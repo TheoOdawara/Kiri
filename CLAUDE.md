@@ -28,18 +28,22 @@ Layered, single binary. Dependencies point one way: `main → services → model
 
 - `src/main.rs` — entry + `#[tokio::main]` + **clap** parsing + dispatch. Thin: parse → call a service →
   render to stdout. No business logic, no HTTP here.
-- `src/models/` — plain data types (serde structs/enums) for Ollama request/response payloads.
-  `models/chat.rs` = chat-completion types (messages, `Usage` token counts). Derive
+- `src/models/` — plain data types (serde structs/enums) for OpenAI-compatible request/response payloads.
+  `models/chat.rs` = chat-completion types (messages, streaming chunks, `Usage` token counts). Derive
   `Serialize`/`Deserialize`/`Debug`. No I/O, no logic.
-- `src/services/` — external integrations. `services/ollama.rs` owns the Ollama HTTP client: build request →
-  send via `reqwest` → deserialize into `models` → return `Result`. **All network I/O lives here**; never call
-  `reqwest` outside `services/`.
+- `src/services/` — external integrations. `services/chat.rs` owns the OpenAI-compatible HTTP client:
+  build request → send via `reqwest` → deserialize into `models` → return `Result`. **All network I/O lives
+  here**; never call `reqwest` outside `services/`.
 
-Data flow: CLI args (clap) → `services::ollama` builds + sends → Ollama API → deserialize into `models::chat`
+Data flow: CLI args (clap) → `services::chat` builds + sends → provider API → deserialize into `models::chat`
 → `main` renders. Errors propagate as `Result` with `?`; fail fast, never swallow.
 
-Ollama target: endpoint `http://<host>:11434/v1/chat/completions`, OpenAI-compatible messages
-(ref: `docs/ollama.ps1`). Host/model are **configurable (flag/env)** — never hardcode `192.168.0.240`.
+Provider target: **NVIDIA**'s OpenAI-compatible endpoint `<base-url>/chat/completions`. The base URL is
+hardcoded for now (`const BASE_URL` in `main.rs` = `https://integrate.api.nvidia.com/v1`); a future
+multi-provider feature will externalize it to config (ref: `docs/decisions/0001-openai-compatible-provider.md`).
+The **model** and **API key** are read from the environment, both required — `NVIDIA_MODEL` and
+`NVIDIA_API_KEY` (loaded from `.env` via `dotenvy`); the key is **never** a CLI flag. The bearer header is
+always sent. See `docs/ollama.ps1` for the raw OpenAI-compatible protocol shape.
 
 ## Branches
 

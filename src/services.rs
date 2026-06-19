@@ -1,1 +1,1 @@
-pub mod ollama;
+pub mod chat;
