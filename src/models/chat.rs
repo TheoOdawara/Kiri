@@ -1,17 +1,67 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::models::tools::{Tool, ToolCall};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
-    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Tool calls requested by an assistant turn. Omitted on every other message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// Set only on `Role::Tool`: which assistant tool call this message answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl Message {
+    pub fn user(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::User,
+            content: Some(text.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    pub fn assistant_text(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: Some(text.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// An assistant turn that requests tool calls. `content` is the optional narration the model
+    /// emitted alongside the calls.
+    pub fn assistant_tool_calls(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content,
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: Some(content.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -21,6 +71,8 @@ pub struct ChatRequest {
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<ChatTemplateKwargs>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<Tool>,
 }
 
 /// Provider-specific knob that asks the model to emit reasoning. Reasoning models stream it by
@@ -50,6 +102,26 @@ pub struct Delta {
     /// a serde `alias` would make a delta carrying BOTH keys fail as a duplicate field.
     #[serde(default, deserialize_with = "string_or_none")]
     pub reasoning: Option<String>,
+    /// Tool-call fragments. Streamed incrementally and keyed by `index`; assembled by the service.
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallFragment>,
+}
+
+/// One streamed slice of a tool call. Every field but `index` is optional: the first fragment for an
+/// index carries `id`/`type`/`function.name`, later fragments carry only `function.arguments` slices.
+#[derive(Debug, Deserialize)]
+pub struct ToolCallFragment {
+    pub index: u32,
+    pub id: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub function: Option<FunctionFragment>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FunctionFragment {
+    pub name: Option<String>,
+    pub arguments: Option<String>,
 }
 
 /// Serde adapter: accept a string into `Some`; coerce any other JSON shape (object, list, number,
@@ -75,6 +147,7 @@ pub struct Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::tools::{FunctionCall, FunctionDef, ToolKind};
 
     #[test]
     fn role_serializes_lowercase() {
@@ -84,6 +157,7 @@ mod tests {
             serde_json::to_string(&Role::Assistant).unwrap(),
             "\"assistant\""
         );
+        assert_eq!(serde_json::to_string(&Role::Tool).unwrap(), "\"tool\"");
     }
 
     #[test]
@@ -93,12 +167,10 @@ mod tests {
 
         let request = ChatRequest {
             model: model.clone(),
-            messages: vec![Message {
-                role: Role::User,
-                content: "hi".to_string(),
-            }],
+            messages: vec![Message::user("hi")],
             stream: true,
             chat_template_kwargs: None,
+            tools: Vec::new(),
         };
 
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();
@@ -115,6 +187,7 @@ mod tests {
             messages: vec![],
             stream: true,
             chat_template_kwargs: None,
+            tools: Vec::new(),
         };
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();
         assert!(value.get("chat_template_kwargs").is_none());
@@ -127,6 +200,7 @@ mod tests {
             messages: vec![],
             stream: true,
             chat_template_kwargs: Some(ChatTemplateKwargs { thinking: true }),
+            tools: Vec::new(),
         };
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();
         assert_eq!(value["chat_template_kwargs"]["thinking"], true);
@@ -134,14 +208,11 @@ mod tests {
 
     #[test]
     fn message_round_trips() {
-        let message = Message {
-            role: Role::Assistant,
-            content: "ok".to_string(),
-        };
+        let message = Message::assistant_text("ok");
         let json = serde_json::to_string(&message).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(back.role, Role::Assistant);
-        assert_eq!(back.content, "ok");
+        assert_eq!(back.content.as_deref(), Some("ok"));
     }
 
     #[test]
@@ -166,5 +237,79 @@ mod tests {
             serde_json::from_str(r#"{"reasoning":"Okay","reasoning_content":"Okay"}"#).unwrap();
         assert_eq!(delta.reasoning.as_deref(), Some("Okay"));
         assert_eq!(delta.reasoning_content.as_deref(), Some("Okay"));
+    }
+
+    #[test]
+    fn assistant_tool_calls_message_omits_content_and_includes_tool_calls() {
+        let message = Message::assistant_tool_calls(
+            None,
+            vec![ToolCall {
+                id: "c1".to_string(),
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path":"a.txt"}"#.to_string(),
+                },
+            }],
+        );
+        let value: serde_json::Value = serde_json::to_value(&message).unwrap();
+        assert_eq!(value["role"], "assistant");
+        assert!(value.get("content").is_none());
+        assert_eq!(value["tool_calls"][0]["id"], "c1");
+        assert_eq!(value["tool_calls"][0]["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn tool_result_message_serializes_role_and_tool_call_id() {
+        let message = Message::tool_result("c1", "ok");
+        let value: serde_json::Value = serde_json::to_value(&message).unwrap();
+        assert_eq!(value["role"], "tool");
+        assert_eq!(value["tool_call_id"], "c1");
+        assert_eq!(value["content"], "ok");
+        assert!(value.get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn chat_request_omits_tools_when_empty() {
+        let request = ChatRequest {
+            model: "m".to_string(),
+            messages: vec![],
+            stream: true,
+            chat_template_kwargs: None,
+            tools: Vec::new(),
+        };
+        let value: serde_json::Value = serde_json::to_value(&request).unwrap();
+        assert!(value.get("tools").is_none());
+    }
+
+    #[test]
+    fn chat_request_includes_tools_when_present() {
+        let request = ChatRequest {
+            model: "m".to_string(),
+            messages: vec![],
+            stream: true,
+            chat_template_kwargs: None,
+            tools: vec![Tool {
+                kind: ToolKind::Function,
+                function: FunctionDef {
+                    name: "read_file".to_string(),
+                    description: "d".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+            }],
+        };
+        let value: serde_json::Value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["tools"][0]["type"], "function");
+        assert_eq!(value["tools"][0]["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn tool_call_fragment_deserializes_partial() {
+        let frag: ToolCallFragment =
+            serde_json::from_str(r#"{"index":0,"function":{"arguments":"{\"p\""}}"#).unwrap();
+        assert_eq!(frag.index, 0);
+        assert_eq!(frag.id, None);
+        assert_eq!(frag.kind, None);
+        assert_eq!(frag.function.unwrap().arguments.as_deref(), Some("{\"p\""));
     }
 }

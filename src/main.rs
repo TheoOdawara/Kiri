@@ -2,6 +2,7 @@ mod models;
 mod services;
 
 use std::io::{self, IsTerminal, Write};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -9,11 +10,16 @@ use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::models::chat::{ChatRequest, ChatTemplateKwargs, Message, Role};
-use crate::services::chat::{StreamEvent, stream_completion};
+use crate::services::chat::{CompletedTurn, StreamEvent, stream_completion};
+use crate::services::sandbox::Sandbox;
+use crate::services::tools::{ToolOutcome, confirmation_prompt, execute, tool_definitions};
 
 /// NVIDIA's OpenAI-compatible endpoint. Hardcoded for now; a future multi-provider feature will
 /// move this into external configuration (see docs/decisions/0001-openai-compatible-provider.md).
 const BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
+
+/// Upper bound on tool-call rounds per user turn; bounds a runaway agentic loop.
+const MAX_TOOL_ITERATIONS: usize = 10;
 
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
@@ -26,6 +32,9 @@ const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
 struct Cli {
     /// Optional first message; the chat then continues interactively
     prompt: Option<String>,
+    /// Sandbox root for file tools (also via T_CLI_PATH). Defaults to the current directory.
+    #[arg(long, env = "T_CLI_PATH", default_value = ".")]
+    path: PathBuf,
 }
 
 #[tokio::main]
@@ -35,6 +44,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let api_key = required_env("NVIDIA_API_KEY")?;
     let model = required_env("NVIDIA_MODEL")?;
+    let sandbox = Sandbox::new(&cli.path)?;
+    let tools = tool_definitions();
 
     let client = reqwest::Client::new();
     let mut history: Vec<Message> = Vec::new();
@@ -43,7 +54,7 @@ async fn main() -> Result<()> {
     let is_tty = stdout.is_terminal();
     let mut seed = cli.prompt;
 
-    loop {
+    'session: loop {
         let input = match seed.take() {
             Some(prompt) => prompt,
             None => {
@@ -64,26 +75,64 @@ async fn main() -> Result<()> {
             break;
         }
 
-        history.push(Message {
-            role: Role::User,
-            content: input.to_string(),
-        });
+        history.push(Message::user(input));
 
-        let request = ChatRequest {
-            model: model.clone(),
-            messages: history.clone(),
-            stream: true,
-            chat_template_kwargs: Some(ChatTemplateKwargs { thinking: true }),
-        };
+        let mut iterations = 0;
+        loop {
+            let request = ChatRequest {
+                model: model.clone(),
+                messages: history.clone(),
+                stream: true,
+                chat_template_kwargs: Some(ChatTemplateKwargs { thinking: true }),
+                tools: tools.clone(),
+            };
 
-        match render_turn(&client, &api_key, &request, &mut stdout, is_tty).await {
-            Ok(answer) => history.push(Message {
-                role: Role::Assistant,
-                content: answer,
-            }),
-            Err(error) => {
-                eprintln!("erro: {error:#}");
-                history.pop();
+            let turn = match render_turn(&client, &api_key, &request, &mut stdout, is_tty).await {
+                Ok(turn) => turn,
+                Err(error) => {
+                    eprintln!("erro: {error:#}");
+                    // Roll back only a dangling user message (a first-round failure); a partial tool
+                    // exchange is a valid, resumable state and is kept.
+                    if matches!(history.last(), Some(message) if message.role == Role::User) {
+                        history.pop();
+                    }
+                    break;
+                }
+            };
+
+            if turn.tool_calls.is_empty() {
+                // Plain text turn (also covers a degenerate tool-call finish with no parsed calls).
+                history.push(Message::assistant_text(turn.content));
+                break;
+            }
+
+            iterations += 1;
+            let calls = turn.tool_calls;
+            let narration = (!turn.content.is_empty()).then_some(turn.content);
+            history.push(Message::assistant_tool_calls(narration, calls.clone()));
+
+            for call in &calls {
+                let outcome = match confirmation_prompt(&sandbox, call) {
+                    Some(prompt) => {
+                        write!(stdout, "{prompt}")?;
+                        stdout.flush()?;
+                        match reader.next_line().await? {
+                            Some(answer) if is_yes(&answer) => execute(&sandbox, call),
+                            Some(_) => ToolOutcome::Declined,
+                            None => break 'session, // stdin closed at a prompt: end the session
+                        }
+                    }
+                    None => execute(&sandbox, call),
+                };
+                history.push(Message::tool_result(
+                    call.id.as_str(),
+                    outcome.into_message_content(),
+                ));
+            }
+
+            if iterations >= MAX_TOOL_ITERATIONS {
+                eprintln!("erro: limite de {MAX_TOOL_ITERATIONS} chamadas de ferramenta atingido");
+                break;
             }
         }
     }
@@ -92,19 +141,18 @@ async fn main() -> Result<()> {
 }
 
 /// Stream one assistant turn: an ephemeral "pensando…" indicator while the model reasons, then the
-/// answer token-by-token. Returns the accumulated answer content for the conversation history.
+/// answer token-by-token. Returns the assembled turn (content + any tool calls) for the loop to act on.
 async fn render_turn(
     client: &reqwest::Client,
     api_key: &str,
     request: &ChatRequest,
     stdout: &mut io::Stdout,
     is_tty: bool,
-) -> Result<String> {
+) -> Result<CompletedTurn> {
     let started = Instant::now();
     let mut last_tick = started;
     let mut frame = 0usize;
     let mut answering = false;
-    let mut answer = String::new();
 
     let result = stream_completion(client, BASE_URL, api_key, request, |event| {
         match event {
@@ -128,7 +176,6 @@ async fn render_turn(
                         write!(stdout, "{CLEAR_LINE}")?;
                     }
                 }
-                answer.push_str(&text);
                 write!(stdout, "{text}")?;
                 stdout.flush()?;
             }
@@ -148,7 +195,14 @@ async fn render_turn(
     let _ = writeln!(stdout);
     let _ = stdout.flush();
 
-    result.map(|()| answer)
+    result
+}
+
+fn is_yes(answer: &str) -> bool {
+    matches!(
+        answer.trim().to_lowercase().as_str(),
+        "s" | "sim" | "y" | "yes"
+    )
 }
 
 fn required_env(key: &str) -> Result<String> {
