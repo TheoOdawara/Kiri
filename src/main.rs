@@ -22,7 +22,9 @@ use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
 use crate::modules::provider::infrastructure::openai::provider::OpenAiProvider;
-use crate::services::sandbox::{Sandbox, expand_user_path, is_absolute_target};
+use crate::modules::tools::infrastructure::sandbox::{
+    Sandbox, expand_user_path, is_absolute_target,
+};
 use crate::services::tools::{ToolOutcome, confirmation_prompt, execute, tool_definitions};
 use crate::shared::kernel::error::AgentError;
 

@@ -6,7 +6,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::models::tools::{FunctionDef, Tool, ToolKind};
-use crate::services::sandbox::{CreateResolution, Sandbox, is_absolute_target};
+use crate::modules::tools::infrastructure::sandbox::{
+    CreateResolution, Sandbox, is_absolute_target,
+};
 use crate::shared::kernel::tool_call::ToolCall;
 
 const READ_FILE_MAX_BYTES: usize = 64 * 1024;

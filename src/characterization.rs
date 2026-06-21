@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::{Value, json};
 
-use crate::services::sandbox::Sandbox;
+use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::services::tools::{confirmation_prompt, tool_definitions};
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
