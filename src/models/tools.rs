@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// A tool advertised to the model in a chat request.
 #[derive(Debug, Clone, Serialize)]
@@ -24,26 +24,6 @@ pub struct FunctionDef {
     pub parameters: serde_json::Value,
 }
 
-/// A tool call the model emitted, assembled from its streamed fragments and re-sent in history.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    #[serde(rename = "type", default = "default_function_type")]
-    pub kind: String,
-    pub function: FunctionCall,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FunctionCall {
-    pub name: String,
-    /// JSON-encoded argument string, exactly as the model produced it.
-    pub arguments: String,
-}
-
-fn default_function_type() -> String {
-    "function".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,28 +43,5 @@ mod tests {
         assert_eq!(value["type"], "function");
         assert_eq!(value["function"]["name"], "read_file");
         assert_eq!(value["function"]["parameters"]["type"], "object");
-    }
-
-    #[test]
-    fn tool_call_round_trips() {
-        let call = ToolCall {
-            id: "call_1".to_string(),
-            kind: "function".to_string(),
-            function: FunctionCall {
-                name: "write_file".to_string(),
-                arguments: r#"{"path":"a.txt"}"#.to_string(),
-            },
-        };
-        let json = serde_json::to_string(&call).unwrap();
-        let back: ToolCall = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, call);
-    }
-
-    #[test]
-    fn tool_call_defaults_type_when_provider_omits_it() {
-        let back: ToolCall =
-            serde_json::from_str(r#"{"id":"c1","function":{"name":"x","arguments":"{}"}}"#)
-                .unwrap();
-        assert_eq!(back.kind, "function");
     }
 }

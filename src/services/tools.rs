@@ -5,8 +5,9 @@ use std::path::Path;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::models::tools::{FunctionDef, Tool, ToolCall, ToolKind};
+use crate::models::tools::{FunctionDef, Tool, ToolKind};
 use crate::services::sandbox::{CreateResolution, Sandbox, is_absolute_target};
+use crate::shared::kernel::tool_call::ToolCall;
 
 const READ_FILE_MAX_BYTES: usize = 64 * 1024;
 const EDIT_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -650,7 +651,7 @@ fn search_file(path: &Path, query: &str, root: &Path, matches: &mut Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::tools::FunctionCall;
+    use crate::shared::kernel::tool_call::FunctionCall;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 

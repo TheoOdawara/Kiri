@@ -1,6 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::models::tools::{Tool, ToolCall};
+use crate::models::tools::Tool;
+use crate::shared::kernel::tool_call::ToolCall;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -156,7 +157,8 @@ pub struct Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::tools::{FunctionCall, FunctionDef, ToolKind};
+    use crate::models::tools::{FunctionDef, ToolKind};
+    use crate::shared::kernel::tool_call::FunctionCall;
 
     #[test]
     fn role_serializes_lowercase() {

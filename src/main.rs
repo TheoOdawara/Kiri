@@ -1,5 +1,6 @@
 mod models;
 mod services;
+mod shared;
 
 #[cfg(test)]
 mod characterization;

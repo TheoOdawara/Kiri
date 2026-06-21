@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 
 use crate::models::chat::{ChatRequest, ChatStreamChunk, Delta, StreamChoice, ToolCallFragment};
-use crate::models::tools::{FunctionCall, ToolCall};
+use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
 /// A semantic piece of the streamed completion: the model's reasoning, or its answer content.
 #[derive(Debug, Clone, PartialEq)]
