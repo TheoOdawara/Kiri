@@ -1,4 +1,5 @@
 mod models;
+mod modules;
 mod services;
 mod shared;
 
@@ -13,8 +14,12 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use crate::models::chat::{ChatRequest, ChatTemplateKwargs, Message, Role};
-use crate::services::chat::{CompletedTurn, StreamEvent, stream_completion};
+use crate::models::chat::{ChatRequest, ChatTemplateKwargs};
+use crate::modules::agent::domain::completed_turn::CompletedTurn;
+use crate::modules::agent::domain::message::Message;
+use crate::modules::agent::domain::role::Role;
+use crate::modules::agent::domain::stream_event::StreamEvent;
+use crate::services::chat::stream_completion;
 use crate::services::sandbox::{Sandbox, expand_user_path, is_absolute_target};
 use crate::services::tools::{ToolOutcome, confirmation_prompt, execute, tool_definitions};
 

@@ -3,22 +3,9 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 
 use crate::models::chat::{ChatRequest, ChatStreamChunk, Delta, StreamChoice, ToolCallFragment};
+use crate::modules::agent::domain::completed_turn::CompletedTurn;
+use crate::modules::agent::domain::stream_event::StreamEvent;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
-
-/// A semantic piece of the streamed completion: the model's reasoning, or its answer content.
-#[derive(Debug, Clone, PartialEq)]
-pub enum StreamEvent {
-    Reasoning(String),
-    Content(String),
-}
-
-/// The assembled result of one streamed assistant turn: any answer text, the tool calls it requested
-/// (assembled from their streamed fragments, ordered by index), and the terminating finish reason.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CompletedTurn {
-    pub content: String,
-    pub tool_calls: Vec<ToolCall>,
-}
 
 /// Send `request` to the OpenAI-compatible `<base_url>/chat/completions` endpoint and stream the
 /// response: `on_event` fires for every reasoning or content delta as it arrives, and the assembled
