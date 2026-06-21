@@ -8,6 +8,7 @@ use crate::modules::repl::infrastructure::terminal::Terminal;
 use crate::modules::tools::infrastructure::sandbox::{
     Sandbox, expand_user_path, is_absolute_target,
 };
+use crate::shared::kernel::error::AgentError;
 
 /// The interactive REPL driving adapter: read user input, handle slash commands (`/exit`, `/sair`,
 /// `/cd`), and drive one `AgentLoop` per message. Owns the terminal, the active (movable) sandbox, and
@@ -76,6 +77,13 @@ impl Repl {
                 Err(error) => {
                     eprintln!("erro: {error}");
                     self.conversation.rollback_dangling_user();
+                    // A rejected request body (4xx) would fail identically on every retry: drop the
+                    // offending turn so the session recovers without a restart.
+                    if matches!(error, AgentError::ProviderRejected { .. }) {
+                        self.conversation.rollback_last_assistant_turn();
+                        self.terminal
+                            .notice("turno anterior descartado (request rejeitado pelo provedor)");
+                    }
                 }
             }
         }

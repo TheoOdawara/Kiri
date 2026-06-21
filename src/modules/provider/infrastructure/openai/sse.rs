@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use super::arguments::normalize_arguments;
 use super::wire::{ChatStreamChunk, Delta, StreamChoice, ToolCallFragment};
 use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::agent::domain::stream_event::StreamEvent;
@@ -105,7 +106,7 @@ impl TurnAccumulator {
                 },
                 function: FunctionCall {
                     name: partial.name,
-                    arguments: partial.arguments,
+                    arguments: normalize_arguments(partial.arguments),
                 },
             })
             .collect();
@@ -296,6 +297,31 @@ mod tests {
             ]
         );
         assert_eq!(accumulator.into_completed().content, "Hi");
+    }
+
+    #[test]
+    fn normalizes_raw_control_chars_in_tool_call_arguments() {
+        // The model produced a file `content` with a RAW newline inside the string value instead of
+        // `\n`. Built via `json!` so the SSE chunk is valid wire JSON whose decoded `arguments`
+        // carries the literal 0x0A — exactly what poisons the conversation today. The stored value
+        // must come out as valid JSON with the content preserved.
+        let bad_args = "{\"path\":\"a.rs\",\"content\":\"line1\nline2\"}";
+        let chunk = serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "write_file", "arguments": bad_args}
+            }]}}]
+        })
+        .to_string();
+
+        let turn = accumulate(&[chunk.as_str()]);
+        let args = &turn.tool_calls[0].function.arguments;
+        let value: serde_json::Value =
+            serde_json::from_str(args).expect("stored arguments must be valid JSON");
+        assert_eq!(value["path"], "a.rs");
+        assert_eq!(value["content"], "line1\nline2");
     }
 
     #[tokio::test]

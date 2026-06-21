@@ -61,9 +61,17 @@ impl CompletionProvider for OpenAiProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(AgentError::Provider(format!(
-                "provider returned {status}: {body}"
-            )));
+            // A 4xx means the body we sent is unacceptable; resending it unchanged fails identically,
+            // so it is surfaced distinctly to let the REPL drop the offending turn. 5xx/other stay a
+            // plain (transient) provider error.
+            return Err(if status.is_client_error() {
+                AgentError::ProviderRejected {
+                    status: status.as_u16(),
+                    body,
+                }
+            } else {
+                AgentError::Provider(format!("provider returned {status}: {body}"))
+            });
         }
 
         let mut accumulator = TurnAccumulator::default();
