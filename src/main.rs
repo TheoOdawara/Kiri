@@ -11,18 +11,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use crate::modules::agent::application::presenter::Presenter;
-use crate::modules::agent::application::run_turn::{RunTurn, TurnOutcome};
-use crate::modules::agent::domain::conversation::Conversation;
-use crate::modules::agent::domain::message::Message;
+use crate::modules::agent::application::run_turn::RunTurn;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::infrastructure::openai::provider::OpenAiProvider;
-use crate::modules::repl::infrastructure::terminal::Terminal;
+use crate::modules::repl::infrastructure::repl::Repl;
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
-use crate::modules::tools::infrastructure::sandbox::{
-    Sandbox, expand_user_path, is_absolute_target,
-};
+use crate::modules::tools::infrastructure::sandbox::Sandbox;
 
 /// NVIDIA's OpenAI-compatible endpoint. Hardcoded for now; a future multi-provider feature will
 /// move this into external configuration (see docs/decisions/0001-openai-compatible-provider.md).
@@ -74,7 +69,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let api_key = required_env("NVIDIA_API_KEY")?;
     let model = required_env("NVIDIA_MODEL")?;
-    let mut sandbox = Sandbox::new(&cli.path)?;
+    let sandbox = Sandbox::new(&cli.path)?;
 
     let provider: Arc<dyn CompletionProvider> = Arc::new(OpenAiProvider::new(
         reqwest::Client::new(),
@@ -84,67 +79,8 @@ async fn main() -> Result<()> {
     let registry = ToolRegistry::new(default_fs_tools());
     let run_turn = RunTurn::new(provider, registry, model, TOOL_CHECKPOINT);
 
-    let mut conversation = Conversation::new(SYSTEM_PROMPT);
-    let mut terminal = Terminal::new();
-    let mut seed = cli.prompt;
-
-    terminal.notice(&format!("workspace: {}", sandbox.root().display()));
-
-    loop {
-        let input = match seed.take() {
-            Some(prompt) => prompt,
-            None => {
-                terminal.prompt("\nvocê › ")?;
-                match terminal.read_line().await? {
-                    Some(line) => line,
-                    None => break,
-                }
-            }
-        };
-
-        let input = input.trim();
-        if input.is_empty() {
-            continue;
-        }
-        if matches!(input, "/exit" | "/sair") {
-            break;
-        }
-        if input == "/cd" {
-            terminal.notice(&format!("workspace: {}", sandbox.root().display()));
-            continue;
-        }
-        if let Some(arg) = input.strip_prefix("/cd ") {
-            let arg = arg.trim();
-            let target = if is_absolute_target(arg) {
-                expand_user_path(arg)
-            } else {
-                sandbox.root().join(arg)
-            };
-            match Sandbox::new(&target) {
-                Ok(new_sandbox) => {
-                    sandbox = new_sandbox;
-                    terminal.notice(&format!("workspace: {}", sandbox.root().display()));
-                }
-                Err(error) => eprintln!("erro: {error:#}"),
-            }
-            continue;
-        }
-
-        conversation.push(Message::user(input));
-        match run_turn
-            .run(&mut conversation, &sandbox, &mut terminal)
-            .await
-        {
-            Ok(TurnOutcome::Completed) => {}
-            Ok(TurnOutcome::Aborted) => break, // stdin closed at a prompt: end the session
-            Err(error) => {
-                eprintln!("erro: {error}");
-                conversation.rollback_dangling_user();
-            }
-        }
-    }
-
-    Ok(())
+    let mut repl = Repl::new(run_turn, sandbox, SYSTEM_PROMPT, cli.prompt);
+    repl.run().await
 }
 
 fn required_env(key: &str) -> Result<String> {
