@@ -4,29 +4,26 @@ mod shared;
 #[cfg(test)]
 mod characterization;
 
-use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tokio::io::{AsyncBufReadExt, BufReader};
 
+use crate::modules::agent::application::approval_policy::{Approval, ApprovalPolicy};
+use crate::modules::agent::application::presenter::Presenter;
 use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::agent::domain::message::Message;
 use crate::modules::agent::domain::role::Role;
-use crate::modules::agent::domain::stream_event::StreamEvent;
-use crate::modules::provider::application::completion_provider::{
-    CompletionProvider, EventSink, TurnRequest,
-};
+use crate::modules::provider::application::completion_provider::{CompletionProvider, TurnRequest};
 use crate::modules::provider::infrastructure::openai::provider::OpenAiProvider;
+use crate::modules::repl::infrastructure::terminal::Terminal;
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::ToolOutcome;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::{
     Sandbox, expand_user_path, is_absolute_target,
 };
-use crate::shared::kernel::error::AgentError;
 
 /// NVIDIA's OpenAI-compatible endpoint. Hardcoded for now; a future multi-provider feature will
 /// move this into external configuration (see docs/decisions/0001-openai-compatible-provider.md).
@@ -61,12 +58,6 @@ const SYSTEM_PROMPT: &str = concat!(
 /// this time checkpoint is the only guard against an unattended runaway.
 const TOOL_CHECKPOINT: Duration = Duration::from_secs(30 * 60);
 
-const DIM: &str = "\x1b[2m";
-const RESET: &str = "\x1b[0m";
-const CLEAR_LINE: &str = "\r\x1b[K";
-const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
-
 #[derive(Parser)]
 #[command(name = "t-cli", about = "Chat with NVIDIA's OpenAI-compatible API")]
 struct Cli {
@@ -90,20 +81,17 @@ async fn main() -> Result<()> {
 
     let provider = OpenAiProvider::new(reqwest::Client::new(), BASE_URL, api_key);
     let mut history: Vec<Message> = vec![Message::system(SYSTEM_PROMPT)];
-    let mut reader = BufReader::new(tokio::io::stdin()).lines();
-    let mut stdout = io::stdout();
-    let is_tty = stdout.is_terminal();
+    let mut terminal = Terminal::new();
     let mut seed = cli.prompt;
 
-    writeln!(stdout, "workspace: {}", sandbox.root().display())?;
+    terminal.notice(&format!("workspace: {}", sandbox.root().display()));
 
     'session: loop {
         let input = match seed.take() {
             Some(prompt) => prompt,
             None => {
-                write!(stdout, "\nvocê › ")?;
-                stdout.flush()?;
-                match reader.next_line().await? {
+                terminal.prompt("\nvocê › ")?;
+                match terminal.read_line().await? {
                     Some(line) => line,
                     None => break,
                 }
@@ -118,7 +106,7 @@ async fn main() -> Result<()> {
             break;
         }
         if input == "/cd" {
-            writeln!(stdout, "workspace: {}", sandbox.root().display())?;
+            terminal.notice(&format!("workspace: {}", sandbox.root().display()));
             continue;
         }
         if let Some(arg) = input.strip_prefix("/cd ") {
@@ -131,7 +119,7 @@ async fn main() -> Result<()> {
             match Sandbox::new(&target) {
                 Ok(new_sandbox) => {
                     sandbox = new_sandbox;
-                    writeln!(stdout, "workspace: {}", sandbox.root().display())?;
+                    terminal.notice(&format!("workspace: {}", sandbox.root().display()));
                 }
                 Err(error) => eprintln!("erro: {error:#}"),
             }
@@ -142,21 +130,14 @@ async fn main() -> Result<()> {
 
         let mut checkpoint = Instant::now();
         loop {
-            let turn = match render_turn(
-                &provider,
-                &history,
-                &model,
-                &tool_schemas,
-                &mut stdout,
-                is_tty,
-            )
-            .await
+            let turn = match render_turn(&provider, &history, &model, &tool_schemas, &mut terminal)
+                .await
             {
                 Ok(turn) => turn,
                 Err(error) => {
                     eprintln!("erro: {error:#}");
-                    // Roll back only a dangling user message (a first-round failure); a partial tool
-                    // exchange is a valid, resumable state and is kept.
+                    // Roll back only a dangling user message (a first-round failure); a partial
+                    // tool exchange is a valid, resumable state and is kept.
                     if matches!(history.last(), Some(message) if message.role == Role::User) {
                         history.pop();
                     }
@@ -176,19 +157,11 @@ async fn main() -> Result<()> {
 
             for call in &calls {
                 let outcome = match registry.confirm(&sandbox, call) {
-                    Some(confirmation) => {
-                        write!(stdout, "{}", confirmation.prompt)?;
-                        stdout.flush()?;
-                        match reader.next_line().await? {
-                            Some(answer)
-                                if answer_approves(&answer, confirmation.default_accept) =>
-                            {
-                                registry.execute(&sandbox, call)
-                            }
-                            Some(_) => ToolOutcome::Declined,
-                            None => break 'session, // stdin closed at a prompt: end the session
-                        }
-                    }
+                    Some(confirmation) => match terminal.decide(&confirmation).await {
+                        Approval::Approved => registry.execute(&sandbox, call),
+                        Approval::Declined => ToolOutcome::Declined,
+                        Approval::Aborted => break 'session, // stdin closed at a prompt: end the session
+                    },
                     None => registry.execute(&sandbox, call),
                 };
                 history.push(Message::tool_result(
@@ -199,12 +172,10 @@ async fn main() -> Result<()> {
 
             if checkpoint.elapsed() >= TOOL_CHECKPOINT {
                 let minutes = checkpoint.elapsed().as_secs() / 60;
-                write!(stdout, "Execução já dura ~{minutes}min. Continuar? [S/n] ")?;
-                stdout.flush()?;
-                match reader.next_line().await? {
-                    Some(answer) if answer_approves(&answer, true) => checkpoint = Instant::now(),
-                    Some(_) => break,
-                    None => break 'session, // stdin closed at a prompt: end the session
+                match terminal.confirm_continue(minutes).await {
+                    Approval::Approved => checkpoint = Instant::now(),
+                    Approval::Declined => break,
+                    Approval::Aborted => break 'session, // stdin closed at a prompt: end the session
                 }
             }
         }
@@ -213,26 +184,16 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Stream one assistant turn: an ephemeral "pensando…" indicator while the model reasons, then the
-/// answer token-by-token. Returns the assembled turn (content + any tool calls) for the loop to act on.
+/// Stream one assistant turn through the provider, rendering reasoning/content via the terminal, then
+/// finishing the turn. Returns the assembled turn (content + any tool calls) for the loop to act on.
 async fn render_turn(
     provider: &OpenAiProvider,
     messages: &[Message],
     model: &str,
     tools: &[serde_json::Value],
-    stdout: &mut io::Stdout,
-    is_tty: bool,
+    terminal: &mut Terminal,
 ) -> Result<CompletedTurn> {
-    let now = Instant::now();
-    let mut sink = CliSink {
-        stdout,
-        is_tty,
-        started: now,
-        last_tick: now,
-        frame: 0,
-        answering: false,
-    };
-
+    terminal.begin_turn();
     let result = provider
         .complete(
             TurnRequest {
@@ -240,98 +201,13 @@ async fn render_turn(
                 model,
                 tools,
             },
-            &mut sink,
+            terminal,
         )
         .await;
-
-    // In a terminal, erase a leftover spinner if the stream ended or failed mid-reasoning, and
-    // never leave the terminal dimmed. When piped, keep the output free of escape codes.
-    if sink.is_tty {
-        if !sink.answering {
-            let _ = write!(sink.stdout, "{CLEAR_LINE}");
-        }
-        let _ = write!(sink.stdout, "{RESET}");
-    }
-    let _ = writeln!(sink.stdout);
-    let _ = sink.stdout.flush();
-
+    let _ = terminal.finish_turn();
     Ok(result?)
-}
-
-/// The terminal sink for a streamed turn: a "pensando…" spinner while the model reasons, then the
-/// answer token-by-token. Owns the spinner state so `render_turn` can read it after the stream ends.
-struct CliSink<'a> {
-    stdout: &'a mut io::Stdout,
-    is_tty: bool,
-    started: Instant,
-    last_tick: Instant,
-    frame: usize,
-    answering: bool,
-}
-
-impl EventSink for CliSink<'_> {
-    fn on_event(&mut self, event: StreamEvent) -> Result<(), AgentError> {
-        match event {
-            StreamEvent::Reasoning(_) => {
-                if !self.answering && self.is_tty && self.last_tick.elapsed() >= SPINNER_INTERVAL {
-                    self.frame = (self.frame + 1) % SPINNER.len();
-                    self.last_tick = Instant::now();
-                    let secs = self.started.elapsed().as_secs();
-                    write!(
-                        self.stdout,
-                        "{CLEAR_LINE}{DIM}{} pensando… ({secs}s){RESET}",
-                        SPINNER[self.frame]
-                    )?;
-                    self.stdout.flush()?;
-                }
-            }
-            StreamEvent::Content(text) => {
-                if !self.answering {
-                    self.answering = true;
-                    if self.is_tty {
-                        write!(self.stdout, "{CLEAR_LINE}")?;
-                    }
-                }
-                write!(self.stdout, "{text}")?;
-                self.stdout.flush()?;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Interpret a confirmation answer. An explicit yes/no always wins; an empty or unrecognized answer
-/// follows `default_accept` — `[S/n]` (accept) inside the workspace, `[s/N]` (decline) for out-of-root
-/// operations.
-fn answer_approves(answer: &str, default_accept: bool) -> bool {
-    match answer.trim().to_lowercase().as_str() {
-        "s" | "sim" | "y" | "yes" => true,
-        "n" | "nao" | "não" | "no" => false,
-        _ => default_accept,
-    }
 }
 
 fn required_env(key: &str) -> Result<String> {
     std::env::var(key).with_context(|| format!("environment variable {key} must be set (see .env)"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn answer_approves_follows_default_for_empty_and_unknown() {
-        // Explicit yes/no override the default either way.
-        for yes in ["s", "sim", "S", "y", "yes"] {
-            assert!(answer_approves(yes, false), "{yes:?} should approve");
-        }
-        for no in ["n", "N", "nao", "não", "no", " NÃO "] {
-            assert!(!answer_approves(no, true), "{no:?} should decline");
-        }
-        // Empty/unrecognized follow the default.
-        assert!(answer_approves("", true));
-        assert!(answer_approves("ok", true));
-        assert!(!answer_approves("", false));
-        assert!(!answer_approves("ok", false));
-    }
 }
