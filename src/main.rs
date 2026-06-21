@@ -5,21 +5,20 @@ mod shared;
 mod characterization;
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use crate::modules::agent::application::approval_policy::{Approval, ApprovalPolicy};
 use crate::modules::agent::application::presenter::Presenter;
-use crate::modules::agent::domain::completed_turn::CompletedTurn;
+use crate::modules::agent::application::run_turn::{RunTurn, TurnOutcome};
+use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
-use crate::modules::agent::domain::role::Role;
-use crate::modules::provider::application::completion_provider::{CompletionProvider, TurnRequest};
+use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::infrastructure::openai::provider::OpenAiProvider;
 use crate::modules::repl::infrastructure::terminal::Terminal;
 use crate::modules::tools::application::registry::ToolRegistry;
-use crate::modules::tools::application::tool::ToolOutcome;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::{
     Sandbox, expand_user_path, is_absolute_target,
@@ -76,17 +75,22 @@ async fn main() -> Result<()> {
     let api_key = required_env("NVIDIA_API_KEY")?;
     let model = required_env("NVIDIA_MODEL")?;
     let mut sandbox = Sandbox::new(&cli.path)?;
-    let registry = ToolRegistry::new(default_fs_tools());
-    let tool_schemas = registry.schemas();
 
-    let provider = OpenAiProvider::new(reqwest::Client::new(), BASE_URL, api_key);
-    let mut history: Vec<Message> = vec![Message::system(SYSTEM_PROMPT)];
+    let provider: Arc<dyn CompletionProvider> = Arc::new(OpenAiProvider::new(
+        reqwest::Client::new(),
+        BASE_URL,
+        api_key,
+    ));
+    let registry = ToolRegistry::new(default_fs_tools());
+    let run_turn = RunTurn::new(provider, registry, model, TOOL_CHECKPOINT);
+
+    let mut conversation = Conversation::new(SYSTEM_PROMPT);
     let mut terminal = Terminal::new();
     let mut seed = cli.prompt;
 
     terminal.notice(&format!("workspace: {}", sandbox.root().display()));
 
-    'session: loop {
+    loop {
         let input = match seed.take() {
             Some(prompt) => prompt,
             None => {
@@ -126,86 +130,21 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        history.push(Message::user(input));
-
-        let mut checkpoint = Instant::now();
-        loop {
-            let turn = match render_turn(&provider, &history, &model, &tool_schemas, &mut terminal)
-                .await
-            {
-                Ok(turn) => turn,
-                Err(error) => {
-                    eprintln!("erro: {error:#}");
-                    // Roll back only a dangling user message (a first-round failure); a partial
-                    // tool exchange is a valid, resumable state and is kept.
-                    if matches!(history.last(), Some(message) if message.role == Role::User) {
-                        history.pop();
-                    }
-                    break;
-                }
-            };
-
-            if turn.tool_calls.is_empty() {
-                // Plain text turn (also covers a degenerate tool-call finish with no parsed calls).
-                history.push(Message::assistant_text(turn.content));
-                break;
-            }
-
-            let calls = turn.tool_calls;
-            let narration = (!turn.content.is_empty()).then_some(turn.content);
-            history.push(Message::assistant_tool_calls(narration, calls.clone()));
-
-            for call in &calls {
-                let outcome = match registry.confirm(&sandbox, call) {
-                    Some(confirmation) => match terminal.decide(&confirmation).await {
-                        Approval::Approved => registry.execute(&sandbox, call),
-                        Approval::Declined => ToolOutcome::Declined,
-                        Approval::Aborted => break 'session, // stdin closed at a prompt: end the session
-                    },
-                    None => registry.execute(&sandbox, call),
-                };
-                history.push(Message::tool_result(
-                    call.id.as_str(),
-                    outcome.into_message_content(),
-                ));
-            }
-
-            if checkpoint.elapsed() >= TOOL_CHECKPOINT {
-                let minutes = checkpoint.elapsed().as_secs() / 60;
-                match terminal.confirm_continue(minutes).await {
-                    Approval::Approved => checkpoint = Instant::now(),
-                    Approval::Declined => break,
-                    Approval::Aborted => break 'session, // stdin closed at a prompt: end the session
-                }
+        conversation.push(Message::user(input));
+        match run_turn
+            .run(&mut conversation, &sandbox, &mut terminal)
+            .await
+        {
+            Ok(TurnOutcome::Completed) => {}
+            Ok(TurnOutcome::Aborted) => break, // stdin closed at a prompt: end the session
+            Err(error) => {
+                eprintln!("erro: {error}");
+                conversation.rollback_dangling_user();
             }
         }
     }
 
     Ok(())
-}
-
-/// Stream one assistant turn through the provider, rendering reasoning/content via the terminal, then
-/// finishing the turn. Returns the assembled turn (content + any tool calls) for the loop to act on.
-async fn render_turn(
-    provider: &OpenAiProvider,
-    messages: &[Message],
-    model: &str,
-    tools: &[serde_json::Value],
-    terminal: &mut Terminal,
-) -> Result<CompletedTurn> {
-    terminal.begin_turn();
-    let result = provider
-        .complete(
-            TurnRequest {
-                messages,
-                model,
-                tools,
-            },
-            terminal,
-        )
-        .await;
-    let _ = terminal.finish_turn();
-    Ok(result?)
 }
 
 fn required_env(key: &str) -> Result<String> {

@@ -47,15 +47,6 @@ impl Terminal {
         }
     }
 
-    /// Reset the spinner state before streaming a new turn.
-    pub fn begin_turn(&mut self) {
-        let now = Instant::now();
-        self.started = now;
-        self.last_tick = now;
-        self.frame = 0;
-        self.answering = false;
-    }
-
     /// Write a prompt label (no newline) and flush — e.g. the `você ›` input prompt.
     pub fn prompt(&mut self, label: &str) -> io::Result<()> {
         write!(self.stdout, "{label}")?;
@@ -116,6 +107,14 @@ impl EventSink for Terminal {
 }
 
 impl Presenter for Terminal {
+    fn begin_turn(&mut self) {
+        let now = Instant::now();
+        self.started = now;
+        self.last_tick = now;
+        self.frame = 0;
+        self.answering = false;
+    }
+
     fn finish_turn(&mut self) -> Result<(), AgentError> {
         // In a terminal, erase a leftover spinner if the stream ended mid-reasoning, and never leave
         // the terminal dimmed. When piped, keep the output free of escape codes.
