@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
-use anyhow::Result;
-
 use super::wire::{ChatStreamChunk, Delta, StreamChoice, ToolCallFragment};
 use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::agent::domain::stream_event::StreamEvent;
+use crate::modules::provider::application::completion_provider::EventSink;
+use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
 /// Parse one streamed line, feed both the accumulator (content/tool-calls) and the live `on_event`
@@ -12,8 +12,8 @@ use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 pub(crate) fn handle_line(
     line: &[u8],
     accumulator: &mut TurnAccumulator,
-    on_event: &mut impl FnMut(StreamEvent) -> Result<()>,
-) -> Result<()> {
+    sink: &mut dyn EventSink,
+) -> Result<(), AgentError> {
     let text = String::from_utf8_lossy(line);
     let Some(choice) = parse_chunk_line(text.trim_end()) else {
         return Ok(());
@@ -23,7 +23,7 @@ pub(crate) fn handle_line(
         accumulator.content.push_str(content);
     }
     for event in events_from_delta(choice.delta) {
-        on_event(event)?;
+        sink.on_event(event)?;
     }
     Ok(())
 }
@@ -129,14 +129,22 @@ mod tests {
         }
     }
 
-    /// Run lines through the same path as `stream_completion` and return the assembled turn.
+    #[derive(Default)]
+    struct CollectSink(Vec<StreamEvent>);
+
+    impl EventSink for CollectSink {
+        fn on_event(&mut self, event: StreamEvent) -> Result<(), AgentError> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    /// Run lines through the same path as the provider and return the assembled turn.
     fn accumulate(lines: &[&str]) -> CompletedTurn {
         let mut accumulator = TurnAccumulator::default();
-        {
-            let mut sink = |_event: StreamEvent| -> Result<()> { Ok(()) };
-            for line in lines {
-                handle_line(line.as_bytes(), &mut accumulator, &mut sink).unwrap();
-            }
+        let mut sink = CollectSink::default();
+        for line in lines {
+            handle_line(line.as_bytes(), &mut accumulator, &mut sink).unwrap();
         }
         accumulator.into_completed()
     }
@@ -275,21 +283,15 @@ mod tests {
     #[test]
     fn content_and_reasoning_still_streamed_during_a_turn() {
         let mut accumulator = TurnAccumulator::default();
-        let mut events = Vec::new();
-        {
-            let mut sink = |event: StreamEvent| -> Result<()> {
-                events.push(event);
-                Ok(())
-            };
-            handle_line(
-                br#"data: {"choices":[{"delta":{"reasoning":"why","content":"Hi"}}]}"#,
-                &mut accumulator,
-                &mut sink,
-            )
-            .unwrap();
-        }
+        let mut sink = CollectSink::default();
+        handle_line(
+            br#"data: {"choices":[{"delta":{"reasoning":"why","content":"Hi"}}]}"#,
+            &mut accumulator,
+            &mut sink,
+        )
+        .unwrap();
         assert_eq!(
-            events,
+            sink.0,
             vec![
                 StreamEvent::Reasoning("why".to_string()),
                 StreamEvent::Content("Hi".to_string()),

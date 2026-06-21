@@ -1,46 +1,83 @@
-use anyhow::{Context, Result, bail};
-
+use super::message_dto::MessageDto;
 use super::sse::{TurnAccumulator, handle_line};
-use super::wire::ChatRequest;
+use super::wire::{ChatRequest, ChatTemplateKwargs};
 use crate::modules::agent::domain::completed_turn::CompletedTurn;
-use crate::modules::agent::domain::stream_event::StreamEvent;
+use crate::modules::provider::application::completion_provider::{
+    CompletionProvider, EventSink, TurnRequest,
+};
+use crate::shared::kernel::error::AgentError;
 
-/// Send `request` to the OpenAI-compatible `<base_url>/chat/completions` endpoint and stream the
-/// response: `on_event` fires for every reasoning or content delta as it arrives, and the assembled
-/// turn (content + tool calls) is returned once the stream ends.
-pub async fn stream_completion(
-    client: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
-    request: &ChatRequest,
-    mut on_event: impl FnMut(StreamEvent) -> Result<()>,
-) -> Result<CompletedTurn> {
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+/// OpenAI-compatible chat provider (NVIDIA today). Holds the HTTP client and endpoint/credentials;
+/// translates a domain `TurnRequest` into the wire `ChatRequest`, streams the response forwarding
+/// deltas to `sink`, and assembles the turn.
+pub struct OpenAiProvider {
+    client: reqwest::Client,
+    base_url: String,
+    api_key: String,
+}
 
-    let mut response = client
-        .post(&url)
-        .bearer_auth(api_key)
-        .json(request)
-        .send()
-        .await
-        .context("failed to reach provider")?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        bail!("provider returned {status}: {body}");
-    }
-
-    let mut accumulator = TurnAccumulator::default();
-    let mut buffer: Vec<u8> = Vec::new();
-    while let Some(chunk) = response.chunk().await.context("error reading stream")? {
-        buffer.extend_from_slice(&chunk);
-        while let Some(newline) = buffer.iter().position(|&byte| byte == b'\n') {
-            let line: Vec<u8> = buffer.drain(..=newline).collect();
-            handle_line(&line, &mut accumulator, &mut on_event)?;
+impl OpenAiProvider {
+    pub fn new(
+        client: reqwest::Client,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            client,
+            base_url: base_url.into(),
+            api_key: api_key.into(),
         }
     }
-    handle_line(&buffer, &mut accumulator, &mut on_event)?;
+}
 
-    Ok(accumulator.into_completed())
+#[async_trait::async_trait(?Send)]
+impl CompletionProvider for OpenAiProvider {
+    async fn complete(
+        &self,
+        request: TurnRequest<'_>,
+        sink: &mut dyn EventSink,
+    ) -> Result<CompletedTurn, AgentError> {
+        let body = ChatRequest {
+            model: request.model.to_string(),
+            messages: request.messages.iter().map(MessageDto::from).collect(),
+            stream: true,
+            chat_template_kwargs: Some(ChatTemplateKwargs { thinking: true }),
+            tools: request.tools.to_vec(),
+        };
+
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let mut response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| AgentError::Provider(format!("failed to reach provider: {error}")))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(AgentError::Provider(format!(
+                "provider returned {status}: {body}"
+            )));
+        }
+
+        let mut accumulator = TurnAccumulator::default();
+        let mut buffer: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| AgentError::Provider(format!("error reading stream: {error}")))?
+        {
+            buffer.extend_from_slice(&chunk);
+            while let Some(newline) = buffer.iter().position(|&byte| byte == b'\n') {
+                let line: Vec<u8> = buffer.drain(..=newline).collect();
+                handle_line(&line, &mut accumulator, sink)?;
+            }
+        }
+        handle_line(&buffer, &mut accumulator, sink)?;
+
+        Ok(accumulator.into_completed())
+    }
 }

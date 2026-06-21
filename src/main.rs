@@ -18,11 +18,13 @@ use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::agent::domain::message::Message;
 use crate::modules::agent::domain::role::Role;
 use crate::modules::agent::domain::stream_event::StreamEvent;
-use crate::modules::provider::infrastructure::openai::message_dto::MessageDto;
-use crate::modules::provider::infrastructure::openai::provider::stream_completion;
-use crate::modules::provider::infrastructure::openai::wire::{ChatRequest, ChatTemplateKwargs};
+use crate::modules::provider::application::completion_provider::{
+    CompletionProvider, EventSink, TurnRequest,
+};
+use crate::modules::provider::infrastructure::openai::provider::OpenAiProvider;
 use crate::services::sandbox::{Sandbox, expand_user_path, is_absolute_target};
 use crate::services::tools::{ToolOutcome, confirmation_prompt, execute, tool_definitions};
+use crate::shared::kernel::error::AgentError;
 
 /// NVIDIA's OpenAI-compatible endpoint. Hardcoded for now; a future multi-provider feature will
 /// move this into external configuration (see docs/decisions/0001-openai-compatible-provider.md).
@@ -86,7 +88,7 @@ async fn main() -> Result<()> {
         .map(|tool| serde_json::to_value(tool).expect("tool schema serializes"))
         .collect();
 
-    let client = reqwest::Client::new();
+    let provider = OpenAiProvider::new(reqwest::Client::new(), BASE_URL, api_key);
     let mut history: Vec<Message> = vec![Message::system(SYSTEM_PROMPT)];
     let mut reader = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = io::stdout();
@@ -140,15 +142,16 @@ async fn main() -> Result<()> {
 
         let mut checkpoint = Instant::now();
         loop {
-            let request = ChatRequest {
-                model: model.clone(),
-                messages: history.iter().map(MessageDto::from).collect(),
-                stream: true,
-                chat_template_kwargs: Some(ChatTemplateKwargs { thinking: true }),
-                tools: tool_schemas.clone(),
-            };
-
-            let turn = match render_turn(&client, &api_key, &request, &mut stdout, is_tty).await {
+            let turn = match render_turn(
+                &provider,
+                &history,
+                &model,
+                &tool_schemas,
+                &mut stdout,
+                is_tty,
+            )
+            .await
+            {
                 Ok(turn) => turn,
                 Err(error) => {
                     eprintln!("erro: {error:#}");
@@ -213,59 +216,88 @@ async fn main() -> Result<()> {
 /// Stream one assistant turn: an ephemeral "pensando…" indicator while the model reasons, then the
 /// answer token-by-token. Returns the assembled turn (content + any tool calls) for the loop to act on.
 async fn render_turn(
-    client: &reqwest::Client,
-    api_key: &str,
-    request: &ChatRequest,
+    provider: &OpenAiProvider,
+    messages: &[Message],
+    model: &str,
+    tools: &[serde_json::Value],
     stdout: &mut io::Stdout,
     is_tty: bool,
 ) -> Result<CompletedTurn> {
-    let started = Instant::now();
-    let mut last_tick = started;
-    let mut frame = 0usize;
-    let mut answering = false;
+    let now = Instant::now();
+    let mut sink = CliSink {
+        stdout,
+        is_tty,
+        started: now,
+        last_tick: now,
+        frame: 0,
+        answering: false,
+    };
 
-    let result = stream_completion(client, BASE_URL, api_key, request, |event| {
-        match event {
-            StreamEvent::Reasoning(_) => {
-                if !answering && is_tty && last_tick.elapsed() >= SPINNER_INTERVAL {
-                    frame = (frame + 1) % SPINNER.len();
-                    last_tick = Instant::now();
-                    let secs = started.elapsed().as_secs();
-                    write!(
-                        stdout,
-                        "{CLEAR_LINE}{DIM}{} pensando… ({secs}s){RESET}",
-                        SPINNER[frame]
-                    )?;
-                    stdout.flush()?;
-                }
-            }
-            StreamEvent::Content(text) => {
-                if !answering {
-                    answering = true;
-                    if is_tty {
-                        write!(stdout, "{CLEAR_LINE}")?;
-                    }
-                }
-                write!(stdout, "{text}")?;
-                stdout.flush()?;
-            }
-        }
-        Ok(())
-    })
-    .await;
+    let result = provider
+        .complete(
+            TurnRequest {
+                messages,
+                model,
+                tools,
+            },
+            &mut sink,
+        )
+        .await;
 
     // In a terminal, erase a leftover spinner if the stream ended or failed mid-reasoning, and
     // never leave the terminal dimmed. When piped, keep the output free of escape codes.
-    if is_tty {
-        if !answering {
-            let _ = write!(stdout, "{CLEAR_LINE}");
+    if sink.is_tty {
+        if !sink.answering {
+            let _ = write!(sink.stdout, "{CLEAR_LINE}");
         }
-        let _ = write!(stdout, "{RESET}");
+        let _ = write!(sink.stdout, "{RESET}");
     }
-    let _ = writeln!(stdout);
-    let _ = stdout.flush();
+    let _ = writeln!(sink.stdout);
+    let _ = sink.stdout.flush();
 
-    result
+    Ok(result?)
+}
+
+/// The terminal sink for a streamed turn: a "pensando…" spinner while the model reasons, then the
+/// answer token-by-token. Owns the spinner state so `render_turn` can read it after the stream ends.
+struct CliSink<'a> {
+    stdout: &'a mut io::Stdout,
+    is_tty: bool,
+    started: Instant,
+    last_tick: Instant,
+    frame: usize,
+    answering: bool,
+}
+
+impl EventSink for CliSink<'_> {
+    fn on_event(&mut self, event: StreamEvent) -> Result<(), AgentError> {
+        match event {
+            StreamEvent::Reasoning(_) => {
+                if !self.answering && self.is_tty && self.last_tick.elapsed() >= SPINNER_INTERVAL {
+                    self.frame = (self.frame + 1) % SPINNER.len();
+                    self.last_tick = Instant::now();
+                    let secs = self.started.elapsed().as_secs();
+                    write!(
+                        self.stdout,
+                        "{CLEAR_LINE}{DIM}{} pensando… ({secs}s){RESET}",
+                        SPINNER[self.frame]
+                    )?;
+                    self.stdout.flush()?;
+                }
+            }
+            StreamEvent::Content(text) => {
+                if !self.answering {
+                    self.answering = true;
+                    if self.is_tty {
+                        write!(self.stdout, "{CLEAR_LINE}")?;
+                    }
+                }
+                write!(self.stdout, "{text}")?;
+                self.stdout.flush()?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Interpret a confirmation answer. An explicit yes/no always wins; an empty or unrecognized answer
