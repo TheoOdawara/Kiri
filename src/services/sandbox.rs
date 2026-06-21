@@ -33,9 +33,15 @@ impl Sandbox {
         &self.root
     }
 
-    /// Resolve a path that must already exist (read/edit/overwrite/delete/list/search). Resolves
-    /// symlinks via `canonicalize`, then asserts the real path stays under the root.
+    /// Resolve a path that must already exist (read/edit/overwrite/delete/list/search). A relative path
+    /// resolves under the active root and is asserted to stay within it; an absolute path (or `~/…`) is
+    /// resolved as given — allowed outside the root, since the CLI gates it with explicit confirmation.
     pub fn resolve_existing(&self, rel: &str) -> Result<PathBuf> {
+        let expanded = expand_tilde(rel, home().as_deref());
+        if expanded.is_absolute() {
+            return std::fs::canonicalize(&expanded)
+                .with_context(|| format!("path not found: {rel}"));
+        }
         let candidate = self.join_checked(rel)?;
         let real =
             std::fs::canonicalize(&candidate).with_context(|| format!("path not found: {rel}"))?;
@@ -47,8 +53,13 @@ impl Sandbox {
     /// missing. The deepest existing ancestor is canonicalized and asserted within the root, so the
     /// remaining (lexically clean) components appended onto it cannot escape.
     pub fn resolve_create(&self, rel: &str) -> Result<CreateResolution> {
-        let candidate = self.join_checked(rel)?;
-        if candidate == self.root {
+        let expanded = expand_tilde(rel, home().as_deref());
+        let (candidate, confined) = if expanded.is_absolute() {
+            (expanded, false)
+        } else {
+            (self.join_checked(rel)?, true)
+        };
+        if confined && candidate == self.root {
             bail!("path has no file name: {rel}");
         }
 
@@ -63,7 +74,9 @@ impl Sandbox {
 
         let real_existing = std::fs::canonicalize(existing)
             .with_context(|| format!("cannot resolve an existing ancestor of {rel}"))?;
-        self.assert_within(&real_existing)?;
+        if confined {
+            self.assert_within(&real_existing)?;
+        }
 
         // `missing` is deepest-first; reverse to shallow-first for both the join and mkdir order.
         missing.reverse();
@@ -112,6 +125,35 @@ impl Sandbox {
         }
         Ok(())
     }
+}
+
+/// Expand a leading `~` (alone) or `~/…` to `home`; any other path is returned unchanged. `~user` is
+/// intentionally not expanded. Pure, for testability.
+fn expand_tilde(path: &str, home: Option<&Path>) -> PathBuf {
+    if let Some(home) = home {
+        if path == "~" {
+            return home.to_path_buf();
+        }
+        if let Some(rest) = path.strip_prefix("~/") {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Expand `~`/`~/…` against the real `$HOME`; used to resolve a `/cd` target the shell didn't expand.
+pub(crate) fn expand_user_path(path: &str) -> PathBuf {
+    expand_tilde(path, home().as_deref())
+}
+
+/// Whether a tool path targets an explicit absolute location (after `~` expansion) — i.e. potentially
+/// outside the active workspace. Used to pick the confirmation default (accept inside, decline outside).
+pub(crate) fn is_absolute_target(path: &str) -> bool {
+    expand_tilde(path, home().as_deref()).is_absolute()
 }
 
 #[cfg(test)]
@@ -179,11 +221,37 @@ mod tests {
     }
 
     #[test]
-    fn rejects_absolute_path() {
-        let dir = TempDir::new("absolute");
+    fn allows_absolute_path_outside_root() {
+        let outside = TempDir::new("abs-outside");
+        let file = outside.path.join("f.txt");
+        fs::write(&file, b"x").unwrap();
+
+        let dir = TempDir::new("abs-inside");
         let sb = sandbox(&dir);
-        assert!(sb.resolve_existing("/etc/passwd").is_err());
-        assert!(sb.resolve_create("/tmp/x.txt").is_err());
+
+        let resolved = sb.resolve_existing(file.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, fs::canonicalize(&file).unwrap());
+
+        let created = sb
+            .resolve_create(outside.path.join("new.txt").to_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            created.target,
+            fs::canonicalize(&outside.path).unwrap().join("new.txt")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_expands_leading_home() {
+        let home = Path::new("/home/u");
+        assert_eq!(expand_tilde("~", Some(home)), PathBuf::from("/home/u"));
+        assert_eq!(
+            expand_tilde("~/dev/x", Some(home)),
+            PathBuf::from("/home/u/dev/x")
+        );
+        assert_eq!(expand_tilde("dev/x", Some(home)), PathBuf::from("dev/x"));
+        assert_eq!(expand_tilde("/abs", Some(home)), PathBuf::from("/abs"));
+        assert_eq!(expand_tilde("~/x", None), PathBuf::from("~/x"));
     }
 
     #[test]

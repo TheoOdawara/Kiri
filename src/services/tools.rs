@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::models::tools::{FunctionDef, Tool, ToolCall, ToolKind};
-use crate::services::sandbox::Sandbox;
+use crate::services::sandbox::{CreateResolution, Sandbox, is_absolute_target};
 
 const READ_FILE_MAX_BYTES: usize = 64 * 1024;
 const EDIT_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -40,13 +40,14 @@ pub fn tool_definitions() -> Vec<Tool> {
     vec![
         function(
             "read_file",
-            "Read a UTF-8 text file and return its contents. The path is relative to the workspace \
-             root; '..' and absolute paths are rejected.",
+            "Read a UTF-8 text file and return its contents. Paths are relative to the active workspace \
+             root; an absolute path or '~/…' may reach outside it (the user confirms each call). '..' \
+             in a relative path is rejected.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["path"],
-                "properties": { "path": { "type": "string", "description": "Path relative to the workspace root." } }
+                "properties": { "path": { "type": "string", "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it." } }
             }),
         ),
         function(
@@ -58,7 +59,7 @@ pub fn tool_definitions() -> Vec<Tool> {
                 "additionalProperties": false,
                 "required": ["path", "content"],
                 "properties": {
-                    "path": { "type": "string", "description": "Path relative to the workspace root." },
+                    "path": { "type": "string", "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it." },
                     "content": { "type": "string", "description": "Full file content to write." }
                 }
             }),
@@ -71,7 +72,7 @@ pub fn tool_definitions() -> Vec<Tool> {
                 "additionalProperties": false,
                 "required": ["path", "old_string", "new_string"],
                 "properties": {
-                    "path": { "type": "string", "description": "Path relative to the workspace root." },
+                    "path": { "type": "string", "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it." },
                     "old_string": { "type": "string", "description": "Exact text to find (must be unique enough)." },
                     "new_string": { "type": "string", "description": "Replacement text." }
                 }
@@ -84,7 +85,22 @@ pub fn tool_definitions() -> Vec<Tool> {
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["path"],
-                "properties": { "path": { "type": "string", "description": "Path relative to the workspace root." } }
+                "properties": { "path": { "type": "string", "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it." } }
+            }),
+        ),
+        function(
+            "move_path",
+            "Move or rename a file or directory. Creates missing parent directories of the destination \
+             (with user confirmation) and overwrites an existing destination (with confirmation). Both \
+             paths are relative to the workspace root.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["source", "destination"],
+                "properties": {
+                    "source": { "type": "string", "description": "Existing file or directory to move, relative to the workspace root." },
+                    "destination": { "type": "string", "description": "New path, relative to the workspace root." }
+                }
             }),
         ),
         function(
@@ -95,6 +111,28 @@ pub fn tool_definitions() -> Vec<Tool> {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": { "path": { "type": "string", "description": "Directory path relative to the workspace root. Defaults to '.'." } }
+            }),
+        ),
+        function(
+            "create_dir",
+            "Create a directory, including any missing parent directories. The path is relative to the \
+             workspace root.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path"],
+                "properties": { "path": { "type": "string", "description": "Directory path to create, relative to the workspace root." } }
+            }),
+        ),
+        function(
+            "delete_dir",
+            "Delete a directory and all of its contents, recursively. Requires confirmation. The path \
+             is relative to the workspace root.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path"],
+                "properties": { "path": { "type": "string", "description": "Directory path to delete, relative to the workspace root." } }
             }),
         ),
         function(
@@ -133,54 +171,120 @@ pub fn execute(sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         "write_file" => run_write(sandbox, args),
         "edit_file" => run_edit(sandbox, args),
         "delete_file" => run_delete(sandbox, args),
+        "move_path" => run_move(sandbox, args),
         "list_dir" => run_list(sandbox, args),
+        "create_dir" => run_create_dir(sandbox, args),
+        "delete_dir" => run_delete_dir(sandbox, args),
         "search" => run_search(sandbox, args),
         other => ToolOutcome::Error(format!("unknown tool '{other}'")),
     }
 }
 
-/// The prompt to show before a destructive operation, or `None` when the call needs no confirmation
-/// (read/list/search, a plain create in an existing directory, or unparseable arguments — which
-/// `execute` will report as an error). No I/O happens here; the caller performs the actual prompt.
-pub fn confirmation_prompt(sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
-    match call.function.name.as_str() {
-        "delete_file" => {
-            let args: PathArgs = parse(&call.function.arguments).ok()?;
-            sandbox.resolve_existing(&args.path).ok()?;
-            Some(format!("Excluir '{}'? [s/N] ", args.path))
+/// A confirmation request: the line to show and whether Enter approves it. Operations inside the active
+/// workspace default to accept (`[S/n]`); operations on an explicit absolute/`~` path (potentially
+/// outside the workspace) default to decline (`[s/N]`), requiring a deliberate "yes".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confirmation {
+    pub prompt: String,
+    pub default_accept: bool,
+}
+
+/// The prompt shown before a tool call runs. The CLI confirms *every* call — reads included — so this
+/// returns `Some` for any tool whose arguments parse; only unparseable arguments yield `None`, letting
+/// `execute` report the error. The only I/O is the sandbox path resolution used to phrase write/move
+/// precisely (mkdir vs overwrite vs new); the caller performs the actual prompt.
+pub fn confirmation_prompt(sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+    let args = call.function.arguments.as_str();
+    let (action, primary): (String, String) = match call.function.name.as_str() {
+        "read_file" => {
+            let a: PathArgs = parse(args).ok()?;
+            (format!("Ler '{}'?", a.path), a.path)
         }
-        "edit_file" => {
-            let args: PathArgs = parse(&call.function.arguments).ok()?;
-            sandbox.resolve_existing(&args.path).ok()?;
-            Some(format!("Editar '{}'? [s/N] ", args.path))
+        "list_dir" => {
+            let a: ListArgs = parse(args).ok()?;
+            (format!("Listar '{}'?", a.path), a.path)
+        }
+        "search" => {
+            let a: SearchArgs = parse(args).ok()?;
+            (format!("Buscar '{}' em '{}'?", a.query, a.path), a.path)
         }
         "write_file" => {
-            let args: PathArgs = parse(&call.function.arguments).ok()?;
-            let resolution = sandbox.resolve_create(&args.path).ok()?;
-            if !resolution.missing_dirs.is_empty() {
-                let dirs = resolution
-                    .missing_dirs
-                    .iter()
-                    .map(|dir| {
-                        dir.strip_prefix(sandbox.root())
-                            .unwrap_or(dir)
-                            .display()
-                            .to_string()
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                Some(format!(
-                    "Criar diretório(s) '{dirs}' e gravar '{}'? [s/N] ",
-                    args.path
-                ))
-            } else if resolution.target.exists() {
-                Some(format!("Sobrescrever '{}'? [s/N] ", args.path))
-            } else {
-                None
-            }
+            let a: PathArgs = parse(args).ok()?;
+            let action = match sandbox.resolve_create(&a.path) {
+                Ok(r) if !r.missing_dirs.is_empty() => format!(
+                    "Criar diretório(s) '{}' e gravar '{}'?",
+                    missing_dirs_label(&r, sandbox),
+                    a.path
+                ),
+                Ok(r) if r.target.exists() => format!("Sobrescrever '{}'?", a.path),
+                _ => format!("Criar e gravar '{}'?", a.path),
+            };
+            (action, a.path)
         }
-        _ => None,
-    }
+        "edit_file" => {
+            let a: PathArgs = parse(args).ok()?;
+            (format!("Editar '{}'?", a.path), a.path)
+        }
+        "create_dir" => {
+            let a: PathArgs = parse(args).ok()?;
+            (format!("Criar diretório '{}'?", a.path), a.path)
+        }
+        "move_path" => {
+            let a: MoveArgs = parse(args).ok()?;
+            let action = match sandbox.resolve_create(&a.destination) {
+                Ok(r) if !r.missing_dirs.is_empty() => format!(
+                    "Criar diretório(s) '{}' e mover '{}' → '{}'?",
+                    missing_dirs_label(&r, sandbox),
+                    a.source,
+                    a.destination
+                ),
+                Ok(r) if r.target.exists() => {
+                    format!(
+                        "Sobrescrever '{}' movendo de '{}'?",
+                        a.destination, a.source
+                    )
+                }
+                _ => format!("Mover '{}' → '{}'?", a.source, a.destination),
+            };
+            (action, a.destination)
+        }
+        "delete_file" => {
+            let a: PathArgs = parse(args).ok()?;
+            (format!("Excluir '{}'?", a.path), a.path)
+        }
+        "delete_dir" => {
+            let a: PathArgs = parse(args).ok()?;
+            (
+                format!(
+                    "Excluir RECURSIVAMENTE o diretório '{}' e TODO o seu conteúdo?",
+                    a.path
+                ),
+                a.path,
+            )
+        }
+        _ => return None,
+    };
+    let default_accept = !is_absolute_target(&primary);
+    let suffix = if default_accept { "[S/n]" } else { "[s/N]" };
+    Some(Confirmation {
+        prompt: format!("{action} {suffix} "),
+        default_accept,
+    })
+}
+
+/// Workspace-relative, comma-joined list of the directories a create/move would have to make.
+fn missing_dirs_label(resolution: &CreateResolution, sandbox: &Sandbox) -> String {
+    resolution
+        .missing_dirs
+        .iter()
+        .map(|dir| {
+            dir.strip_prefix(sandbox.root())
+                .unwrap_or(dir)
+                .display()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Deserialize)]
@@ -192,6 +296,12 @@ struct PathArgs {
 struct WriteArgs {
     path: String,
     content: String,
+}
+
+#[derive(Deserialize)]
+struct MoveArgs {
+    source: String,
+    destination: String,
 }
 
 #[derive(Deserialize)]
@@ -345,6 +455,40 @@ fn run_delete(sandbox: &Sandbox, args: &str) -> ToolOutcome {
     }
 }
 
+fn run_move(sandbox: &Sandbox, args: &str) -> ToolOutcome {
+    let args: MoveArgs = match parse(args) {
+        Ok(args) => args,
+        Err(error) => return ToolOutcome::Error(format!("invalid arguments: {error}")),
+    };
+    let source = match sandbox.resolve_existing(&args.source) {
+        Ok(source) => source,
+        Err(error) => return ToolOutcome::Error(error.to_string()),
+    };
+    if source == sandbox.root() {
+        return ToolOutcome::Error("refusing to move the workspace root".to_string());
+    }
+    let resolution = match sandbox.resolve_create(&args.destination) {
+        Ok(resolution) => resolution,
+        Err(error) => return ToolOutcome::Error(error.to_string()),
+    };
+    if !resolution.missing_dirs.is_empty()
+        && let Some(parent) = resolution.target.parent()
+        && let Err(error) = fs::create_dir_all(parent)
+    {
+        return ToolOutcome::Error(format!(
+            "cannot create directories for {}: {error}",
+            args.destination
+        ));
+    }
+    match fs::rename(&source, &resolution.target) {
+        Ok(()) => ToolOutcome::Ok(format!("moved {} to {}", args.source, args.destination)),
+        Err(error) => ToolOutcome::Error(format!(
+            "cannot move {} to {}: {error}",
+            args.source, args.destination
+        )),
+    }
+}
+
 fn run_list(sandbox: &Sandbox, args: &str) -> ToolOutcome {
     let args: ListArgs = match parse(args) {
         Ok(args) => args,
@@ -372,6 +516,52 @@ fn run_list(sandbox: &Sandbox, args: &str) -> ToolOutcome {
     }
 }
 
+fn run_create_dir(sandbox: &Sandbox, args: &str) -> ToolOutcome {
+    let args: PathArgs = match parse(args) {
+        Ok(args) => args,
+        Err(error) => return ToolOutcome::Error(format!("invalid arguments: {error}")),
+    };
+    let resolution = match sandbox.resolve_create(&args.path) {
+        Ok(resolution) => resolution,
+        Err(error) => return ToolOutcome::Error(error.to_string()),
+    };
+    if resolution.target.is_dir() {
+        return ToolOutcome::Ok(format!("directory already exists: {}", args.path));
+    }
+    match fs::create_dir_all(&resolution.target) {
+        Ok(()) => ToolOutcome::Ok(format!("created directory {}", args.path)),
+        Err(error) => ToolOutcome::Error(format!("cannot create {}: {error}", args.path)),
+    }
+}
+
+fn run_delete_dir(sandbox: &Sandbox, args: &str) -> ToolOutcome {
+    let args: PathArgs = match parse(args) {
+        Ok(args) => args,
+        Err(error) => return ToolOutcome::Error(format!("invalid arguments: {error}")),
+    };
+    let path = match sandbox.resolve_existing(&args.path) {
+        Ok(path) => path,
+        Err(error) => return ToolOutcome::Error(error.to_string()),
+    };
+    if path == sandbox.root() {
+        return ToolOutcome::Error("refusing to delete the workspace root".to_string());
+    }
+    match fs::metadata(&path) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return ToolOutcome::Error(format!(
+                "{} is not a directory; use delete_file",
+                args.path
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => return ToolOutcome::Error(format!("cannot stat {}: {error}", args.path)),
+    }
+    match fs::remove_dir_all(&path) {
+        Ok(()) => ToolOutcome::Ok(format!("deleted directory {}", args.path)),
+        Err(error) => ToolOutcome::Error(format!("cannot delete {}: {error}", args.path)),
+    }
+}
+
 fn run_search(sandbox: &Sandbox, args: &str) -> ToolOutcome {
     let args: SearchArgs = match parse(args) {
         Ok(args) => args,
@@ -386,6 +576,9 @@ fn run_search(sandbox: &Sandbox, args: &str) -> ToolOutcome {
     };
 
     let mut matches: Vec<String> = Vec::new();
+    // Bound the recursion (and the displayed paths) to the resolved start directory, so a search begun
+    // outside the active workspace stays within its own subtree.
+    let base = start.clone();
     let mut stack = vec![start];
     let mut truncated = false;
     while let Some(dir) = stack.pop() {
@@ -400,13 +593,13 @@ fn run_search(sandbox: &Sandbox, args: &str) -> ToolOutcome {
                 continue; // never follow symlinks: avoids escape and traversal loops
             }
             let path = entry.path();
-            if !path.starts_with(sandbox.root()) {
+            if !path.starts_with(&base) {
                 continue;
             }
             if file_type.is_dir() {
                 stack.push(path);
             } else if file_type.is_file() {
-                search_file(&path, &args.query, sandbox.root(), &mut matches);
+                search_file(&path, &args.query, &base, &mut matches);
                 if matches.len() >= SEARCH_MAX_MATCHES {
                     truncated = true;
                     break;
@@ -500,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_expose_the_six_tools() {
+    fn tool_definitions_expose_all_tools() {
         let names: Vec<String> = tool_definitions()
             .into_iter()
             .map(|tool| tool.function.name)
@@ -512,7 +705,10 @@ mod tests {
                 "write_file",
                 "edit_file",
                 "delete_file",
+                "move_path",
                 "list_dir",
+                "create_dir",
+                "delete_dir",
                 "search"
             ]
         );
@@ -663,16 +859,153 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_none_for_read_list_search() {
-        let dir = TempDir::new("confirm-none");
+    fn move_path_relocates_a_file() {
+        let dir = TempDir::new("move-file");
         let sb = sandbox(&dir);
-        assert!(confirmation_prompt(&sb, &call("read_file", json!({"path": "a.txt"}))).is_none());
-        assert!(confirmation_prompt(&sb, &call("list_dir", json!({}))).is_none());
-        assert!(confirmation_prompt(&sb, &call("search", json!({"query": "x"}))).is_none());
+        fs::write(sb.root().join("a.txt"), b"data").unwrap();
+        assert_eq!(
+            execute(
+                &sb,
+                &call(
+                    "move_path",
+                    json!({"source": "a.txt", "destination": "b.txt"})
+                )
+            ),
+            ToolOutcome::Ok("moved a.txt to b.txt".to_string())
+        );
+        assert!(!sb.root().join("a.txt").exists());
+        assert_eq!(fs::read_to_string(sb.root().join("b.txt")).unwrap(), "data");
     }
 
     #[test]
-    fn confirmation_none_for_create_in_existing_dir() {
+    fn move_path_relocates_a_directory_with_contents() {
+        let dir = TempDir::new("move-dir");
+        let sb = sandbox(&dir);
+        fs::create_dir(sb.root().join("src")).unwrap();
+        fs::write(sb.root().join("src").join("f.txt"), b"x").unwrap();
+        let outcome = execute(
+            &sb,
+            &call("move_path", json!({"source": "src", "destination": "dst"})),
+        );
+        assert!(matches!(outcome, ToolOutcome::Ok(_)));
+        assert!(!sb.root().join("src").exists());
+        assert!(sb.root().join("dst").join("f.txt").exists());
+    }
+
+    #[test]
+    fn move_path_creates_missing_destination_dirs() {
+        let dir = TempDir::new("move-mkdir");
+        let sb = sandbox(&dir);
+        fs::write(sb.root().join("a.txt"), b"x").unwrap();
+        let outcome = execute(
+            &sb,
+            &call(
+                "move_path",
+                json!({"source": "a.txt", "destination": "nested/deep/b.txt"}),
+            ),
+        );
+        assert!(matches!(outcome, ToolOutcome::Ok(_)));
+        assert!(sb.root().join("nested").join("deep").join("b.txt").exists());
+    }
+
+    #[test]
+    fn move_path_missing_source_returns_error() {
+        let dir = TempDir::new("move-missing");
+        let sb = sandbox(&dir);
+        let outcome = execute(
+            &sb,
+            &call(
+                "move_path",
+                json!({"source": "nope.txt", "destination": "b.txt"}),
+            ),
+        );
+        assert!(matches!(outcome, ToolOutcome::Error(_)));
+    }
+
+    #[test]
+    fn move_path_refuses_to_move_the_root() {
+        let dir = TempDir::new("move-root");
+        let sb = sandbox(&dir);
+        let outcome = execute(
+            &sb,
+            &call("move_path", json!({"source": ".", "destination": "x"})),
+        );
+        assert!(matches!(outcome, ToolOutcome::Error(_)));
+    }
+
+    #[test]
+    fn create_dir_creates_nested_directories() {
+        let dir = TempDir::new("create-dir");
+        let sb = sandbox(&dir);
+        let outcome = execute(&sb, &call("create_dir", json!({"path": "a/b/c"})));
+        assert!(matches!(outcome, ToolOutcome::Ok(_)));
+        assert!(sb.root().join("a").join("b").join("c").is_dir());
+    }
+
+    #[test]
+    fn create_dir_is_idempotent_for_existing_directory() {
+        let dir = TempDir::new("create-dir-exists");
+        let sb = sandbox(&dir);
+        fs::create_dir(sb.root().join("a")).unwrap();
+        let outcome = execute(&sb, &call("create_dir", json!({"path": "a"})));
+        assert!(matches!(outcome, ToolOutcome::Ok(_)));
+        assert!(sb.root().join("a").is_dir());
+    }
+
+    #[test]
+    fn delete_dir_removes_a_directory_recursively() {
+        let dir = TempDir::new("delete-dir");
+        let sb = sandbox(&dir);
+        fs::create_dir_all(sb.root().join("a").join("b")).unwrap();
+        fs::write(sb.root().join("a").join("b").join("f.txt"), b"x").unwrap();
+        let outcome = execute(&sb, &call("delete_dir", json!({"path": "a"})));
+        assert_eq!(outcome, ToolOutcome::Ok("deleted directory a".to_string()));
+        assert!(!sb.root().join("a").exists());
+    }
+
+    #[test]
+    fn delete_dir_refuses_a_file() {
+        let dir = TempDir::new("delete-dir-file");
+        let sb = sandbox(&dir);
+        fs::write(sb.root().join("a.txt"), b"x").unwrap();
+        let outcome = execute(&sb, &call("delete_dir", json!({"path": "a.txt"})));
+        assert!(matches!(outcome, ToolOutcome::Error(_)));
+        assert!(sb.root().join("a.txt").exists());
+    }
+
+    #[test]
+    fn delete_dir_refuses_the_root() {
+        let dir = TempDir::new("delete-dir-root");
+        let sb = sandbox(&dir);
+        let outcome = execute(&sb, &call("delete_dir", json!({"path": "."})));
+        assert!(matches!(outcome, ToolOutcome::Error(_)));
+        assert!(sb.root().is_dir());
+    }
+
+    #[test]
+    fn confirmation_prompts_for_read_list_search() {
+        let dir = TempDir::new("confirm-reads");
+        let sb = sandbox(&dir);
+        let read = confirmation_prompt(&sb, &call("read_file", json!({"path": "a.txt"}))).unwrap();
+        assert!(read.prompt.contains("Ler"));
+        assert!(read.prompt.ends_with("[S/n] "));
+        assert!(read.default_accept);
+        assert!(
+            confirmation_prompt(&sb, &call("list_dir", json!({})))
+                .unwrap()
+                .prompt
+                .contains("Listar")
+        );
+        assert!(
+            confirmation_prompt(&sb, &call("search", json!({"query": "x"})))
+                .unwrap()
+                .prompt
+                .contains("Buscar")
+        );
+    }
+
+    #[test]
+    fn confirmation_prompts_for_new_file() {
         let dir = TempDir::new("confirm-create");
         let sb = sandbox(&dir);
         assert!(
@@ -680,7 +1013,9 @@ mod tests {
                 &sb,
                 &call("write_file", json!({"path": "new.txt", "content": "x"}))
             )
-            .is_none()
+            .unwrap()
+            .prompt
+            .contains("Criar e gravar")
         );
     }
 
@@ -693,7 +1028,7 @@ mod tests {
             &sb,
             &call("write_file", json!({"path": "a.txt", "content": "new"})),
         );
-        assert!(prompt.unwrap().contains("Sobrescrever"));
+        assert!(prompt.unwrap().prompt.contains("Sobrescrever"));
     }
 
     #[test]
@@ -703,10 +1038,10 @@ mod tests {
         let prompt = confirmation_prompt(
             &sb,
             &call("write_file", json!({"path": "a/b/c.txt", "content": "x"})),
-        );
-        let prompt = prompt.unwrap();
-        assert!(prompt.contains("Criar diretório"));
-        assert!(prompt.contains("a/b"));
+        )
+        .unwrap();
+        assert!(prompt.prompt.contains("Criar diretório"));
+        assert!(prompt.prompt.contains("a/b"));
     }
 
     #[test]
@@ -717,6 +1052,7 @@ mod tests {
         assert!(
             confirmation_prompt(&sb, &call("delete_file", json!({"path": "a.txt"})))
                 .unwrap()
+                .prompt
                 .contains("Excluir")
         );
         assert!(
@@ -728,8 +1064,111 @@ mod tests {
                 )
             )
             .unwrap()
+            .prompt
             .contains("Editar")
         );
+    }
+
+    #[test]
+    fn confirmation_prompts_for_clean_move_and_create_dir() {
+        let dir = TempDir::new("confirm-move-clean");
+        let sb = sandbox(&dir);
+        fs::write(sb.root().join("a.txt"), b"x").unwrap();
+        assert!(
+            confirmation_prompt(
+                &sb,
+                &call(
+                    "move_path",
+                    json!({"source": "a.txt", "destination": "b.txt"})
+                )
+            )
+            .unwrap()
+            .prompt
+            .contains("Mover")
+        );
+        assert!(
+            confirmation_prompt(&sb, &call("create_dir", json!({"path": "newdir"})))
+                .unwrap()
+                .prompt
+                .contains("Criar diretório")
+        );
+    }
+
+    #[test]
+    fn confirmation_some_for_move_overwrite_and_mkdir() {
+        let dir = TempDir::new("confirm-move");
+        let sb = sandbox(&dir);
+        fs::write(sb.root().join("a.txt"), b"x").unwrap();
+        fs::write(sb.root().join("b.txt"), b"old").unwrap();
+        assert!(
+            confirmation_prompt(
+                &sb,
+                &call(
+                    "move_path",
+                    json!({"source": "a.txt", "destination": "b.txt"})
+                )
+            )
+            .unwrap()
+            .prompt
+            .contains("Sobrescrever")
+        );
+        let prompt = confirmation_prompt(
+            &sb,
+            &call(
+                "move_path",
+                json!({"source": "a.txt", "destination": "x/y/c.txt"}),
+            ),
+        )
+        .unwrap();
+        assert!(prompt.prompt.contains("Criar diretório"));
+    }
+
+    #[test]
+    fn confirmation_some_for_delete_dir_recursive() {
+        let dir = TempDir::new("confirm-delete-dir");
+        let sb = sandbox(&dir);
+        fs::create_dir(sb.root().join("d")).unwrap();
+        assert!(
+            confirmation_prompt(&sb, &call("delete_dir", json!({"path": "d"})))
+                .unwrap()
+                .prompt
+                .contains("RECURSIVAMENTE")
+        );
+    }
+
+    #[test]
+    fn confirmation_defaults_decline_for_absolute_path() {
+        let outside = TempDir::new("confirm-abs");
+        let file = outside.path.join("f.txt");
+        fs::write(&file, b"x").unwrap();
+        let dir = TempDir::new("confirm-abs-inside");
+        let sb = sandbox(&dir);
+        let c = confirmation_prompt(
+            &sb,
+            &call("read_file", json!({ "path": file.to_str().unwrap() })),
+        )
+        .unwrap();
+        assert!(!c.default_accept);
+        assert!(c.prompt.ends_with("[s/N] "));
+        assert!(c.prompt.contains(file.to_str().unwrap()));
+    }
+
+    #[test]
+    fn execute_edits_file_outside_workspace() {
+        let outside = TempDir::new("edit-abs");
+        let file = outside.path.join("f.txt");
+        fs::write(&file, b"hello world").unwrap();
+        let dir = TempDir::new("edit-abs-inside");
+        let sb = sandbox(&dir);
+        let outcome = execute(
+            &sb,
+            &call(
+                "edit_file",
+                json!({ "path": file.to_str().unwrap(), "old_string": "world", "new_string": "rust" }),
+            ),
+        );
+        assert!(matches!(outcome, ToolOutcome::Ok(_)));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hello rust");
     }
 
     #[test]

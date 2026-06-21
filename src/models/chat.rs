@@ -25,6 +25,15 @@ pub struct Message {
 }
 
 impl Message {
+    pub fn system(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::System,
+            content: Some(text.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
     pub fn user(text: impl Into<String>) -> Self {
         Self {
             role: Role::User,
@@ -213,6 +222,17 @@ mod tests {
         let back: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(back.role, Role::Assistant);
         assert_eq!(back.content.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn message_system_serializes_role_and_content() {
+        let message = Message::system("be concise");
+        assert_eq!(message.role, Role::System);
+        assert_eq!(message.content.as_deref(), Some("be concise"));
+        let value: serde_json::Value = serde_json::to_value(&message).unwrap();
+        assert_eq!(value["role"], "system");
+        assert_eq!(value["content"], "be concise");
+        assert!(value.get("tool_calls").is_none());
     }
 
     #[test]
