@@ -9,23 +9,23 @@ use crate::shared::kernel::tool_call::ToolCall;
 /// `Message` free of any wire concern — so a future provider with a different message shape only adds
 /// its own DTO.
 #[derive(Debug, Serialize)]
-pub struct MessageDto {
+pub struct MessageDto<'a> {
     pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<ToolCall>,
+    pub content: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub tool_calls: &'a [ToolCall],
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
+    pub tool_call_id: Option<&'a str>,
 }
 
-impl From<&Message> for MessageDto {
-    fn from(message: &Message) -> Self {
+impl<'a> From<&'a Message> for MessageDto<'a> {
+    fn from(message: &'a Message) -> Self {
         Self {
             role: message.role,
-            content: message.content.clone(),
-            tool_calls: message.tool_calls.clone(),
-            tool_call_id: message.tool_call_id.clone(),
+            content: message.content.as_deref(),
+            tool_calls: &message.tool_calls,
+            tool_call_id: message.tool_call_id.as_deref(),
         }
     }
 }

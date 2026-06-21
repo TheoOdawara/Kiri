@@ -7,14 +7,14 @@ use super::message_dto::MessageDto;
 /// domain `Message`s through `MessageDto`, and `tools` are the opaque JSON schemas the tool registry
 /// produced, passed through verbatim.
 #[derive(Debug, Serialize)]
-pub struct ChatRequest {
-    pub model: String,
-    pub messages: Vec<MessageDto>,
+pub struct ChatRequest<'a> {
+    pub model: &'a str,
+    pub messages: Vec<MessageDto<'a>>,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<ChatTemplateKwargs>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<Value>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub tools: &'a [Value],
 }
 
 /// Provider-specific knob that asks the model to emit reasoning. Reasoning models stream it by
@@ -87,12 +87,13 @@ mod tests {
         dotenvy::dotenv().ok();
         let model = std::env::var("NVIDIA_MODEL").expect("NVIDIA_MODEL must be set in .env");
 
+        let message = Message::user("hi");
         let request = ChatRequest {
-            model: model.clone(),
-            messages: vec![MessageDto::from(&Message::user("hi"))],
+            model: &model,
+            messages: vec![MessageDto::from(&message)],
             stream: true,
             chat_template_kwargs: None,
-            tools: Vec::new(),
+            tools: &[],
         };
 
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();
@@ -105,11 +106,11 @@ mod tests {
     #[test]
     fn chat_template_kwargs_omitted_when_none() {
         let request = ChatRequest {
-            model: "m".to_string(),
+            model: "m",
             messages: vec![],
             stream: true,
             chat_template_kwargs: None,
-            tools: Vec::new(),
+            tools: &[],
         };
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();
         assert!(value.get("chat_template_kwargs").is_none());
@@ -118,11 +119,11 @@ mod tests {
     #[test]
     fn chat_template_kwargs_serializes_nested() {
         let request = ChatRequest {
-            model: "m".to_string(),
+            model: "m",
             messages: vec![],
             stream: true,
             chat_template_kwargs: Some(ChatTemplateKwargs { thinking: true }),
-            tools: Vec::new(),
+            tools: &[],
         };
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();
         assert_eq!(value["chat_template_kwargs"]["thinking"], true);
@@ -155,11 +156,11 @@ mod tests {
     #[test]
     fn chat_request_omits_tools_when_empty() {
         let request = ChatRequest {
-            model: "m".to_string(),
+            model: "m",
             messages: vec![],
             stream: true,
             chat_template_kwargs: None,
-            tools: Vec::new(),
+            tools: &[],
         };
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();
         assert!(value.get("tools").is_none());
@@ -167,19 +168,20 @@ mod tests {
 
     #[test]
     fn chat_request_includes_tools_when_present() {
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "d",
+                "parameters": {"type": "object"}
+            }
+        })];
         let request = ChatRequest {
-            model: "m".to_string(),
+            model: "m",
             messages: vec![],
             stream: true,
             chat_template_kwargs: None,
-            tools: vec![serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": "read_file",
-                    "description": "d",
-                    "parameters": {"type": "object"}
-                }
-            })],
+            tools: &tools,
         };
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();
         assert_eq!(value["tools"][0]["type"], "function");

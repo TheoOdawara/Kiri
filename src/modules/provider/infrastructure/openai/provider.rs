@@ -38,11 +38,11 @@ impl CompletionProvider for OpenAiProvider {
         sink: &mut dyn EventSink,
     ) -> Result<CompletedTurn, AgentError> {
         let body = ChatRequest {
-            model: request.model.to_string(),
+            model: request.model,
             messages: request.messages.iter().map(MessageDto::from).collect(),
             stream: true,
             chat_template_kwargs: Some(ChatTemplateKwargs { thinking: true }),
-            tools: request.tools.to_vec(),
+            tools: request.tools,
         };
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
