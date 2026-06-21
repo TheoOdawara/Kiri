@@ -76,14 +76,6 @@ fn string_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<S
     })
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct Usage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
-}
-
 #[cfg(test)]
 mod tests {
     use super::{ChatRequest, ChatTemplateKwargs, Delta, ToolCallFragment};

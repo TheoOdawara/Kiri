@@ -26,18 +26,18 @@ pub struct EditArgs {
 
 #[derive(Deserialize)]
 pub struct ListArgs {
-    #[serde(default = "dot")]
+    #[serde(default = "default_path")]
     pub path: String,
 }
 
 #[derive(Deserialize)]
 pub struct SearchArgs {
     pub query: String,
-    #[serde(default = "dot")]
+    #[serde(default = "default_path")]
     pub path: String,
 }
 
-fn dot() -> String {
+fn default_path() -> String {
     ".".to_string()
 }
 
