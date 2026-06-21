@@ -1,6 +1,4 @@
-mod models;
 mod modules;
-mod services;
 mod shared;
 
 #[cfg(test)]
@@ -22,10 +20,12 @@ use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
 use crate::modules::provider::infrastructure::openai::provider::OpenAiProvider;
+use crate::modules::tools::application::registry::ToolRegistry;
+use crate::modules::tools::application::tool::ToolOutcome;
+use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::{
     Sandbox, expand_user_path, is_absolute_target,
 };
-use crate::services::tools::{ToolOutcome, confirmation_prompt, execute, tool_definitions};
 use crate::shared::kernel::error::AgentError;
 
 /// NVIDIA's OpenAI-compatible endpoint. Hardcoded for now; a future multi-provider feature will
@@ -85,10 +85,8 @@ async fn main() -> Result<()> {
     let api_key = required_env("NVIDIA_API_KEY")?;
     let model = required_env("NVIDIA_MODEL")?;
     let mut sandbox = Sandbox::new(&cli.path)?;
-    let tool_schemas: Vec<serde_json::Value> = tool_definitions()
-        .iter()
-        .map(|tool| serde_json::to_value(tool).expect("tool schema serializes"))
-        .collect();
+    let registry = ToolRegistry::new(default_fs_tools());
+    let tool_schemas = registry.schemas();
 
     let provider = OpenAiProvider::new(reqwest::Client::new(), BASE_URL, api_key);
     let mut history: Vec<Message> = vec![Message::system(SYSTEM_PROMPT)];
@@ -177,7 +175,7 @@ async fn main() -> Result<()> {
             history.push(Message::assistant_tool_calls(narration, calls.clone()));
 
             for call in &calls {
-                let outcome = match confirmation_prompt(&sandbox, call) {
+                let outcome = match registry.confirm(&sandbox, call) {
                     Some(confirmation) => {
                         write!(stdout, "{}", confirmation.prompt)?;
                         stdout.flush()?;
@@ -185,13 +183,13 @@ async fn main() -> Result<()> {
                             Some(answer)
                                 if answer_approves(&answer, confirmation.default_accept) =>
                             {
-                                execute(&sandbox, call)
+                                registry.execute(&sandbox, call)
                             }
                             Some(_) => ToolOutcome::Declined,
                             None => break 'session, // stdin closed at a prompt: end the session
                         }
                     }
-                    None => execute(&sandbox, call),
+                    None => registry.execute(&sandbox, call),
                 };
                 history.push(Message::tool_result(
                     call.id.as_str(),

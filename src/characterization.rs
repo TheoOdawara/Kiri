@@ -15,8 +15,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::{Value, json};
 
+use crate::modules::tools::application::registry::ToolRegistry;
+use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
-use crate::services::tools::{confirmation_prompt, tool_definitions};
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -54,8 +55,14 @@ fn call(name: &str, args: Value) -> ToolCall {
 }
 
 /// One confirmation observation: (tool, args) → the exact prompt and default-accept the CLI shows.
-fn confirmation_row(sandbox: &Sandbox, label: &str, name: &str, args: Value) -> Value {
-    let confirmation = confirmation_prompt(sandbox, &call(name, args.clone()));
+fn confirmation_row(
+    registry: &ToolRegistry,
+    sandbox: &Sandbox,
+    label: &str,
+    name: &str,
+    args: Value,
+) -> Value {
+    let confirmation = registry.confirm(sandbox, &call(name, args.clone()));
     json!({
         "label": label,
         "tool": name,
@@ -69,64 +76,76 @@ fn confirmation_row(sandbox: &Sandbox, label: &str, name: &str, args: Value) -> 
 fn current_snapshot() -> Value {
     let dir = TempDir::new("snap");
     let sandbox = Sandbox::new(&dir.path).unwrap();
+    let registry = ToolRegistry::new(default_fs_tools());
     // Pre-seed a file so the overwrite/edit/delete variants resolve against an existing path.
     fs::write(dir.path.join("exists.txt"), b"data").unwrap();
 
+    let r = &registry;
+    let s = &sandbox;
     let confirmations = vec![
-        confirmation_row(&sandbox, "read", "read_file", json!({ "path": "a.txt" })),
+        confirmation_row(r, s, "read", "read_file", json!({ "path": "a.txt" })),
         confirmation_row(
-            &sandbox,
+            r,
+            s,
             "read_absolute",
             "read_file",
             json!({ "path": "/etc/hosts" }),
         ),
-        confirmation_row(&sandbox, "list", "list_dir", json!({})),
-        confirmation_row(&sandbox, "search", "search", json!({ "query": "q" })),
+        confirmation_row(r, s, "list", "list_dir", json!({})),
+        confirmation_row(r, s, "search", "search", json!({ "query": "q" })),
         confirmation_row(
-            &sandbox,
+            r,
+            s,
             "write_new",
             "write_file",
             json!({ "path": "new.txt", "content": "x" }),
         ),
         confirmation_row(
-            &sandbox,
+            r,
+            s,
             "write_overwrite",
             "write_file",
             json!({ "path": "exists.txt", "content": "x" }),
         ),
         confirmation_row(
-            &sandbox,
+            r,
+            s,
             "write_mkdir",
             "write_file",
             json!({ "path": "a/b/c.txt", "content": "x" }),
         ),
         confirmation_row(
-            &sandbox,
+            r,
+            s,
             "edit",
             "edit_file",
             json!({ "path": "exists.txt", "old_string": "d", "new_string": "e" }),
         ),
         confirmation_row(
-            &sandbox,
+            r,
+            s,
             "delete_file",
             "delete_file",
             json!({ "path": "exists.txt" }),
         ),
         confirmation_row(
-            &sandbox,
+            r,
+            s,
             "create_dir",
             "create_dir",
             json!({ "path": "newdir" }),
         ),
-        confirmation_row(&sandbox, "delete_dir", "delete_dir", json!({ "path": "d" })),
+        confirmation_row(r, s, "delete_dir", "delete_dir", json!({ "path": "d" })),
         confirmation_row(
-            &sandbox,
+            r,
+            s,
             "move_clean",
             "move_path",
             json!({ "source": "exists.txt", "destination": "b.txt" }),
         ),
         confirmation_row(
-            &sandbox,
+            r,
+            s,
             "move_mkdir",
             "move_path",
             json!({ "source": "exists.txt", "destination": "x/y/c.txt" }),
@@ -134,12 +153,12 @@ fn current_snapshot() -> Value {
     ];
 
     json!({
-        "tool_definitions": serde_json::to_value(tool_definitions()).unwrap(),
+        "tool_definitions": serde_json::to_value(registry.schemas()).unwrap(),
         "confirmations": confirmations,
     })
 }
 
-/// The frozen surface, captured against the pre-refactor `tool_definitions`/`confirmation_prompt`.
+/// The frozen surface, captured against the pre-refactor tool layer (`services/tools.rs`).
 const FROZEN: &str = include_str!("snapshots/characterization.json");
 
 #[test]
