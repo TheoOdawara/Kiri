@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::modules::agent::application::run_turn::RunTurn;
+use crate::modules::agent::application::agent_loop::AgentLoop;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::infrastructure::openai::provider::OpenAiProvider;
 use crate::modules::repl::infrastructure::repl::Repl;
@@ -22,14 +22,14 @@ pub fn wire(settings: Settings) -> Result<Repl> {
         settings.api_key,
     ));
     let registry = ToolRegistry::new(default_fs_tools());
-    let run_turn = RunTurn::new(
+    let agent_loop = AgentLoop::new(
         provider,
         registry,
         settings.model,
         settings.checkpoint_budget,
     );
     Ok(Repl::new(
-        run_turn,
+        agent_loop,
         sandbox,
         settings.system_prompt,
         settings.seed,

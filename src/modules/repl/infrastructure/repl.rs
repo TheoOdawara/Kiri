@@ -1,7 +1,7 @@
 use anyhow::Result;
 
+use crate::modules::agent::application::agent_loop::{AgentLoop, TurnOutcome};
 use crate::modules::agent::application::presenter::Presenter;
-use crate::modules::agent::application::run_turn::{RunTurn, TurnOutcome};
 use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
 use crate::modules::repl::infrastructure::terminal::Terminal;
@@ -10,10 +10,10 @@ use crate::modules::tools::infrastructure::sandbox::{
 };
 
 /// The interactive REPL driving adapter: read user input, handle slash commands (`/exit`, `/sair`,
-/// `/cd`), and drive one `RunTurn` per message. Owns the terminal, the active (movable) sandbox, and
+/// `/cd`), and drive one `AgentLoop` per message. Owns the terminal, the active (movable) sandbox, and
 /// the conversation.
 pub struct Repl {
-    run_turn: RunTurn,
+    agent_loop: AgentLoop,
     sandbox: Sandbox,
     conversation: Conversation,
     terminal: Terminal,
@@ -22,13 +22,13 @@ pub struct Repl {
 
 impl Repl {
     pub fn new(
-        run_turn: RunTurn,
+        agent_loop: AgentLoop,
         sandbox: Sandbox,
         system_prompt: &str,
         seed: Option<String>,
     ) -> Self {
         Self {
-            run_turn,
+            agent_loop,
             sandbox,
             conversation: Conversation::new(system_prompt),
             terminal: Terminal::new(),
@@ -69,7 +69,7 @@ impl Repl {
 
             self.conversation.push(Message::user(input));
             match self
-                .run_turn
+                .agent_loop
                 .run(&mut self.conversation, &self.sandbox, &mut self.terminal)
                 .await
             {

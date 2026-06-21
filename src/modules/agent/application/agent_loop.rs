@@ -3,11 +3,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::modules::agent::application::agent_io::AgentIo;
-use crate::modules::agent::application::approval_policy::Approval;
+use crate::modules::agent::application::approval_policy::{Approval, ApprovalPolicy};
+use crate::modules::agent::application::presenter::Presenter;
 use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
-use crate::modules::provider::application::completion_provider::{CompletionProvider, TurnRequest};
+use crate::modules::provider::application::completion_provider::{
+    CompletionProvider, EventSink, TurnRequest,
+};
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::ToolOutcome;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
@@ -23,7 +25,7 @@ pub enum TurnOutcome {
 /// The agent loop. For one user turn: stream the assistant, then while it requests tools, confirm each
 /// call through the UI, execute approved ones against the sandbox, feed the results back, and repeat
 /// until the model stops requesting tools — guarded by a wall-clock checkpoint against runaways.
-pub struct RunTurn {
+pub struct AgentLoop {
     provider: Arc<dyn CompletionProvider>,
     registry: ToolRegistry,
     schemas: Vec<Value>,
@@ -31,7 +33,7 @@ pub struct RunTurn {
     checkpoint_budget: Duration,
 }
 
-impl RunTurn {
+impl AgentLoop {
     pub fn new(
         provider: Arc<dyn CompletionProvider>,
         registry: ToolRegistry,
@@ -50,8 +52,10 @@ impl RunTurn {
 
     /// Drive one user turn to completion. The conversation must already hold the user message. On a
     /// provider failure the error is returned (the caller renders it and rolls back a dangling user
-    /// message); `Aborted` means the user ended the session at a prompt.
-    pub async fn run<IO: AgentIo>(
+    /// message); `Aborted` means the user ended the session at a prompt. `io` is the engine's single UI
+    /// surface — the `EventSink`/`Presenter`/`ApprovalPolicy` ports, all satisfied by the one `Terminal`
+    /// in production.
+    pub async fn run<IO: EventSink + Presenter + ApprovalPolicy>(
         &self,
         conversation: &mut Conversation,
         sandbox: &Sandbox,
@@ -211,11 +215,11 @@ mod tests {
         }
     }
 
-    fn run_turn_with(turns: Vec<CompletedTurn>) -> RunTurn {
+    fn agent_loop_with(turns: Vec<CompletedTurn>) -> AgentLoop {
         let provider = Arc::new(ScriptedProvider {
             turns: Mutex::new(VecDeque::from(turns)),
         });
-        RunTurn::new(
+        AgentLoop::new(
             provider,
             ToolRegistry::new(default_fs_tools()),
             "model".to_string(),
@@ -229,7 +233,7 @@ mod tests {
         std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
         let sandbox = Sandbox::new(&dir.path).unwrap();
 
-        let run_turn = run_turn_with(vec![
+        let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "reading".to_string(),
                 tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
@@ -244,7 +248,7 @@ mod tests {
         conversation.push(Message::user("read a.txt"));
         let mut io = ScriptedIo(Approval::Approved);
 
-        let outcome = run_turn
+        let outcome = agent_loop
             .run(&mut conversation, &sandbox, &mut io)
             .await
             .unwrap();
@@ -270,7 +274,7 @@ mod tests {
     async fn run_aborts_when_the_user_ends_the_session_at_a_prompt() {
         let dir = TempDir::new("abort");
         let sandbox = Sandbox::new(&dir.path).unwrap();
-        let run_turn = run_turn_with(vec![CompletedTurn {
+        let agent_loop = agent_loop_with(vec![CompletedTurn {
             content: String::new(),
             tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
         }]);
@@ -279,7 +283,7 @@ mod tests {
         conversation.push(Message::user("read a.txt"));
         let mut io = ScriptedIo(Approval::Aborted);
 
-        let outcome = run_turn
+        let outcome = agent_loop
             .run(&mut conversation, &sandbox, &mut io)
             .await
             .unwrap();
