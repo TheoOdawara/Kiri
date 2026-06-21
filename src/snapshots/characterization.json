@@ -1,0 +1,329 @@
+{
+  "confirmations": [
+    {
+      "args": {
+        "path": "a.txt"
+      },
+      "default_accept": true,
+      "label": "read",
+      "prompt": "Ler 'a.txt'? [S/n] ",
+      "tool": "read_file"
+    },
+    {
+      "args": {
+        "path": "/etc/hosts"
+      },
+      "default_accept": false,
+      "label": "read_absolute",
+      "prompt": "Ler '/etc/hosts'? [s/N] ",
+      "tool": "read_file"
+    },
+    {
+      "args": {},
+      "default_accept": true,
+      "label": "list",
+      "prompt": "Listar '.'? [S/n] ",
+      "tool": "list_dir"
+    },
+    {
+      "args": {
+        "query": "q"
+      },
+      "default_accept": true,
+      "label": "search",
+      "prompt": "Buscar 'q' em '.'? [S/n] ",
+      "tool": "search"
+    },
+    {
+      "args": {
+        "content": "x",
+        "path": "new.txt"
+      },
+      "default_accept": true,
+      "label": "write_new",
+      "prompt": "Criar e gravar 'new.txt'? [S/n] ",
+      "tool": "write_file"
+    },
+    {
+      "args": {
+        "content": "x",
+        "path": "exists.txt"
+      },
+      "default_accept": true,
+      "label": "write_overwrite",
+      "prompt": "Sobrescrever 'exists.txt'? [S/n] ",
+      "tool": "write_file"
+    },
+    {
+      "args": {
+        "content": "x",
+        "path": "a/b/c.txt"
+      },
+      "default_accept": true,
+      "label": "write_mkdir",
+      "prompt": "Criar diretório(s) 'a, a/b' e gravar 'a/b/c.txt'? [S/n] ",
+      "tool": "write_file"
+    },
+    {
+      "args": {
+        "new_string": "e",
+        "old_string": "d",
+        "path": "exists.txt"
+      },
+      "default_accept": true,
+      "label": "edit",
+      "prompt": "Editar 'exists.txt'? [S/n] ",
+      "tool": "edit_file"
+    },
+    {
+      "args": {
+        "path": "exists.txt"
+      },
+      "default_accept": true,
+      "label": "delete_file",
+      "prompt": "Excluir 'exists.txt'? [S/n] ",
+      "tool": "delete_file"
+    },
+    {
+      "args": {
+        "path": "newdir"
+      },
+      "default_accept": true,
+      "label": "create_dir",
+      "prompt": "Criar diretório 'newdir'? [S/n] ",
+      "tool": "create_dir"
+    },
+    {
+      "args": {
+        "path": "d"
+      },
+      "default_accept": true,
+      "label": "delete_dir",
+      "prompt": "Excluir RECURSIVAMENTE o diretório 'd' e TODO o seu conteúdo? [S/n] ",
+      "tool": "delete_dir"
+    },
+    {
+      "args": {
+        "destination": "b.txt",
+        "source": "exists.txt"
+      },
+      "default_accept": true,
+      "label": "move_clean",
+      "prompt": "Mover 'exists.txt' → 'b.txt'? [S/n] ",
+      "tool": "move_path"
+    },
+    {
+      "args": {
+        "destination": "x/y/c.txt",
+        "source": "exists.txt"
+      },
+      "default_accept": true,
+      "label": "move_mkdir",
+      "prompt": "Criar diretório(s) 'x, x/y' e mover 'exists.txt' → 'x/y/c.txt'? [S/n] ",
+      "tool": "move_path"
+    }
+  ],
+  "tool_definitions": [
+    {
+      "function": {
+        "description": "Read a UTF-8 text file and return its contents. Paths are relative to the active workspace root; an absolute path or '~/…' may reach outside it (the user confirms each call). '..' in a relative path is rejected.",
+        "name": "read_file",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Create a file or overwrite it with the full given content. Creates missing parent directories (with user confirmation). The path is relative to the workspace root.",
+        "name": "write_file",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "description": "Full file content to write.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Replace the first exact occurrence of old_string with new_string in an existing file.",
+        "name": "edit_file",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "new_string": {
+              "description": "Replacement text.",
+              "type": "string"
+            },
+            "old_string": {
+              "description": "Exact text to find (must be unique enough).",
+              "type": "string"
+            },
+            "path": {
+              "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "old_string",
+            "new_string"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Delete a file (not a directory). The path is relative to the workspace root.",
+        "name": "delete_file",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Move or rename a file or directory. Creates missing parent directories of the destination (with user confirmation) and overwrites an existing destination (with confirmation). Both paths are relative to the workspace root.",
+        "name": "move_path",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "destination": {
+              "description": "New path, relative to the workspace root.",
+              "type": "string"
+            },
+            "source": {
+              "description": "Existing file or directory to move, relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "destination"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "List the entries of a directory (one level). Defaults to the workspace root. Directories are suffixed with '/'.",
+        "name": "list_dir",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Directory path relative to the workspace root. Defaults to '.'.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Create a directory, including any missing parent directories. The path is relative to the workspace root.",
+        "name": "create_dir",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Directory path to create, relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Delete a directory and all of its contents, recursively. Requires confirmation. The path is relative to the workspace root.",
+        "name": "delete_dir",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Directory path to delete, relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Recursively search file contents under a directory for a plain substring (case-sensitive). Binary files are skipped. Defaults to the workspace root.",
+        "name": "search",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Directory to search under, relative to the workspace root. Defaults to '.'.",
+              "type": "string"
+            },
+            "query": {
+              "description": "Substring to search for.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

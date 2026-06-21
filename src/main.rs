@@ -1,6 +1,9 @@
 mod models;
 mod services;
 
+#[cfg(test)]
+mod characterization;
+
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
