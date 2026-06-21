@@ -1,17 +1,20 @@
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
-use crate::models::tools::Tool;
-use crate::modules::agent::domain::message::Message;
+use super::message_dto::MessageDto;
 
+/// The OpenAI-compatible chat-completions request body. A pure wire DTO: `messages` are mapped from
+/// domain `Message`s through `MessageDto`, and `tools` are the opaque JSON schemas the tool registry
+/// produced, passed through verbatim.
 #[derive(Debug, Serialize)]
 pub struct ChatRequest {
     pub model: String,
-    pub messages: Vec<Message>,
+    pub messages: Vec<MessageDto>,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<ChatTemplateKwargs>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<Tool>,
+    pub tools: Vec<Value>,
 }
 
 /// Provider-specific knob that asks the model to emit reasoning. Reasoning models stream it by
@@ -41,7 +44,7 @@ pub struct Delta {
     /// a serde `alias` would make a delta carrying BOTH keys fail as a duplicate field.
     #[serde(default, deserialize_with = "string_or_none")]
     pub reasoning: Option<String>,
-    /// Tool-call fragments. Streamed incrementally and keyed by `index`; assembled by the service.
+    /// Tool-call fragments. Streamed incrementally and keyed by `index`; assembled by the SSE layer.
     #[serde(default)]
     pub tool_calls: Vec<ToolCallFragment>,
 }
@@ -67,12 +70,10 @@ pub struct FunctionFragment {
 /// null) to `None`. Keeps an unexpected reasoning shape from failing the whole delta and dropping
 /// its `content`.
 fn string_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
-    Ok(
-        match Option::<serde_json::Value>::deserialize(deserializer)? {
-            Some(serde_json::Value::String(text)) => Some(text),
-            _ => None,
-        },
-    )
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        Some(Value::String(text)) => Some(text),
+        _ => None,
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -85,8 +86,9 @@ pub struct Usage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::models::tools::{FunctionDef, ToolKind};
+    use super::{ChatRequest, ChatTemplateKwargs, Delta, ToolCallFragment};
+    use crate::modules::agent::domain::message::Message;
+    use crate::modules::provider::infrastructure::openai::message_dto::MessageDto;
 
     #[test]
     fn chat_request_serializes_expected_shape() {
@@ -95,7 +97,7 @@ mod tests {
 
         let request = ChatRequest {
             model: model.clone(),
-            messages: vec![Message::user("hi")],
+            messages: vec![MessageDto::from(&Message::user("hi"))],
             stream: true,
             chat_template_kwargs: None,
             tools: Vec::new(),
@@ -178,14 +180,14 @@ mod tests {
             messages: vec![],
             stream: true,
             chat_template_kwargs: None,
-            tools: vec![Tool {
-                kind: ToolKind::Function,
-                function: FunctionDef {
-                    name: "read_file".to_string(),
-                    description: "d".to_string(),
-                    parameters: serde_json::json!({"type": "object"}),
-                },
-            }],
+            tools: vec![serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "d",
+                    "parameters": {"type": "object"}
+                }
+            })],
         };
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();
         assert_eq!(value["tools"][0]["type"], "function");

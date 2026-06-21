@@ -1,55 +1,15 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 
-use crate::models::chat::{ChatRequest, ChatStreamChunk, Delta, StreamChoice, ToolCallFragment};
+use super::wire::{ChatStreamChunk, Delta, StreamChoice, ToolCallFragment};
 use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::agent::domain::stream_event::StreamEvent;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
-/// Send `request` to the OpenAI-compatible `<base_url>/chat/completions` endpoint and stream the
-/// response: `on_event` fires for every reasoning or content delta as it arrives, and the assembled
-/// turn (content + tool calls + finish reason) is returned once the stream ends.
-pub async fn stream_completion(
-    client: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
-    request: &ChatRequest,
-    mut on_event: impl FnMut(StreamEvent) -> Result<()>,
-) -> Result<CompletedTurn> {
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-
-    let mut response = client
-        .post(&url)
-        .bearer_auth(api_key)
-        .json(request)
-        .send()
-        .await
-        .context("failed to reach provider")?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        bail!("provider returned {status}: {body}");
-    }
-
-    let mut accumulator = TurnAccumulator::default();
-    let mut buffer: Vec<u8> = Vec::new();
-    while let Some(chunk) = response.chunk().await.context("error reading stream")? {
-        buffer.extend_from_slice(&chunk);
-        while let Some(newline) = buffer.iter().position(|&byte| byte == b'\n') {
-            let line: Vec<u8> = buffer.drain(..=newline).collect();
-            handle_line(&line, &mut accumulator, &mut on_event)?;
-        }
-    }
-    handle_line(&buffer, &mut accumulator, &mut on_event)?;
-
-    Ok(accumulator.into_completed())
-}
-
-/// Parse one streamed line, feed both the accumulator (content/tool-calls/finish-reason) and the live
-/// `on_event` callback (reasoning/content). Non-data lines, `[DONE]`, and malformed JSON are ignored.
-fn handle_line(
+/// Parse one streamed line, feed both the accumulator (content/tool-calls) and the live `on_event`
+/// callback (reasoning/content). Non-data lines, `[DONE]`, and malformed JSON are ignored.
+pub(crate) fn handle_line(
     line: &[u8],
     accumulator: &mut TurnAccumulator,
     on_event: &mut impl FnMut(StreamEvent) -> Result<()>,
@@ -99,7 +59,7 @@ fn events_from_delta(delta: Delta) -> Vec<StreamEvent> {
 /// Assembles a turn from its streamed fragments. Tool calls are keyed by `index` (BTreeMap keeps them
 /// in natural order); `function.arguments` slices are concatenated in arrival order.
 #[derive(Default)]
-struct TurnAccumulator {
+pub(crate) struct TurnAccumulator {
     content: String,
     tool_calls: BTreeMap<u32, PartialToolCall>,
 }
@@ -133,7 +93,7 @@ impl TurnAccumulator {
         }
     }
 
-    fn into_completed(self) -> CompletedTurn {
+    pub(crate) fn into_completed(self) -> CompletedTurn {
         let tool_calls = self
             .tool_calls
             .into_values()

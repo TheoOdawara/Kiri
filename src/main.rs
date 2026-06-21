@@ -14,12 +14,13 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use crate::models::chat::{ChatRequest, ChatTemplateKwargs};
 use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::agent::domain::message::Message;
 use crate::modules::agent::domain::role::Role;
 use crate::modules::agent::domain::stream_event::StreamEvent;
-use crate::services::chat::stream_completion;
+use crate::modules::provider::infrastructure::openai::message_dto::MessageDto;
+use crate::modules::provider::infrastructure::openai::provider::stream_completion;
+use crate::modules::provider::infrastructure::openai::wire::{ChatRequest, ChatTemplateKwargs};
 use crate::services::sandbox::{Sandbox, expand_user_path, is_absolute_target};
 use crate::services::tools::{ToolOutcome, confirmation_prompt, execute, tool_definitions};
 
@@ -80,7 +81,10 @@ async fn main() -> Result<()> {
     let api_key = required_env("NVIDIA_API_KEY")?;
     let model = required_env("NVIDIA_MODEL")?;
     let mut sandbox = Sandbox::new(&cli.path)?;
-    let tools = tool_definitions();
+    let tool_schemas: Vec<serde_json::Value> = tool_definitions()
+        .iter()
+        .map(|tool| serde_json::to_value(tool).expect("tool schema serializes"))
+        .collect();
 
     let client = reqwest::Client::new();
     let mut history: Vec<Message> = vec![Message::system(SYSTEM_PROMPT)];
@@ -138,10 +142,10 @@ async fn main() -> Result<()> {
         loop {
             let request = ChatRequest {
                 model: model.clone(),
-                messages: history.clone(),
+                messages: history.iter().map(MessageDto::from).collect(),
                 stream: true,
                 chat_template_kwargs: Some(ChatTemplateKwargs { thinking: true }),
-                tools: tools.clone(),
+                tools: tool_schemas.clone(),
             };
 
             let turn = match render_turn(&client, &api_key, &request, &mut stdout, is_tty).await {
