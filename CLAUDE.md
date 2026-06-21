@@ -1,13 +1,15 @@
 # T-Cli — Project Working Contract
 
-Async Rust CLI that talks to a local Ollama server (OpenAI-compatible chat API).
+Async Rust CLI agent harness that talks to NVIDIA's OpenAI-compatible chat API (streaming REPL,
+tool-calling with a filesystem sandbox, per-call approval).
 Layers on the global contract — only project-specific rules below; when they conflict, this file wins.
 
 ## Stack
 
 - Rust **1.96 stable**, **edition 2024** (intentional — stabilized in 1.85, valid on this toolchain).
-- `tokio` (full) — async runtime. `reqwest` (json) — HTTP to Ollama. `serde` + `serde_json` — payload models.
-- **clap (derive)** — decided CLI-parsing convention (not yet added).
+- `tokio` (full) — async runtime. `reqwest` (json) — HTTP to the provider. `serde` + `serde_json` — payloads.
+- **clap** (derive) — CLI parsing. **async-trait** — dyn-compatible async ports. **thiserror** — the typed
+  `AgentError` kernel type. **anyhow** — error glue at the binary edge. **dotenvy** — `.env` loading.
 - Single binary crate. No workspace, no lib target.
 
 ## Commands (verified on Rust 1.96)
@@ -24,26 +26,38 @@ Definition-of-done gate (overrides the global Biome/Jest defaults):
 
 ## Architecture (enforced strictly)
 
-Layered, single binary. Dependencies point one way: `main → services → models`; `models` depends on nothing.
+**Modular hexagonal** (ports & adapters, vertical slices), single binary. Full rationale in
+`docs/decisions/0003-modular-hexagonal-architecture.md`; it supersedes the old `main → services → models`
+layering.
 
-- `src/main.rs` — entry + `#[tokio::main]` + **clap** parsing + dispatch. Thin: parse → call a service →
-  render to stdout. No business logic, no HTTP here.
-- `src/models/` — plain data types (serde structs/enums) for OpenAI-compatible request/response payloads.
-  `models/chat.rs` = chat-completion types (messages, streaming chunks, `Usage` token counts). Derive
-  `Serialize`/`Deserialize`/`Debug`. No I/O, no logic.
-- `src/services/` — external integrations. `services/chat.rs` owns the OpenAI-compatible HTTP client:
-  build request → send via `reqwest` → deserialize into `models` → return `Result`. **All network I/O lives
-  here**; never call `reqwest` outside `services/`.
+Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`) + `src/shared/{kernel,infra}`
++ `src/modules/<context>/{domain,application,infrastructure}`.
 
-Data flow: CLI args (clap) → `services::chat` builds + sends → provider API → deserialize into `models::chat`
-→ `main` renders. Errors propagate as `Result` with `?`; fail fast, never swallow.
+- **Layers, depending inward:** `domain/` = pure data/rules, no I/O · `application/` = use-cases + the
+  **ports** they need, as **traits** (named by capability, no `I` prefix) · `infrastructure/` = **adapters**
+  implementing the ports.
+- **Modules (bounded contexts):** `agent` (conversation domain + the `RunTurn` agent loop + the UI ports
+  `Presenter`/`ApprovalPolicy`/`AgentIo`), `provider` (the `CompletionProvider` port + the OpenAI-compatible
+  adapter: wire DTOs, SSE assembly), `tools` (the `Tool` trait + `ToolRegistry` + the sandbox + one fs adapter
+  per tool), `repl` (the `Terminal` + the REPL driving adapter). Planned: `session` (SQLite-persisted
+  conversations).
+- **shared/kernel:** cross-cutting primitives — `ToolCall`/`FunctionCall`, `AgentError` (thiserror).
+  **shared/infra:** `config` (CLI + env + `Settings`).
+
+**Invariants:** network I/O only in `provider/infrastructure`; filesystem I/O only in `tools/infrastructure`
+(the sandbox is the single path chokepoint); `domain` has no I/O; the engine never touches stdin/stdout
+directly (all UI via the `AgentIo` port). Ports return `AgentError`; `anyhow` only at the binary edge.
+
+**Extending:** a new tool = one file under `tools/infrastructure/fs/` implementing `Tool`, registered in
+`default_fs_tools`; a new provider = one adapter implementing `CompletionProvider`, chosen in `app::wire`.
 
 Provider target: **NVIDIA**'s OpenAI-compatible endpoint `<base-url>/chat/completions`. The base URL is
-hardcoded for now (`const BASE_URL` in `main.rs` = `https://integrate.api.nvidia.com/v1`); a future
-multi-provider feature will externalize it to config (ref: `docs/decisions/0001-openai-compatible-provider.md`).
-The **model** and **API key** are read from the environment, both required — `NVIDIA_MODEL` and
-`NVIDIA_API_KEY` (loaded from `.env` via `dotenvy`); the key is **never** a CLI flag. The bearer header is
-always sent. See `docs/ollama.ps1` for the raw OpenAI-compatible protocol shape.
+injected via `Settings` into the provider adapter at `app::wire` (default
+`https://integrate.api.nvidia.com/v1`); a future multi-provider feature externalizes it to a config file
+(ref: `docs/decisions/0001-openai-compatible-provider.md`). The **model** and **API key** are read from the
+environment, both required — `NVIDIA_MODEL` and `NVIDIA_API_KEY` (loaded from `.env` via `dotenvy`); the key
+is **never** a CLI flag. The bearer header is always sent. See `docs/ollama.ps1` for the raw
+OpenAI-compatible protocol shape.
 
 ## Branches
 
@@ -58,6 +72,6 @@ always sent. See `docs/ollama.ps1` for the raw OpenAI-compatible protocol shape.
 
 - **Code-only style:** clear names, minimal comments (why, not what), no teaching prose.
 - **clap is the convention** — record any deviation as an ADR (`docs/decisions/`).
-- Keep the Ollama host/model configurable; never hardcode.
+- Keep the provider base URL / model / key configurable; never hardcode.
 - A PostToolUse hook auto-runs `cargo fmt` (+ clippy feedback) on `.rs` edits — see `docs/claude-tooling.md`.
 - Recommended Claude Code tooling (MCPs/skills): see `docs/claude-tooling.md`.
