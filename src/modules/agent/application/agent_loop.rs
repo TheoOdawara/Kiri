@@ -75,6 +75,8 @@ impl AgentLoop {
                     io,
                 )
                 .await;
+            // Finish rendering (erase the spinner, reset the terminal) before `?` can propagate a
+            // provider error: the cleanup must run on the failure path too, so its Result is dropped.
             let _ = io.finish_turn();
             let turn = result?;
 

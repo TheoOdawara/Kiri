@@ -51,23 +51,21 @@ impl Repl {
                 }
             };
 
-            let input = input.trim();
-            if input.is_empty() {
-                continue;
-            }
-            if matches!(input, "/exit" | "/sair") {
-                break;
-            }
-            if input == "/cd" {
-                self.show_workspace();
-                continue;
-            }
-            if let Some(arg) = input.strip_prefix("/cd ") {
-                self.change_workspace(arg.trim());
-                continue;
-            }
+            let prompt = match classify(&input) {
+                Command::Empty => continue,
+                Command::Exit => break,
+                Command::ShowWorkspace => {
+                    self.show_workspace();
+                    continue;
+                }
+                Command::ChangeWorkspace(arg) => {
+                    self.change_workspace(arg);
+                    continue;
+                }
+                Command::Prompt(text) => text,
+            };
 
-            self.conversation.push(Message::user(input));
+            self.conversation.push(Message::user(prompt));
             match self
                 .agent_loop
                 .run(&mut self.conversation, &self.sandbox, &mut self.terminal)
@@ -104,5 +102,95 @@ impl Repl {
             }
             Err(error) => eprintln!("erro: {error:#}"),
         }
+    }
+}
+
+/// One classified line of REPL input (borrows the trimmed input).
+enum Command<'a> {
+    /// Blank line: prompt again.
+    Empty,
+    /// `/exit` or `/sair`: end the session.
+    Exit,
+    /// Bare `/cd`: print the active workspace.
+    ShowWorkspace,
+    /// `/cd <path>`: move the active workspace.
+    ChangeWorkspace(&'a str),
+    /// Anything else: a turn prompt for the model.
+    Prompt(&'a str),
+}
+
+/// Classify one input line by its first token. The input is trimmed first; a `/cd` argument is trimmed
+/// too. A `/cd`-looking token without a space (e.g. `/cdfoo`) falls through to a model prompt.
+fn classify(input: &str) -> Command<'_> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Command::Empty;
+    }
+    if let Some(("/cd", arg)) = input.split_once(' ') {
+        let arg = arg.trim();
+        return if arg.is_empty() {
+            Command::ShowWorkspace
+        } else {
+            Command::ChangeWorkspace(arg)
+        };
+    }
+    match input {
+        "/exit" | "/sair" => Command::Exit,
+        "/cd" => Command::ShowWorkspace,
+        _ => Command::Prompt(input),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, classify};
+
+    #[test]
+    fn exit_aliases_end_the_session() {
+        assert!(matches!(classify("/exit"), Command::Exit));
+        assert!(matches!(classify("/sair"), Command::Exit));
+        assert!(matches!(classify("  /exit  "), Command::Exit));
+    }
+
+    #[test]
+    fn bare_cd_shows_the_workspace() {
+        assert!(matches!(classify("/cd"), Command::ShowWorkspace));
+        assert!(matches!(classify("/cd   "), Command::ShowWorkspace));
+    }
+
+    #[test]
+    fn cd_with_argument_changes_the_workspace() {
+        assert!(matches!(
+            classify("/cd src"),
+            Command::ChangeWorkspace("src")
+        ));
+        assert!(matches!(
+            classify("/cd   src"),
+            Command::ChangeWorkspace("src")
+        ));
+        assert!(matches!(
+            classify("/cd ~/dev"),
+            Command::ChangeWorkspace("~/dev")
+        ));
+    }
+
+    #[test]
+    fn empty_input_is_empty() {
+        assert!(matches!(classify(""), Command::Empty));
+        assert!(matches!(classify("   "), Command::Empty));
+    }
+
+    #[test]
+    fn unknown_slash_token_and_text_are_prompts() {
+        assert!(matches!(classify("/cdfoo"), Command::Prompt("/cdfoo")));
+        assert!(matches!(
+            classify("/exit now"),
+            Command::Prompt("/exit now")
+        ));
+        assert!(matches!(classify("hello"), Command::Prompt("hello")));
+        assert!(matches!(
+            classify("  hello world  "),
+            Command::Prompt("hello world")
+        ));
     }
 }
