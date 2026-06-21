@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fs;
 use std::fs::Metadata;
 use std::io::Read;
@@ -44,7 +45,13 @@ pub fn search_file(path: &Path, query: &str, root: &Path, matches: &mut Vec<Stri
             return;
         }
         if line.contains(query) {
-            let shown: String = line.chars().take(SEARCH_MAX_LINE_CHARS).collect();
+            // Common case: a line short enough by byte length that no char-truncation is possible is
+            // shown borrowed, with no per-line allocation. Only a long line pays to char-truncate.
+            let shown: Cow<str> = if line.len() <= SEARCH_MAX_LINE_CHARS {
+                Cow::Borrowed(line)
+            } else {
+                Cow::Owned(line.chars().take(SEARCH_MAX_LINE_CHARS).collect())
+            };
             matches.push(format!("{relative}:{}: {shown}", number + 1));
         }
     }
@@ -94,5 +101,52 @@ pub fn stat_guard(
             None => Ok(()),
         },
         Err(error) => Err(ToolOutcome::Error(format!("cannot stat {label}: {error}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SEARCH_MAX_LINE_CHARS, search_file};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn temp_file(tag: &str, contents: &[u8]) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        path.push(format!("t-cli-support-{}-{n}-{tag}", std::process::id()));
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn long_multibyte_line_truncates_at_a_char_boundary() {
+        // 300 two-byte chars (600 bytes): the byte-length fast path is skipped, and truncation must
+        // cut at a char boundary, never mid-codepoint.
+        let line = "é".repeat(300);
+        let file = temp_file("multibyte", line.as_bytes());
+        let root = file.parent().unwrap().to_path_buf();
+        let mut matches = Vec::new();
+        search_file(&file, "é", &root, &mut matches);
+        let _ = fs::remove_file(&file);
+
+        assert_eq!(matches.len(), 1);
+        let shown = matches[0].rsplit_once(": ").unwrap().1;
+        assert_eq!(shown.chars().count(), SEARCH_MAX_LINE_CHARS);
+        assert!(shown.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn short_multibyte_line_is_returned_whole() {
+        let file = temp_file("short", "héllo wörld".as_bytes());
+        let root = file.parent().unwrap().to_path_buf();
+        let mut matches = Vec::new();
+        search_file(&file, "wörld", &root, &mut matches);
+        let _ = fs::remove_file(&file);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].ends_with("héllo wörld"));
     }
 }
