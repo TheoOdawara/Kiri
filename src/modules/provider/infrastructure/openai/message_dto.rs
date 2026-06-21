@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::modules::agent::domain::message::Message;
 use crate::modules::agent::domain::role::Role;
@@ -10,6 +10,7 @@ use crate::shared::kernel::tool_call::ToolCall;
 /// its own DTO.
 #[derive(Debug, Serialize)]
 pub struct MessageDto<'a> {
+    #[serde(serialize_with = "serialize_role")]
     pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<&'a str>,
@@ -30,10 +31,33 @@ impl<'a> From<&'a Message> for MessageDto<'a> {
     }
 }
 
+/// The OpenAI wire string for a role — the single place the domain `Role` becomes its lowercase wire
+/// form, so the domain enum stays serde-free.
+const fn wire_role(role: Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+fn serialize_role<S: Serializer>(role: &Role, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(wire_role(*role))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::shared::kernel::tool_call::FunctionCall;
+
+    #[test]
+    fn wire_role_maps_all_variants() {
+        assert_eq!(wire_role(Role::System), "system");
+        assert_eq!(wire_role(Role::User), "user");
+        assert_eq!(wire_role(Role::Assistant), "assistant");
+        assert_eq!(wire_role(Role::Tool), "tool");
+    }
 
     #[test]
     fn system_message_serializes_role_and_content() {
