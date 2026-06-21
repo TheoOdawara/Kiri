@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
-use crate::modules::tools::infrastructure::args::{PathArgs, parse};
+use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, is_absolute_target};
 use crate::modules::tools::infrastructure::support::{READ_FILE_MAX_BYTES, read_capped};
 use crate::shared::kernel::tool_call::ToolCall;
@@ -37,10 +37,9 @@ impl Tool for ReadFile {
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
-        let args = call.function.arguments.as_str();
-        let args: PathArgs = match parse(args) {
+        let args: PathArgs = match parse_args(call) {
             Ok(args) => args,
-            Err(error) => return ToolOutcome::Error(format!("invalid arguments: {error}")),
+            Err(out) => return out,
         };
         let path = match sandbox.resolve_existing(&args.path) {
             Ok(path) => path,

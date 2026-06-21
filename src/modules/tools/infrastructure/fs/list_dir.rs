@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
-use crate::modules::tools::infrastructure::args::{ListArgs, parse};
+use crate::modules::tools::infrastructure::args::{ListArgs, parse, parse_args};
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, is_absolute_target};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -36,10 +36,9 @@ impl Tool for ListDir {
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
-        let args = call.function.arguments.as_str();
-        let args: ListArgs = match parse(args) {
+        let args: ListArgs = match parse_args(call) {
             Ok(args) => args,
-            Err(error) => return ToolOutcome::Error(format!("invalid arguments: {error}")),
+            Err(out) => return out,
         };
         let dir = match sandbox.resolve_existing(&args.path) {
             Ok(dir) => dir,

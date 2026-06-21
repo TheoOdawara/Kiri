@@ -5,9 +5,9 @@ use serde_json::{Value, json};
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
-use crate::modules::tools::infrastructure::args::{MoveArgs, parse};
+use crate::modules::tools::infrastructure::args::{MoveArgs, parse, parse_args};
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, is_absolute_target};
-use crate::modules::tools::infrastructure::support::missing_dirs_label;
+use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct MovePath;
@@ -57,10 +57,9 @@ impl Tool for MovePath {
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
-        let args = call.function.arguments.as_str();
-        let args: MoveArgs = match parse(args) {
+        let args: MoveArgs = match parse_args(call) {
             Ok(args) => args,
-            Err(error) => return ToolOutcome::Error(format!("invalid arguments: {error}")),
+            Err(out) => return out,
         };
         let source = match sandbox.resolve_existing(&args.source) {
             Ok(source) => source,
@@ -73,14 +72,8 @@ impl Tool for MovePath {
             Ok(resolution) => resolution,
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
-        if !resolution.missing_dirs.is_empty()
-            && let Some(parent) = resolution.target.parent()
-            && let Err(error) = fs::create_dir_all(parent)
-        {
-            return ToolOutcome::Error(format!(
-                "cannot create directories for {}: {error}",
-                args.destination
-            ));
+        if let Err(out) = ensure_parent_dirs(&resolution, &args.destination) {
+            return out;
         }
         match fs::rename(&source, &resolution.target) {
             Ok(()) => ToolOutcome::Ok(format!("moved {} to {}", args.source, args.destination)),

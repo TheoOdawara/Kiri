@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
-use crate::modules::tools::infrastructure::args::{SearchArgs, parse};
+use crate::modules::tools::infrastructure::args::{SearchArgs, parse, parse_args};
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, is_absolute_target};
 use crate::modules::tools::infrastructure::support::{SEARCH_MAX_MATCHES, search_file};
 use crate::shared::kernel::tool_call::ToolCall;
@@ -44,10 +44,9 @@ impl Tool for Search {
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
-        let args = call.function.arguments.as_str();
-        let args: SearchArgs = match parse(args) {
+        let args: SearchArgs = match parse_args(call) {
             Ok(args) => args,
-            Err(error) => return ToolOutcome::Error(format!("invalid arguments: {error}")),
+            Err(out) => return out,
         };
         if args.query.is_empty() {
             return ToolOutcome::Error("query must not be empty".to_string());

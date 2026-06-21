@@ -1,5 +1,8 @@
 use serde::Deserialize;
 
+use crate::modules::tools::application::tool::ToolOutcome;
+use crate::shared::kernel::tool_call::ToolCall;
+
 #[derive(Deserialize)]
 pub struct PathArgs {
     pub path: String,
@@ -43,4 +46,11 @@ fn default_path() -> String {
 
 pub fn parse<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, serde_json::Error> {
     serde_json::from_str(args)
+}
+
+/// Parse a tool call's JSON arguments, mapping a parse failure to the shared `invalid arguments`
+/// outcome the model reads and recovers from — the prologue every tool's `execute` opens with.
+pub fn parse_args<T: serde::de::DeserializeOwned>(call: &ToolCall) -> Result<T, ToolOutcome> {
+    parse(call.function.arguments.as_str())
+        .map_err(|error| ToolOutcome::Error(format!("invalid arguments: {error}")))
 }

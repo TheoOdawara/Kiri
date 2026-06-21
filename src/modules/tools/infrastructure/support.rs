@@ -1,7 +1,9 @@
 use std::fs;
+use std::fs::Metadata;
 use std::io::Read;
 use std::path::Path;
 
+use crate::modules::tools::application::tool::ToolOutcome;
 use crate::modules::tools::infrastructure::sandbox::{CreateResolution, Sandbox};
 
 pub const READ_FILE_MAX_BYTES: usize = 64 * 1024;
@@ -61,4 +63,36 @@ pub fn missing_dirs_label(resolution: &CreateResolution, sandbox: &Sandbox) -> S
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Create the missing parent directories of a create/move target, mapping a mkdir failure to the
+/// shared error outcome. Call before writing/renaming when the resolution reported missing dirs;
+/// `path` is the user-facing path interpolated into the error.
+pub fn ensure_parent_dirs(resolution: &CreateResolution, path: &str) -> Result<(), ToolOutcome> {
+    if !resolution.missing_dirs.is_empty()
+        && let Some(parent) = resolution.target.parent()
+        && let Err(error) = fs::create_dir_all(parent)
+    {
+        return Err(ToolOutcome::Error(format!(
+            "cannot create directories for {path}: {error}"
+        )));
+    }
+    Ok(())
+}
+
+/// Stat `path` once as a pre-flight guard. `reject` inspects the metadata and returns `Some(error)` to
+/// veto the operation; a stat failure maps to the shared `cannot stat` error. `label` is the
+/// user-facing path interpolated into both messages.
+pub fn stat_guard(
+    path: &Path,
+    label: &str,
+    reject: impl FnOnce(&Metadata) -> Option<String>,
+) -> Result<(), ToolOutcome> {
+    match fs::metadata(path) {
+        Ok(metadata) => match reject(&metadata) {
+            Some(error) => Err(ToolOutcome::Error(error)),
+            None => Ok(()),
+        },
+        Err(error) => Err(ToolOutcome::Error(format!("cannot stat {label}: {error}"))),
+    }
 }
