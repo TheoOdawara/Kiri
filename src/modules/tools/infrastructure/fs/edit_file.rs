@@ -3,10 +3,10 @@ use std::fs;
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, PATH_DESC, Tool, ToolOutcome, function_schema, simple_confirm,
 };
-use crate::modules::tools::infrastructure::args::{EditArgs, PathArgs, parse, parse_args};
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, is_absolute_target};
+use crate::modules::tools::infrastructure::args::{EditArgs, PathArgs, parse_args};
+use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tools::infrastructure::support::{EDIT_FILE_MAX_BYTES, stat_guard};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -26,7 +26,7 @@ impl Tool for EditFile {
                 "additionalProperties": false,
                 "required": ["path", "old_string", "new_string"],
                 "properties": {
-                    "path": { "type": "string", "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it." },
+                    "path": { "type": "string", "description": PATH_DESC },
                     "old_string": { "type": "string", "description": "Exact text to find (must be unique enough)." },
                     "new_string": { "type": "string", "description": "Replacement text." }
                 }
@@ -35,9 +35,11 @@ impl Tool for EditFile {
     }
 
     fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
-        let default_accept = !is_absolute_target(&a.path);
-        Some(confirm(format!("Editar '{}'?", a.path), default_accept))
+        simple_confirm(
+            call,
+            |a: &PathArgs| format!("Editar '{}'?", a.path),
+            |a| a.path.as_str(),
+        )
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {

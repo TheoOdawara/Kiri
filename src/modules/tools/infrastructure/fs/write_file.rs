@@ -3,10 +3,10 @@ use std::fs;
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, WriteArgs, parse, parse_args};
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, is_absolute_target};
+use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -27,7 +27,7 @@ impl Tool for WriteFile {
                 "additionalProperties": false,
                 "required": ["path", "content"],
                 "properties": {
-                    "path": { "type": "string", "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it." },
+                    "path": { "type": "string", "description": PATH_DESC },
                     "content": { "type": "string", "description": "Full file content to write." }
                 }
             }),
@@ -45,7 +45,7 @@ impl Tool for WriteFile {
             Ok(r) if r.target.exists() => format!("Sobrescrever '{}'?", a.path),
             _ => format!("Criar e gravar '{}'?", a.path),
         };
-        let default_accept = !is_absolute_target(&a.path);
+        let default_accept = default_accept_for(&a.path);
         Some(confirm(action, default_accept))
     }
 

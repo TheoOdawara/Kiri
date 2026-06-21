@@ -3,10 +3,10 @@ use std::fs;
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, Tool, ToolOutcome, function_schema, simple_confirm,
 };
-use crate::modules::tools::infrastructure::args::{SearchArgs, parse, parse_args};
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, is_absolute_target};
+use crate::modules::tools::infrastructure::args::{SearchArgs, parse_args};
+use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tools::infrastructure::support::{SEARCH_MAX_MATCHES, search_file};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -35,12 +35,11 @@ impl Tool for Search {
     }
 
     fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        let a: SearchArgs = parse(call.function.arguments.as_str()).ok()?;
-        let default_accept = !is_absolute_target(&a.path);
-        Some(confirm(
-            format!("Buscar '{}' em '{}'?", a.query, a.path),
-            default_accept,
-        ))
+        simple_confirm(
+            call,
+            |a: &SearchArgs| format!("Buscar '{}' em '{}'?", a.query, a.path),
+            |a| a.path.as_str(),
+        )
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {

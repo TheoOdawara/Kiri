@@ -6,7 +6,7 @@ use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{MoveArgs, parse, parse_args};
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, is_absolute_target};
+use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -52,7 +52,7 @@ impl Tool for MovePath {
             }
             _ => format!("Mover '{}' → '{}'?", a.source, a.destination),
         };
-        let default_accept = !is_absolute_target(&a.destination);
+        let default_accept = default_accept_for(&a.destination);
         Some(confirm(action, default_accept))
     }
 
