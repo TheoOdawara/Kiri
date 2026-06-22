@@ -1,17 +1,22 @@
 use ratatui::Frame;
+use ratatui::widgets::Block;
 
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::infrastructure::layout::frame_layout;
+use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
-    editor, hint_line, status_bar, transcript_pane,
+    editor, header, hint_line, meta_rule, transcript_pane,
 };
 
 /// The sole ratatui render entry point: project the model onto the frame's regions. Pure with respect
-/// to the model (takes `&Model`); all state changes happen in `update`.
+/// to the model (takes `&Model`); all state changes happen in `update`. The whole frame is first painted
+/// with the Tamahagane Void base so every cell inherits steel-on-void.
 pub fn view(model: &Model, frame: &mut Frame) {
+    frame.render_widget(Block::default().style(theme::base()), frame.area());
     let regions = frame_layout(frame.area(), model.input.line_count() as u16);
-    status_bar::render(model, frame, regions.status);
+    header::render(model, frame, regions.header);
     transcript_pane::render(model, frame, regions.transcript);
+    meta_rule::render(model, frame, regions.meta);
     editor::render(model, frame, regions.input);
     hint_line::render(model, frame, regions.hint);
 }
@@ -41,12 +46,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_shell_shows_brand_status_and_hints() {
+    fn empty_shell_shows_brand_splash_and_hints() {
         let model = Model::new("model-x".to_string(), "/work".to_string());
         let out = render(&model, 80, 12);
-        assert!(out.contains("kiri"), "brand missing:\n{out}");
+        assert!(out.contains("kiri"), "brand seal missing:\n{out}");
+        assert!(out.contains("KIRI"), "splash mark missing:\n{out}");
         assert!(out.contains("model-x"), "model missing:\n{out}");
-        assert!(out.contains("você"), "editor title missing:\n{out}");
+        assert!(out.contains("›_"), "prompt glyph missing:\n{out}");
         assert!(out.contains("Enter envia"), "hints missing:\n{out}");
     }
 

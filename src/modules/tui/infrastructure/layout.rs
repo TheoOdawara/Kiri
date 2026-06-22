@@ -1,28 +1,33 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 
-/// The four stacked regions of the single-pane core. Panels (a later phase) split `transcript`
-/// further; this base layout is complete on its own.
+/// The five stacked regions of the core. The brand seal sits on top; the model/workspace context drops
+/// down to the forged `meta` rule directly above the input, so identity and context cluster around where
+/// the user actually types.
 pub struct Regions {
-    pub status: Rect,
+    pub header: Rect,
     pub transcript: Rect,
+    pub meta: Rect,
     pub input: Rect,
     pub hint: Rect,
 }
 
-/// Split the frame into status bar, transcript, input editor (height grows with the buffer, capped),
-/// and the hint line. `input_lines` is the editor's logical line count.
+/// Split the frame into the brand seal, the transcript, the forged meta rule, the borderless input
+/// editor (height grows with the buffer, capped), and the hint line. `input_lines` is the editor's
+/// logical line count.
 pub fn frame_layout(area: Rect, input_lines: u16) -> Regions {
-    let input_height = input_lines.clamp(1, 6) + 2; // +2 for the editor's border
-    let [status, transcript, input, hint] = Layout::vertical([
+    let input_height = input_lines.clamp(1, 6); // borderless: no extra rows for a frame
+    let [header, transcript, meta, input, hint] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
+        Constraint::Length(1),
         Constraint::Length(input_height),
         Constraint::Length(1),
     ])
     .areas(area);
     Regions {
-        status,
+        header,
         transcript,
+        meta,
         input,
         hint,
     }

@@ -7,11 +7,17 @@ use ratatui::widgets::Paragraph;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::modules::tui::infrastructure::theme;
+use crate::modules::tui::infrastructure::widgets::splash;
 
 /// Render the scrolling transcript. Items are pre-wrapped to the pane width (so scroll offsets are
 /// exact line counts), then scrolled so the newest content is pinned to the bottom unless the user has
-/// scrolled up (`scrollback`).
+/// scrolled up (`scrollback`). When the conversation is empty, the brand splash takes the pane instead.
 pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
+    if model.transcript.is_empty() {
+        splash::render(frame, area);
+        return;
+    }
+
     let width = area.width.max(1) as usize;
     let mut lines: Vec<Line> = Vec::new();
     for item in model.transcript.items() {
@@ -26,7 +32,12 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     let scrollback = model.scroll.scrollback.min(max_offset);
     let offset = max_offset - scrollback;
 
-    frame.render_widget(Paragraph::new(lines).scroll((offset, 0)), area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((offset, 0))
+            .style(theme::base()),
+        area,
+    );
 }
 
 fn render_item(item: &TranscriptItem, width: usize, out: &mut Vec<Line<'static>>) {
@@ -35,15 +46,17 @@ fn render_item(item: &TranscriptItem, width: usize, out: &mut Vec<Line<'static>>
             &format!("você › {text}"),
             width,
             Style::default()
-                .fg(theme::USER)
+                .fg(theme::HIGHLIGHT)
                 .add_modifier(Modifier::BOLD),
             out,
         ),
         TranscriptItem::Reasoning(text) => push_wrapped(text, width, theme::dim(), out),
-        TranscriptItem::Assistant(text) => push_wrapped(text, width, Style::default(), out),
+        TranscriptItem::Assistant(text) => {
+            push_wrapped(text, width, Style::default().fg(theme::STEEL), out)
+        }
         TranscriptItem::Notice(level, text) => {
             let color = match level {
-                NoticeLevel::Info => theme::NOTICE,
+                NoticeLevel::Info => theme::WARNING,
                 NoticeLevel::Error => theme::ERROR,
             };
             push_wrapped(text, width, Style::default().fg(color), out);

@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -19,11 +19,11 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         Line::from(vec![
             Span::styled(
                 " aprovar? ",
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::REVERSED),
+                theme::base()
+                    .fg(theme::WARNING)
+                    .add_modifier(Modifier::REVERSED | Modifier::BOLD),
             ),
-            Span::raw(format!(" {} {suffix}", pending.prompt)),
+            Span::styled(format!(" {} {suffix}", pending.prompt), theme::base()),
         ])
     } else if model.busy {
         Line::styled("  ^C cancela · streaming…", theme::dim())
@@ -33,5 +33,5 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
             theme::dim(),
         )
     };
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(Paragraph::new(line).style(theme::base()), area);
 }

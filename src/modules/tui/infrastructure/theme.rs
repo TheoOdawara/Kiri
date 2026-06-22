@@ -1,19 +1,63 @@
 use ratatui::style::{Color, Modifier, Style};
 
-/// A small native palette built on ANSI-16 named colors only: nothing to degrade on terminals without
-/// truecolor, and no theme-engine machinery.
-pub const ACCENT: Color = Color::Magenta;
-pub const USER: Color = Color::Cyan;
-pub const NOTICE: Color = Color::Yellow;
-pub const ERROR: Color = Color::Red;
+/// The "Tamahagane Void" brand palette (truecolor). Deliberately drops the old ANSI-16 fallback: the
+/// goal is brand fidelity on modern truecolor terminals — deep steel-on-void, gates in sharp accents.
+pub const VOID: Color = Color::Rgb(0x0D, 0x11, 0x17); // base background
+pub const STEEL: Color = Color::Rgb(0xE6, 0xED, 0xF3); // default text (polished steel)
+pub const BRAND: Color = Color::Rgb(0x8B, 0x94, 0x9E); // rules, delimiters, dim, idle gate
+pub const SUCCESS: Color = Color::Rgb(0x3F, 0xB9, 0x50); // green gate — passed / [OK]
+pub const WARNING: Color = Color::Rgb(0xD2, 0x99, 0x22); // yellow gate — info / approval pending
+pub const ERROR: Color = Color::Rgb(0xF8, 0x51, 0x49); // red gate — error / blade cut
+pub const HIGHLIGHT: Color = Color::Rgb(0x58, 0xA6, 0xFF); // cyan action — active input / loading
 
-/// The 10-frame braille spinner, matching the plain terminal's animation.
+/// The 10-frame braille spinner.
 pub const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-pub fn dim() -> Style {
-    Style::default().add_modifier(Modifier::DIM)
+/// The root style — steel on the void — painted across the whole frame so every cell inherits it.
+pub fn base() -> Style {
+    Style::default().fg(STEEL).bg(VOID)
 }
 
+/// Neutral/secondary text: rules, delimiters, reasoning, hints.
+pub fn dim() -> Style {
+    Style::default().fg(BRAND)
+}
+
+/// Active/loading accent (cyan), bold.
 pub fn accent() -> Style {
-    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    Style::default().fg(HIGHLIGHT).add_modifier(Modifier::BOLD)
+}
+
+/// The input prompt is a live Quality Gate: its glyph and color encode the editor's state.
+pub enum GateState {
+    /// Active, empty buffer — the gate is open and waiting.
+    Idle,
+    /// Active, the user is composing.
+    Typing,
+    /// A turn is running; carries the spinner frame.
+    Busy(usize),
+    /// A tool-call confirmation is awaiting an answer.
+    Approval,
+    /// The last transcript line was an error — the blade cut.
+    Error,
+}
+
+/// Map a gate state to its prompt glyph and style.
+pub fn gate(state: GateState) -> (char, Style) {
+    match state {
+        GateState::Idle => ('⬡', Style::default().fg(BRAND)),
+        GateState::Typing => (
+            '⬢',
+            Style::default().fg(HIGHLIGHT).add_modifier(Modifier::BOLD),
+        ),
+        GateState::Busy(frame) => (
+            SPINNER[frame % SPINNER.len()],
+            Style::default().fg(HIGHLIGHT).add_modifier(Modifier::BOLD),
+        ),
+        GateState::Approval => (
+            '⬢',
+            Style::default().fg(WARNING).add_modifier(Modifier::BOLD),
+        ),
+        GateState::Error => ('⬢', Style::default().fg(ERROR).add_modifier(Modifier::BOLD)),
+    }
 }

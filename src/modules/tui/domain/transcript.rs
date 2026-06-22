@@ -28,6 +28,10 @@ impl Transcript {
         &self.items
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
     pub fn push(&mut self, item: TranscriptItem) {
         self.items.push(item);
     }
