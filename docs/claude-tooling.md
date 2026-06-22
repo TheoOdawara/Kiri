@@ -1,6 +1,6 @@
 # Recommended Claude Code Tooling
 
-Curated MCPs, skills, and hooks for working on T-Cli (async Rust CLI + Ollama). Grounded in a focused
+Curated MCPs, skills, and hooks for working on Kiri (async Rust agent harness, NVIDIA OpenAI-compatible API). Grounded in a focused
 research pass; install nothing you don't need (lean by default).
 
 ## MCP servers

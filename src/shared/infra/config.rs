@@ -11,7 +11,7 @@ const BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
 /// Seeded once as the first message of the session; shapes the assistant's identity, language,
 /// concision, and code standards (see docs/decisions/0002-tool-calling-and-sandbox.md).
 const SYSTEM_PROMPT: &str = concat!(
-    "You are T-Cli, a coding agent working in the user's local workspace through file tools (read, ",
+    "You are Kiri, a coding agent working in the user's local workspace through file tools (read, ",
     "write, edit, move, create, delete — files and directories). Relative paths resolve under the ",
     "active workspace root (the user moves it with /cd); to reach a file outside it, use an absolute ",
     "or '~/…' path, which the user must confirm explicitly. Prefer relative paths within the ",
@@ -38,13 +38,21 @@ const SYSTEM_PROMPT: &str = concat!(
 const TOOL_CHECKPOINT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Parser)]
-#[command(name = "t-cli", about = "Chat with NVIDIA's OpenAI-compatible API")]
+#[command(
+    name = "kiri",
+    about = "Kiri — a directed coding-agent harness (NVIDIA OpenAI-compatible API)"
+)]
 struct Cli {
     /// Optional first message; the chat then continues interactively
     prompt: Option<String>,
-    /// Sandbox root for file tools (also via T_CLI_PATH). Defaults to the current directory.
-    #[arg(long, env = "T_CLI_PATH", default_value = ".")]
-    path: PathBuf,
+    /// Sandbox root for file tools (also via KIRI_PATH; legacy T_CLI_PATH still honored).
+    /// Defaults to the current directory.
+    #[arg(long, env = "KIRI_PATH")]
+    path: Option<PathBuf>,
+    /// Use the plain line-based REPL instead of the full-screen TUI. The plain REPL is also used
+    /// automatically when stdout is not a TTY (piped output, CI).
+    #[arg(long)]
+    plain: bool,
 }
 
 /// The resolved configuration the composition root needs to wire the harness. The API key and model
@@ -57,6 +65,8 @@ pub struct Settings {
     pub path: PathBuf,
     pub seed: Option<String>,
     pub checkpoint_budget: Duration,
+    /// Force the plain line-based REPL even on a TTY (the `--plain` flag).
+    pub plain: bool,
 }
 
 impl Settings {
@@ -65,14 +75,19 @@ impl Settings {
     pub fn load() -> Result<Self> {
         dotenvy::dotenv().ok();
         let cli = Cli::parse();
+        let path = cli
+            .path
+            .or_else(|| std::env::var_os("T_CLI_PATH").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("."));
         Ok(Self {
             base_url: BASE_URL.to_string(),
             api_key: required_env("NVIDIA_API_KEY")?,
             model: required_env("NVIDIA_MODEL")?,
             system_prompt: SYSTEM_PROMPT,
-            path: cli.path,
+            path,
             seed: cli.prompt,
             checkpoint_budget: TOOL_CHECKPOINT,
+            plain: cli.plain,
         })
     }
 }

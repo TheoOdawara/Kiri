@@ -1,4 +1,4 @@
-# T-Cli — Project Working Contract
+# Kiri — Project Working Contract
 
 Async Rust CLI agent harness that talks to NVIDIA's OpenAI-compatible chat API (streaming REPL,
 tool-calling with a filesystem sandbox, per-call approval).
