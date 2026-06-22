@@ -3,10 +3,10 @@ use std::fs;
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, Tool, ToolOutcome, function_schema, simple_confirm,
 };
-use crate::modules::tools::infrastructure::args::{ListArgs, parse};
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, is_absolute_target};
+use crate::modules::tools::infrastructure::args::{ListArgs, parse_args};
+use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct ListDir;
@@ -30,16 +30,17 @@ impl Tool for ListDir {
     }
 
     fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        let a: ListArgs = parse(call.function.arguments.as_str()).ok()?;
-        let default_accept = !is_absolute_target(&a.path);
-        Some(confirm(format!("Listar '{}'?", a.path), default_accept))
+        simple_confirm(
+            call,
+            |a: &ListArgs| format!("Listar '{}'?", a.path),
+            |a| a.path.as_str(),
+        )
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
-        let args = call.function.arguments.as_str();
-        let args: ListArgs = match parse(args) {
+        let args: ListArgs = match parse_args(call) {
             Ok(args) => args,
-            Err(error) => return ToolOutcome::Error(format!("invalid arguments: {error}")),
+            Err(out) => return out,
         };
         let dir = match sandbox.resolve_existing(&args.path) {
             Ok(dir) => dir,

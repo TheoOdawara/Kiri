@@ -126,7 +126,13 @@ mod tests {
         let dir = TempDir::new("bad-args");
         let sb = sandbox(&dir);
         let outcome = registry().execute(&sb, &call("read_file", json!({"wrong": 1})));
-        assert!(matches!(outcome, ToolOutcome::Error(_)));
+        let ToolOutcome::Error(message) = outcome else {
+            panic!("expected an error outcome");
+        };
+        assert!(
+            message.contains("invalid arguments"),
+            "expected the centralized parse error, got: {message}"
+        );
     }
 
     #[test]

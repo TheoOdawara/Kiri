@@ -1,7 +1,10 @@
+use std::borrow::Cow;
 use std::fs;
+use std::fs::Metadata;
 use std::io::Read;
 use std::path::Path;
 
+use crate::modules::tools::application::tool::ToolOutcome;
 use crate::modules::tools::infrastructure::sandbox::{CreateResolution, Sandbox};
 
 pub const READ_FILE_MAX_BYTES: usize = 64 * 1024;
@@ -42,7 +45,13 @@ pub fn search_file(path: &Path, query: &str, root: &Path, matches: &mut Vec<Stri
             return;
         }
         if line.contains(query) {
-            let shown: String = line.chars().take(SEARCH_MAX_LINE_CHARS).collect();
+            // Common case: a line short enough by byte length that no char-truncation is possible is
+            // shown borrowed, with no per-line allocation. Only a long line pays to char-truncate.
+            let shown: Cow<str> = if line.len() <= SEARCH_MAX_LINE_CHARS {
+                Cow::Borrowed(line)
+            } else {
+                Cow::Owned(line.chars().take(SEARCH_MAX_LINE_CHARS).collect())
+            };
             matches.push(format!("{relative}:{}: {shown}", number + 1));
         }
     }
@@ -61,4 +70,83 @@ pub fn missing_dirs_label(resolution: &CreateResolution, sandbox: &Sandbox) -> S
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Create the missing parent directories of a create/move target, mapping a mkdir failure to the
+/// shared error outcome. Call before writing/renaming when the resolution reported missing dirs;
+/// `path` is the user-facing path interpolated into the error.
+pub fn ensure_parent_dirs(resolution: &CreateResolution, path: &str) -> Result<(), ToolOutcome> {
+    if !resolution.missing_dirs.is_empty()
+        && let Some(parent) = resolution.target.parent()
+        && let Err(error) = fs::create_dir_all(parent)
+    {
+        return Err(ToolOutcome::Error(format!(
+            "cannot create directories for {path}: {error}"
+        )));
+    }
+    Ok(())
+}
+
+/// Stat `path` once as a pre-flight guard. `reject` inspects the metadata and returns `Some(error)` to
+/// veto the operation; a stat failure maps to the shared `cannot stat` error. `label` is the
+/// user-facing path interpolated into both messages.
+pub fn stat_guard(
+    path: &Path,
+    label: &str,
+    reject: impl FnOnce(&Metadata) -> Option<String>,
+) -> Result<(), ToolOutcome> {
+    match fs::metadata(path) {
+        Ok(metadata) => match reject(&metadata) {
+            Some(error) => Err(ToolOutcome::Error(error)),
+            None => Ok(()),
+        },
+        Err(error) => Err(ToolOutcome::Error(format!("cannot stat {label}: {error}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SEARCH_MAX_LINE_CHARS, search_file};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn temp_file(tag: &str, contents: &[u8]) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        path.push(format!("t-cli-support-{}-{n}-{tag}", std::process::id()));
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn long_multibyte_line_truncates_at_a_char_boundary() {
+        // 300 two-byte chars (600 bytes): the byte-length fast path is skipped, and truncation must
+        // cut at a char boundary, never mid-codepoint.
+        let line = "é".repeat(300);
+        let file = temp_file("multibyte", line.as_bytes());
+        let root = file.parent().unwrap().to_path_buf();
+        let mut matches = Vec::new();
+        search_file(&file, "é", &root, &mut matches);
+        let _ = fs::remove_file(&file);
+
+        assert_eq!(matches.len(), 1);
+        let shown = matches[0].rsplit_once(": ").unwrap().1;
+        assert_eq!(shown.chars().count(), SEARCH_MAX_LINE_CHARS);
+        assert!(shown.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn short_multibyte_line_is_returned_whole() {
+        let file = temp_file("short", "héllo wörld".as_bytes());
+        let root = file.parent().unwrap().to_path_buf();
+        let mut matches = Vec::new();
+        search_file(&file, "wörld", &root, &mut matches);
+        let _ = fs::remove_file(&file);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].ends_with("héllo wörld"));
+    }
 }

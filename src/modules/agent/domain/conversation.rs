@@ -28,6 +28,19 @@ impl Conversation {
             self.messages.pop();
         }
     }
+
+    /// Drop the last assistant turn — the assistant message and any tool results that answered it —
+    /// so the conversation can recover after the provider rejected the request body (HTTP 4xx). That
+    /// offending turn would otherwise be re-sent unchanged and fail identically on every later
+    /// request. A no-op when no assistant turn trails the conversation.
+    pub fn rollback_last_assistant_turn(&mut self) {
+        while matches!(self.messages.last(), Some(message) if message.role == Role::Tool) {
+            self.messages.pop();
+        }
+        if matches!(self.messages.last(), Some(message) if message.role == Role::Assistant) {
+            self.messages.pop();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -45,5 +58,43 @@ mod tests {
         conversation.push(Message::tool_result("id", "out"));
         conversation.rollback_dangling_user();
         assert_eq!(conversation.messages().len(), 3); // system, user, tool — partial exchange kept
+    }
+
+    fn roles(conversation: &Conversation) -> Vec<Role> {
+        conversation.messages().iter().map(|m| m.role).collect()
+    }
+
+    #[test]
+    fn rollback_last_assistant_turn_drops_the_assistant_and_its_tool_results() {
+        let mut conversation = Conversation::new("sys");
+        conversation.push(Message::user("do it"));
+        conversation.push(Message::assistant_tool_calls(None, vec![]));
+        conversation.push(Message::tool_result("id1", "ok"));
+        conversation.push(Message::tool_result("id2", "ok"));
+        conversation.rollback_last_assistant_turn();
+        assert_eq!(roles(&conversation), vec![Role::System, Role::User]);
+    }
+
+    #[test]
+    fn rollback_last_assistant_turn_is_a_noop_without_an_assistant_turn() {
+        let mut conversation = Conversation::new("sys");
+        conversation.push(Message::user("hi"));
+        conversation.rollback_last_assistant_turn();
+        assert_eq!(roles(&conversation), vec![Role::System, Role::User]);
+    }
+
+    #[test]
+    fn rollback_last_assistant_turn_keeps_earlier_exchanges() {
+        let mut conversation = Conversation::new("sys");
+        conversation.push(Message::user("first"));
+        conversation.push(Message::assistant_text("answer"));
+        conversation.push(Message::user("second"));
+        conversation.push(Message::assistant_tool_calls(None, vec![]));
+        conversation.push(Message::tool_result("id", "ok"));
+        conversation.rollback_last_assistant_turn();
+        assert_eq!(
+            roles(&conversation),
+            vec![Role::System, Role::User, Role::Assistant, Role::User]
+        );
     }
 }

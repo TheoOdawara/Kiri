@@ -1,6 +1,8 @@
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
+use crate::modules::tools::infrastructure::args::parse;
+use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// The result of executing a tool. Failures are data the model reads and recovers from — never panics
@@ -41,6 +43,26 @@ pub fn confirm(action: String, default_accept: bool) -> Confirmation {
         default_accept,
     }
 }
+
+/// Build a confirmation for a tool whose prompt is a fixed phrase over its parsed args (no sandbox
+/// resolution): parse, derive the default from the path, and phrase. Returns `None` when the args do
+/// not parse (then `execute` reports the error). The resolution-aware tools (write_file, move_path)
+/// phrase from the resolution and stay bespoke.
+pub fn simple_confirm<T: DeserializeOwned>(
+    call: &ToolCall,
+    phrase: impl FnOnce(&T) -> String,
+    path_of: impl FnOnce(&T) -> &str,
+) -> Option<Confirmation> {
+    let args: T = parse(call.function.arguments.as_str()).ok()?;
+    let default_accept = default_accept_for(path_of(&args));
+    Some(confirm(phrase(&args), default_accept))
+}
+
+/// The `path` property description shared verbatim by the tools that take a single
+/// workspace-relative-or-absolute path. Hoisted so the four byte-identical schemas have one source;
+/// the characterization snapshot pins the exact text.
+pub const PATH_DESC: &str =
+    "Path relative to the active workspace root, or an absolute / ~ path to reach outside it.";
 
 /// The full advertised tool object (the OpenAI-compatible `{type, function:{…}}` shape) a tool puts on
 /// the wire. Shared so every `Tool::schema` is built the same way.

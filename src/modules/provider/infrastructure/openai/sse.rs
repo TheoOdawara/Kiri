@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use super::arguments::normalize_arguments;
 use super::wire::{ChatStreamChunk, Delta, StreamChoice, ToolCallFragment};
 use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::agent::domain::stream_event::StreamEvent;
@@ -7,15 +8,15 @@ use crate::modules::provider::application::completion_provider::EventSink;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
-/// Parse one streamed line, feed both the accumulator (content/tool-calls) and the live `on_event`
-/// callback (reasoning/content). Non-data lines, `[DONE]`, and malformed JSON are ignored.
-pub(crate) fn handle_line(
-    line: &[u8],
+/// Feed one parsed SSE event's `data` payload into the accumulator (content/tool-calls) and the live
+/// `on_event` callback (reasoning/content). The `[DONE]` sentinel and malformed JSON are ignored. Line
+/// framing (chunk reassembly, the `data:` prefix) is handled upstream by `eventsource-stream`.
+pub(crate) fn handle_event(
+    data: &str,
     accumulator: &mut TurnAccumulator,
     sink: &mut dyn EventSink,
 ) -> Result<(), AgentError> {
-    let text = String::from_utf8_lossy(line);
-    let Some(choice) = parse_chunk_line(text.trim_end()) else {
+    let Some(choice) = parse_chunk(data) else {
         return Ok(());
     };
     accumulator.absorb_tool_fragments(&choice.delta.tool_calls);
@@ -28,10 +29,9 @@ pub(crate) fn handle_line(
     Ok(())
 }
 
-/// Parse one SSE line into its first choice. Yields nothing for non-`data:` lines, the `[DONE]`
-/// sentinel, and malformed JSON.
-fn parse_chunk_line(line: &str) -> Option<StreamChoice> {
-    let data = line.strip_prefix("data:").map(str::trim)?;
+/// Parse one event's `data` payload into its first choice. Yields nothing for the `[DONE]` sentinel,
+/// an empty payload, or malformed JSON.
+fn parse_chunk(data: &str) -> Option<StreamChoice> {
     if data.is_empty() || data == "[DONE]" {
         return None;
     }
@@ -106,7 +106,7 @@ impl TurnAccumulator {
                 },
                 function: FunctionCall {
                     name: partial.name,
-                    arguments: partial.arguments,
+                    arguments: normalize_arguments(partial.arguments),
                 },
             })
             .collect();
@@ -121,9 +121,9 @@ impl TurnAccumulator {
 mod tests {
     use super::*;
 
-    /// Parse one SSE line into events (test seam over `parse_chunk_line` + `events_from_delta`).
-    fn events_from_sse_line(line: &str) -> Vec<StreamEvent> {
-        match parse_chunk_line(line) {
+    /// Parse one event payload into events (test seam over `parse_chunk` + `events_from_delta`).
+    fn events_from_data(data: &str) -> Vec<StreamEvent> {
+        match parse_chunk(data) {
             Some(choice) => events_from_delta(choice.delta),
             None => Vec::new(),
         }
@@ -139,39 +139,39 @@ mod tests {
         }
     }
 
-    /// Run lines through the same path as the provider and return the assembled turn.
-    fn accumulate(lines: &[&str]) -> CompletedTurn {
+    /// Run event payloads through the same path as the provider and return the assembled turn.
+    fn accumulate(payloads: &[&str]) -> CompletedTurn {
         let mut accumulator = TurnAccumulator::default();
         let mut sink = CollectSink::default();
-        for line in lines {
-            handle_line(line.as_bytes(), &mut accumulator, &mut sink).unwrap();
+        for data in payloads {
+            handle_event(data, &mut accumulator, &mut sink).unwrap();
         }
         accumulator.into_completed()
     }
 
     #[test]
     fn extracts_content_from_data_line() {
-        let line = r#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#;
+        let line = r#"{"choices":[{"delta":{"content":"Hi"}}]}"#;
         assert_eq!(
-            events_from_sse_line(line),
+            events_from_data(line),
             vec![StreamEvent::Content("Hi".to_string())]
         );
     }
 
     #[test]
     fn extracts_reasoning_from_data_line() {
-        let line = r#"data: {"choices":[{"delta":{"reasoning_content":"hmm"}}]}"#;
+        let line = r#"{"choices":[{"delta":{"reasoning_content":"hmm"}}]}"#;
         assert_eq!(
-            events_from_sse_line(line),
+            events_from_data(line),
             vec![StreamEvent::Reasoning("hmm".to_string())]
         );
     }
 
     #[test]
     fn reasoning_field_is_accepted() {
-        let line = r#"data: {"choices":[{"delta":{"reasoning":"hmm"}}]}"#;
+        let line = r#"{"choices":[{"delta":{"reasoning":"hmm"}}]}"#;
         assert_eq!(
-            events_from_sse_line(line),
+            events_from_data(line),
             vec![StreamEvent::Reasoning("hmm".to_string())]
         );
     }
@@ -179,19 +179,18 @@ mod tests {
     #[test]
     fn duplicate_reasoning_keys_yield_single_event() {
         // NVIDIA Nemotron sends both keys in one delta; this must not fail to parse nor double up.
-        let line =
-            r#"data: {"choices":[{"delta":{"reasoning":"Okay","reasoning_content":"Okay"}}]}"#;
+        let line = r#"{"choices":[{"delta":{"reasoning":"Okay","reasoning_content":"Okay"}}]}"#;
         assert_eq!(
-            events_from_sse_line(line),
+            events_from_data(line),
             vec![StreamEvent::Reasoning("Okay".to_string())]
         );
     }
 
     #[test]
     fn reasoning_and_content_in_one_delta_keep_order() {
-        let line = r#"data: {"choices":[{"delta":{"reasoning":"why","content":"Hi"}}]}"#;
+        let line = r#"{"choices":[{"delta":{"reasoning":"why","content":"Hi"}}]}"#;
         assert_eq!(
-            events_from_sse_line(line),
+            events_from_data(line),
             vec![
                 StreamEvent::Reasoning("why".to_string()),
                 StreamEvent::Content("Hi".to_string()),
@@ -201,47 +200,47 @@ mod tests {
 
     #[test]
     fn non_string_reasoning_is_dropped_but_content_survives() {
-        let line = r#"data: {"choices":[{"delta":{"reasoning":{"step":1},"content":"Hi"}}]}"#;
+        let line = r#"{"choices":[{"delta":{"reasoning":{"step":1},"content":"Hi"}}]}"#;
         assert_eq!(
-            events_from_sse_line(line),
+            events_from_data(line),
             vec![StreamEvent::Content("Hi".to_string())]
         );
     }
 
     #[test]
     fn done_sentinel_yields_nothing() {
-        assert!(events_from_sse_line("data: [DONE]").is_empty());
+        assert!(events_from_data("[DONE]").is_empty());
     }
 
     #[test]
     fn non_data_or_blank_lines_yield_nothing() {
-        assert!(events_from_sse_line("").is_empty());
-        assert!(events_from_sse_line(": keep-alive").is_empty());
-        assert!(events_from_sse_line("event: message").is_empty());
+        assert!(events_from_data("").is_empty());
+        assert!(events_from_data(": keep-alive").is_empty());
+        assert!(events_from_data("event: message").is_empty());
     }
 
     #[test]
     fn malformed_json_yields_nothing() {
-        assert!(events_from_sse_line("data: {not json").is_empty());
+        assert!(events_from_data("{not json").is_empty());
     }
 
     #[test]
     fn role_only_or_empty_delta_yields_nothing() {
-        let role_only = r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#;
-        assert!(events_from_sse_line(role_only).is_empty());
+        let role_only = r#"{"choices":[{"delta":{"role":"assistant"}}]}"#;
+        assert!(events_from_data(role_only).is_empty());
 
-        let empty = r#"data: {"choices":[{"delta":{"content":""}}]}"#;
-        assert!(events_from_sse_line(empty).is_empty());
+        let empty = r#"{"choices":[{"delta":{"content":""}}]}"#;
+        assert!(events_from_data(empty).is_empty());
     }
 
     #[test]
     fn accumulates_single_tool_call_split_across_deltas() {
         let turn = accumulate(&[
-            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":""}}]}}]}"#,
-            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}"#,
-            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.txt\"}"}}]}}]}"#,
-            r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
-            "data: [DONE]",
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.txt\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            "[DONE]",
         ]);
         assert_eq!(turn.tool_calls.len(), 1);
         let call = &turn.tool_calls[0];
@@ -254,9 +253,9 @@ mod tests {
     #[test]
     fn accumulates_parallel_tool_calls_by_index() {
         let turn = accumulate(&[
-            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"read_file","arguments":"{}"}}]}}]}"#,
-            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"b","type":"function","function":{"name":"list_dir","arguments":"{}"}}]}}]}"#,
-            r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"read_file","arguments":"{}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"b","type":"function","function":{"name":"list_dir","arguments":"{}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
         ]);
         assert_eq!(turn.tool_calls.len(), 2);
         assert_eq!(turn.tool_calls[0].function.name, "read_file");
@@ -266,8 +265,8 @@ mod tests {
     #[test]
     fn tool_calls_accumulate_regardless_of_stop_finish_reason() {
         let turn = accumulate(&[
-            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"x","type":"function","function":{"name":"read_file","arguments":"{}"}}]}}]}"#,
-            r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"x","type":"function","function":{"name":"read_file","arguments":"{}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
         ]);
         assert_eq!(turn.tool_calls.len(), 1);
     }
@@ -275,7 +274,7 @@ mod tests {
     #[test]
     fn defaults_function_type_when_provider_omits_it() {
         let turn = accumulate(&[
-            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"x","function":{"name":"read_file","arguments":"{}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"x","function":{"name":"read_file","arguments":"{}"}}]}}]}"#,
         ]);
         assert_eq!(turn.tool_calls[0].kind, "function");
     }
@@ -284,8 +283,8 @@ mod tests {
     fn content_and_reasoning_still_streamed_during_a_turn() {
         let mut accumulator = TurnAccumulator::default();
         let mut sink = CollectSink::default();
-        handle_line(
-            br#"data: {"choices":[{"delta":{"reasoning":"why","content":"Hi"}}]}"#,
+        handle_event(
+            r#"{"choices":[{"delta":{"reasoning":"why","content":"Hi"}}]}"#,
             &mut accumulator,
             &mut sink,
         )
@@ -297,6 +296,53 @@ mod tests {
                 StreamEvent::Content("Hi".to_string()),
             ]
         );
+        assert_eq!(accumulator.into_completed().content, "Hi");
+    }
+
+    #[test]
+    fn normalizes_raw_control_chars_in_tool_call_arguments() {
+        // The model produced a file `content` with a RAW newline inside the string value instead of
+        // `\n`. Built via `json!` so the SSE chunk is valid wire JSON whose decoded `arguments`
+        // carries the literal 0x0A — exactly what poisons the conversation today. The stored value
+        // must come out as valid JSON with the content preserved.
+        let bad_args = "{\"path\":\"a.rs\",\"content\":\"line1\nline2\"}";
+        let chunk = serde_json::json!({
+            "choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "write_file", "arguments": bad_args}
+            }]}}]
+        })
+        .to_string();
+
+        let turn = accumulate(&[chunk.as_str()]);
+        let args = &turn.tool_calls[0].function.arguments;
+        let value: serde_json::Value =
+            serde_json::from_str(args).expect("stored arguments must be valid JSON");
+        assert_eq!(value["path"], "a.rs");
+        assert_eq!(value["content"], "line1\nline2");
+    }
+
+    #[tokio::test]
+    async fn eventsource_pipeline_frames_and_parses_a_raw_chunk() {
+        use eventsource_stream::Eventsource;
+        use tokio_stream::StreamExt;
+
+        // Two SSE events delivered as one raw byte blob: eventsource-stream frames them, we map the
+        // first to a content event and the `[DONE]` sentinel to nothing.
+        let raw = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n";
+        let stream = tokio_stream::iter(vec![Ok::<_, std::convert::Infallible>(
+            raw.as_bytes().to_vec(),
+        )]);
+        let mut events = stream.eventsource();
+
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        while let Some(event) = events.next().await {
+            handle_event(&event.unwrap().data, &mut accumulator, &mut sink).unwrap();
+        }
+        assert_eq!(sink.0, vec![StreamEvent::Content("Hi".to_string())]);
         assert_eq!(accumulator.into_completed().content, "Hi");
     }
 }

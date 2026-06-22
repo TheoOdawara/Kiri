@@ -1,5 +1,8 @@
+use eventsource_stream::Eventsource;
+use tokio_stream::StreamExt;
+
 use super::message_dto::MessageDto;
-use super::sse::{TurnAccumulator, handle_line};
+use super::sse::{TurnAccumulator, handle_event};
 use super::wire::{ChatRequest, ChatTemplateKwargs};
 use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::provider::application::completion_provider::{
@@ -38,15 +41,15 @@ impl CompletionProvider for OpenAiProvider {
         sink: &mut dyn EventSink,
     ) -> Result<CompletedTurn, AgentError> {
         let body = ChatRequest {
-            model: request.model.to_string(),
+            model: request.model,
             messages: request.messages.iter().map(MessageDto::from).collect(),
             stream: true,
             chat_template_kwargs: Some(ChatTemplateKwargs { thinking: true }),
-            tools: request.tools.to_vec(),
+            tools: request.tools,
         };
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let mut response = self
+        let response = self
             .client
             .post(&url)
             .bearer_auth(&self.api_key)
@@ -58,25 +61,27 @@ impl CompletionProvider for OpenAiProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(AgentError::Provider(format!(
-                "provider returned {status}: {body}"
-            )));
+            // A 4xx means the body we sent is unacceptable; resending it unchanged fails identically,
+            // so it is surfaced distinctly to let the REPL drop the offending turn. 5xx/other stay a
+            // plain (transient) provider error.
+            return Err(if status.is_client_error() {
+                AgentError::ProviderRejected {
+                    status: status.as_u16(),
+                    body,
+                }
+            } else {
+                AgentError::Provider(format!("provider returned {status}: {body}"))
+            });
         }
 
         let mut accumulator = TurnAccumulator::default();
-        let mut buffer: Vec<u8> = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|error| AgentError::Provider(format!("error reading stream: {error}")))?
-        {
-            buffer.extend_from_slice(&chunk);
-            while let Some(newline) = buffer.iter().position(|&byte| byte == b'\n') {
-                let line: Vec<u8> = buffer.drain(..=newline).collect();
-                handle_line(&line, &mut accumulator, sink)?;
-            }
+        let stream = response.bytes_stream().eventsource();
+        tokio::pin!(stream);
+        while let Some(event) = stream.next().await {
+            let event = event
+                .map_err(|error| AgentError::Provider(format!("error reading stream: {error}")))?;
+            handle_event(&event.data, &mut accumulator, sink)?;
         }
-        handle_line(&buffer, &mut accumulator, sink)?;
 
         Ok(accumulator.into_completed())
     }

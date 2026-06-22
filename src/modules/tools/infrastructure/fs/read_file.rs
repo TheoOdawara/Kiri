@@ -1,10 +1,10 @@
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, PATH_DESC, Tool, ToolOutcome, function_schema, simple_confirm,
 };
-use crate::modules::tools::infrastructure::args::{PathArgs, parse};
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, is_absolute_target};
+use crate::modules::tools::infrastructure::args::{PathArgs, parse_args};
+use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tools::infrastructure::support::{READ_FILE_MAX_BYTES, read_capped};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -25,22 +25,23 @@ impl Tool for ReadFile {
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["path"],
-                "properties": { "path": { "type": "string", "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it." } }
+                "properties": { "path": { "type": "string", "description": PATH_DESC } }
             }),
         )
     }
 
     fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
-        let default_accept = !is_absolute_target(&a.path);
-        Some(confirm(format!("Ler '{}'?", a.path), default_accept))
+        simple_confirm(
+            call,
+            |a: &PathArgs| format!("Ler '{}'?", a.path),
+            |a| a.path.as_str(),
+        )
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
-        let args = call.function.arguments.as_str();
-        let args: PathArgs = match parse(args) {
+        let args: PathArgs = match parse_args(call) {
             Ok(args) => args,
-            Err(error) => return ToolOutcome::Error(format!("invalid arguments: {error}")),
+            Err(out) => return out,
         };
         let path = match sandbox.resolve_existing(&args.path) {
             Ok(path) => path,

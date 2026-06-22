@@ -156,6 +156,12 @@ pub(crate) fn is_absolute_target(path: &str) -> bool {
     expand_tilde(path, home().as_deref()).is_absolute()
 }
 
+/// The confirmation default for a tool path: accept inside the workspace, decline for an explicit
+/// absolute/`~` target (potentially outside it). The single source of the in/out-of-workspace rule.
+pub(crate) fn default_accept_for(path: &str) -> bool {
+    !is_absolute_target(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

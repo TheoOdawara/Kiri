@@ -3,11 +3,11 @@ use std::fs;
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, PATH_DESC, Tool, ToolOutcome, function_schema, simple_confirm,
 };
-use crate::modules::tools::infrastructure::args::{EditArgs, PathArgs, parse};
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, is_absolute_target};
-use crate::modules::tools::infrastructure::support::EDIT_FILE_MAX_BYTES;
+use crate::modules::tools::infrastructure::args::{EditArgs, PathArgs, parse_args};
+use crate::modules::tools::infrastructure::sandbox::Sandbox;
+use crate::modules::tools::infrastructure::support::{EDIT_FILE_MAX_BYTES, stat_guard};
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct EditFile;
@@ -26,7 +26,7 @@ impl Tool for EditFile {
                 "additionalProperties": false,
                 "required": ["path", "old_string", "new_string"],
                 "properties": {
-                    "path": { "type": "string", "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it." },
+                    "path": { "type": "string", "description": PATH_DESC },
                     "old_string": { "type": "string", "description": "Exact text to find (must be unique enough)." },
                     "new_string": { "type": "string", "description": "Replacement text." }
                 }
@@ -35,16 +35,17 @@ impl Tool for EditFile {
     }
 
     fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
-        let default_accept = !is_absolute_target(&a.path);
-        Some(confirm(format!("Editar '{}'?", a.path), default_accept))
+        simple_confirm(
+            call,
+            |a: &PathArgs| format!("Editar '{}'?", a.path),
+            |a| a.path.as_str(),
+        )
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
-        let args = call.function.arguments.as_str();
-        let args: EditArgs = match parse(args) {
+        let args: EditArgs = match parse_args(call) {
             Ok(args) => args,
-            Err(error) => return ToolOutcome::Error(format!("invalid arguments: {error}")),
+            Err(out) => return out,
         };
         if args.old_string.is_empty() {
             return ToolOutcome::Error("old_string must not be empty".to_string());
@@ -53,15 +54,15 @@ impl Tool for EditFile {
             Ok(path) => path,
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
-        match fs::metadata(&path) {
-            Ok(metadata) if metadata.len() > EDIT_FILE_MAX_BYTES => {
-                return ToolOutcome::Error(format!(
+        if let Err(out) = stat_guard(&path, &args.path, |metadata| {
+            (metadata.len() > EDIT_FILE_MAX_BYTES).then(|| {
+                format!(
                     "{} is too large to edit (max {EDIT_FILE_MAX_BYTES} bytes)",
                     args.path
-                ));
-            }
-            Ok(_) => {}
-            Err(error) => return ToolOutcome::Error(format!("cannot stat {}: {error}", args.path)),
+                )
+            })
+        }) {
+            return out;
         }
         let content = match fs::read_to_string(&path) {
             Ok(content) => content,

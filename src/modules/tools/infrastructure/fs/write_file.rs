@@ -3,11 +3,11 @@ use std::fs;
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
 };
-use crate::modules::tools::infrastructure::args::{PathArgs, WriteArgs, parse};
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, is_absolute_target};
-use crate::modules::tools::infrastructure::support::missing_dirs_label;
+use crate::modules::tools::infrastructure::args::{PathArgs, WriteArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
+use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct WriteFile;
@@ -27,7 +27,7 @@ impl Tool for WriteFile {
                 "additionalProperties": false,
                 "required": ["path", "content"],
                 "properties": {
-                    "path": { "type": "string", "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it." },
+                    "path": { "type": "string", "description": PATH_DESC },
                     "content": { "type": "string", "description": "Full file content to write." }
                 }
             }),
@@ -45,28 +45,21 @@ impl Tool for WriteFile {
             Ok(r) if r.target.exists() => format!("Sobrescrever '{}'?", a.path),
             _ => format!("Criar e gravar '{}'?", a.path),
         };
-        let default_accept = !is_absolute_target(&a.path);
+        let default_accept = default_accept_for(&a.path);
         Some(confirm(action, default_accept))
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
-        let args = call.function.arguments.as_str();
-        let args: WriteArgs = match parse(args) {
+        let args: WriteArgs = match parse_args(call) {
             Ok(args) => args,
-            Err(error) => return ToolOutcome::Error(format!("invalid arguments: {error}")),
+            Err(out) => return out,
         };
         let resolution = match sandbox.resolve_create(&args.path) {
             Ok(resolution) => resolution,
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
-        if !resolution.missing_dirs.is_empty()
-            && let Some(parent) = resolution.target.parent()
-            && let Err(error) = fs::create_dir_all(parent)
-        {
-            return ToolOutcome::Error(format!(
-                "cannot create directories for {}: {error}",
-                args.path
-            ));
+        if let Err(out) = ensure_parent_dirs(&resolution, &args.path) {
+            return out;
         }
         match fs::write(&resolution.target, args.content.as_bytes()) {
             Ok(()) => ToolOutcome::Ok(format!(
