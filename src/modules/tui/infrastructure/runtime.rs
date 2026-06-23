@@ -20,7 +20,7 @@ use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::application::update::update;
 use crate::modules::tui::domain::model::Model;
-use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
+use crate::modules::tui::domain::transcript::{NoticeLevel, Transcript, TranscriptItem};
 use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
 use crate::modules::tui::infrastructure::input;
 use crate::modules::tui::infrastructure::terminal_guard::TerminalGuard;
@@ -41,13 +41,15 @@ pub struct Tui {
     conversation: Conversation,
     model: Model,
     seed: Option<String>,
+    /// Kept so `/new` can rebuild a fresh conversation with the same system prompt.
+    system_prompt: &'static str,
 }
 
 impl Tui {
     pub fn new(
         agent_loop: AgentLoop,
         sandbox: Sandbox,
-        system_prompt: &str,
+        system_prompt: &'static str,
         seed: Option<String>,
         model: String,
     ) -> Self {
@@ -58,16 +60,18 @@ impl Tui {
             conversation: Conversation::new(system_prompt),
             model: Model::new(model, workspace),
             seed,
+            system_prompt,
         }
     }
 
     pub async fn run(self) -> Result<()> {
         let Tui {
             agent_loop,
-            sandbox,
+            mut sandbox,
             mut conversation,
             mut model,
             seed,
+            system_prompt,
         } = self;
 
         let mut terminal = ratatui::init();
@@ -85,6 +89,8 @@ impl Tui {
         if let Some(line) = seed.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
             match command::parse(&line) {
                 Some(Command::Quit) => model.should_quit = true,
+                // A non-quit command as the CLI seed is ignored; the seed is meant to be a prompt.
+                Some(_) => {}
                 None => {
                     model.history.record(&line);
                     model.transcript.push(TranscriptItem::User(line.clone()));
@@ -149,6 +155,29 @@ impl Tui {
                         .await?;
                     }
                     Effect::Quit => model.should_quit = true,
+                    Effect::NewSession => {
+                        conversation = Conversation::new(system_prompt);
+                        model.transcript = Transcript::default();
+                        model.scroll.pin();
+                        model.transcript.push(TranscriptItem::Notice(
+                            NoticeLevel::Info,
+                            "nova sessão".to_string(),
+                        ));
+                    }
+                    Effect::ChangeWorkspace(path) => match sandbox.relocated(&path) {
+                        Ok(new_sandbox) => {
+                            model.status.workspace = new_sandbox.root().display().to_string();
+                            sandbox = new_sandbox;
+                            model.transcript.push(TranscriptItem::Notice(
+                                NoticeLevel::Info,
+                                format!("workspace: {}", model.status.workspace),
+                            ));
+                        }
+                        Err(error) => model.transcript.push(TranscriptItem::Notice(
+                            NoticeLevel::Error,
+                            format!("erro: {error:#}"),
+                        )),
+                    },
                     Effect::AnswerApproval(_) | Effect::CancelTurn => {}
                 }
             }
@@ -220,7 +249,9 @@ async fn drive_turn(
                                 model.should_quit = true;
                                 cancel.cancel();
                             }
-                            Effect::SubmitPrompt(_) => {}
+                            Effect::SubmitPrompt(_)
+                            | Effect::NewSession
+                            | Effect::ChangeWorkspace(_) => {}
                         }
                     }
                 }

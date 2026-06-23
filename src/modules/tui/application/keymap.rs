@@ -113,6 +113,33 @@ fn submit(model: &mut Model) -> Vec<Effect> {
             model.should_quit = true;
             vec![Effect::Quit]
         }
+        Some(Command::NewSession) => vec![Effect::NewSession],
+        Some(Command::Help) => {
+            model.transcript.push(TranscriptItem::Notice(
+                NoticeLevel::Info,
+                command::help_text(),
+            ));
+            vec![]
+        }
+        Some(Command::SetMode(mode)) => {
+            model.approval_mode = mode;
+            vec![]
+        }
+        Some(Command::ChangeWorkspace(None)) => {
+            model.transcript.push(TranscriptItem::Notice(
+                NoticeLevel::Info,
+                format!("workspace: {}", model.status.workspace),
+            ));
+            vec![]
+        }
+        Some(Command::ChangeWorkspace(Some(path))) => vec![Effect::ChangeWorkspace(path)],
+        Some(Command::Unknown) => {
+            model.transcript.push(TranscriptItem::Notice(
+                NoticeLevel::Error,
+                format!("comando desconhecido: {} (use /help)", line.trim()),
+            ));
+            vec![]
+        }
         None if line.trim().is_empty() => vec![],
         None => {
             model.transcript.push(TranscriptItem::User(line.clone()));
@@ -280,5 +307,39 @@ mod tests {
         };
         on_key(&mut m, press(Key::BackTab));
         assert_eq!(m.approval_mode, ApprovalMode::Default);
+    }
+
+    #[test]
+    fn new_session_command_emits_effect() {
+        let mut m = Model::default();
+        m.input.set("/new".to_string());
+        assert_eq!(on_key(&mut m, press(Key::Enter)), vec![Effect::NewSession]);
+    }
+
+    #[test]
+    fn mode_command_sets_mode_without_effect() {
+        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        let mut m = Model::default();
+        m.input.set("/plan".to_string());
+        assert!(on_key(&mut m, press(Key::Enter)).is_empty());
+        assert_eq!(m.approval_mode, ApprovalMode::Plan);
+    }
+
+    #[test]
+    fn cd_with_path_emits_change_workspace() {
+        let mut m = Model::default();
+        m.input.set("/cd src".to_string());
+        assert_eq!(
+            on_key(&mut m, press(Key::Enter)),
+            vec![Effect::ChangeWorkspace("src".to_string())]
+        );
+    }
+
+    #[test]
+    fn unknown_command_warns_without_effect() {
+        let mut m = Model::default();
+        m.input.set("/nope".to_string());
+        assert!(on_key(&mut m, press(Key::Enter)).is_empty());
+        assert_eq!(m.transcript.items().len(), 1);
     }
 }
