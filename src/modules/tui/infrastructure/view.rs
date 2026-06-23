@@ -19,9 +19,11 @@ pub fn view(model: &Model, frame: &mut Frame) {
     meta_rule::render(model, frame, regions.meta);
     editor::render(model, frame, regions.input);
     hint_line::render(model, frame, regions.hint);
-    // The approval box is an overlay over the transcript, so it sits above the conversation.
+    // The approval / plan box is an overlay over the transcript, so it sits above the conversation.
     if let Some(pending) = &model.pending_approval {
         approval::render(pending, frame, regions.transcript);
+    } else if let Some(plan) = &model.pending_plan {
+        approval::render_plan(plan, frame, regions.transcript);
     }
 }
 
@@ -88,5 +90,18 @@ mod tests {
         model.approval_mode = ApprovalMode::Plan;
         let out = render(&model, 80, 12);
         assert!(out.contains("PLAN"), "mode badge missing:\n{out}");
+    }
+
+    #[test]
+    fn pending_plan_renders_the_plan_box() {
+        use crate::modules::tui::domain::view_state::PendingPlan;
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model
+            .transcript
+            .push(TranscriptItem::Assistant("meu plano".to_string()));
+        model.pending_plan = Some(PendingPlan::default());
+        let out = render(&model, 80, 20);
+        assert!(out.contains("plano"), "plan box title missing:\n{out}");
+        assert!(out.contains("Executar"), "plan option missing:\n{out}");
     }
 }

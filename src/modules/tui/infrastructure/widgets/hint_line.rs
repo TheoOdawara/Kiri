@@ -14,6 +14,11 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
             "  ↑↓ seleciona · Enter confirma · Esc recusa · ^C encerra",
             theme::dim(),
         )
+    } else if model.pending_plan.is_some() {
+        Line::styled(
+            "  ↑↓ seleciona · Enter confirma · Esc cancela · ^C encerra",
+            theme::dim(),
+        )
     } else if model.busy {
         Line::styled("  ^C cancela · streaming…", theme::dim())
     } else {

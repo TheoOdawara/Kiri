@@ -1,7 +1,7 @@
 use crate::modules::agent::application::approval_policy::ApprovalMode;
 
 use super::transcript::Transcript;
-use super::view_state::{History, InputBuffer, PendingApproval, Scroll};
+use super::view_state::{History, InputBuffer, PendingApproval, PendingPlan, Scroll};
 
 /// The status line's data: the model id, the active workspace, and the live turn indicators.
 #[derive(Debug, Default)]
@@ -24,6 +24,8 @@ pub struct Model {
     pub status: Status,
     /// A confirmation awaiting an answer; while set, keys answer it instead of editing.
     pub pending_approval: Option<PendingApproval>,
+    /// A finished plan awaiting the user's decision; while set, keys drive the plan box.
+    pub pending_plan: Option<PendingPlan>,
     /// A turn is running (the agent loop future is armed).
     pub busy: bool,
     pub should_quit: bool,

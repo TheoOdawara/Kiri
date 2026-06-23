@@ -202,6 +202,21 @@ impl PendingApproval {
     }
 }
 
+/// The options shown when a plan-mode turn finishes: run the plan, keep refining it, or leave plan mode.
+pub const PLAN_OPTIONS: [&str; 3] = [
+    "Executar o plano",
+    "Continuar planejando",
+    "Cancelar (sair do modo plan)",
+];
+
+/// A finished plan-mode turn awaiting the user's decision. The plan itself is the assistant's last
+/// transcript item; this only tracks which action is highlighted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingPlan {
+    /// The highlighted option index into `PLAN_OPTIONS`.
+    pub selected: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

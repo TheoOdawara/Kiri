@@ -11,7 +11,7 @@ use tokio::time::{self, Interval};
 use tokio_stream::StreamExt;
 
 use crate::modules::agent::application::agent_loop::{AgentLoop, TurnOutcome};
-use crate::modules::agent::application::approval_policy::Approval;
+use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode};
 use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
@@ -21,6 +21,7 @@ use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::application::update::update;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::{NoticeLevel, Transcript, TranscriptItem};
+use crate::modules::tui::domain::view_state::PendingPlan;
 use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
 use crate::modules::tui::infrastructure::input;
 use crate::modules::tui::infrastructure::terminal_guard::TerminalGuard;
@@ -178,6 +179,31 @@ impl Tui {
                             format!("erro: {error:#}"),
                         )),
                     },
+                    Effect::ApprovePlan => {
+                        model.approval_mode = ApprovalMode::Default;
+                        model.transcript.push(TranscriptItem::Notice(
+                            NoticeLevel::Info,
+                            "▶ executando o plano".to_string(),
+                        ));
+                        model.busy = true;
+                        conversation.push(Message::user(
+                            "Plano aprovado. Prossiga com a execução.".to_string(),
+                        ));
+                        drive_turn(
+                            &agent_loop,
+                            &mut conversation,
+                            &sandbox,
+                            &mut bridge,
+                            &mut model,
+                            &mut engine_rx,
+                            &cancel,
+                            &mut pending_reply,
+                            &mut terminal,
+                            &mut events,
+                            &mut ticker,
+                        )
+                        .await?;
+                    }
                     Effect::AnswerApproval(_) | Effect::CancelTurn => {}
                 }
             }
@@ -251,7 +277,8 @@ async fn drive_turn(
                             }
                             Effect::SubmitPrompt(_)
                             | Effect::NewSession
-                            | Effect::ChangeWorkspace(_) => {}
+                            | Effect::ChangeWorkspace(_)
+                            | Effect::ApprovePlan => {}
                         }
                     }
                 }
@@ -294,7 +321,12 @@ fn on_turn_end(
     conversation: &mut Conversation,
 ) {
     match result {
-        Ok(TurnOutcome::Completed) => {}
+        Ok(TurnOutcome::Completed) => {
+            // A finished plan-mode turn offers its plan for approval before anything is executed.
+            if model.approval_mode == ApprovalMode::Plan && !cancelled {
+                model.pending_plan = Some(PendingPlan::default());
+            }
+        }
         Ok(TurnOutcome::Aborted) => model.should_quit = true,
         Err(error) => {
             if cancelled {

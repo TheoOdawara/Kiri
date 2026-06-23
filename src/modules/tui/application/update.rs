@@ -9,7 +9,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     match msg {
         Msg::Key(key) => keymap::on_key(model, key),
         Msg::Paste(text) => {
-            if model.pending_approval.is_none() {
+            if model.pending_approval.is_none() && model.pending_plan.is_none() {
                 model.input.insert(&text);
             }
             Vec::new()

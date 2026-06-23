@@ -16,4 +16,6 @@ pub enum Effect {
     NewSession,
     /// Move the active workspace (sandbox root) to the given `/cd` path argument.
     ChangeWorkspace(String),
+    /// Approve the proposed plan: leave plan mode and run a turn that executes it.
+    ApprovePlan,
 }
