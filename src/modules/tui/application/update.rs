@@ -24,14 +24,19 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::TurnBegan => {
             model.status.streaming = true;
+            model.status.turn_started = Some(std::time::Instant::now());
+            model.live_reasoning.clear();
+            model.live_content.clear();
             Vec::new()
         }
         Msg::StreamDelta(StreamKind::Reasoning, text) => {
             model.transcript.push_reasoning_delta(&text);
+            model.live_reasoning.push_str(&text);
             Vec::new()
         }
         Msg::StreamDelta(StreamKind::Content, text) => {
             model.transcript.push_content_delta(&text);
+            model.live_content.push_str(&text);
             Vec::new()
         }
         Msg::TurnFinished => {
@@ -42,10 +47,21 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.pending_approval = Some(pending);
             Vec::new()
         }
+        Msg::ScrollUp => {
+            model.scroll.up(3);
+            Vec::new()
+        }
+        Msg::ScrollDown => {
+            model.scroll.down(3);
+            Vec::new()
+        }
         Msg::TurnEnded => {
             model.busy = false;
             model.status.streaming = false;
+            model.status.turn_started = None;
             model.pending_approval = None;
+            model.live_reasoning.clear();
+            model.live_content.clear();
             Vec::new()
         }
     }

@@ -81,10 +81,6 @@ impl InputBuffer {
         self.cursor = 0;
         std::mem::take(&mut self.text)
     }
-
-    pub fn line_count(&self) -> usize {
-        self.text.bytes().filter(|&b| b == b'\n').count() + 1
-    }
 }
 
 /// Submitted-prompt history with shell-style up/down recall. The in-progress line is saved as a draft
@@ -158,6 +154,12 @@ impl Scroll {
 
     pub fn pin(&mut self) {
         self.scrollback = 0;
+    }
+
+    /// Jump to the top of the scrollback. The view clamps to the available history, so saturating to
+    /// the maximum is enough — no viewport height needs to leak into the model.
+    pub fn top(&mut self) {
+        self.scrollback = u16::MAX;
     }
 }
 
@@ -259,5 +261,14 @@ mod tests {
         h.record("x");
         assert_eq!(h.older("").as_deref(), Some("x"));
         assert_eq!(h.older("").as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn scroll_top_saturates_and_pin_resets() {
+        let mut s = Scroll::default();
+        s.top();
+        assert_eq!(s.scrollback, u16::MAX);
+        s.pin();
+        assert_eq!(s.scrollback, 0);
     }
 }

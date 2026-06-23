@@ -29,11 +29,17 @@ pub fn render(menu: &CommandMenu, frame: &mut Frame, anchor: Rect) {
         } else {
             ("  ", theme::dim())
         };
+        // Truncate the blurb so the row never overflows the box's inner width.
+        let inner_w = region.width.saturating_sub(2) as usize;
+        let name_cols = spec.name.chars().count();
+        let prefix_cols = 2 + name_cols + 2; // marker + name + gap
+        let blurb_budget = inner_w.saturating_sub(prefix_cols);
+        let blurb = truncate_blurb(spec.blurb, blurb_budget);
         lines.push(Line::from(vec![
             Span::styled(marker, style),
             Span::styled(spec.name, style),
             Span::styled("  ", style),
-            Span::styled(spec.blurb, style),
+            Span::styled(blurb, style),
         ]));
     }
 
@@ -60,6 +66,20 @@ fn box_rect(anchor: Rect, row_count: usize) -> Rect {
         width,
         height,
     }
+}
+
+/// Truncate `blurb` to `budget` display columns, appending an ellipsis when it does not fit. A zero or
+/// tiny budget yields an empty string rather than overflow.
+fn truncate_blurb(blurb: &str, budget: usize) -> String {
+    if budget == 0 {
+        return String::new();
+    }
+    if blurb.chars().count() <= budget {
+        return blurb.to_string();
+    }
+    let end = budget.saturating_sub(1);
+    let prefix: String = blurb.chars().take(end).collect();
+    format!("{prefix}…")
 }
 
 #[cfg(test)]

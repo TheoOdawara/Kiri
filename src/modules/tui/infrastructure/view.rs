@@ -1,11 +1,12 @@
 use ratatui::Frame;
+use ratatui::layout::Rect;
 use ratatui::widgets::Block;
 
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::infrastructure::layout::frame_layout;
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
-    approval, command_menu, editor, header, hint_line, meta_rule, transcript_pane,
+    approval, command_menu, editor, header, hint_line, meta_rule, thinking_line, transcript_pane,
 };
 
 /// The sole ratatui render entry point: project the model onto the frame's regions. Pure with respect
@@ -13,21 +14,60 @@ use crate::modules::tui::infrastructure::widgets::{
 /// with the Tamahagane Void base so every cell inherits steel-on-void.
 pub fn view(model: &Model, frame: &mut Frame) {
     frame.render_widget(Block::default().style(theme::base()), frame.area());
-    let regions = frame_layout(frame.area(), model.input.line_count() as u16);
+    let show_thinking = model.busy
+        && (!model.live_reasoning.is_empty()
+            || model
+                .status
+                .turn_started
+                .is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(2)));
+    let wrap_w = frame
+        .area()
+        .width
+        .saturating_sub(editor::PROMPT_COLS)
+        .max(1) as usize;
+    let input_lines = editor::wrapped_line_count(&model.input, wrap_w) as u16;
+    let regions = frame_layout(frame.area(), input_lines, show_thinking);
     header::render(model, frame, regions.header);
-    transcript_pane::render(model, frame, regions.transcript);
+    // When a plan is pending, reserve the bottom rows for the plan box and render the transcript into
+    // the shortened area so the plan stays visible above the box. Otherwise render the full transcript
+    // and overlay the approval box (a short single confirmation) at the bottom.
+    if let Some(plan) = &model.pending_plan {
+        let action = "Plano pronto. Escolha:";
+        let (_, box_h) =
+            approval::box_dims(regions.transcript, action, approval::plan_options_len());
+        if box_h < regions.transcript.height {
+            // Reserve the bottom `box_h` rows for the plan box; the transcript keeps the rows above it
+            // so the plan text stays visible directly over the box, not under it.
+            let split = regions.transcript.height - box_h;
+            let top = Rect {
+                height: split,
+                ..regions.transcript
+            };
+            let bottom = Rect {
+                y: regions.transcript.y + split,
+                height: box_h,
+                ..regions.transcript
+            };
+            transcript_pane::render(model, frame, top);
+            approval::render_plan_into(plan, frame, bottom);
+        } else {
+            // Too short to split: the box takes the whole transcript region.
+            transcript_pane::render(model, frame, regions.transcript);
+            approval::render_plan_into(plan, frame, regions.transcript);
+        }
+    } else {
+        transcript_pane::render(model, frame, regions.transcript);
+        if let Some(pending) = &model.pending_approval {
+            approval::render(pending, frame, regions.transcript);
+        }
+    }
     meta_rule::render(model, frame, regions.meta);
+    thinking_line::render(model, frame, regions.thinking);
     editor::render(model, frame, regions.input);
     hint_line::render(model, frame, regions.hint);
     // The slash-command preview floats just above the editor while the buffer is a `/`-prefixed token.
     if let Some(menu) = &model.command_menu {
         command_menu::render(menu, frame, regions.input);
-    }
-    // The approval / plan box is an overlay over the transcript, so it sits above the conversation.
-    if let Some(pending) = &model.pending_approval {
-        approval::render(pending, frame, regions.transcript);
-    } else if let Some(plan) = &model.pending_plan {
-        approval::render_plan(plan, frame, regions.transcript);
     }
 }
 
@@ -97,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_plan_renders_the_plan_box() {
+    fn pending_plan_renders_the_plan_box_below_the_transcript() {
         use crate::modules::tui::domain::view_state::PendingPlan;
         let mut model = Model::new("m".to_string(), "/w".to_string());
         model
@@ -107,5 +147,41 @@ mod tests {
         let out = render(&model, 80, 20);
         assert!(out.contains("plano"), "plan box title missing:\n{out}");
         assert!(out.contains("Executar"), "plan option missing:\n{out}");
+        // The box must sit BELOW the transcript, not overlay it: the assistant's plan text renders on
+        // an earlier row than the box's options.
+        let rows: Vec<&str> = out.lines().collect();
+        let plan_row = rows.iter().position(|l| l.contains("meu plano"));
+        let box_row = rows.iter().position(|l| l.contains("Executar"));
+        assert!(
+            matches!((plan_row, box_row), (Some(p), Some(b)) if p < b),
+            "plan text should render above the box (plan_row={plan_row:?}, box_row={box_row:?}):\n{out}"
+        );
+    }
+
+    #[test]
+    fn narrow_terminal_keeps_prompt_and_short_hint_without_overflow() {
+        let model = Model::new("m".to_string(), "/w".to_string());
+        let out = render(&model, 20, 8);
+        // The prompt glyph and the seal survive; the long hint collapses to the short form.
+        assert!(out.contains("kiri"), "brand seal missing:\n{out}");
+        assert!(out.contains("›_"), "prompt glyph missing:\n{out}");
+        assert!(out.contains("/help"), "short hint missing:\n{out}");
+    }
+
+    #[test]
+    fn live_reasoning_line_appears_while_busy_and_vanishes_after() {
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.busy = true;
+        model.live_reasoning = "pensando no que fazer a seguir".to_string();
+        let out = render(&model, 80, 16);
+        assert!(out.contains("pensando"), "live reasoning missing:\n{out}");
+
+        model.busy = false;
+        model.live_reasoning.clear();
+        let out = render(&model, 80, 16);
+        assert!(
+            !out.contains("pensando"),
+            "live reasoning should be gone after the turn:\n{out}"
+        );
     }
 }

@@ -1,14 +1,20 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use crate::modules::tui::application::msg::{Key, KeyPress, Msg};
 
 /// Translate a crossterm event into a `Msg`, or `None` for events the TUI ignores. Only key *press*
 /// events are forwarded (key-release events, reported by some terminals, would double every keystroke).
+/// Mouse wheel scroll up/down maps to transcript scroll messages.
 pub fn to_msg(event: Event) -> Option<Msg> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => key_to_msg(key),
         Event::Paste(text) => Some(Msg::Paste(text)),
         Event::Resize(..) => Some(Msg::Resize),
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => Some(Msg::ScrollUp),
+            MouseEventKind::ScrollDown => Some(Msg::ScrollDown),
+            _ => None,
+        },
         _ => None,
     }
 }

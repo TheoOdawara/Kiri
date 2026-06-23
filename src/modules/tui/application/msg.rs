@@ -49,6 +49,10 @@ pub enum Msg {
     StreamDelta(StreamKind, String),
     TurnFinished,
     ApprovalRequested(PendingApproval),
+    /// The user scrolled the mouse wheel up by one notch.
+    ScrollUp,
+    /// The user scrolled the mouse wheel down by one notch.
+    ScrollDown,
     /// The agent-loop future resolved; reset per-turn UI state.
     TurnEnded,
 }

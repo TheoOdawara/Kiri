@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{EnableBracketedPaste, EventStream};
+use crossterm::event::{EnableBracketedPaste, EnableMouseCapture, EventStream};
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{self, Interval};
@@ -77,7 +77,7 @@ impl Tui {
 
         let mut terminal = ratatui::init();
         let _guard = TerminalGuard;
-        let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste);
+        let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture);
 
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel::<EngineMsg>();
         let cancel = CancelToken::new();
@@ -245,9 +245,6 @@ async fn drive_turn(
     let result = {
         let mut turn: TurnFuture = Box::pin(agent_loop.run(conversation, sandbox, mode, bridge));
         loop {
-            model.status.elapsed_secs = started.elapsed().as_secs();
-            terminal.draw(|frame| view(model, frame))?;
-
             let step = tokio::select! {
                 biased;
                 maybe = events.next() => match maybe {
@@ -259,8 +256,9 @@ async fn drive_turn(
                 outcome = &mut turn => Step::Done(outcome),
             };
 
+            let mut done: Option<_> = None;
             match step {
-                Step::Done(outcome) => break outcome,
+                Step::Done(outcome) => done = Some(outcome),
                 Step::Idle => {}
                 Step::Apply(msg) => {
                     for effect in update(model, msg) {
@@ -282,6 +280,13 @@ async fn drive_turn(
                         }
                     }
                 }
+            }
+            // Draw after applying the step, so the frame reflects the latest model state (no one-frame
+            // lag between a streaming delta and the thinking line / transcript).
+            model.status.elapsed_secs = started.elapsed().as_secs();
+            terminal.draw(|frame| view(model, frame))?;
+            if let Some(outcome) = done {
+                break outcome;
             }
         }
     };

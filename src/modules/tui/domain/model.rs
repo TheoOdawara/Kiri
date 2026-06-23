@@ -4,6 +4,8 @@ use super::command_menu::CommandMenu;
 use super::transcript::Transcript;
 use super::view_state::{History, InputBuffer, PendingApproval, PendingPlan, Scroll};
 
+use std::time::Instant;
+
 /// The status line's data: the model id, the active workspace, and the live turn indicators.
 #[derive(Debug, Default)]
 pub struct Status {
@@ -12,6 +14,21 @@ pub struct Status {
     pub streaming: bool,
     pub elapsed_secs: u64,
     pub spinner_frame: usize,
+    /// When the current turn started, so the thinking line can fall back to streaming content once a
+    /// short budget elapses with no reasoning. Reset on `TurnBegan`.
+    pub turn_started: Option<Instant>,
+}
+
+impl Status {
+    /// Elapsed time as a compact label: seconds under a minute, `Mm Ss` once it reaches one. The raw
+    /// seconds field stays the single source of truth; this is a render-only projection.
+    pub fn elapsed_label(&self) -> String {
+        if self.elapsed_secs < 60 {
+            format!("{}s", self.elapsed_secs)
+        } else {
+            format!("{}m {}s", self.elapsed_secs / 60, self.elapsed_secs % 60)
+        }
+    }
 }
 
 /// The whole TUI state — a pure value mutated only by `update`. The runtime renders it and feeds it
@@ -31,6 +48,12 @@ pub struct Model {
     pub command_menu: Option<CommandMenu>,
     /// A turn is running (the agent loop future is armed).
     pub busy: bool,
+    /// The live reasoning buffer shown as a "thinking" line while a turn runs; cleared on turn end so
+    /// the conversation reverts to the normal chat view. The transcript keeps its own dim copy.
+    pub live_reasoning: String,
+    /// The live content buffer used as a fallback for the thinking line when the model emits no
+    /// reasoning (after a short grace period). Cleared on turn end.
+    pub live_content: String,
     pub should_quit: bool,
     /// How tool calls are gated; cycled with Shift+Tab, read at the start of each turn.
     pub approval_mode: ApprovalMode,
@@ -46,5 +69,38 @@ impl Model {
             },
             ..Self::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elapsed_label_formats_seconds_below_a_minute() {
+        let s = Status {
+            elapsed_secs: 0,
+            ..Status::default()
+        };
+        assert_eq!(s.elapsed_label(), "0s");
+        let s = Status {
+            elapsed_secs: 59,
+            ..Status::default()
+        };
+        assert_eq!(s.elapsed_label(), "59s");
+    }
+
+    #[test]
+    fn elapsed_label_formats_minutes_and_seconds_at_and_above_a_minute() {
+        let s = Status {
+            elapsed_secs: 60,
+            ..Status::default()
+        };
+        assert_eq!(s.elapsed_label(), "1m 0s");
+        let s = Status {
+            elapsed_secs: 125,
+            ..Status::default()
+        };
+        assert_eq!(s.elapsed_label(), "2m 5s");
     }
 }

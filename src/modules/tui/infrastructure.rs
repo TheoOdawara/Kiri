@@ -1,6 +1,7 @@
 pub mod bridge;
 pub mod input;
 pub mod layout;
+pub mod markdown;
 pub mod runtime;
 pub mod terminal_guard;
 pub mod theme;

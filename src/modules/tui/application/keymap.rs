@@ -8,6 +8,9 @@ use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::modules::tui::domain::view_state::{APPROVAL_OPTIONS, PLAN_OPTIONS};
 
 const SCROLL_STEP: u16 = 5;
+/// A "page" scroll step, used for Shift+PageUp/PageDown. The transcript viewport height is not stored
+/// on the model, so a fixed large step stands in; the view clamps to the available history.
+const SCROLL_PAGE: u16 = 20;
 
 /// Interpret a key press against the current model, mutating it and returning any effects. Pure: no
 /// I/O, so it is fully unit-testable. While an approval is pending, keys answer it; otherwise they
@@ -80,35 +83,53 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
             vec![]
         }
         Key::Home => {
-            model.input.home();
-            sync_menu(model);
+            if key.ctrl {
+                model.scroll.top();
+            } else {
+                model.input.home();
+                sync_menu(model);
+            }
             vec![]
         }
         Key::End => {
-            model.input.end();
-            sync_menu(model);
+            if key.ctrl {
+                model.scroll.pin();
+            } else {
+                model.input.end();
+                sync_menu(model);
+            }
             vec![]
         }
+        // Up/Down: history recall by default, transcript scroll when shifted.
         Key::Up => {
-            if let Some(line) = model.history.older(model.input.text()) {
+            if key.shift {
+                model.scroll.up(1);
+            } else if let Some(line) = model.history.older(model.input.text()) {
                 model.input.set(line);
                 sync_menu(model);
             }
             vec![]
         }
         Key::Down => {
-            if let Some(line) = model.history.newer() {
+            if key.shift {
+                model.scroll.down(1);
+            } else if let Some(line) = model.history.newer() {
                 model.input.set(line);
                 sync_menu(model);
             }
             vec![]
         }
+        // PageUp/PageDown: coarse scroll; shifted scrolls a page instead of a step.
         Key::PageUp => {
-            model.scroll.up(SCROLL_STEP);
+            model
+                .scroll
+                .up(if key.shift { SCROLL_PAGE } else { SCROLL_STEP });
             vec![]
         }
         Key::PageDown => {
-            model.scroll.down(SCROLL_STEP);
+            model
+                .scroll
+                .down(if key.shift { SCROLL_PAGE } else { SCROLL_STEP });
             vec![]
         }
         // Shift+Tab cycles the approval mode (Default -> Auto -> Plan); ignored mid-turn, since the
@@ -298,9 +319,6 @@ fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         Choice::Option(1) => (Approval::Approved, true),
         Choice::Option(_) => (Approval::Declined, false),
     };
-    if switch_auto {
-        model.approval_mode = ApprovalMode::Auto;
-    }
     let (level, label) = match decision {
         Approval::Approved => (NoticeLevel::Info, format!("✓ {}", pending.action())),
         Approval::Declined => (
@@ -310,6 +328,15 @@ fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         Approval::Aborted => (NoticeLevel::Error, "✗ sessão encerrada".to_string()),
     };
     model.transcript.push(TranscriptItem::Notice(level, label));
+    // The approval mode is snapshotted per turn, so the auto switch only takes effect on the next
+    // one — make that explicit so the user does not expect the remaining calls to run unattended.
+    if switch_auto {
+        model.approval_mode = ApprovalMode::Auto;
+        model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Info,
+            "modo auto ativo a partir do próximo turno".to_string(),
+        ));
+    }
     vec![Effect::AnswerApproval(decision)]
 }
 
@@ -464,6 +491,12 @@ mod tests {
         assert_eq!(effects, vec![Effect::AnswerApproval(Approval::Approved)]);
         assert_eq!(m.approval_mode, ApprovalMode::Auto);
         assert!(m.pending_approval.is_none());
+        // The auto switch is signposted so the user knows it applies to the next turn, not this one.
+        let last = m.transcript.items().last().unwrap();
+        assert!(
+            matches!(last, TranscriptItem::Notice(NoticeLevel::Info, t) if t.contains("próximo turno")),
+            "missing next-turn notice: {last:?}"
+        );
     }
 
     #[test]
