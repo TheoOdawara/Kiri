@@ -1,5 +1,6 @@
 use crate::modules::agent::application::approval_policy::ApprovalMode;
 
+use super::command_menu::CommandMenu;
 use super::transcript::Transcript;
 use super::view_state::{History, InputBuffer, PendingApproval, PendingPlan, Scroll};
 
@@ -26,6 +27,8 @@ pub struct Model {
     pub pending_approval: Option<PendingApproval>,
     /// A finished plan awaiting the user's decision; while set, keys drive the plan box.
     pub pending_plan: Option<PendingPlan>,
+    /// The live slash-command preview, open while the input starts with `/` and has no whitespace yet.
+    pub command_menu: Option<CommandMenu>,
     /// A turn is running (the agent loop future is armed).
     pub busy: bool,
     pub should_quit: bool,

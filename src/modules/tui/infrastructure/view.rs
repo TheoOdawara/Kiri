@@ -5,7 +5,7 @@ use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::infrastructure::layout::frame_layout;
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
-    approval, editor, header, hint_line, meta_rule, transcript_pane,
+    approval, command_menu, editor, header, hint_line, meta_rule, transcript_pane,
 };
 
 /// The sole ratatui render entry point: project the model onto the frame's regions. Pure with respect
@@ -19,6 +19,10 @@ pub fn view(model: &Model, frame: &mut Frame) {
     meta_rule::render(model, frame, regions.meta);
     editor::render(model, frame, regions.input);
     hint_line::render(model, frame, regions.hint);
+    // The slash-command preview floats just above the editor while the buffer is a `/`-prefixed token.
+    if let Some(menu) = &model.command_menu {
+        command_menu::render(menu, frame, regions.input);
+    }
     // The approval / plan box is an overlay over the transcript, so it sits above the conversation.
     if let Some(pending) = &model.pending_approval {
         approval::render(pending, frame, regions.transcript);

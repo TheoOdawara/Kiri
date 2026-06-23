@@ -2,6 +2,7 @@ use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::msg::{Key, KeyPress};
+use crate::modules::tui::domain::command_menu::CommandMenu;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::modules::tui::domain::view_state::{APPROVAL_OPTIONS, PLAN_OPTIONS};
@@ -17,6 +18,14 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     }
     if model.pending_plan.is_some() {
         return on_plan_key(model, key);
+    }
+
+    // Before anything else: the menu intercepts navigation and completion keys, but lets ordinary
+    // typing fall through to the editor (which keeps the filter in sync after each mutation).
+    if model.command_menu.is_some()
+        && let Some(effects) = on_menu_key(model, &key)
+    {
+        return effects;
     }
 
     // Control chords take precedence over text input.
@@ -41,46 +50,56 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     match key.code {
         Key::Enter if key.shift || key.alt => {
             model.input.insert_char('\n');
+            sync_menu(model);
             vec![]
         }
         Key::Enter => submit(model),
         Key::Char(c) if !key.ctrl => {
             model.input.insert_char(c);
+            sync_menu(model);
             vec![]
         }
         Key::Backspace => {
             model.input.backspace();
+            sync_menu(model);
             vec![]
         }
         Key::Delete => {
             model.input.delete();
+            sync_menu(model);
             vec![]
         }
         Key::Left => {
             model.input.left();
+            sync_menu(model);
             vec![]
         }
         Key::Right => {
             model.input.right();
+            sync_menu(model);
             vec![]
         }
         Key::Home => {
             model.input.home();
+            sync_menu(model);
             vec![]
         }
         Key::End => {
             model.input.end();
+            sync_menu(model);
             vec![]
         }
         Key::Up => {
             if let Some(line) = model.history.older(model.input.text()) {
                 model.input.set(line);
+                sync_menu(model);
             }
             vec![]
         }
         Key::Down => {
             if let Some(line) = model.history.newer() {
                 model.input.set(line);
+                sync_menu(model);
             }
             vec![]
         }
@@ -104,6 +123,72 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     }
 }
 
+/// Open, refresh, or close the slash-command preview based on the current buffer. The menu is gated:
+/// never open during a running turn, while an approval/plan box is up, or once the input contains
+/// whitespace (the user moved on to arguments). Allowed only while the buffer starts with `/`.
+pub fn sync_menu(model: &mut Model) {
+    let text = model.input.text();
+    let can_open = !model.busy
+        && model.pending_approval.is_none()
+        && model.pending_plan.is_none()
+        && text.starts_with('/')
+        && !text.chars().any(char::is_whitespace);
+    if !can_open {
+        model.command_menu = None;
+        return;
+    }
+    match &mut model.command_menu {
+        Some(menu) => menu.refresh(text),
+        slot @ None => *slot = Some(CommandMenu::open(text)),
+    }
+}
+
+/// Handle keys that the menu owns while it is open. Returns `Some(effects)` when the key is consumed
+/// (Up/Down/Tab/Esc), or `None` to fall through to the editor — typing keys still update the filter
+/// via `sync_menu` after the editor mutation.
+fn on_menu_key(model: &mut Model, key: &KeyPress) -> Option<Vec<Effect>> {
+    if key.ctrl {
+        return None;
+    }
+    match key.code {
+        Key::Up => {
+            if let Some(menu) = model.command_menu.as_mut() {
+                menu.move_cursor(-1);
+            }
+            Some(vec![])
+        }
+        Key::Down => {
+            if let Some(menu) = model.command_menu.as_mut() {
+                menu.move_cursor(1);
+            }
+            Some(vec![])
+        }
+        Key::Tab => {
+            if let Some(menu) = model.command_menu.as_ref()
+                && let Some(spec) = menu.spec()
+            {
+                complete_command(model, spec.name);
+            }
+            Some(vec![])
+        }
+        Key::Esc => {
+            model.command_menu = None;
+            Some(vec![])
+        }
+        _ => None,
+    }
+}
+
+/// Replace the slash-command token in the buffer with `name` followed by a single space (Tab moves to
+/// argument mode), then close the menu. Uses `set` to keep `InputBuffer`'s cursor on a char boundary.
+fn complete_command(model: &mut Model, name: &'static str) {
+    let mut new_text = String::with_capacity(name.len() + 1);
+    new_text.push_str(name);
+    new_text.push(' ');
+    model.input.set(new_text);
+    model.command_menu = None;
+}
+
 /// Submit the editor contents: a quit command ends the session; anything else non-blank starts a turn.
 fn submit(model: &mut Model) -> Vec<Effect> {
     if model.busy {
@@ -112,6 +197,7 @@ fn submit(model: &mut Model) -> Vec<Effect> {
     let line = model.input.take();
     model.history.record(&line);
     model.scroll.pin();
+    model.command_menu = None;
     match command::parse(&line) {
         Some(Command::Quit) => {
             model.should_quit = true;
@@ -503,5 +589,129 @@ mod tests {
         assert!(on_key(&mut m, press(Key::Esc)).is_empty());
         assert!(m.pending_plan.is_none());
         assert_eq!(m.approval_mode, ApprovalMode::Default);
+    }
+
+    // --- live slash-command preview ----------------------------------------------
+
+    fn type_str(m: &mut Model, s: &str) {
+        for c in s.chars() {
+            on_key(m, press(Key::Char(c)));
+        }
+    }
+
+    #[test]
+    fn typing_slash_opens_the_command_menu() {
+        let mut m = Model::default();
+        type_str(&mut m, "/");
+        assert!(m.command_menu.is_some(), "menu should open on bare slash");
+        // Empty query shows the whole catalog.
+        assert_eq!(
+            m.command_menu.as_ref().unwrap().filtered().len(),
+            crate::modules::tui::domain::command_menu::COMMANDS.len()
+        );
+    }
+
+    #[test]
+    fn typing_after_slash_filters_the_menu() {
+        let mut m = Model::default();
+        type_str(&mut m, "/ne");
+        let menu = m.command_menu.as_ref().expect("menu should stay open");
+        assert_eq!(menu.filtered().len(), 1);
+        assert_eq!(
+            menu.spec().unwrap().name,
+            "/new",
+            "filtered row should highlight /new"
+        );
+    }
+
+    #[test]
+    fn backspace_closes_the_menu_when_the_slash_is_erased() {
+        let mut m = Model::default();
+        type_str(&mut m, "/n");
+        assert!(m.command_menu.is_some());
+        on_key(&mut m, press(Key::Backspace)); // now "/"
+        assert!(m.command_menu.is_some(), "bare slash keeps the menu open");
+        on_key(&mut m, press(Key::Backspace)); // now empty
+        assert!(
+            m.command_menu.is_none(),
+            "erasing the slash closes the menu"
+        );
+        assert!(m.input.is_empty());
+    }
+
+    #[test]
+    fn space_in_buffer_closes_the_menu_argument_mode() {
+        let mut m = Model::default();
+        type_str(&mut m, "/cd ");
+        assert!(
+            m.command_menu.is_none(),
+            "whitespace starts argument mode, menu must close"
+        );
+    }
+
+    #[test]
+    fn arrows_move_the_highlight_without_recalling_history() {
+        let mut m = Model::default();
+        type_str(&mut m, "/");
+        let first = m.command_menu.as_ref().unwrap().selected();
+        on_key(&mut m, press(Key::Down));
+        assert_eq!(m.command_menu.as_ref().unwrap().selected(), first + 1);
+        on_key(&mut m, press(Key::Up));
+        assert_eq!(m.command_menu.as_ref().unwrap().selected(), first);
+    }
+
+    #[test]
+    fn tab_completes_to_canonical_name_plus_space_and_closes_menu() {
+        let mut m = Model::default();
+        type_str(&mut m, "/ne");
+        on_key(&mut m, press(Key::Tab));
+        assert_eq!(m.input.text(), "/new ");
+        assert!(
+            m.command_menu.is_none(),
+            "Tab closes the menu after completion"
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_menu_but_keeps_the_buffer() {
+        let mut m = Model::default();
+        type_str(&mut m, "/ne");
+        on_key(&mut m, press(Key::Esc));
+        assert!(m.command_menu.is_none());
+        assert_eq!(m.input.text(), "/ne", "Esc must not erase the text");
+    }
+
+    #[test]
+    fn enter_in_a_filtered_menu_submits_the_command() {
+        let mut m = Model::default();
+        type_str(&mut m, "/new");
+        let effects = on_key(&mut m, press(Key::Enter));
+        assert_eq!(effects, vec![Effect::NewSession]);
+        assert!(m.command_menu.is_none(), "submit must clear the menu");
+        assert!(m.input.is_empty());
+    }
+
+    #[test]
+    fn menu_does_not_open_while_a_turn_is_running() {
+        let mut m = Model {
+            busy: true,
+            ..Model::default()
+        };
+        type_str(&mut m, "/");
+        assert!(m.command_menu.is_none(), "menu must stay closed while busy");
+    }
+
+    #[test]
+    fn ctrl_c_mid_menu_aborts_to_quit_not_navigation() {
+        let mut m = Model::default();
+        type_str(&mut m, "/");
+        let ctrl_c = KeyPress {
+            code: Key::Char('c'),
+            ctrl: true,
+            alt: false,
+            shift: false,
+        };
+        assert_eq!(on_key(&mut m, ctrl_c), vec![Effect::Quit]);
+        assert!(m.should_quit);
     }
 }
