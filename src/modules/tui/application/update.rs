@@ -2,7 +2,6 @@ use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::keymap;
 use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::domain::model::Model;
-use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 
 /// The pure reducer: apply one message to the model and return the effects the runtime must perform.
 /// No I/O, no engine handles — fully unit-testable.
@@ -36,12 +35,6 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::TurnFinished => {
             model.status.streaming = false;
-            Vec::new()
-        }
-        Msg::EngineNotice(line) => {
-            model
-                .transcript
-                .push(TranscriptItem::Notice(NoticeLevel::Info, line));
             Vec::new()
         }
         Msg::ApprovalRequested(pending) => {

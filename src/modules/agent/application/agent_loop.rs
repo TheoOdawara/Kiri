@@ -53,8 +53,8 @@ impl AgentLoop {
     /// Drive one user turn to completion. The conversation must already hold the user message. On a
     /// provider failure the error is returned (the caller renders it and rolls back a dangling user
     /// message); `Aborted` means the user ended the session at a prompt. `io` is the engine's single UI
-    /// surface — the `EventSink`/`Presenter`/`ApprovalPolicy` ports, all satisfied by the one `Terminal`
-    /// in production.
+    /// surface — the `EventSink`/`Presenter`/`ApprovalPolicy` ports, all satisfied by the `Bridge`
+    /// adapter in production.
     pub async fn run<IO: EventSink + Presenter + ApprovalPolicy>(
         &self,
         conversation: &mut Conversation,
@@ -193,7 +193,6 @@ mod tests {
         fn finish_turn(&mut self) -> Result<(), AgentError> {
             Ok(())
         }
-        fn notice(&mut self, _line: &str) {}
     }
 
     #[async_trait::async_trait(?Send)]

@@ -145,11 +145,6 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Expand `~`/`~/…` against the real `$HOME`; used to resolve a `/cd` target the shell didn't expand.
-pub(crate) fn expand_user_path(path: &str) -> PathBuf {
-    expand_tilde(path, home().as_deref())
-}
-
 /// Whether a tool path targets an explicit absolute location (after `~` expansion) — i.e. potentially
 /// outside the active workspace. Used to pick the confirmation default (accept inside, decline outside).
 pub(crate) fn is_absolute_target(path: &str) -> bool {

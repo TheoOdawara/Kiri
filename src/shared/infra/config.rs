@@ -49,10 +49,6 @@ struct Cli {
     /// Defaults to the current directory.
     #[arg(long, env = "KIRI_PATH")]
     path: Option<PathBuf>,
-    /// Use the plain line-based REPL instead of the full-screen TUI. The plain REPL is also used
-    /// automatically when stdout is not a TTY (piped output, CI).
-    #[arg(long)]
-    plain: bool,
 }
 
 /// The resolved configuration the composition root needs to wire the harness. The API key and model
@@ -65,8 +61,6 @@ pub struct Settings {
     pub path: PathBuf,
     pub seed: Option<String>,
     pub checkpoint_budget: Duration,
-    /// Force the plain line-based REPL even on a TTY (the `--plain` flag).
-    pub plain: bool,
 }
 
 impl Settings {
@@ -87,7 +81,6 @@ impl Settings {
             path,
             seed: cli.prompt,
             checkpoint_budget: TOOL_CHECKPOINT,
-            plain: cli.plain,
         })
     }
 }

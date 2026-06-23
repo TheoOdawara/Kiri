@@ -20,7 +20,6 @@ pub enum EngineMsg {
     Reasoning(String),
     Content(String),
     Finished,
-    Notice(String),
     Approval {
         pending: PendingApproval,
         reply: oneshot::Sender<Approval>,
@@ -103,10 +102,6 @@ impl Presenter for Bridge {
 
     fn finish_turn(&mut self) -> Result<(), AgentError> {
         self.push(EngineMsg::Finished)
-    }
-
-    fn notice(&mut self, line: &str) {
-        let _ = self.push(EngineMsg::Notice(line.to_string()));
     }
 }
 

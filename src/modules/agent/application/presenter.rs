@@ -7,6 +7,4 @@ pub trait Presenter {
     fn begin_turn(&mut self);
     /// Called once a turn's stream ends: erase a leftover spinner, reset the terminal, newline.
     fn finish_turn(&mut self) -> Result<(), AgentError>;
-    /// An out-of-band line (the workspace path, an error message).
-    fn notice(&mut self, line: &str);
 }

@@ -34,7 +34,7 @@ type TurnFuture<'a> = Pin<Box<dyn Future<Output = Result<TurnOutcome, AgentError
 const FRAME_INTERVAL: Duration = Duration::from_millis(120);
 
 /// The full-screen TUI frontend: owns the engine handles and the UI model, runs the render/input loop,
-/// and drives one agent turn at a time. Selected over `Repl` in `app::wire` when stdout is a TTY.
+/// and drives one agent turn at a time. The sole frontend, assembled in `app::wire`.
 pub struct Tui {
     agent_loop: AgentLoop,
     sandbox: Sandbox,
@@ -245,7 +245,6 @@ fn engine_msg(engine: EngineMsg, pending_reply: &mut Option<oneshot::Sender<Appr
         EngineMsg::Reasoning(text) => Msg::StreamDelta(StreamKind::Reasoning, text),
         EngineMsg::Content(text) => Msg::StreamDelta(StreamKind::Content, text),
         EngineMsg::Finished => Msg::TurnFinished,
-        EngineMsg::Notice(line) => Msg::EngineNotice(line),
         EngineMsg::Approval { pending, reply } => {
             *pending_reply = Some(reply);
             Msg::ApprovalRequested(pending)

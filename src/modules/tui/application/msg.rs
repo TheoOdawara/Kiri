@@ -46,7 +46,6 @@ pub enum Msg {
     TurnBegan,
     StreamDelta(StreamKind, String),
     TurnFinished,
-    EngineNotice(String),
     ApprovalRequested(PendingApproval),
     /// The agent-loop future resolved; reset per-turn UI state.
     TurnEnded,
