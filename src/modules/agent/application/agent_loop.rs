@@ -1,9 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
-
-use crate::modules::agent::application::approval_policy::{Approval, ApprovalPolicy};
+use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode, ApprovalPolicy};
 use crate::modules::agent::application::presenter::Presenter;
 use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
@@ -28,7 +26,6 @@ pub enum TurnOutcome {
 pub struct AgentLoop {
     provider: Arc<dyn CompletionProvider>,
     registry: ToolRegistry,
-    schemas: Vec<Value>,
     model: String,
     checkpoint_budget: Duration,
 }
@@ -40,11 +37,9 @@ impl AgentLoop {
         model: String,
         checkpoint_budget: Duration,
     ) -> Self {
-        let schemas = registry.schemas();
         Self {
             provider,
             registry,
-            schemas,
             model,
             checkpoint_budget,
         }
@@ -59,8 +54,11 @@ impl AgentLoop {
         &self,
         conversation: &mut Conversation,
         sandbox: &Sandbox,
+        mode: ApprovalMode,
         io: &mut IO,
     ) -> Result<TurnOutcome, AgentError> {
+        // The advertised tool set is fixed for the turn; in plan mode it excludes destructive tools.
+        let schemas = self.registry.schemas_for(mode);
         let mut checkpoint = Instant::now();
         loop {
             io.begin_turn();
@@ -70,7 +68,7 @@ impl AgentLoop {
                     TurnRequest {
                         messages: conversation.messages(),
                         model: &self.model,
-                        tools: &self.schemas,
+                        tools: &schemas,
                     },
                     io,
                 )
@@ -91,13 +89,28 @@ impl AgentLoop {
             conversation.push(Message::assistant_tool_calls(narration, calls.clone()));
 
             for call in &calls {
-                let outcome = match self.registry.confirm(sandbox, call) {
-                    Some(confirmation) => match io.decide(&confirmation).await {
-                        Approval::Approved => self.registry.execute(sandbox, call),
-                        Approval::Declined => ToolOutcome::Declined,
-                        Approval::Aborted => return Ok(TurnOutcome::Aborted),
+                let outcome = match mode {
+                    // Auto: run every call without asking.
+                    ApprovalMode::Auto => self.registry.execute(sandbox, call),
+                    // Plan: destructive tools are withheld from the schema; if the model still names
+                    // one, refuse it without touching the filesystem. Read-only tools run directly so
+                    // the agent can investigate while drafting its plan.
+                    ApprovalMode::Plan if self.registry.is_destructive(&call.function.name) => {
+                        ToolOutcome::Error(format!(
+                            "'{}' is blocked in plan mode (planning is read-only)",
+                            call.function.name
+                        ))
+                    }
+                    ApprovalMode::Plan => self.registry.execute(sandbox, call),
+                    // Default: confirm each call through the UI before running it.
+                    ApprovalMode::Default => match self.registry.confirm(sandbox, call) {
+                        Some(confirmation) => match io.decide(&confirmation).await {
+                            Approval::Approved => self.registry.execute(sandbox, call),
+                            Approval::Declined => ToolOutcome::Declined,
+                            Approval::Aborted => return Ok(TurnOutcome::Aborted),
+                        },
+                        None => self.registry.execute(sandbox, call),
                     },
-                    None => self.registry.execute(sandbox, call),
                 };
                 conversation.push(Message::tool_result(
                     call.id.as_str(),
@@ -250,7 +263,7 @@ mod tests {
         let mut io = ScriptedIo(Approval::Approved);
 
         let outcome = agent_loop
-            .run(&mut conversation, &sandbox, &mut io)
+            .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
             .await
             .unwrap();
 
@@ -285,9 +298,119 @@ mod tests {
         let mut io = ScriptedIo(Approval::Aborted);
 
         let outcome = agent_loop
-            .run(&mut conversation, &sandbox, &mut io)
+            .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
             .await
             .unwrap();
         assert_eq!(outcome, TurnOutcome::Aborted);
+    }
+
+    #[tokio::test]
+    async fn auto_mode_runs_tools_without_asking() {
+        let dir = TempDir::new("auto");
+        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let agent_loop = agent_loop_with(vec![
+            CompletedTurn {
+                content: "writing".to_string(),
+                tool_calls: vec![tool_call(
+                    "write_file",
+                    r#"{"path":"a.txt","content":"hi"}"#,
+                )],
+            },
+            CompletedTurn {
+                content: "done".to_string(),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("write a.txt"));
+        // Would decline if asked — auto mode must not ask.
+        let mut io = ScriptedIo(Approval::Declined);
+
+        let outcome = agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TurnOutcome::Completed);
+        assert_eq!(
+            std::fs::read_to_string(dir.path.join("a.txt")).unwrap(),
+            "hi"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_mode_blocks_destructive_tools() {
+        let dir = TempDir::new("plan-block");
+        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let agent_loop = agent_loop_with(vec![
+            CompletedTurn {
+                content: "writing".to_string(),
+                tool_calls: vec![tool_call(
+                    "write_file",
+                    r#"{"path":"a.txt","content":"hi"}"#,
+                )],
+            },
+            CompletedTurn {
+                content: "plan".to_string(),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("write a.txt"));
+        let mut io = ScriptedIo(Approval::Approved);
+
+        let outcome = agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TurnOutcome::Completed);
+        assert!(!dir.path.join("a.txt").exists(), "plan mode must not write");
+        let tool_msg = conversation
+            .messages()
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .unwrap();
+        assert!(
+            tool_msg
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("blocked in plan mode")
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_mode_allows_read_only_tools() {
+        let dir = TempDir::new("plan-read");
+        std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
+        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let agent_loop = agent_loop_with(vec![
+            CompletedTurn {
+                content: "reading".to_string(),
+                tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+            },
+            CompletedTurn {
+                content: "plan".to_string(),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("read a.txt"));
+        // Would decline if asked — plan mode runs read-only tools directly.
+        let mut io = ScriptedIo(Approval::Declined);
+
+        let outcome = agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TurnOutcome::Completed);
+        let tool_msg = conversation
+            .messages()
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .unwrap();
+        assert_eq!(tool_msg.content.as_deref(), Some("hello"));
     }
 }

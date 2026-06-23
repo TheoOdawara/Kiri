@@ -1,3 +1,4 @@
+use crate::modules::agent::application::approval_policy::ApprovalMode;
 use crate::modules::tools::application::tool::{Confirmation, Tool, ToolOutcome};
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::tool_call::ToolCall;
@@ -16,6 +17,26 @@ impl ToolRegistry {
     /// The schema array advertised to the provider (replaces `tool_definitions()`).
     pub fn schemas(&self) -> Vec<serde_json::Value> {
         self.tools.iter().map(|tool| tool.schema()).collect()
+    }
+
+    /// The schema array advertised for `mode`. In plan mode only read-only tools are offered, so the
+    /// model cannot even request a destructive action while planning.
+    pub fn schemas_for(&self, mode: ApprovalMode) -> Vec<serde_json::Value> {
+        if mode == ApprovalMode::Plan {
+            self.tools
+                .iter()
+                .filter(|tool| tool.is_read_only())
+                .map(|tool| tool.schema())
+                .collect()
+        } else {
+            self.schemas()
+        }
+    }
+
+    /// Whether a named tool exists and mutates the filesystem — used to block it in plan mode. An
+    /// unknown name is not destructive (then `execute` reports the unknown-tool error).
+    pub fn is_destructive(&self, name: &str) -> bool {
+        self.find(name).is_some_and(|tool| !tool.is_read_only())
     }
 
     fn find(&self, name: &str) -> Option<&dyn Tool> {
@@ -111,6 +132,28 @@ mod tests {
                 "search"
             ]
         );
+    }
+
+    #[test]
+    fn plan_mode_schemas_expose_only_read_only_tools() {
+        let names: Vec<String> = registry()
+            .schemas_for(ApprovalMode::Plan)
+            .iter()
+            .map(|schema| schema["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["read_file", "list_dir", "search"]);
+    }
+
+    #[test]
+    fn is_destructive_classifies_tools() {
+        let r = registry();
+        assert!(r.is_destructive("write_file"));
+        assert!(r.is_destructive("delete_dir"));
+        assert!(r.is_destructive("move_path"));
+        assert!(!r.is_destructive("read_file"));
+        assert!(!r.is_destructive("search"));
+        // An unknown tool is not destructive; execute reports the unknown-tool error instead.
+        assert!(!r.is_destructive("nope"));
     }
 
     #[test]

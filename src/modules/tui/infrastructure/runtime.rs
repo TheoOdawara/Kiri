@@ -184,9 +184,11 @@ async fn drive_turn(
 ) -> Result<()> {
     cancel.reset();
     let started = Instant::now();
+    // The approval mode is fixed for this turn; cycling it mid-turn applies to the next one.
+    let mode = model.approval_mode;
 
     let result = {
-        let mut turn: TurnFuture = Box::pin(agent_loop.run(conversation, sandbox, bridge));
+        let mut turn: TurnFuture = Box::pin(agent_loop.run(conversation, sandbox, mode, bridge));
         loop {
             model.status.elapsed_secs = started.elapsed().as_secs();
             terminal.draw(|frame| view(model, frame))?;

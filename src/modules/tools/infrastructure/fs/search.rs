@@ -100,4 +100,8 @@ impl Tool for Search {
         }
         ToolOutcome::Ok(output)
     }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }
