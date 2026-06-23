@@ -29,6 +29,7 @@ fn key_to_msg(key: KeyEvent) -> Option<Msg> {
         KeyCode::PageDown => Key::PageDown,
         KeyCode::Esc => Key::Esc,
         KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => Key::BackTab,
         _ => return None,
     };
     let modifiers = key.modifiers;

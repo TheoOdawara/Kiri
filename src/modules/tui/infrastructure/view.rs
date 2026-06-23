@@ -75,4 +75,13 @@ mod tests {
         assert!(out.contains("aprovar?"), "approval prompt missing:\n{out}");
         assert!(out.contains("ler a.txt"), "approval text missing:\n{out}");
     }
+
+    #[test]
+    fn meta_rule_shows_the_active_approval_mode() {
+        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.approval_mode = ApprovalMode::Plan;
+        let out = render(&model, 80, 12);
+        assert!(out.contains("PLAN"), "mode badge missing:\n{out}");
+    }
 }

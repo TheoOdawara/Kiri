@@ -1,3 +1,5 @@
+use crate::modules::agent::application::approval_policy::ApprovalMode;
+
 use super::transcript::Transcript;
 use super::view_state::{History, InputBuffer, PendingApproval, Scroll};
 
@@ -25,6 +27,8 @@ pub struct Model {
     /// A turn is running (the agent loop future is armed).
     pub busy: bool,
     pub should_quit: bool,
+    /// How tool calls are gated; cycled with Shift+Tab, read at the start of each turn.
+    pub approval_mode: ApprovalMode,
 }
 
 impl Model {

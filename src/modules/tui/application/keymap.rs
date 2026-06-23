@@ -88,6 +88,14 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
             model.scroll.down(SCROLL_STEP);
             vec![]
         }
+        // Shift+Tab cycles the approval mode (Default -> Auto -> Plan); ignored mid-turn, since the
+        // mode is read when a turn starts.
+        Key::BackTab => {
+            if !model.busy {
+                model.approval_mode = model.approval_mode.next();
+            }
+            vec![]
+        }
         _ => vec![],
     }
 }
@@ -248,5 +256,29 @@ mod tests {
             on_key(&mut m, press(Key::Enter)),
             vec![Effect::AnswerApproval(Approval::Declined)]
         );
+    }
+
+    #[test]
+    fn back_tab_cycles_the_approval_mode_when_idle() {
+        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        let mut m = Model::default();
+        assert_eq!(m.approval_mode, ApprovalMode::Default);
+        assert!(on_key(&mut m, press(Key::BackTab)).is_empty());
+        assert_eq!(m.approval_mode, ApprovalMode::Auto);
+        on_key(&mut m, press(Key::BackTab));
+        assert_eq!(m.approval_mode, ApprovalMode::Plan);
+        on_key(&mut m, press(Key::BackTab));
+        assert_eq!(m.approval_mode, ApprovalMode::Default);
+    }
+
+    #[test]
+    fn back_tab_is_ignored_mid_turn() {
+        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        let mut m = Model {
+            busy: true,
+            ..Model::default()
+        };
+        on_key(&mut m, press(Key::BackTab));
+        assert_eq!(m.approval_mode, ApprovalMode::Default);
     }
 }

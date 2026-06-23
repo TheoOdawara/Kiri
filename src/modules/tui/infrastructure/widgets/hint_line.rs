@@ -29,7 +29,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         Line::styled("  ^C cancela · streaming…", theme::dim())
     } else {
         Line::styled(
-            "  Enter envia · Alt+Enter nova linha · ↑↓ histórico · PgUp/PgDn rola · ^C/^D sai · /exit",
+            "  Enter envia · ⇧Tab modo · Alt+Enter nova linha · ↑↓ histórico · PgUp/PgDn rola · ^C/^D sai · /exit",
             theme::dim(),
         )
     };
