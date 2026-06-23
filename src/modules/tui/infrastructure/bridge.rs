@@ -72,10 +72,7 @@ impl Bridge {
 
     async fn request(&self, prompt: String, default_accept: bool) -> Approval {
         let (reply, rx) = oneshot::channel();
-        let pending = PendingApproval {
-            prompt,
-            default_accept,
-        };
+        let pending = PendingApproval::new(prompt, default_accept);
         if self.push(EngineMsg::Approval { pending, reply }).is_err() {
             return Approval::Aborted;
         }

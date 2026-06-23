@@ -1,9 +1,10 @@
-use crate::modules::agent::application::approval_policy::Approval;
+use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode};
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::msg::{Key, KeyPress};
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
+use crate::modules::tui::domain::view_state::APPROVAL_OPTIONS;
 
 const SCROLL_STEP: u16 = 5;
 
@@ -149,48 +150,78 @@ fn submit(model: &mut Model) -> Vec<Effect> {
     }
 }
 
-/// Map a key to an approval decision, recording the outcome in the transcript.
-fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
-    let default_accept = model
-        .pending_approval
-        .as_ref()
-        .is_some_and(|p| p.default_accept);
+/// A resolved approval choice from a key press while a confirmation is pending.
+enum Choice {
+    /// Pick option `usize` from `APPROVAL_OPTIONS`.
+    Option(usize),
+    /// Decline just this call (Esc / 'n').
+    Decline,
+    /// End the whole session (Ctrl+C).
+    Abort,
+}
 
-    let approval = match key.code {
-        Key::Esc => Some(Approval::Aborted),
-        Key::Char('c') if key.ctrl => Some(Approval::Aborted),
-        Key::Enter => Some(if default_accept {
-            Approval::Approved
-        } else {
-            Approval::Declined
-        }),
+/// Answer the pending confirmation: arrows move the highlight, Enter takes the highlighted option,
+/// digits/letters jump straight to one, Esc declines this call, and Ctrl+C aborts the session. Option 2
+/// ("Sim, e não perguntar de novo") also switches the session to auto mode.
+fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
+    // Navigation moves the highlight without answering.
+    if let Some(pending) = model.pending_approval.as_mut() {
+        match key.code {
+            Key::Up => {
+                pending.selected = pending.selected.saturating_sub(1);
+                return vec![];
+            }
+            Key::Down => {
+                pending.selected = (pending.selected + 1).min(APPROVAL_OPTIONS.len() - 1);
+                return vec![];
+            }
+            _ => {}
+        }
+    }
+
+    let selected = model.pending_approval.as_ref().map_or(0, |p| p.selected);
+    let choice = match key.code {
+        Key::Char('c') if key.ctrl => Some(Choice::Abort),
+        Key::Esc => Some(Choice::Decline),
+        Key::Enter => Some(Choice::Option(selected)),
+        Key::Char('1') => Some(Choice::Option(0)),
+        Key::Char('2') => Some(Choice::Option(1)),
+        Key::Char('3') => Some(Choice::Option(2)),
         Key::Char(c) => match c.to_ascii_lowercase() {
-            's' | 'y' => Some(Approval::Approved),
-            'n' => Some(Approval::Declined),
+            's' | 'y' => Some(Choice::Option(0)),
+            'n' => Some(Choice::Decline),
             _ => None,
         },
         _ => None,
     };
+    let Some(choice) = choice else {
+        return vec![];
+    };
 
-    match approval {
-        Some(decision) => {
-            let pending = model
-                .pending_approval
-                .take()
-                .expect("an approval is pending");
-            let (level, label) = match decision {
-                Approval::Approved => (NoticeLevel::Info, format!("✓ {}", pending.prompt)),
-                Approval::Declined => (
-                    NoticeLevel::Error,
-                    format!("✗ recusado: {}", pending.prompt),
-                ),
-                Approval::Aborted => (NoticeLevel::Error, "✗ sessão encerrada".to_string()),
-            };
-            model.transcript.push(TranscriptItem::Notice(level, label));
-            vec![Effect::AnswerApproval(decision)]
-        }
-        None => vec![],
+    let pending = model
+        .pending_approval
+        .take()
+        .expect("an approval is pending");
+    let (decision, switch_auto) = match choice {
+        Choice::Abort => (Approval::Aborted, false),
+        Choice::Decline => (Approval::Declined, false),
+        Choice::Option(0) => (Approval::Approved, false),
+        Choice::Option(1) => (Approval::Approved, true),
+        Choice::Option(_) => (Approval::Declined, false),
+    };
+    if switch_auto {
+        model.approval_mode = ApprovalMode::Auto;
     }
+    let (level, label) = match decision {
+        Approval::Approved => (NoticeLevel::Info, format!("✓ {}", pending.action())),
+        Approval::Declined => (
+            NoticeLevel::Error,
+            format!("✗ recusado: {}", pending.action()),
+        ),
+        Approval::Aborted => (NoticeLevel::Error, "✗ sessão encerrada".to_string()),
+    };
+    model.transcript.push(TranscriptItem::Notice(level, label));
+    vec![Effect::AnswerApproval(decision)]
 }
 
 #[cfg(test)]
@@ -258,10 +289,7 @@ mod tests {
     #[test]
     fn pending_approval_consumes_keys_as_decisions() {
         let mut m = Model {
-            pending_approval: Some(PendingApproval {
-                prompt: "delete a.txt".to_string(),
-                default_accept: true,
-            }),
+            pending_approval: Some(PendingApproval::new("delete a.txt".to_string(), true)),
             ..Model::default()
         };
         let effects = on_key(&mut m, press(Key::Char('n')));
@@ -273,15 +301,57 @@ mod tests {
     #[test]
     fn enter_on_approval_follows_the_default() {
         let mut m = Model {
-            pending_approval: Some(PendingApproval {
-                prompt: "p".to_string(),
-                default_accept: false,
-            }),
+            pending_approval: Some(PendingApproval::new("p".to_string(), false)),
             ..Model::default()
         };
         assert_eq!(
             on_key(&mut m, press(Key::Enter)),
             vec![Effect::AnswerApproval(Approval::Declined)]
+        );
+    }
+
+    #[test]
+    fn approval_arrows_move_selection_then_enter_confirms_and_switches_to_auto() {
+        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        let mut m = Model {
+            pending_approval: Some(PendingApproval::new("p".to_string(), true)),
+            ..Model::default()
+        };
+        on_key(&mut m, press(Key::Down)); // highlight option 2 ("…modo auto")
+        assert_eq!(m.pending_approval.as_ref().unwrap().selected, 1);
+        let effects = on_key(&mut m, press(Key::Enter));
+        assert_eq!(effects, vec![Effect::AnswerApproval(Approval::Approved)]);
+        assert_eq!(m.approval_mode, ApprovalMode::Auto);
+        assert!(m.pending_approval.is_none());
+    }
+
+    #[test]
+    fn esc_declines_without_aborting_the_session() {
+        let mut m = Model {
+            pending_approval: Some(PendingApproval::new("p".to_string(), true)),
+            ..Model::default()
+        };
+        assert_eq!(
+            on_key(&mut m, press(Key::Esc)),
+            vec![Effect::AnswerApproval(Approval::Declined)]
+        );
+    }
+
+    #[test]
+    fn ctrl_c_aborts_a_pending_approval() {
+        let mut m = Model {
+            pending_approval: Some(PendingApproval::new("p".to_string(), true)),
+            ..Model::default()
+        };
+        let ctrl_c = KeyPress {
+            code: Key::Char('c'),
+            ctrl: true,
+            alt: false,
+            shift: false,
+        };
+        assert_eq!(
+            on_key(&mut m, ctrl_c),
+            vec![Effect::AnswerApproval(Approval::Aborted)]
         );
     }
 
