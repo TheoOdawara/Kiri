@@ -36,7 +36,7 @@ impl Tool for DeleteDir {
             call,
             |a: &PathArgs| {
                 format!(
-                    "Excluir RECURSIVAMENTE o diretório '{}' e TODO o seu conteúdo?",
+                    "Excluir recursivamente o diretório e todo o seu conteúdo. Aprova executar: rm -rf {}?",
                     a.path
                 )
             },

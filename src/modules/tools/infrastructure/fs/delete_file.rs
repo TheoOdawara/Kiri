@@ -33,7 +33,7 @@ impl Tool for DeleteFile {
     fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
         simple_confirm(
             call,
-            |a: &PathArgs| format!("Excluir '{}'?", a.path),
+            |a: &PathArgs| format!("Excluir o arquivo. Aprova executar: rm {}?", a.path),
             |a| a.path.as_str(),
         )
     }

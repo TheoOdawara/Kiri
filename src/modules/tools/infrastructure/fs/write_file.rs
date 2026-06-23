@@ -38,12 +38,17 @@ impl Tool for WriteFile {
         let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
         let action = match sandbox.resolve_create(&a.path) {
             Ok(r) if !r.missing_dirs.is_empty() => format!(
-                "Criar diretório(s) '{}' e gravar '{}'?",
+                "Criar diretório(s) '{}' e gravar o arquivo. Aprova executar: write {}?",
                 missing_dirs_label(&r, sandbox),
                 a.path
             ),
-            Ok(r) if r.target.exists() => format!("Sobrescrever '{}'?", a.path),
-            _ => format!("Criar e gravar '{}'?", a.path),
+            Ok(r) if r.target.exists() => {
+                format!("Sobrescrever o arquivo. Aprova executar: write {}?", a.path)
+            }
+            _ => format!(
+                "Criar e gravar o arquivo. Aprova executar: write {}?",
+                a.path
+            ),
         };
         let default_accept = default_accept_for(&a.path);
         Some(confirm(action, default_accept))

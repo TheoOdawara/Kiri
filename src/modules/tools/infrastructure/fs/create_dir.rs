@@ -33,7 +33,7 @@ impl Tool for CreateDir {
     fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
         simple_confirm(
             call,
-            |a: &PathArgs| format!("Criar diretório '{}'?", a.path),
+            |a: &PathArgs| format!("Criar diretório. Aprova executar: mkdir {}?", a.path),
             |a| a.path.as_str(),
         )
     }

@@ -39,7 +39,7 @@ pub fn search_file(path: &Path, query: &str, root: &Path, matches: &mut Vec<Stri
         return; // treat NUL-containing files as binary and skip
     }
     let text = String::from_utf8_lossy(&bytes);
-    let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
+    let relative = relative_display(path.strip_prefix(root).unwrap_or(path));
     for (number, line) in text.lines().enumerate() {
         if matches.len() >= SEARCH_MAX_MATCHES {
             return;
@@ -62,14 +62,15 @@ pub fn missing_dirs_label(resolution: &CreateResolution, sandbox: &Sandbox) -> S
     resolution
         .missing_dirs
         .iter()
-        .map(|dir| {
-            dir.strip_prefix(sandbox.root())
-                .unwrap_or(dir)
-                .display()
-                .to_string()
-        })
+        .map(|dir| relative_display(dir.strip_prefix(sandbox.root()).unwrap_or(dir)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Render a workspace-relative path with forward slashes, so the user-facing text and the frozen
+/// characterization snapshot stay byte-identical across platforms (Windows otherwise yields `\`).
+fn relative_display(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
 }
 
 /// Create the missing parent directories of a create/move target, mapping a mkdir failure to the

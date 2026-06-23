@@ -39,18 +39,19 @@ impl Tool for MovePath {
         let a: MoveArgs = parse(call.function.arguments.as_str()).ok()?;
         let action = match sandbox.resolve_create(&a.destination) {
             Ok(r) if !r.missing_dirs.is_empty() => format!(
-                "Criar diretório(s) '{}' e mover '{}' → '{}'?",
+                "Criar diretório(s) '{}' e mover. Aprova executar: mv {} {}?",
                 missing_dirs_label(&r, sandbox),
                 a.source,
                 a.destination
             ),
-            Ok(r) if r.target.exists() => {
-                format!(
-                    "Sobrescrever '{}' movendo de '{}'?",
-                    a.destination, a.source
-                )
-            }
-            _ => format!("Mover '{}' → '{}'?", a.source, a.destination),
+            Ok(r) if r.target.exists() => format!(
+                "Sobrescrever o destino movendo. Aprova executar: mv {} {}?",
+                a.source, a.destination
+            ),
+            _ => format!(
+                "Mover o caminho. Aprova executar: mv {} {}?",
+                a.source, a.destination
+            ),
         };
         let default_accept = default_accept_for(&a.destination);
         Some(confirm(action, default_accept))

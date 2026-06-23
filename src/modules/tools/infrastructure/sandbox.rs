@@ -160,8 +160,10 @@ fn home() -> Option<PathBuf> {
 
 /// Whether a tool path targets an explicit absolute location (after `~` expansion) — i.e. potentially
 /// outside the active workspace. Used to pick the confirmation default (accept inside, decline outside).
+/// The model emits Unix-style paths, so a leading `/` is treated as absolute on every platform
+/// (`Path::is_absolute` would miss it on Windows, where a drive prefix is required).
 pub(crate) fn is_absolute_target(path: &str) -> bool {
-    expand_tilde(path, home().as_deref()).is_absolute()
+    path.starts_with('/') || expand_tilde(path, home().as_deref()).is_absolute()
 }
 
 /// The confirmation default for a tool path: accept inside the workspace, decline for an explicit

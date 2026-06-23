@@ -33,7 +33,7 @@ impl Tool for ReadFile {
     fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
         simple_confirm(
             call,
-            |a: &PathArgs| format!("Ler '{}'?", a.path),
+            |a: &PathArgs| format!("Ler o arquivo. Aprova executar: cat {}?", a.path),
             |a| a.path.as_str(),
         )
     }

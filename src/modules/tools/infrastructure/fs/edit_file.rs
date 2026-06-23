@@ -37,7 +37,7 @@ impl Tool for EditFile {
     fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
         simple_confirm(
             call,
-            |a: &PathArgs| format!("Editar '{}'?", a.path),
+            |a: &PathArgs| format!("Editar o arquivo. Aprova executar: edit {}?", a.path),
             |a| a.path.as_str(),
         )
     }

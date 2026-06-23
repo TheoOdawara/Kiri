@@ -37,7 +37,12 @@ impl Tool for Search {
     fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
         simple_confirm(
             call,
-            |a: &SearchArgs| format!("Buscar '{}' em '{}'?", a.query, a.path),
+            |a: &SearchArgs| {
+                format!(
+                    "Buscar '{}'. Aprova executar: rg '{}' {}?",
+                    a.query, a.query, a.path
+                )
+            },
             |a| a.path.as_str(),
         )
     }
