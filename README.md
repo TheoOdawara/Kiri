@@ -60,9 +60,9 @@ borderless prompt whose gate glyph changes color with its state.
         KIRI harness system: Protecting codebase... [OK]
            Forged from Tradition, Built for Precision
 
-◈─ moonshotai/kimi-k2-instruct · ~/dev/Kiri ──────────────◈
+◈─ moonshotai/kimi-k2-instruct · ~/dev/Kiri · DEFAULT ─────◈
 ⬡ ›_
-  Enter envia · Alt+Enter nova linha · ↑↓ histórico · ^C sai
+  Enter envia · ⇧Tab modo · Alt+Enter nova linha · ↑↓ histórico · ^C/^D sai · /help
 ```
 
 ## Features
@@ -70,8 +70,10 @@ borderless prompt whose gate glyph changes color with its state.
 - **Directed agent loop** — the model plans, then acts through tools, **one approved call at a time**.
 - **Streaming reasoning + content** — thoughts and answer stream token-by-token over SSE.
 - **9 filesystem tools** behind a **path sandbox** — the workspace root is the single I/O chokepoint.
-- **Two frontends, one engine** — a full-screen [ratatui](https://ratatui.rs) **TUI**, or a plain
-  line-based REPL (used automatically when stdout isn't a TTY, or forced with `--plain`).
+- **Full-screen TUI** — a [ratatui](https://ratatui.rs) terminal UI: live transcript, a rich approval
+  box, and slash commands (requires an interactive terminal).
+- **Three approval modes** — cycle with `Shift+Tab`: **default** confirms every call, **auto** runs them
+  unattended, **plan** stays read-only and proposes a plan you approve before it executes.
 - **Runaway guard** — a 30-minute wall-clock checkpoint pauses long turns to ask whether to keep going.
 - **NVIDIA OpenAI-compatible provider** — talks to `integrate.api.nvidia.com`'s `/chat/completions`.
 - **Built to hold up** — modular-hexagonal, single binary, `unsafe` forbidden, green-gated.
@@ -108,13 +110,15 @@ Arguments:
 
 Options:
       --path <DIR> Sandbox root for file tools (also via KIRI_PATH). Defaults to the current directory
-      --plain      Use the plain line REPL instead of the TUI (also auto when stdout isn't a TTY)
   -h, --help       Print help
 ```
 
-**Approval.** Every tool call is confirmed before it runs. Paths **inside** the workspace default to
-accept (`[S/n]`); absolute or `~/` paths **outside** it default to decline (`[s/N]`). Press `y`/`s` to
-approve, `n` to decline, `Enter` for the default, `Esc`/`Ctrl+C` to abort the session.
+**Approval modes.** `Shift+Tab` cycles three modes (shown on the meta rule): **default** opens an
+approval box for every tool call, **auto** runs them without asking, and **plan** offers only read-only
+tools so the agent drafts a plan you approve before it runs. In the approval box, navigate with `↑`/`↓`
+and `Enter` (or press `1`/`2`/`3`): **Sim**, **Sim, e não perguntar de novo** (switches to auto), or
+**Não**. `Esc`/`n` declines just that call; `Ctrl+C` ends the session. Paths inside the workspace default
+to accept; absolute or `~/` paths outside it default to decline.
 
 **Key bindings (TUI)**
 
@@ -124,11 +128,13 @@ approve, `n` to decline, `Enter` for the default, `Esc`/`Ctrl+C` to abort the se
 | `Alt+Enter` / `Shift+Enter` | Insert a newline |
 | `↑` / `↓` | Recall input history |
 | `PgUp` / `PgDn` | Scroll the transcript |
+| `Shift+Tab` | Cycle the approval mode (default → auto → plan) |
 | `Ctrl+C` | Cancel the running turn, or quit when idle |
 | `Ctrl+D` | Quit (empty input) |
 
-**Commands.** `/exit`, `/sair`, `/quit` end the session. The plain REPL also accepts `/cd [path]` to show
-or change the active workspace.
+**Commands.** `/exit` (`/sair`, `/quit`) ends the session · `/new` (`/novo`) starts a fresh session ·
+`/plan`, `/auto`, `/default` switch the approval mode · `/cd [path]` shows or changes the workspace ·
+`/help` lists everything. An unknown `/command` is flagged instead of being sent to the model.
 
 ## Tools
 
@@ -162,14 +168,13 @@ src/
     agent/                # conversation domain + the agent loop + the UI ports
     provider/             # CompletionProvider port + the NVIDIA OpenAI/SSE adapter
     tools/                # Tool trait + ToolRegistry + the sandbox + fs adapters
-    repl/                 # the plain line-based frontend
     tui/                  # the full-screen ratatui frontend (Elm-style state machine)
 ```
 
 Invariants: network I/O lives only in `provider/infrastructure`, filesystem I/O only behind the sandbox,
 and `domain` has no I/O at all. The decisions behind this are recorded as ADRs in
 [`docs/decisions/`](docs/decisions/) — provider (0001), tools & sandbox (0002), architecture (0003),
-the rename & TUI (0004).
+the rename & TUI (0004), and the approval modes & plan flow (0005).
 
 ## Development
 

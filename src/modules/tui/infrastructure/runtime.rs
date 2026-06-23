@@ -312,8 +312,8 @@ fn engine_msg(engine: EngineMsg, pending_reply: &mut Option<oneshot::Sender<Appr
     }
 }
 
-/// Apply the turn's outcome: surface errors, roll back the conversation exactly as the plain REPL does,
-/// and reset per-turn UI state. A user cancel (^C) is reported as such, not as an error.
+/// Apply the turn's outcome: surface errors, roll back the conversation, and reset per-turn UI state.
+/// A user cancel (^C) is reported as such, not as an error.
 fn on_turn_end(
     result: Result<TurnOutcome, AgentError>,
     cancelled: bool,

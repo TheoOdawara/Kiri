@@ -62,8 +62,8 @@ impl CompletionProvider for OpenAiProvider {
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             // A 4xx means the body we sent is unacceptable; resending it unchanged fails identically,
-            // so it is surfaced distinctly to let the REPL drop the offending turn. 5xx/other stay a
-            // plain (transient) provider error.
+            // so it is surfaced distinctly to let the frontend drop the offending turn. 5xx/other stay
+            // a plain (transient) provider error.
             return Err(if status.is_client_error() {
                 AgentError::ProviderRejected {
                     status: status.as_u16(),

@@ -1,7 +1,7 @@
 # Kiri — Project Working Contract
 
-Async Rust CLI agent harness that talks to NVIDIA's OpenAI-compatible chat API (streaming REPL,
-tool-calling with a filesystem sandbox, per-call approval).
+Async Rust CLI agent harness that talks to NVIDIA's OpenAI-compatible chat API (streaming TUI,
+tool-calling with a filesystem sandbox, approval modes: default/auto/plan).
 Layers on the global contract — only project-specific rules below; when they conflict, this file wins.
 
 ## Stack
@@ -36,17 +36,17 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
 - **Layers, depending inward:** `domain/` = pure data/rules, no I/O · `application/` = use-cases + the
   **ports** they need, as **traits** (named by capability, no `I` prefix) · `infrastructure/` = **adapters**
   implementing the ports.
-- **Modules (bounded contexts):** `agent` (conversation domain + the `RunTurn` agent loop + the UI ports
-  `Presenter`/`ApprovalPolicy`/`AgentIo`), `provider` (the `CompletionProvider` port + the OpenAI-compatible
-  adapter: wire DTOs, SSE assembly), `tools` (the `Tool` trait + `ToolRegistry` + the sandbox + one fs adapter
-  per tool), `repl` (the `Terminal` + the REPL driving adapter). Planned: `session` (SQLite-persisted
-  conversations).
+- **Modules (bounded contexts):** `agent` (conversation domain + the `AgentLoop` + `ApprovalMode` + the UI
+  ports `Presenter`/`ApprovalPolicy`, plus the provider's `EventSink`), `provider` (the `CompletionProvider`
+  port + the OpenAI-compatible adapter: wire DTOs, SSE assembly), `tools` (the `Tool` trait + `ToolRegistry`
+  + the sandbox + one fs adapter per tool), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
+  adapter + the ratatui runtime — the sole front-end). Planned: `session` (SQLite-persisted conversations).
 - **shared/kernel:** cross-cutting primitives — `ToolCall`/`FunctionCall`, `AgentError` (thiserror).
   **shared/infra:** `config` (CLI + env + `Settings`).
 
 **Invariants:** network I/O only in `provider/infrastructure`; filesystem I/O only in `tools/infrastructure`
 (the sandbox is the single path chokepoint); `domain` has no I/O; the engine never touches stdin/stdout
-directly (all UI via the `AgentIo` port). Ports return `AgentError`; `anyhow` only at the binary edge.
+directly (all UI via the engine ports). Ports return `AgentError`; `anyhow` only at the binary edge.
 
 **Extending:** a new tool = one file under `tools/infrastructure/fs/` implementing `Tool`, registered in
 `default_fs_tools`; a new provider = one adapter implementing `CompletionProvider`, chosen in `app::wire`.
