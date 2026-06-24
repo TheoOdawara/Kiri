@@ -2,11 +2,16 @@ use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::msg::{Key, KeyPress};
+use crate::modules::tui::domain::command_menu::CommandMenu;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::modules::tui::domain::view_state::{APPROVAL_OPTIONS, PLAN_OPTIONS};
+use tui_textarea::{Input, Key as TaKey};
 
 const SCROLL_STEP: u16 = 5;
+/// A "page" scroll step, used for Shift+PageUp/PageDown. The transcript viewport height is not stored
+/// on the model, so a fixed large step stands in; the view clamps to the available history.
+const SCROLL_PAGE: u16 = 20;
 
 /// Interpret a key press against the current model, mutating it and returning any effects. Pure: no
 /// I/O, so it is fully unit-testable. While an approval is pending, keys answer it; otherwise they
@@ -19,16 +24,59 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         return on_plan_key(model, key);
     }
 
-    // Control chords take precedence over text input.
-    if key.ctrl {
+    // Before anything else: the menu intercepts navigation and completion keys, but lets ordinary
+    // typing fall through to the editor (which keeps the filter in sync after each mutation).
+    if model.command_menu.is_some()
+        && let Some(effects) = on_menu_key(model, &key)
+    {
+        return effects;
+    }
+
+    // Windows-style chords for clipboard/undo and session control take precedence over text input, and
+    // override the widget's emacs defaults (Ctrl+A=head, Ctrl+V=paste, Ctrl+Y=paste, ...). Clipboard is
+    // I/O, so the reducer only mutates the buffer and emits an effect; the runtime performs the I/O.
+    if key.ctrl && !key.alt {
         match key.code {
             Key::Char('c') => {
+                if let Some(text) = model.input.copy_selection() {
+                    return vec![Effect::CopyToClipboard(text)];
+                }
                 return if model.busy {
                     vec![Effect::CancelTurn]
                 } else {
                     model.should_quit = true;
                     vec![Effect::Quit]
                 };
+            }
+            Key::Char('x') => {
+                return match model.input.cut_selection() {
+                    Some(text) => {
+                        sync_menu(model);
+                        vec![Effect::CopyToClipboard(text)]
+                    }
+                    None => vec![],
+                };
+            }
+            Key::Char('v') => return vec![Effect::PasteClipboard],
+            Key::Char('a') => {
+                model.input.select_all();
+                return vec![];
+            }
+            Key::Char('z') => {
+                model.input.undo();
+                sync_menu(model);
+                return vec![];
+            }
+            Key::Char('y') => {
+                model.input.redo();
+                sync_menu(model);
+                return vec![];
+            }
+            // Toggle full vs preview-bounded tool output / edit diffs. A pure view flag, live even
+            // mid-turn so the user can expand a long output while it streams.
+            Key::Char('o') => {
+                model.expand_tools = !model.expand_tools;
+                return vec![];
             }
             Key::Char('d') if model.input.is_empty() => {
                 model.should_quit = true;
@@ -39,59 +87,13 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     }
 
     match key.code {
+        // Shift/Alt+Enter inserts a newline; plain Enter submits.
         Key::Enter if key.shift || key.alt => {
-            model.input.insert_char('\n');
+            model.input.newline();
+            sync_menu(model);
             vec![]
         }
         Key::Enter => submit(model),
-        Key::Char(c) if !key.ctrl => {
-            model.input.insert_char(c);
-            vec![]
-        }
-        Key::Backspace => {
-            model.input.backspace();
-            vec![]
-        }
-        Key::Delete => {
-            model.input.delete();
-            vec![]
-        }
-        Key::Left => {
-            model.input.left();
-            vec![]
-        }
-        Key::Right => {
-            model.input.right();
-            vec![]
-        }
-        Key::Home => {
-            model.input.home();
-            vec![]
-        }
-        Key::End => {
-            model.input.end();
-            vec![]
-        }
-        Key::Up => {
-            if let Some(line) = model.history.older(model.input.text()) {
-                model.input.set(line);
-            }
-            vec![]
-        }
-        Key::Down => {
-            if let Some(line) = model.history.newer() {
-                model.input.set(line);
-            }
-            vec![]
-        }
-        Key::PageUp => {
-            model.scroll.up(SCROLL_STEP);
-            vec![]
-        }
-        Key::PageDown => {
-            model.scroll.down(SCROLL_STEP);
-            vec![]
-        }
         // Shift+Tab cycles the approval mode (Default -> Auto -> Plan); ignored mid-turn, since the
         // mode is read when a turn starts.
         Key::BackTab => {
@@ -100,8 +102,149 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
             }
             vec![]
         }
-        _ => vec![],
+        // Ctrl+Home/End jump the transcript scrollback; plain Home/End fall through to the editor.
+        Key::Home if key.ctrl => {
+            model.scroll.top();
+            vec![]
+        }
+        Key::End if key.ctrl => {
+            model.scroll.pin();
+            vec![]
+        }
+        // Up/Down recall history only at the buffer's edges; inside a multi-line buffer they move the
+        // cursor between lines (handled by the editor fall-through). Shift or an active selection always
+        // means "select", never "recall".
+        Key::Up if !key.shift && !model.input.is_selecting() && model.input.cursor_row() == 0 => {
+            if let Some(line) = model.history.older(&model.input.text()) {
+                model.input.set(line);
+                sync_menu(model);
+            }
+            vec![]
+        }
+        Key::Down
+            if !key.shift
+                && !model.input.is_selecting()
+                && model.input.cursor_row() == model.input.last_row() =>
+        {
+            if let Some(line) = model.history.newer() {
+                model.input.set(line);
+                sync_menu(model);
+            }
+            vec![]
+        }
+        // PageUp/PageDown: coarse transcript scroll; shifted scrolls a page instead of a step.
+        Key::PageUp => {
+            model
+                .scroll
+                .up(if key.shift { SCROLL_PAGE } else { SCROLL_STEP });
+            vec![]
+        }
+        Key::PageDown => {
+            model
+                .scroll
+                .down(if key.shift { SCROLL_PAGE } else { SCROLL_STEP });
+            vec![]
+        }
+        // Everything else — typing, deletion, cursor motion, word motion, Shift-selection — is the
+        // editor's; the widget handles it and we keep the slash-command preview in sync.
+        _ => {
+            model.input.feed(to_input(key));
+            sync_menu(model);
+            vec![]
+        }
     }
+}
+
+/// Map a normalized key press onto the editor widget's backend-agnostic input type.
+fn to_input(key: KeyPress) -> Input {
+    Input {
+        key: match key.code {
+            Key::Char(c) => TaKey::Char(c),
+            Key::Enter => TaKey::Enter,
+            Key::Backspace => TaKey::Backspace,
+            Key::Delete => TaKey::Delete,
+            Key::Left => TaKey::Left,
+            Key::Right => TaKey::Right,
+            Key::Up => TaKey::Up,
+            Key::Down => TaKey::Down,
+            Key::Home => TaKey::Home,
+            Key::End => TaKey::End,
+            Key::PageUp => TaKey::PageUp,
+            Key::PageDown => TaKey::PageDown,
+            Key::Esc => TaKey::Esc,
+            Key::Tab => TaKey::Tab,
+            Key::BackTab => TaKey::Null,
+        },
+        ctrl: key.ctrl,
+        alt: key.alt,
+        shift: key.shift,
+    }
+}
+
+/// Open, refresh, or close the slash-command preview based on the current buffer. The menu is gated:
+/// never open during a running turn, while an approval/plan box is up, or once the input contains
+/// whitespace (the user moved on to arguments). Allowed only while the buffer starts with `/`.
+pub fn sync_menu(model: &mut Model) {
+    let text = model.input.text();
+    let can_open = !model.busy
+        && model.pending_approval.is_none()
+        && model.pending_plan.is_none()
+        && text.starts_with('/')
+        && !text.chars().any(char::is_whitespace);
+    if !can_open {
+        model.command_menu = None;
+        return;
+    }
+    match &mut model.command_menu {
+        Some(menu) => menu.refresh(&text),
+        slot @ None => *slot = Some(CommandMenu::open(&text)),
+    }
+}
+
+/// Handle keys that the menu owns while it is open. Returns `Some(effects)` when the key is consumed
+/// (Up/Down/Tab/Esc), or `None` to fall through to the editor — typing keys still update the filter
+/// via `sync_menu` after the editor mutation.
+fn on_menu_key(model: &mut Model, key: &KeyPress) -> Option<Vec<Effect>> {
+    if key.ctrl {
+        return None;
+    }
+    match key.code {
+        Key::Up => {
+            if let Some(menu) = model.command_menu.as_mut() {
+                menu.move_cursor(-1);
+            }
+            Some(vec![])
+        }
+        Key::Down => {
+            if let Some(menu) = model.command_menu.as_mut() {
+                menu.move_cursor(1);
+            }
+            Some(vec![])
+        }
+        Key::Tab => {
+            if let Some(menu) = model.command_menu.as_ref()
+                && let Some(spec) = menu.spec()
+            {
+                complete_command(model, spec.name);
+            }
+            Some(vec![])
+        }
+        Key::Esc => {
+            model.command_menu = None;
+            Some(vec![])
+        }
+        _ => None,
+    }
+}
+
+/// Replace the slash-command token in the buffer with `name` followed by a single space (Tab moves to
+/// argument mode), then close the menu. Uses `set` to keep `InputBuffer`'s cursor on a char boundary.
+fn complete_command(model: &mut Model, name: &'static str) {
+    let mut new_text = String::with_capacity(name.len() + 1);
+    new_text.push_str(name);
+    new_text.push(' ');
+    model.input.set(new_text);
+    model.command_menu = None;
 }
 
 /// Submit the editor contents: a quit command ends the session; anything else non-blank starts a turn.
@@ -112,6 +255,7 @@ fn submit(model: &mut Model) -> Vec<Effect> {
     let line = model.input.take();
     model.history.record(&line);
     model.scroll.pin();
+    model.command_menu = None;
     match command::parse(&line) {
         Some(Command::Quit) => {
             model.should_quit = true;
@@ -137,6 +281,7 @@ fn submit(model: &mut Model) -> Vec<Effect> {
             vec![]
         }
         Some(Command::ChangeWorkspace(Some(path))) => vec![Effect::ChangeWorkspace(path)],
+        Some(Command::Paste) => vec![Effect::PasteClipboard],
         Some(Command::Unknown) => {
             model.transcript.push(TranscriptItem::Notice(
                 NoticeLevel::Error,
@@ -144,11 +289,21 @@ fn submit(model: &mut Model) -> Vec<Effect> {
             ));
             vec![]
         }
-        None if line.trim().is_empty() => vec![],
+        None if line.trim().is_empty() && model.attachments.is_empty() => vec![],
         None => {
-            model.transcript.push(TranscriptItem::User(line.clone()));
+            // Drain the staged images into the prompt; a turn can carry text, images, or both.
+            let images: Vec<String> = std::mem::take(&mut model.attachments)
+                .into_iter()
+                .map(|attachment| attachment.data_url)
+                .collect();
+            let label = if line.trim().is_empty() {
+                format!("🖼 {} imagem(ns)", images.len())
+            } else {
+                line.clone()
+            };
+            model.transcript.push(TranscriptItem::User(label));
             model.busy = true;
-            vec![Effect::SubmitPrompt(line)]
+            vec![Effect::SubmitPrompt { text: line, images }]
         }
     }
 }
@@ -209,14 +364,13 @@ fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         Choice::Abort => (Approval::Aborted, false),
         Choice::Decline => (Approval::Declined, false),
         Choice::Option(0) => (Approval::Approved, false),
-        Choice::Option(1) => (Approval::Approved, true),
+        Choice::Option(1) => (Approval::ApprovedAuto, true),
         Choice::Option(_) => (Approval::Declined, false),
     };
-    if switch_auto {
-        model.approval_mode = ApprovalMode::Auto;
-    }
     let (level, label) = match decision {
-        Approval::Approved => (NoticeLevel::Info, format!("✓ {}", pending.action())),
+        Approval::Approved | Approval::ApprovedAuto => {
+            (NoticeLevel::Info, format!("✓ {}", pending.action()))
+        }
         Approval::Declined => (
             NoticeLevel::Error,
             format!("✗ recusado: {}", pending.action()),
@@ -224,12 +378,21 @@ fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         Approval::Aborted => (NoticeLevel::Error, "✗ sessão encerrada".to_string()),
     };
     model.transcript.push(TranscriptItem::Notice(level, label));
+    // `ApprovedAuto` already runs the rest of this turn unattended; also make auto the standing mode
+    // so later turns no longer prompt either.
+    if switch_auto {
+        model.approval_mode = ApprovalMode::Auto;
+        model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Info,
+            "✓ modo auto ativo".to_string(),
+        ));
+    }
     vec![Effect::AnswerApproval(decision)]
 }
 
 /// Drive the plan box shown after a plan-mode turn: arrows move the highlight, Enter/digits pick an
-/// option, Esc cancels, Ctrl+C quits. "Executar" emits `ApprovePlan`; "Continuar" just closes the box
-/// (staying in plan mode); "Cancelar" closes it and returns to default mode.
+/// option, Esc cancels, Ctrl+C quits. "Executar" emits `ApprovePlan` (in default or auto mode);
+/// "Continuar" just closes the box (staying in plan mode); "Cancelar" closes it and returns to default.
 fn on_plan_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     if let Some(plan) = model.pending_plan.as_mut() {
         match key.code {
@@ -257,16 +420,19 @@ fn on_plan_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         Key::Char('1') => 0,
         Key::Char('2') => 1,
         Key::Char('3') => 2,
-        Key::Esc => 2,
+        Key::Char('4') => 3,
+        Key::Esc => 3,
         _ => return vec![],
     };
 
     model.pending_plan = None;
     match index {
-        // Execute the plan: the runtime leaves plan mode and runs a turn that carries it out.
-        0 => vec![Effect::ApprovePlan],
+        // Execute the plan confirming each step: the runtime leaves plan mode for default mode.
+        0 => vec![Effect::ApprovePlan(ApprovalMode::Default)],
+        // Execute the plan unattended: the runtime leaves plan mode for auto mode.
+        1 => vec![Effect::ApprovePlan(ApprovalMode::Auto)],
         // Keep planning: close the box and stay in plan mode for more input.
-        1 => vec![],
+        2 => vec![],
         // Cancel: leave plan mode without executing.
         _ => {
             model.approval_mode = ApprovalMode::Default;
@@ -300,7 +466,13 @@ mod tests {
             on_key(&mut m, press(Key::Char(c)));
         }
         let effects = on_key(&mut m, press(Key::Enter));
-        assert_eq!(effects, vec![Effect::SubmitPrompt("hi".to_string())]);
+        assert_eq!(
+            effects,
+            vec![Effect::SubmitPrompt {
+                text: "hi".to_string(),
+                images: vec![],
+            }]
+        );
         assert!(m.busy);
         assert!(m.input.is_empty());
         assert_eq!(m.transcript.items().len(), 1);
@@ -375,9 +547,18 @@ mod tests {
         on_key(&mut m, press(Key::Down)); // highlight option 2 ("…modo auto")
         assert_eq!(m.pending_approval.as_ref().unwrap().selected, 1);
         let effects = on_key(&mut m, press(Key::Enter));
-        assert_eq!(effects, vec![Effect::AnswerApproval(Approval::Approved)]);
+        // ApprovedAuto runs the rest of this turn unattended; the mode also sticks for later turns.
+        assert_eq!(
+            effects,
+            vec![Effect::AnswerApproval(Approval::ApprovedAuto)]
+        );
         assert_eq!(m.approval_mode, ApprovalMode::Auto);
         assert!(m.pending_approval.is_none());
+        let last = m.transcript.items().last().unwrap();
+        assert!(
+            matches!(last, TranscriptItem::Notice(NoticeLevel::Info, t) if t.contains("modo auto ativo")),
+            "missing auto-active notice: {last:?}"
+        );
     }
 
     #[test]
@@ -408,6 +589,16 @@ mod tests {
             on_key(&mut m, ctrl_c),
             vec![Effect::AnswerApproval(Approval::Aborted)]
         );
+    }
+
+    #[test]
+    fn ctrl_o_toggles_tool_output_expansion() {
+        let mut m = Model::default();
+        assert!(!m.expand_tools);
+        assert!(on_key(&mut m, ctrl(Key::Char('o'))).is_empty());
+        assert!(m.expand_tools, "Ctrl+O should expand tool output");
+        on_key(&mut m, ctrl(Key::Char('o')));
+        assert!(!m.expand_tools, "Ctrl+O again should collapse it");
     }
 
     #[test]
@@ -470,11 +661,31 @@ mod tests {
 
     #[test]
     fn plan_enter_executes_the_plan() {
+        use crate::modules::agent::application::approval_policy::ApprovalMode;
         let mut m = Model {
             pending_plan: Some(PendingPlan::default()),
             ..Model::default()
         };
-        assert_eq!(on_key(&mut m, press(Key::Enter)), vec![Effect::ApprovePlan]);
+        assert_eq!(
+            on_key(&mut m, press(Key::Enter)),
+            vec![Effect::ApprovePlan(ApprovalMode::Default)]
+        );
+        assert!(m.pending_plan.is_none());
+    }
+
+    #[test]
+    fn plan_execute_in_auto_emits_auto_mode() {
+        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        let mut m = Model {
+            pending_plan: Some(PendingPlan::default()),
+            approval_mode: ApprovalMode::Plan,
+            ..Model::default()
+        };
+        on_key(&mut m, press(Key::Down)); // highlight "Executar o plano em modo auto"
+        assert_eq!(
+            on_key(&mut m, press(Key::Enter)),
+            vec![Effect::ApprovePlan(ApprovalMode::Auto)]
+        );
         assert!(m.pending_plan.is_none());
     }
 
@@ -486,6 +697,7 @@ mod tests {
             approval_mode: ApprovalMode::Plan,
             ..Model::default()
         };
+        on_key(&mut m, press(Key::Down)); // highlight "Executar o plano em modo auto"
         on_key(&mut m, press(Key::Down)); // highlight "Continuar planejando"
         assert!(on_key(&mut m, press(Key::Enter)).is_empty());
         assert!(m.pending_plan.is_none());
@@ -503,5 +715,212 @@ mod tests {
         assert!(on_key(&mut m, press(Key::Esc)).is_empty());
         assert!(m.pending_plan.is_none());
         assert_eq!(m.approval_mode, ApprovalMode::Default);
+    }
+
+    // --- live slash-command preview ----------------------------------------------
+
+    fn type_str(m: &mut Model, s: &str) {
+        for c in s.chars() {
+            on_key(m, press(Key::Char(c)));
+        }
+    }
+
+    #[test]
+    fn typing_slash_opens_the_command_menu() {
+        let mut m = Model::default();
+        type_str(&mut m, "/");
+        assert!(m.command_menu.is_some(), "menu should open on bare slash");
+        // Empty query shows the whole catalog.
+        assert_eq!(
+            m.command_menu.as_ref().unwrap().filtered().len(),
+            crate::modules::tui::domain::command_menu::COMMANDS.len()
+        );
+    }
+
+    #[test]
+    fn typing_after_slash_filters_the_menu() {
+        let mut m = Model::default();
+        type_str(&mut m, "/ne");
+        let menu = m.command_menu.as_ref().expect("menu should stay open");
+        assert_eq!(menu.filtered().len(), 1);
+        assert_eq!(
+            menu.spec().unwrap().name,
+            "/new",
+            "filtered row should highlight /new"
+        );
+    }
+
+    #[test]
+    fn backspace_closes_the_menu_when_the_slash_is_erased() {
+        let mut m = Model::default();
+        type_str(&mut m, "/n");
+        assert!(m.command_menu.is_some());
+        on_key(&mut m, press(Key::Backspace)); // now "/"
+        assert!(m.command_menu.is_some(), "bare slash keeps the menu open");
+        on_key(&mut m, press(Key::Backspace)); // now empty
+        assert!(
+            m.command_menu.is_none(),
+            "erasing the slash closes the menu"
+        );
+        assert!(m.input.is_empty());
+    }
+
+    #[test]
+    fn space_in_buffer_closes_the_menu_argument_mode() {
+        let mut m = Model::default();
+        type_str(&mut m, "/cd ");
+        assert!(
+            m.command_menu.is_none(),
+            "whitespace starts argument mode, menu must close"
+        );
+    }
+
+    #[test]
+    fn arrows_move_the_highlight_without_recalling_history() {
+        let mut m = Model::default();
+        type_str(&mut m, "/");
+        let first = m.command_menu.as_ref().unwrap().selected();
+        on_key(&mut m, press(Key::Down));
+        assert_eq!(m.command_menu.as_ref().unwrap().selected(), first + 1);
+        on_key(&mut m, press(Key::Up));
+        assert_eq!(m.command_menu.as_ref().unwrap().selected(), first);
+    }
+
+    #[test]
+    fn tab_completes_to_canonical_name_plus_space_and_closes_menu() {
+        let mut m = Model::default();
+        type_str(&mut m, "/ne");
+        on_key(&mut m, press(Key::Tab));
+        assert_eq!(m.input.text(), "/new ");
+        assert!(
+            m.command_menu.is_none(),
+            "Tab closes the menu after completion"
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_menu_but_keeps_the_buffer() {
+        let mut m = Model::default();
+        type_str(&mut m, "/ne");
+        on_key(&mut m, press(Key::Esc));
+        assert!(m.command_menu.is_none());
+        assert_eq!(m.input.text(), "/ne", "Esc must not erase the text");
+    }
+
+    #[test]
+    fn enter_in_a_filtered_menu_submits_the_command() {
+        let mut m = Model::default();
+        type_str(&mut m, "/new");
+        let effects = on_key(&mut m, press(Key::Enter));
+        assert_eq!(effects, vec![Effect::NewSession]);
+        assert!(m.command_menu.is_none(), "submit must clear the menu");
+        assert!(m.input.is_empty());
+    }
+
+    #[test]
+    fn menu_does_not_open_while_a_turn_is_running() {
+        let mut m = Model {
+            busy: true,
+            ..Model::default()
+        };
+        type_str(&mut m, "/");
+        assert!(m.command_menu.is_none(), "menu must stay closed while busy");
+    }
+
+    #[test]
+    fn ctrl_c_mid_menu_aborts_to_quit_not_navigation() {
+        let mut m = Model::default();
+        type_str(&mut m, "/");
+        let ctrl_c = KeyPress {
+            code: Key::Char('c'),
+            ctrl: true,
+            alt: false,
+            shift: false,
+        };
+        assert_eq!(on_key(&mut m, ctrl_c), vec![Effect::Quit]);
+        assert!(m.should_quit);
+    }
+
+    // --- rich editor: clipboard chords and history-at-edge -------------------------
+
+    fn shift(code: Key) -> KeyPress {
+        KeyPress {
+            code,
+            ctrl: false,
+            alt: false,
+            shift: true,
+        }
+    }
+
+    fn ctrl(code: Key) -> KeyPress {
+        KeyPress {
+            code,
+            ctrl: true,
+            alt: false,
+            shift: false,
+        }
+    }
+
+    #[test]
+    fn ctrl_c_with_a_selection_copies_instead_of_cancelling() {
+        let mut m = Model {
+            busy: true, // even mid-turn, Ctrl+C on a selection copies rather than cancels
+            ..Model::default()
+        };
+        type_str(&mut m, "abc");
+        on_key(&mut m, shift(Key::Left));
+        on_key(&mut m, shift(Key::Left)); // select "bc"
+        let effects = on_key(&mut m, ctrl(Key::Char('c')));
+        assert!(
+            matches!(effects.as_slice(), [Effect::CopyToClipboard(t)] if t == "bc"),
+            "Ctrl+C with a selection should copy it, got {effects:?}"
+        );
+        assert!(!m.should_quit, "copy must not quit");
+    }
+
+    #[test]
+    fn ctrl_x_cuts_the_selection_and_removes_it() {
+        let mut m = Model::default();
+        type_str(&mut m, "abc");
+        on_key(&mut m, shift(Key::Left)); // select "c"
+        let effects = on_key(&mut m, ctrl(Key::Char('x')));
+        assert!(
+            matches!(effects.as_slice(), [Effect::CopyToClipboard(t)] if t == "c"),
+            "Ctrl+X should cut the selection, got {effects:?}"
+        );
+        assert_eq!(m.input.text(), "ab", "cut must remove the selected text");
+    }
+
+    #[test]
+    fn ctrl_x_without_a_selection_is_a_noop() {
+        let mut m = Model::default();
+        type_str(&mut m, "abc");
+        assert!(on_key(&mut m, ctrl(Key::Char('x'))).is_empty());
+        assert_eq!(m.input.text(), "abc");
+    }
+
+    #[test]
+    fn up_recalls_history_only_at_the_first_row() {
+        let mut m = Model::default();
+        m.history.record("prev");
+        // Build a two-line buffer; the cursor ends on the last (second) row.
+        on_key(&mut m, press(Key::Char('a')));
+        on_key(&mut m, shift(Key::Enter)); // newline without submitting
+        on_key(&mut m, press(Key::Char('b')));
+        assert_eq!(m.input.text(), "a\nb");
+        // From the last row, Up moves the cursor up — it must NOT recall history.
+        on_key(&mut m, press(Key::Up));
+        assert_eq!(
+            m.input.text(),
+            "a\nb",
+            "Up inside a multi-line buffer must not recall"
+        );
+        // Now on the first row, Up recalls the previous prompt.
+        on_key(&mut m, press(Key::Up));
+        assert_eq!(
+            m.input.text(),
+            "prev",
+            "Up at the first row should recall history"
+        );
     }
 }

@@ -1,10 +1,10 @@
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::tool::{
-    Confirmation, PATH_DESC, Tool, ToolOutcome, function_schema, simple_confirm,
+    Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema, simple_command,
 };
-use crate::modules::tools::infrastructure::args::{PathArgs, parse_args};
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
+use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::modules::tools::infrastructure::support::{READ_FILE_MAX_BYTES, read_capped};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -30,12 +30,17 @@ impl Tool for ReadFile {
         )
     }
 
-    fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        simple_confirm(
-            call,
-            |a: &PathArgs| format!("Ler '{}'?", a.path),
-            |a| a.path.as_str(),
-        )
+    fn command_line(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+        simple_command(call, |a: &PathArgs| format!("cat {}", a.path))
+    }
+
+    fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+        let cmd = self.command_line(sandbox, call)?;
+        let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
+        Some(confirm(
+            format!("Ler o arquivo. Aprova executar: {cmd}?"),
+            default_accept_for(&a.path),
+        ))
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {

@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{EnableBracketedPaste, EventStream};
+use crossterm::event::{EnableBracketedPaste, EnableMouseCapture, EventStream};
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{self, Interval};
@@ -23,8 +23,11 @@ use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::{NoticeLevel, Transcript, TranscriptItem};
 use crate::modules::tui::domain::view_state::PendingPlan;
 use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
+use crate::modules::tui::infrastructure::clipboard::{self, ClipboardContent};
 use crate::modules::tui::infrastructure::input;
 use crate::modules::tui::infrastructure::terminal_guard::TerminalGuard;
+use crate::modules::tui::infrastructure::text;
+use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::view::view;
 use crate::shared::kernel::error::AgentError;
 
@@ -54,7 +57,7 @@ impl Tui {
         seed: Option<String>,
         model: String,
     ) -> Self {
-        let workspace = sandbox.root().display().to_string();
+        let workspace = text::display_path(sandbox.root());
         Self {
             agent_loop,
             sandbox,
@@ -77,7 +80,16 @@ impl Tui {
 
         let mut terminal = ratatui::init();
         let _guard = TerminalGuard;
-        let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste);
+        let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture);
+
+        // The editor widget owns its own styling; paint it with the brand theme once at startup.
+        let cursor = ratatui::style::Style::default()
+            .fg(theme::VOID)
+            .bg(theme::HIGHLIGHT);
+        let selection = ratatui::style::Style::default()
+            .fg(theme::VOID)
+            .bg(theme::BRAND);
+        model.input.set_styles(theme::base(), cursor, selection);
 
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel::<EngineMsg>();
         let cancel = CancelToken::new();
@@ -138,8 +150,13 @@ impl Tui {
 
             for effect in update(&mut model, msg) {
                 match effect {
-                    Effect::SubmitPrompt(text) => {
-                        conversation.push(Message::user(text));
+                    Effect::SubmitPrompt { text, images } => {
+                        let message = if images.is_empty() {
+                            Message::user(text)
+                        } else {
+                            Message::user_multimodal(text, images)
+                        };
+                        conversation.push(message);
                         drive_turn(
                             &agent_loop,
                             &mut conversation,
@@ -155,10 +172,13 @@ impl Tui {
                         )
                         .await?;
                     }
+                    Effect::CopyToClipboard(text) => clipboard::copy_text(&text),
+                    Effect::PasteClipboard => paste_from_clipboard(&mut model),
                     Effect::Quit => model.should_quit = true,
                     Effect::NewSession => {
                         conversation = Conversation::new(system_prompt);
                         model.transcript = Transcript::default();
+                        model.attachments.clear();
                         model.scroll.pin();
                         model.transcript.push(TranscriptItem::Notice(
                             NoticeLevel::Info,
@@ -167,7 +187,7 @@ impl Tui {
                     }
                     Effect::ChangeWorkspace(path) => match sandbox.relocated(&path) {
                         Ok(new_sandbox) => {
-                            model.status.workspace = new_sandbox.root().display().to_string();
+                            model.status.workspace = text::display_path(new_sandbox.root());
                             sandbox = new_sandbox;
                             model.transcript.push(TranscriptItem::Notice(
                                 NoticeLevel::Info,
@@ -179,11 +199,16 @@ impl Tui {
                             format!("erro: {error:#}"),
                         )),
                     },
-                    Effect::ApprovePlan => {
-                        model.approval_mode = ApprovalMode::Default;
+                    Effect::ApprovePlan(mode) => {
+                        model.approval_mode = mode;
+                        let notice = if mode == ApprovalMode::Auto {
+                            "▶ executando o plano (auto)"
+                        } else {
+                            "▶ executando o plano"
+                        };
                         model.transcript.push(TranscriptItem::Notice(
                             NoticeLevel::Info,
-                            "▶ executando o plano".to_string(),
+                            notice.to_string(),
                         ));
                         model.busy = true;
                         conversation.push(Message::user(
@@ -210,6 +235,20 @@ impl Tui {
         }
 
         Ok(())
+    }
+}
+
+/// Read the OS clipboard and route it into the buffer: an image becomes a staged attachment, text is
+/// inserted at the cursor. Best-effort — an empty or unreadable clipboard is a no-op.
+fn paste_from_clipboard(model: &mut Model) {
+    match clipboard::read() {
+        ClipboardContent::Image(attachment) => {
+            let _ = update(model, Msg::ImageAttached(attachment));
+        }
+        ClipboardContent::Text(text) => {
+            let _ = update(model, Msg::Paste(text));
+        }
+        ClipboardContent::Empty => {}
     }
 }
 
@@ -245,9 +284,6 @@ async fn drive_turn(
     let result = {
         let mut turn: TurnFuture = Box::pin(agent_loop.run(conversation, sandbox, mode, bridge));
         loop {
-            model.status.elapsed_secs = started.elapsed().as_secs();
-            terminal.draw(|frame| view(model, frame))?;
-
             let step = tokio::select! {
                 biased;
                 maybe = events.next() => match maybe {
@@ -259,8 +295,9 @@ async fn drive_turn(
                 outcome = &mut turn => Step::Done(outcome),
             };
 
+            let mut done: Option<_> = None;
             match step {
-                Step::Done(outcome) => break outcome,
+                Step::Done(outcome) => done = Some(outcome),
                 Step::Idle => {}
                 Step::Apply(msg) => {
                     for effect in update(model, msg) {
@@ -275,13 +312,23 @@ async fn drive_turn(
                                 model.should_quit = true;
                                 cancel.cancel();
                             }
-                            Effect::SubmitPrompt(_)
+                            // Clipboard chords stay live during a turn (composing the next prompt).
+                            Effect::CopyToClipboard(text) => clipboard::copy_text(&text),
+                            Effect::PasteClipboard => paste_from_clipboard(model),
+                            Effect::SubmitPrompt { .. }
                             | Effect::NewSession
                             | Effect::ChangeWorkspace(_)
-                            | Effect::ApprovePlan => {}
+                            | Effect::ApprovePlan(_) => {}
                         }
                     }
                 }
+            }
+            // Draw after applying the step, so the frame reflects the latest model state (no one-frame
+            // lag between a streaming delta and the thinking line / transcript).
+            model.status.elapsed_secs = started.elapsed().as_secs();
+            terminal.draw(|frame| view(model, frame))?;
+            if let Some(outcome) = done {
+                break outcome;
             }
         }
     };
@@ -304,6 +351,16 @@ fn engine_msg(engine: EngineMsg, pending_reply: &mut Option<oneshot::Sender<Appr
         EngineMsg::Began => Msg::TurnBegan,
         EngineMsg::Reasoning(text) => Msg::StreamDelta(StreamKind::Reasoning, text),
         EngineMsg::Content(text) => Msg::StreamDelta(StreamKind::Content, text),
+        EngineMsg::ToolStarted { command, diff } => Msg::ToolStarted { command, diff },
+        EngineMsg::ToolFinished {
+            status,
+            output,
+            elapsed,
+        } => Msg::ToolFinished {
+            status,
+            output,
+            elapsed,
+        },
         EngineMsg::Finished => Msg::TurnFinished,
         EngineMsg::Approval { pending, reply } => {
             *pending_reply = Some(reply);

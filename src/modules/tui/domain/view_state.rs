@@ -1,89 +1,134 @@
-/// The multi-line input editor buffer: the text plus the cursor as a byte offset that always sits on a
-/// char boundary. Hand-rolled (no widget crate) — the needs are modest and native-over-deps applies.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+use ratatui::style::Style;
+use tui_textarea::{Input, TextArea, WrapMode};
+
+/// A pasted image staged for the next prompt: its data URL (base64 PNG, ready for the provider's
+/// multimodal content) and pixel dimensions for the "attached" chip. Pure data — the clipboard read and
+/// PNG encoding happen in `tui::infrastructure::clipboard`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageAttachment {
+    pub data_url: String,
+    pub width: usize,
+    pub height: usize,
+}
+
+/// The multi-line input editor: a `tui-textarea` `TextArea` behind a thin domain wrapper. The wrapper
+/// confines the widget type to this module and exposes only what the reducer and the renderer need —
+/// full editor behaviour (selection, word motion, undo/redo, soft word-wrap) comes from the widget,
+/// while clipboard side effects stay outside (the reducer is pure; the runtime performs them).
+#[derive(Debug, Clone)]
 pub struct InputBuffer {
-    text: String,
-    cursor: usize,
+    area: TextArea<'static>,
+}
+
+impl Default for InputBuffer {
+    fn default() -> Self {
+        let mut area = TextArea::default();
+        area.set_wrap_mode(WrapMode::WordOrGlyph);
+        area.remove_line_number();
+        Self { area }
+    }
 }
 
 impl InputBuffer {
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
-    pub fn cursor(&self) -> usize {
-        self.cursor
+    /// The whole buffer as a single string, logical lines joined by `\n`.
+    pub fn text(&self) -> String {
+        self.area.lines().join("\n")
     }
 
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.area.is_empty()
     }
 
+    /// The cursor's logical row and the index of the last row — used to decide whether Up/Down should
+    /// recall history (at the first/last row) or move the cursor within a multi-line buffer.
+    pub fn cursor_row(&self) -> usize {
+        self.area.cursor().0
+    }
+
+    pub fn last_row(&self) -> usize {
+        self.area.lines().len().saturating_sub(1)
+    }
+
+    /// Insert a string at the cursor (bracketed paste of text).
     pub fn insert(&mut self, s: &str) {
-        self.text.insert_str(self.cursor, s);
-        self.cursor += s.len();
+        self.area.insert_str(s);
     }
 
-    pub fn insert_char(&mut self, c: char) {
-        self.text.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
+    pub fn newline(&mut self) {
+        self.area.insert_newline();
     }
 
-    pub fn backspace(&mut self) {
-        if let Some(prev) = self.text[..self.cursor].chars().next_back() {
-            let start = self.cursor - prev.len_utf8();
-            self.text.replace_range(start..self.cursor, "");
-            self.cursor = start;
+    /// Feed a widget input event (the reducer maps a key press to it), returning whether it mutated the
+    /// text. This is the single path for ordinary editing: typing, deletion, cursor motion, selection.
+    pub fn feed(&mut self, input: Input) -> bool {
+        self.area.input(input)
+    }
+
+    pub fn select_all(&mut self) {
+        self.area.select_all();
+    }
+
+    pub fn is_selecting(&self) -> bool {
+        self.area.is_selecting()
+    }
+
+    pub fn undo(&mut self) -> bool {
+        self.area.undo()
+    }
+
+    pub fn redo(&mut self) -> bool {
+        self.area.redo()
+    }
+
+    /// Copy the active selection into the OS clipboard text returned here (the caller performs the I/O).
+    /// `None` when there is no selection.
+    pub fn copy_selection(&mut self) -> Option<String> {
+        if !self.area.is_selecting() {
+            return None;
         }
+        self.area.copy();
+        let text = self.area.yank_text();
+        (!text.is_empty()).then_some(text)
     }
 
-    pub fn delete(&mut self) {
-        if let Some(next) = self.text[self.cursor..].chars().next() {
-            let end = self.cursor + next.len_utf8();
-            self.text.replace_range(self.cursor..end, "");
+    /// Cut the active selection: remove it from the buffer and return its text for the OS clipboard.
+    pub fn cut_selection(&mut self) -> Option<String> {
+        if !self.area.is_selecting() {
+            return None;
         }
+        self.area.cut();
+        let text = self.area.yank_text();
+        (!text.is_empty()).then_some(text)
     }
 
-    pub fn left(&mut self) {
-        if let Some(prev) = self.text[..self.cursor].chars().next_back() {
-            self.cursor -= prev.len_utf8();
-        }
-    }
-
-    pub fn right(&mut self) {
-        if let Some(next) = self.text[self.cursor..].chars().next() {
-            self.cursor += next.len_utf8();
-        }
-    }
-
-    pub fn home(&mut self) {
-        self.cursor = self.text[..self.cursor]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-    }
-
-    pub fn end(&mut self) {
-        self.cursor = self.text[self.cursor..]
-            .find('\n')
-            .map(|i| self.cursor + i)
-            .unwrap_or(self.text.len());
-    }
-
-    /// Replace the whole buffer (history recall), placing the cursor at the end.
+    /// Replace the whole buffer (history recall), placing the cursor at the end. This is a hard
+    /// replacement: the widget's undo/redo stack is reset, so Ctrl+Z does not cross a recall (the
+    /// pre-recall draft is recoverable through history navigation, not undo).
     pub fn set(&mut self, text: String) {
-        self.cursor = text.len();
-        self.text = text;
+        let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+        let row = lines.len().saturating_sub(1);
+        let col = lines.last().map(|l| l.chars().count()).unwrap_or(0);
+        self.area.set_lines(lines, (row, col));
     }
 
     /// Take the text out, leaving the buffer empty.
     pub fn take(&mut self) -> String {
-        self.cursor = 0;
-        std::mem::take(&mut self.text)
+        let text = self.text();
+        self.area.set_lines(vec![String::new()], (0, 0));
+        text
     }
 
-    pub fn line_count(&self) -> usize {
-        self.text.bytes().filter(|&b| b == b'\n').count() + 1
+    /// Apply the theme styles (base/cursor/selection) — set once by the runtime, which owns the theme.
+    pub fn set_styles(&mut self, base: Style, cursor: Style, selection: Style) {
+        self.area.set_style(base);
+        self.area.set_cursor_line_style(base);
+        self.area.set_cursor_style(cursor);
+        self.area.set_selection_style(selection);
+    }
+
+    /// The widget for rendering. `&TextArea` implements `Widget`; the editor renders it directly.
+    pub fn widget(&self) -> &TextArea<'static> {
+        &self.area
     }
 }
 
@@ -159,6 +204,12 @@ impl Scroll {
     pub fn pin(&mut self) {
         self.scrollback = 0;
     }
+
+    /// Jump to the top of the scrollback. The view clamps to the available history, so saturating to
+    /// the maximum is enough — no viewport height needs to leak into the model.
+    pub fn top(&mut self) {
+        self.scrollback = u16::MAX;
+    }
 }
 
 /// The options shown for a tool-call confirmation, in display order. `PendingApproval.selected` indexes
@@ -202,9 +253,11 @@ impl PendingApproval {
     }
 }
 
-/// The options shown when a plan-mode turn finishes: run the plan, keep refining it, or leave plan mode.
-pub const PLAN_OPTIONS: [&str; 3] = [
+/// The options shown when a plan-mode turn finishes: run the plan (confirming each step or fully
+/// unattended in auto), keep refining it, or leave plan mode.
+pub const PLAN_OPTIONS: [&str; 4] = [
     "Executar o plano",
+    "Executar o plano em modo auto",
     "Continuar planejando",
     "Cancelar (sair do modo plan)",
 ];
@@ -222,23 +275,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn input_edits_respect_char_boundaries() {
+    fn insert_set_and_take_round_trip_the_text() {
         let mut b = InputBuffer::default();
         b.insert("ação");
-        b.left(); // cursor now sits before the final 'o'
-        b.backspace(); // removes the multibyte 'ã' just before the cursor
-        assert_eq!(b.text(), "aço");
-        assert_eq!(b.cursor(), "aç".len());
+        assert_eq!(b.text(), "ação");
+        assert!(!b.is_empty());
+        let taken = b.take();
+        assert_eq!(taken, "ação");
+        assert!(b.is_empty());
+        b.set("ab\ncd".to_string());
+        assert_eq!(b.text(), "ab\ncd");
+        assert_eq!(b.last_row(), 1);
+        assert_eq!(b.cursor_row(), 1); // set places the cursor at the end (second line)
     }
 
     #[test]
-    fn home_and_end_move_within_the_current_line() {
+    fn copy_selection_is_none_without_a_selection() {
         let mut b = InputBuffer::default();
-        b.insert("ab\ncd");
-        b.home();
-        assert_eq!(b.cursor(), 3);
-        b.end();
-        assert_eq!(b.cursor(), 5);
+        b.insert("hello");
+        assert!(!b.is_selecting());
+        assert_eq!(b.copy_selection(), None);
     }
 
     #[test]
@@ -259,5 +315,14 @@ mod tests {
         h.record("x");
         assert_eq!(h.older("").as_deref(), Some("x"));
         assert_eq!(h.older("").as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn scroll_top_saturates_and_pin_resets() {
+        let mut s = Scroll::default();
+        s.top();
+        assert_eq!(s.scrollback, u16::MAX);
+        s.pin();
+        assert_eq!(s.scrollback, 0);
     }
 }

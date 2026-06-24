@@ -2,6 +2,7 @@ use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::keymap;
 use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::domain::model::Model;
+use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 
 /// The pure reducer: apply one message to the model and return the effects the runtime must perform.
 /// No I/O, no engine handles — fully unit-testable.
@@ -11,7 +12,19 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Paste(text) => {
             if model.pending_approval.is_none() && model.pending_plan.is_none() {
                 model.input.insert(&text);
+                keymap::sync_menu(model);
             }
+            Vec::new()
+        }
+        Msg::ImageAttached(attachment) => {
+            let label = format!(
+                "🖼 imagem anexada ({}×{})",
+                attachment.width, attachment.height
+            );
+            model.attachments.push(attachment);
+            model
+                .transcript
+                .push(TranscriptItem::Notice(NoticeLevel::Info, label));
             Vec::new()
         }
         Msg::Resize => Vec::new(),
@@ -37,8 +50,28 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.status.streaming = false;
             Vec::new()
         }
+        Msg::ToolStarted { command, diff } => {
+            model.transcript.push_tool_start(command, diff);
+            Vec::new()
+        }
+        Msg::ToolFinished {
+            status,
+            output,
+            elapsed,
+        } => {
+            model.transcript.finish_last_tool(status, output, elapsed);
+            Vec::new()
+        }
         Msg::ApprovalRequested(pending) => {
             model.pending_approval = Some(pending);
+            Vec::new()
+        }
+        Msg::ScrollUp => {
+            model.scroll.up(3);
+            Vec::new()
+        }
+        Msg::ScrollDown => {
+            model.scroll.down(3);
             Vec::new()
         }
         Msg::TurnEnded => {
@@ -53,7 +86,8 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::tui::domain::transcript::TranscriptItem;
+    use crate::modules::tui::domain::transcript::{ToolStatus, TranscriptItem};
+    use std::time::Duration;
 
     #[test]
     fn stream_deltas_build_transcript_items() {
@@ -64,6 +98,38 @@ mod tests {
             m.transcript.items(),
             &[TranscriptItem::Assistant("Hello".to_string())]
         );
+    }
+
+    #[test]
+    fn tool_started_then_finished_build_one_tool_item() {
+        let mut m = Model::default();
+        update(
+            &mut m,
+            Msg::ToolStarted {
+                command: "cat a.txt".into(),
+                diff: None,
+            },
+        );
+        match m.transcript.items() {
+            [TranscriptItem::Tool(a)] => assert!(a.result.is_none(), "should be running"),
+            other => panic!("expected one running tool item, got {other:?}"),
+        }
+        update(
+            &mut m,
+            Msg::ToolFinished {
+                status: ToolStatus::Ok,
+                output: "hello".into(),
+                elapsed: Duration::from_millis(3),
+            },
+        );
+        match m.transcript.items() {
+            [TranscriptItem::Tool(a)] => {
+                let (status, output, _) = a.result.as_ref().expect("finished");
+                assert_eq!(*status, ToolStatus::Ok);
+                assert_eq!(output, "hello");
+            }
+            other => panic!("expected one finished tool item, got {other:?}"),
+        }
     }
 
     #[test]

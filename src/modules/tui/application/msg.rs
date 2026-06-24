@@ -1,4 +1,7 @@
-use crate::modules::tui::domain::view_state::PendingApproval;
+use std::time::Duration;
+
+use crate::modules::tui::domain::transcript::{ToolDiff, ToolStatus};
+use crate::modules::tui::domain::view_state::{ImageAttachment, PendingApproval};
 
 /// Which stream a delta belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,12 +46,29 @@ pub enum Key {
 pub enum Msg {
     Key(KeyPress),
     Paste(String),
+    /// An image read from the OS clipboard, staged as an attachment for the next prompt.
+    ImageAttached(ImageAttachment),
     Resize,
     Tick,
     TurnBegan,
     StreamDelta(StreamKind, String),
     TurnFinished,
+    /// A tool call started running (engine → TUI), with its display command and an optional edit diff.
+    ToolStarted {
+        command: String,
+        diff: Option<ToolDiff>,
+    },
+    /// A tool call finished (engine → TUI): its outcome status, full (capped) output, and duration.
+    ToolFinished {
+        status: ToolStatus,
+        output: String,
+        elapsed: Duration,
+    },
     ApprovalRequested(PendingApproval),
+    /// The user scrolled the mouse wheel up by one notch.
+    ScrollUp,
+    /// The user scrolled the mouse wheel down by one notch.
+    ScrollDown,
     /// The agent-loop future resolved; reset per-turn UI state.
     TurnEnded,
 }

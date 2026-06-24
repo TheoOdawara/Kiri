@@ -17,7 +17,7 @@ pub struct MessageDto<'a> {
     #[serde(serialize_with = "serialize_role")]
     pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<&'a str>,
+    pub content: Option<ContentDto<'a>>,
     #[serde(
         skip_serializing_if = "<[_]>::is_empty",
         serialize_with = "serialize_tool_calls"
@@ -29,13 +29,75 @@ pub struct MessageDto<'a> {
 
 impl<'a> From<&'a Message> for MessageDto<'a> {
     fn from(message: &'a Message) -> Self {
+        let content = message.content.as_deref().map(|text| {
+            if message.images.is_empty() {
+                ContentDto::Text(text)
+            } else {
+                ContentDto::Parts {
+                    text,
+                    images: &message.images,
+                }
+            }
+        });
         Self {
             role: message.role,
-            content: message.content.as_deref(),
+            content,
             tool_calls: &message.tool_calls,
             tool_call_id: message.tool_call_id.as_deref(),
         }
     }
+}
+
+/// The OpenAI-compatible `content` value: a plain string when there are no images (the common case,
+/// byte-for-byte unchanged), or the multimodal parts array when a user message carries images.
+#[derive(Debug)]
+pub enum ContentDto<'a> {
+    Text(&'a str),
+    Parts { text: &'a str, images: &'a [String] },
+}
+
+impl Serialize for ContentDto<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ContentDto::Text(text) => serializer.serialize_str(text),
+            ContentDto::Parts { text, images } => {
+                // Omit the text part when the caption is blank (image-only prompt): an empty text part
+                // is wasteful and some vision endpoints reject it.
+                let include_text = !text.trim().is_empty();
+                let mut seq =
+                    serializer.serialize_seq(Some(usize::from(include_text) + images.len()))?;
+                if include_text {
+                    seq.serialize_element(&TextPart { kind: "text", text })?;
+                }
+                for url in images.iter() {
+                    seq.serialize_element(&ImagePart {
+                        kind: "image_url",
+                        image_url: ImageUrl { url: url.as_str() },
+                    })?;
+                }
+                seq.end()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct TextPart<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct ImagePart<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    image_url: ImageUrl<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct ImageUrl<'a> {
+    url: &'a str,
 }
 
 /// The OpenAI wire string for a role — the single place the domain `Role` becomes its lowercase wire
@@ -163,6 +225,41 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(wire_args).expect("wire arguments must be valid JSON");
         assert_eq!(parsed["content"], "a\nb");
+    }
+
+    #[test]
+    fn user_message_without_images_serializes_content_as_a_plain_string() {
+        let value = serde_json::to_value(MessageDto::from(&Message::user("oi"))).unwrap();
+        assert_eq!(value["role"], "user");
+        assert_eq!(value["content"], "oi"); // still a string — the common path is unchanged
+    }
+
+    #[test]
+    fn user_message_with_images_serializes_multimodal_content_parts() {
+        let message =
+            Message::user_multimodal("olha isso", vec!["data:image/png;base64,AAAA".to_string()]);
+        let value = serde_json::to_value(MessageDto::from(&message)).unwrap();
+        assert_eq!(value["role"], "user");
+        let parts = value["content"]
+            .as_array()
+            .expect("content must be an array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "olha isso");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    #[test]
+    fn image_only_message_omits_the_empty_text_part() {
+        let message =
+            Message::user_multimodal("  ", vec!["data:image/png;base64,AAAA".to_string()]);
+        let value = serde_json::to_value(MessageDto::from(&message)).unwrap();
+        let parts = value["content"]
+            .as_array()
+            .expect("content must be an array");
+        assert_eq!(parts.len(), 1, "blank caption must not emit a text part");
+        assert_eq!(parts[0]["type"], "image_url");
     }
 
     #[test]

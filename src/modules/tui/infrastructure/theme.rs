@@ -9,6 +9,9 @@ pub const SUCCESS: Color = Color::Rgb(0x3F, 0xB9, 0x50); // green gate — passe
 pub const WARNING: Color = Color::Rgb(0xD2, 0x99, 0x22); // yellow gate — info / approval pending
 pub const ERROR: Color = Color::Rgb(0xF8, 0x51, 0x49); // red gate — error / blade cut
 pub const HIGHLIGHT: Color = Color::Rgb(0x58, 0xA6, 0xFF); // cyan action — active input / loading
+pub const CODE_FG: Color = Color::Rgb(0xF0, 0x88, 0x3E); // orange — inline code / fenced code
+pub const CODE_BG: Color = Color::Rgb(0x1C, 0x22, 0x2B); // code block background
+pub const HEADING: Color = Color::Rgb(0x7D, 0xC9, 0xE8); // soft cyan — headings
 
 /// The 10-frame braille spinner.
 pub const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];

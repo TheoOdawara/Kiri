@@ -2,10 +2,11 @@ use ratatui::Frame;
 use ratatui::widgets::Block;
 
 use crate::modules::tui::domain::model::Model;
+use crate::modules::tui::domain::view_state::APPROVAL_OPTIONS;
 use crate::modules::tui::infrastructure::layout::frame_layout;
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
-    approval, editor, header, hint_line, meta_rule, transcript_pane,
+    approval, command_menu, editor, header, hint_line, meta_rule, transcript_pane,
 };
 
 /// The sole ratatui render entry point: project the model onto the frame's regions. Pure with respect
@@ -13,17 +14,41 @@ use crate::modules::tui::infrastructure::widgets::{
 /// with the Tamahagane Void base so every cell inherits steel-on-void.
 pub fn view(model: &Model, frame: &mut Frame) {
     frame.render_widget(Block::default().style(theme::base()), frame.area());
-    let regions = frame_layout(frame.area(), model.input.line_count() as u16);
+    let wrap_w = frame
+        .area()
+        .width
+        .saturating_sub(editor::PROMPT_COLS)
+        .max(1) as usize;
+    let input_lines = editor::wrapped_line_count(&model.input, wrap_w) as u16;
+    // A pending plan/approval box owns a dedicated region directly above the input, so it is always
+    // anchored to the bottom — never carved out of the scrolling transcript. Size it here so the layout
+    // can reserve exactly the rows it needs.
+    let box_h = if model.pending_plan.is_some() {
+        approval::box_dims(
+            frame.area(),
+            approval::PLAN_ACTION,
+            approval::plan_options_len(),
+        )
+        .1
+    } else if let Some(pending) = &model.pending_approval {
+        approval::box_dims(frame.area(), pending.action(), APPROVAL_OPTIONS.len()).1
+    } else {
+        0
+    };
+    let regions = frame_layout(frame.area(), input_lines, box_h);
     header::render(model, frame, regions.header);
     transcript_pane::render(model, frame, regions.transcript);
+    if let Some(plan) = &model.pending_plan {
+        approval::render_plan_into(plan, frame, regions.prompt_box);
+    } else if let Some(pending) = &model.pending_approval {
+        approval::render(pending, frame, regions.prompt_box);
+    }
     meta_rule::render(model, frame, regions.meta);
     editor::render(model, frame, regions.input);
     hint_line::render(model, frame, regions.hint);
-    // The approval / plan box is an overlay over the transcript, so it sits above the conversation.
-    if let Some(pending) = &model.pending_approval {
-        approval::render(pending, frame, regions.transcript);
-    } else if let Some(plan) = &model.pending_plan {
-        approval::render_plan(plan, frame, regions.transcript);
+    // The slash-command preview floats just above the editor while the buffer is a `/`-prefixed token.
+    if let Some(menu) = &model.command_menu {
+        command_menu::render(menu, frame, regions.input);
     }
 }
 
@@ -93,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_plan_renders_the_plan_box() {
+    fn pending_plan_renders_the_plan_box_below_the_transcript() {
         use crate::modules::tui::domain::view_state::PendingPlan;
         let mut model = Model::new("m".to_string(), "/w".to_string());
         model
@@ -103,5 +128,138 @@ mod tests {
         let out = render(&model, 80, 20);
         assert!(out.contains("plano"), "plan box title missing:\n{out}");
         assert!(out.contains("Executar"), "plan option missing:\n{out}");
+        // The box must sit BELOW the transcript, not overlay it: the assistant's plan text renders on
+        // an earlier row than the box's options.
+        let rows: Vec<&str> = out.lines().collect();
+        let plan_row = rows.iter().position(|l| l.contains("meu plano"));
+        let box_row = rows.iter().position(|l| l.contains("Executar"));
+        assert!(
+            matches!((plan_row, box_row), (Some(p), Some(b)) if p < b),
+            "plan text should render above the box (plan_row={plan_row:?}, box_row={box_row:?}):\n{out}"
+        );
+        // ...and the box sits in its dedicated region just above the input prompt, anchored to the
+        // bottom — the box options render below the transcript but above the `›_` prompt row.
+        let prompt_row = rows.iter().position(|l| l.contains("›_"));
+        assert!(
+            matches!((box_row, prompt_row), (Some(b), Some(p)) if b < p),
+            "plan box should sit above the input (box_row={box_row:?}, prompt_row={prompt_row:?}):\n{out}"
+        );
+    }
+
+    #[test]
+    fn plan_box_shows_all_options_on_a_short_terminal() {
+        use crate::modules::tui::domain::view_state::PendingPlan;
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.pending_plan = Some(PendingPlan::default());
+        // On a short terminal the box takes priority over the transcript, so every option the user
+        // must read to answer stays visible (regression: it used to be clipped). Four options plus the
+        // surrounding chrome need a row more than three did.
+        let out = render(&model, 80, 12);
+        assert!(out.contains("Executar o plano"), "option 1 missing:\n{out}");
+        assert!(out.contains("modo auto"), "option 2 missing:\n{out}");
+        assert!(out.contains("Continuar"), "option 3 missing:\n{out}");
+        assert!(out.contains("Cancelar"), "option 4 clipped:\n{out}");
+    }
+
+    #[test]
+    fn tool_activity_renders_command_result_and_diff() {
+        use crate::modules::tui::domain::transcript::{ToolActivity, ToolDiff, ToolStatus};
+        use std::time::Duration;
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.transcript.push(TranscriptItem::Tool(ToolActivity {
+            command: "edit src/app.rs".to_string(),
+            diff: Some(ToolDiff {
+                old: "let mode = mode;".to_string(),
+                new: "let mut mode = mode;".to_string(),
+            }),
+            result: Some((
+                ToolStatus::Ok,
+                "edited src/app.rs".to_string(),
+                Duration::from_millis(7),
+            )),
+        }));
+        let out = render(&model, 80, 20);
+        assert!(
+            out.contains("⏺ edit src/app.rs"),
+            "command line missing:\n{out}"
+        );
+        assert!(out.contains("⎿"), "result marker missing:\n{out}");
+        assert!(
+            out.contains("- let mode = mode;"),
+            "removed diff line missing:\n{out}"
+        );
+        assert!(
+            out.contains("+ let mut mode = mode;"),
+            "added diff line missing:\n{out}"
+        );
+        assert!(
+            out.contains("edited src/app.rs"),
+            "result detail missing:\n{out}"
+        );
+    }
+
+    #[test]
+    fn long_tool_output_is_previewed_until_expanded() {
+        use crate::modules::tui::domain::transcript::{ToolActivity, ToolStatus};
+        use std::time::Duration;
+        let output = (1..=20)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.transcript.push(TranscriptItem::Tool(ToolActivity {
+            command: "cat big.txt".to_string(),
+            diff: None,
+            result: Some((ToolStatus::Ok, output, Duration::from_millis(1))),
+        }));
+        let collapsed = render(&model, 80, 40);
+        assert!(
+            collapsed.contains("para expandir"),
+            "elision hint missing when collapsed:\n{collapsed}"
+        );
+        model.expand_tools = true;
+        let expanded = render(&model, 80, 40);
+        assert!(
+            expanded.contains("line20"),
+            "expanded output should show every line:\n{expanded}"
+        );
+        assert!(
+            !expanded.contains("para expandir"),
+            "no elision hint once expanded:\n{expanded}"
+        );
+    }
+
+    #[test]
+    fn meta_rule_keeps_mode_badge_with_a_long_workspace() {
+        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        let mut model = Model::new(
+            "some-long-model-name".to_string(),
+            "C:/Users/dev/very/deep/workspace/path/kiri".to_string(),
+        );
+        model.approval_mode = ApprovalMode::Auto;
+        // On a tight width the overlong workspace must not push the mode badge off the rule.
+        let out = render(&model, 40, 12);
+        assert!(
+            out.contains("AUTO"),
+            "mode badge must survive a long workspace:\n{out}"
+        );
+    }
+
+    #[test]
+    fn typed_input_renders_in_the_editor() {
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.input.set("ola mundo".to_string());
+        let out = render(&model, 80, 12);
+        assert!(out.contains("ola mundo"), "input text missing:\n{out}");
+    }
+
+    #[test]
+    fn narrow_terminal_keeps_prompt_and_short_hint_without_overflow() {
+        let model = Model::new("m".to_string(), "/w".to_string());
+        let out = render(&model, 20, 8);
+        // The prompt glyph and the seal survive; the long hint collapses to the short form.
+        assert!(out.contains("kiri"), "brand seal missing:\n{out}");
+        assert!(out.contains("›_"), "prompt glyph missing:\n{out}");
+        assert!(out.contains("/help"), "short hint missing:\n{out}");
     }
 }

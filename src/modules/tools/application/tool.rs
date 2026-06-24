@@ -2,7 +2,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::modules::tools::infrastructure::args::parse;
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
+use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// The result of executing a tool. Failures are data the model reads and recovers from — never panics
@@ -44,18 +44,15 @@ pub fn confirm(action: String, default_accept: bool) -> Confirmation {
     }
 }
 
-/// Build a confirmation for a tool whose prompt is a fixed phrase over its parsed args (no sandbox
-/// resolution): parse, derive the default from the path, and phrase. Returns `None` when the args do
-/// not parse (then `execute` reports the error). The resolution-aware tools (write_file, move_path)
-/// phrase from the resolution and stay bespoke.
-pub fn simple_confirm<T: DeserializeOwned>(
+/// Build the bare command label for a tool whose label is a fixed render over its parsed args.
+/// Returns `None` when the args do not parse. The single source of a tool's command text, reused by
+/// both `Tool::command_line` (for on-screen display) and `Tool::confirmation` (for the prompt prose).
+pub fn simple_command<T: DeserializeOwned>(
     call: &ToolCall,
-    phrase: impl FnOnce(&T) -> String,
-    path_of: impl FnOnce(&T) -> &str,
-) -> Option<Confirmation> {
+    render: impl FnOnce(&T) -> String,
+) -> Option<String> {
     let args: T = parse(call.function.arguments.as_str()).ok()?;
-    let default_accept = default_accept_for(path_of(&args));
-    Some(confirm(phrase(&args), default_accept))
+    Some(render(&args))
 }
 
 /// The `path` property description shared verbatim by the tools that take a single
@@ -81,6 +78,10 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     /// The full tool object advertised to the model.
     fn schema(&self) -> Value;
+    /// The bare command this call represents, for on-screen display (e.g. `edit src/x.rs`, `cat foo`,
+    /// `rg 'q' .`). `None` only when the args do not parse. `confirmation` composes its prose around
+    /// this, so the command text lives in one place.
+    fn command_line(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<String>;
     /// Phrase the confirmation from the parsed args; `None` only when the args do not parse (then
     /// `execute` reports the error). May resolve paths via the sandbox to phrase write/move precisely.
     fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation>;

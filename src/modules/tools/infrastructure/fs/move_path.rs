@@ -35,22 +35,23 @@ impl Tool for MovePath {
         )
     }
 
+    fn command_line(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+        let a: MoveArgs = parse(call.function.arguments.as_str()).ok()?;
+        Some(format!("mv {} {}", a.source, a.destination))
+    }
+
     fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let a: MoveArgs = parse(call.function.arguments.as_str()).ok()?;
+        let cmd = self.command_line(sandbox, call)?;
         let action = match sandbox.resolve_create(&a.destination) {
             Ok(r) if !r.missing_dirs.is_empty() => format!(
-                "Criar diretório(s) '{}' e mover '{}' → '{}'?",
+                "Criar diretório(s) '{}' e mover. Aprova executar: {cmd}?",
                 missing_dirs_label(&r, sandbox),
-                a.source,
-                a.destination
             ),
             Ok(r) if r.target.exists() => {
-                format!(
-                    "Sobrescrever '{}' movendo de '{}'?",
-                    a.destination, a.source
-                )
+                format!("Sobrescrever o destino movendo. Aprova executar: {cmd}?")
             }
-            _ => format!("Mover '{}' → '{}'?", a.source, a.destination),
+            _ => format!("Mover o caminho. Aprova executar: {cmd}?"),
         };
         let default_accept = default_accept_for(&a.destination);
         Some(confirm(action, default_accept))

@@ -50,6 +50,12 @@ impl ToolRegistry {
         self.find(&call.function.name)?.confirmation(sandbox, call)
     }
 
+    /// The bare command label for a call, for on-screen display. `None` for an unknown tool or
+    /// unparseable args (the caller falls back to the tool name).
+    pub fn command_line(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+        self.find(&call.function.name)?.command_line(sandbox, call)
+    }
+
     pub fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         match self.find(&call.function.name) {
             Some(tool) => tool.execute(sandbox, call),
@@ -154,6 +160,57 @@ mod tests {
         assert!(!r.is_destructive("search"));
         // An unknown tool is not destructive; execute reports the unknown-tool error instead.
         assert!(!r.is_destructive("nope"));
+    }
+
+    #[test]
+    fn command_line_returns_the_bare_command_per_tool() {
+        let dir = TempDir::new("cmdline");
+        let sb = sandbox(&dir);
+        let reg = registry();
+        assert_eq!(
+            reg.command_line(&sb, &call("read_file", json!({"path": "a.txt"}))),
+            Some("cat a.txt".to_string())
+        );
+        assert_eq!(
+            reg.command_line(
+                &sb,
+                &call(
+                    "edit_file",
+                    json!({"path": "a.txt", "old_string": "x", "new_string": "y"})
+                )
+            ),
+            Some("edit a.txt".to_string())
+        );
+        assert_eq!(
+            reg.command_line(
+                &sb,
+                &call("write_file", json!({"path": "a.txt", "content": "x"}))
+            ),
+            Some("write a.txt".to_string())
+        );
+        assert_eq!(
+            reg.command_line(&sb, &call("search", json!({"query": "q", "path": "."}))),
+            Some("rg 'q' .".to_string())
+        );
+        assert_eq!(
+            reg.command_line(
+                &sb,
+                &call("move_path", json!({"source": "a", "destination": "b"}))
+            ),
+            Some("mv a b".to_string())
+        );
+    }
+
+    #[test]
+    fn command_line_is_none_for_unknown_tool_or_bad_args() {
+        let dir = TempDir::new("cmdline-none");
+        let sb = sandbox(&dir);
+        let reg = registry();
+        assert_eq!(reg.command_line(&sb, &call("nope", json!({}))), None);
+        assert_eq!(
+            reg.command_line(&sb, &call("read_file", json!({"wrong": 1}))),
+            None
+        );
     }
 
     #[test]

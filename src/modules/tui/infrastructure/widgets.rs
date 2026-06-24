@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod command_menu;
 pub mod editor;
 pub mod header;
 pub mod hint_line;
