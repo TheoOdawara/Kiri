@@ -4,6 +4,7 @@ use std::time::Duration;
 use regex::Regex;
 use serde_json::{Value, json};
 
+use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
@@ -22,11 +23,37 @@ fn effective_timeout_ms(requested: u64) -> u64 {
 
 pub struct RunCommand {
     plan_blacklist: Arc<[Regex]>,
+    net_allow: Arc<[Regex]>,
+    require_confinement: bool,
 }
 
 impl RunCommand {
-    pub fn new(plan_blacklist: Arc<[Regex]>) -> Self {
-        Self { plan_blacklist }
+    pub fn new(
+        plan_blacklist: Arc<[Regex]>,
+        net_allow: Arc<[Regex]>,
+        require_confinement: bool,
+    ) -> Self {
+        Self {
+            plan_blacklist,
+            net_allow,
+            require_confinement,
+        }
+    }
+
+    /// Decide the network stance for a command: allowed when the sandbox's base stance already permits
+    /// it or the command matches the dev/package-manager allow-list, otherwise denied. Keeps
+    /// `cargo build` / `npm install` fluid while blocking arbitrary outbound calls by default.
+    fn network_for(&self, command: &str, base: NetworkPolicy) -> NetworkPolicy {
+        if base == NetworkPolicy::Allow
+            || self
+                .net_allow
+                .iter()
+                .any(|pattern| pattern.is_match(command))
+        {
+            NetworkPolicy::Allow
+        } else {
+            NetworkPolicy::Deny
+        }
     }
 }
 
@@ -90,15 +117,28 @@ impl Tool for RunCommand {
             Err(out) => return out,
         };
 
+        // KIRI_SANDBOX=require: refuse to run an arbitrary shell command unconfined rather than fall
+        // back to the path-policy + confirmation layers alone.
+        if self.require_confinement && !sandbox.confiner().supports_confinement() {
+            return ToolOutcome::Error(
+                "OS command sandbox unavailable on this platform; refusing to run unconfined \
+                 (KIRI_SANDBOX=require)"
+                    .to_string(),
+            );
+        }
+
         let cwd = match sandbox.resolve_existing(&args.cwd) {
             Ok(path) => path,
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
 
+        let network = self.network_for(&args.command, sandbox.network());
         let result = match exec::run_shell(
             &args.command,
             Some(&cwd),
             Duration::from_millis(effective_timeout_ms(args.timeout_ms)),
+            sandbox.confiner(),
+            &sandbox.command_policy(network, &[&cwd]),
         )
         .await
         {
@@ -202,7 +242,11 @@ mod tests {
     }
 
     fn registry() -> ToolRegistry {
-        ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new())))
+        ToolRegistry::new(default_fs_tools(
+            Arc::from(Vec::<Regex>::new()),
+            Arc::from(Vec::<Regex>::new()),
+            false,
+        ))
     }
 
     use crate::modules::tools::application::registry::ToolRegistry;
@@ -375,6 +419,80 @@ mod tests {
                 )
             }
             other => panic!("expected timeout Error, got {other:?}"),
+        }
+    }
+
+    // End-to-end confinement proof through the real tool path: a Sandbox carrying the macOS Seatbelt
+    // adapter must stop run_command from writing outside the workspace, while in-jail work still runs.
+    #[cfg(target_os = "macos")]
+    fn confined_sandbox(dir: &TempDir) -> Sandbox {
+        use crate::modules::tools::infrastructure::confine::macos::MacosSeatbelt;
+        Sandbox::with_confinement(
+            &dir.path,
+            SensitiveMatcher::empty(),
+            Arc::new(MacosSeatbelt),
+            NetworkPolicy::Deny,
+            Arc::from(Vec::new()),
+            Arc::from(Vec::new()),
+        )
+        .unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn confined_run_command_cannot_write_outside_root() {
+        use crate::modules::tools::infrastructure::confine::macos::MacosSeatbelt;
+        if MacosSeatbelt::detect().is_none() {
+            return; // sandbox-exec unavailable on this host
+        }
+        let dir = TempDir::new("confine-out");
+        let sb = confined_sandbox(&dir);
+        let reg = registry();
+        let probe = format!(
+            "{}/kiri-sbx-must-not-exist-{}",
+            std::env::var("HOME").unwrap(),
+            std::process::id()
+        );
+        let _ = fs::remove_file(&probe);
+        let cmd = format!("echo leaked > '{probe}' 2>&1; echo done");
+        let _ = reg
+            .execute(&sb, &call("run_command", json!({ "command": cmd })))
+            .await;
+        let leaked = std::path::Path::new(&probe).exists();
+        let _ = fs::remove_file(&probe);
+        assert!(
+            !leaked,
+            "a confined run_command must not be able to write outside the workspace root"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn confined_run_command_still_works_inside_root() {
+        use crate::modules::tools::infrastructure::confine::macos::MacosSeatbelt;
+        if MacosSeatbelt::detect().is_none() {
+            return;
+        }
+        let dir = TempDir::new("confine-in");
+        let sb = confined_sandbox(&dir);
+        let reg = registry();
+        let outcome = reg
+            .execute(
+                &sb,
+                &call(
+                    "run_command",
+                    json!({ "command": "echo hi > inside.txt && cat inside.txt" }),
+                ),
+            )
+            .await;
+        match outcome {
+            ToolOutcome::Ok(text) => {
+                assert!(
+                    text.contains("hi"),
+                    "confinement must not break in-jail work: {text}"
+                )
+            }
+            other => panic!("expected Ok, got {other:?}"),
         }
     }
 }

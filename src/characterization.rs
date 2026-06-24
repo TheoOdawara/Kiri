@@ -79,7 +79,11 @@ fn confirmation_row(
 fn current_snapshot() -> Value {
     let dir = TempDir::new("snap");
     let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
-    let registry = ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new())));
+    let registry = ToolRegistry::new(default_fs_tools(
+        Arc::from(Vec::<Regex>::new()),
+        Arc::from(Vec::<Regex>::new()),
+        false,
+    ));
     // Pre-seed a file so the overwrite/edit/delete variants resolve against an existing path.
     fs::write(dir.path.join("exists.txt"), b"data").unwrap();
 

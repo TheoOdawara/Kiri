@@ -434,7 +434,11 @@ mod tests {
         });
         AgentLoop::new(
             provider,
-            ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new()))),
+            ToolRegistry::new(default_fs_tools(
+                Arc::from(Vec::<Regex>::new()),
+                Arc::from(Vec::<Regex>::new()),
+                false,
+            )),
             "model".to_string(),
             Duration::from_secs(3600),
             1000,
@@ -913,7 +917,11 @@ mod tests {
         });
         let agent_loop = AgentLoop::new(
             provider,
-            ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new()))),
+            ToolRegistry::new(default_fs_tools(
+                Arc::from(Vec::<Regex>::new()),
+                Arc::from(Vec::<Regex>::new()),
+                false,
+            )),
             "model".to_string(),
             Duration::from_secs(3600),
             1,

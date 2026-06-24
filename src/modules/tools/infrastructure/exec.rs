@@ -11,6 +11,8 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
+
 /// Combined stdout/stderr is truncated at this many bytes before it reaches the model.
 pub const EXEC_MAX_BYTES: usize = 64 * 1024;
 
@@ -63,6 +65,8 @@ pub async fn run_argv(
     stdin: Option<&[u8]>,
     env: &[(&str, &OsStr)],
     timeout: Duration,
+    confiner: &dyn CommandSandbox,
+    policy: &SandboxPolicy,
 ) -> Result<ExecResult, ExecError> {
     let (program, rest) = argv.split_first().expect("argv must not be empty");
     let mut cmd = Command::new(program);
@@ -73,6 +77,9 @@ pub async fn run_argv(
     for (key, value) in env {
         cmd.env(key, value);
     }
+    let cmd = confiner
+        .confine(cmd, policy)
+        .map_err(|error| ExecError::Spawn(error.to_string()))?;
     run(cmd, stdin, timeout).await
 }
 
@@ -82,6 +89,8 @@ pub async fn run_shell(
     script: &str,
     cwd: Option<&Path>,
     timeout: Duration,
+    confiner: &dyn CommandSandbox,
+    policy: &SandboxPolicy,
 ) -> Result<ExecResult, ExecError> {
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
@@ -95,6 +104,9 @@ pub async fn run_shell(
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
+    let cmd = confiner
+        .confine(cmd, policy)
+        .map_err(|error| ExecError::Spawn(error.to_string()))?;
     run(cmd, None, timeout).await
 }
 
@@ -166,6 +178,17 @@ async fn run(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::modules::tools::application::command_sandbox::{NetworkPolicy, SandboxPolicy};
+    use crate::modules::tools::infrastructure::confine::noop::NoConfinement;
+
+    fn policy() -> SandboxPolicy {
+        SandboxPolicy {
+            root: std::path::PathBuf::from("/"),
+            network: NetworkPolicy::Allow,
+            extra_ro: Vec::new(),
+            extra_rw: Vec::new(),
+        }
+    }
 
     #[tokio::test]
     async fn run_argv_captures_stdout_and_exit_code() {
@@ -175,6 +198,8 @@ mod tests {
             None,
             &[],
             DEFAULT_TIMEOUT,
+            &NoConfinement,
+            &policy(),
         )
         .await
         .expect("printf runs");
@@ -191,6 +216,8 @@ mod tests {
             Some(b"piped payload"),
             &[],
             DEFAULT_TIMEOUT,
+            &NoConfinement,
+            &policy(),
         )
         .await
         .expect("cat runs");
@@ -209,6 +236,8 @@ mod tests {
             None,
             &[("KIRI_TEST", OsStr::new("$(whoami) literal"))],
             DEFAULT_TIMEOUT,
+            &NoConfinement,
+            &policy(),
         )
         .await
         .expect("sh runs");
@@ -217,10 +246,16 @@ mod tests {
 
     #[tokio::test]
     async fn run_shell_times_out_and_reports_ms() {
-        let error = run_shell("sleep 5", None, Duration::from_millis(100))
-            .await
-            .err()
-            .expect("expected a timeout");
+        let error = run_shell(
+            "sleep 5",
+            None,
+            Duration::from_millis(100),
+            &NoConfinement,
+            &policy(),
+        )
+        .await
+        .err()
+        .expect("expected a timeout");
         assert!(error.message().contains("timed out"));
     }
 
@@ -244,6 +279,8 @@ mod tests {
             None,
             &[],
             DEFAULT_TIMEOUT,
+            &NoConfinement,
+            &policy(),
         )
         .await
         .err()

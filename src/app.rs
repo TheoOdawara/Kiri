@@ -7,6 +7,7 @@ use crate::modules::agent::application::agent_loop::AgentLoop;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::infrastructure::openai::provider::OpenAiProvider;
 use crate::modules::tools::application::registry::ToolRegistry;
+use crate::modules::tools::infrastructure::confine;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tui::infrastructure::runtime::Tui;
@@ -19,13 +20,25 @@ pub fn wire(settings: Settings) -> Result<Tui> {
     if !std::io::stdout().is_terminal() {
         bail!("Kiri requires an interactive terminal (stdout is not a TTY)");
     }
-    let sandbox = Sandbox::new(&settings.path, settings.sensitive.clone())?;
+    let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
+    let sandbox = Sandbox::with_confinement(
+        &settings.path,
+        settings.sensitive.clone(),
+        confiner,
+        settings.sandbox_network,
+        settings.extra_ro.clone(),
+        settings.extra_rw.clone(),
+    )?;
     let provider: Arc<dyn CompletionProvider> = Arc::new(OpenAiProvider::new(
         reqwest::Client::new(),
         settings.base_url,
         settings.api_key,
     ));
-    let registry = ToolRegistry::new(default_fs_tools(settings.plan_blacklist.clone()));
+    let registry = ToolRegistry::new(default_fs_tools(
+        settings.plan_blacklist.clone(),
+        settings.net_allow.clone(),
+        settings.require_confinement,
+    ));
     let model = settings.model.clone();
     let agent_loop = AgentLoop::new(
         provider,

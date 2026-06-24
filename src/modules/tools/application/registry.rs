@@ -124,7 +124,11 @@ mod tests {
     }
 
     fn registry() -> ToolRegistry {
-        ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new())))
+        ToolRegistry::new(default_fs_tools(
+            Arc::from(Vec::<Regex>::new()),
+            Arc::from(Vec::<Regex>::new()),
+            false,
+        ))
     }
 
     fn sandbox(dir: &TempDir) -> Sandbox {

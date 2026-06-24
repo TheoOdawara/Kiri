@@ -3,6 +3,8 @@ use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
+#[cfg(unix)]
+use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
 };
@@ -84,6 +86,8 @@ impl Tool for WriteFile {
                 Some(args.content.as_bytes()),
                 &[],
                 exec::DEFAULT_TIMEOUT,
+                sandbox.confiner(),
+                &sandbox.command_policy(NetworkPolicy::Deny, &[&cwd]),
             )
             .await
             {

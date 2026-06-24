@@ -3,6 +3,8 @@ use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
+#[cfg(unix)]
+use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
@@ -88,6 +90,9 @@ impl Tool for MovePath {
         #[cfg(unix)]
         {
             let cwd = sandbox.exec_cwd_for(&resolution.target);
+            // A move writes at both ends: it creates the destination and unlinks the source. When
+            // either is an approved out-of-root target, its directory must be in the write allow-list.
+            let source_cwd = sandbox.exec_cwd_for(&source);
             match exec::run_argv(
                 &[
                     OsStr::new("mv"),
@@ -98,6 +103,8 @@ impl Tool for MovePath {
                 None,
                 &[],
                 exec::DEFAULT_TIMEOUT,
+                sandbox.confiner(),
+                &sandbox.command_policy(NetworkPolicy::Deny, &[&cwd, &source_cwd]),
             )
             .await
             {

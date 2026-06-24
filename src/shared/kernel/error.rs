@@ -13,4 +13,7 @@ pub enum AgentError {
     /// A terminal/IO failure while rendering or prompting.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// Failed to set up OS-level command confinement before spawning a tool's child process.
+    #[error("sandbox error: {0}")]
+    Sandbox(String),
 }

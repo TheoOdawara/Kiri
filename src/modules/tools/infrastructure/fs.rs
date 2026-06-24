@@ -15,9 +15,15 @@ use regex::Regex;
 
 use crate::modules::tools::application::tool::Tool;
 
-/// The default file tool set, in the order advertised to the model. The plan blacklist is
-/// injected into `RunCommand` so it can refuse destructive shell commands in plan mode.
-pub fn default_fs_tools(plan_blacklist: Arc<[Regex]>) -> Vec<Box<dyn Tool>> {
+/// The default file tool set, in the order advertised to the model. `RunCommand` is injected with the
+/// plan-mode blacklist (destructive shell commands in plan mode), the network allow-list (dev/package
+/// commands that may reach the network under confinement), and whether confinement is required
+/// (`KIRI_SANDBOX=require` refuses `run_command` when no OS sandbox is available).
+pub fn default_fs_tools(
+    plan_blacklist: Arc<[Regex]>,
+    net_allow: Arc<[Regex]>,
+    require_confinement: bool,
+) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(read_file::ReadFile),
         Box::new(write_file::WriteFile),
@@ -28,6 +34,10 @@ pub fn default_fs_tools(plan_blacklist: Arc<[Regex]>) -> Vec<Box<dyn Tool>> {
         Box::new(create_dir::CreateDir),
         Box::new(delete_dir::DeleteDir),
         Box::new(search::Search),
-        Box::new(run_command::RunCommand::new(plan_blacklist)),
+        Box::new(run_command::RunCommand::new(
+            plan_blacklist,
+            net_allow,
+            require_confinement,
+        )),
     ]
 }

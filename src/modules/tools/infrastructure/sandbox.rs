@@ -1,7 +1,13 @@
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
+use crate::modules::tools::application::command_sandbox::{
+    CommandSandbox, NetworkPolicy, SandboxPolicy,
+};
+#[cfg(test)]
+use crate::modules::tools::infrastructure::confine::noop::NoConfinement;
 use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
 
 /// Directory names that hold credentials/keys. The recursive read-only tools (`search`, `list_dir`)
@@ -16,6 +22,14 @@ const SECRET_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".dock
 pub struct Sandbox {
     root: PathBuf,
     sensitive: SensitiveMatcher,
+    /// OS-level confinement applied to every child process the tools spawn. `NoConfinement` on
+    /// platforms without a facility (and `KIRI_SANDBOX=off`), the platform adapter otherwise.
+    confiner: Arc<dyn CommandSandbox>,
+    /// The base network stance for `run_command` (a dev-command allow-list may widen it per call).
+    network: NetworkPolicy,
+    /// Extra paths a confined command may read / write beyond the workspace (toolchain dirs, config).
+    extra_ro: Arc<[PathBuf]>,
+    extra_rw: Arc<[PathBuf]>,
 }
 
 /// The resolved target of a create operation, plus any parent directories that do not yet exist (in
@@ -30,7 +44,30 @@ impl Sandbox {
     /// Canonicalize the root once. Fails if it does not exist or is not a directory. The
     /// `SensitiveMatcher` is carried on the sandbox so every path resolution can check the file
     /// name against the sensitive patterns before the tool touches the filesystem.
+    /// Unconfined shorthand (no OS sandbox, deny-network policy, no extras). Used by tests; the
+    /// composition root builds the real sandbox via `with_confinement`.
+    #[cfg(test)]
     pub fn new(root: impl AsRef<Path>, sensitive: SensitiveMatcher) -> Result<Self> {
+        Self::with_confinement(
+            root,
+            sensitive,
+            Arc::new(NoConfinement),
+            NetworkPolicy::Deny,
+            Arc::from(Vec::new()),
+            Arc::from(Vec::new()),
+        )
+    }
+
+    /// Build a sandbox with an explicit OS-confinement adapter and policy extras. The composition root
+    /// uses this; `new` is the unconfined shorthand (tests, and the default before `app::wire`).
+    pub fn with_confinement(
+        root: impl AsRef<Path>,
+        sensitive: SensitiveMatcher,
+        confiner: Arc<dyn CommandSandbox>,
+        network: NetworkPolicy,
+        extra_ro: Arc<[PathBuf]>,
+        extra_rw: Arc<[PathBuf]>,
+    ) -> Result<Self> {
         let root = root.as_ref();
         let canonical = std::fs::canonicalize(root)
             .with_context(|| format!("sandbox root {} does not exist", root.display()))?;
@@ -40,6 +77,10 @@ impl Sandbox {
         Ok(Self {
             root: canonical,
             sensitive,
+            confiner,
+            network,
+            extra_ro,
+            extra_rw,
         })
     }
 
@@ -51,6 +92,29 @@ impl Sandbox {
     /// name (e.g. `search` dropping matches that come from a secret file the recursive scan reached).
     pub fn sensitive(&self) -> &SensitiveMatcher {
         &self.sensitive
+    }
+
+    /// The OS-confinement adapter every tool wraps its child process with before spawning.
+    pub fn confiner(&self) -> &dyn CommandSandbox {
+        self.confiner.as_ref()
+    }
+
+    /// The base network stance (the default for `run_command` before its dev-command allow-list).
+    pub fn network(&self) -> NetworkPolicy {
+        self.network
+    }
+
+    /// Build the per-call OS-confinement policy: writes confined to the workspace root plus the
+    /// configured extras and any per-call `extra_rw` (e.g. an approved out-of-root target's directory).
+    pub fn command_policy(&self, network: NetworkPolicy, extra_rw: &[&Path]) -> SandboxPolicy {
+        let mut rw: Vec<PathBuf> = self.extra_rw.to_vec();
+        rw.extend(extra_rw.iter().map(|path| path.to_path_buf()));
+        SandboxPolicy {
+            root: self.root.clone(),
+            network,
+            extra_ro: self.extra_ro.to_vec(),
+            extra_rw: rw,
+        }
     }
 
     /// The name of a secret directory (`.ssh`, `.aws`, …) that `real` lies within, if any. The
@@ -105,7 +169,14 @@ impl Sandbox {
         } else {
             self.root.join(arg)
         };
-        Self::new(&target, self.sensitive.clone())
+        Self::with_confinement(
+            &target,
+            self.sensitive.clone(),
+            self.confiner.clone(),
+            self.network,
+            self.extra_ro.clone(),
+            self.extra_rw.clone(),
+        )
     }
 
     /// Resolve a path that must already exist (read/edit/overwrite/delete/list/search). A relative path
