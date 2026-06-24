@@ -83,6 +83,10 @@ fn box_rect(area: Rect, action: &str, option_count: usize) -> Rect {
     }
 }
 
+/// The action line shown above the plan options. Exposed so the view can size the reserved box region
+/// against the same text the box renders.
+pub const PLAN_ACTION: &str = "Plano pronto. Escolha:";
+
 /// The number of plan options, exposed so the view can size the reserved area without importing the
 /// constant across module boundaries.
 pub fn plan_options_len() -> usize {
@@ -116,7 +120,7 @@ pub fn box_dims(area: Rect, action: &str, option_count: usize) -> (u16, u16) {
 /// region, so the plan stays visible above). Unlike `render`, this positions the box at the top of the
 /// given area instead of pinning it to the bottom.
 pub fn render_plan_into(plan: &PendingPlan, frame: &mut Frame, area: Rect) {
-    let action = "Plano pronto. Escolha:";
+    let action = PLAN_ACTION;
     let (width, height) = box_dims(area, action, PLAN_OPTIONS.len());
     let region = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,

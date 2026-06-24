@@ -7,6 +7,9 @@ use crate::shared::kernel::tool_call::ToolCall;
 pub struct Message {
     pub role: Role,
     pub content: Option<String>,
+    /// Image data URLs attached to a user message (base64 PNG, `data:image/png;base64,...`). Empty on
+    /// every other message; when non-empty the provider emits multimodal `content` parts.
+    pub images: Vec<String>,
     /// Tool calls requested by an assistant turn. Empty on every other message.
     pub tool_calls: Vec<ToolCall>,
     /// Set only on `Role::Tool`: which assistant tool call this message answers.
@@ -18,6 +21,7 @@ impl Message {
         Self {
             role: Role::System,
             content: Some(text.into()),
+            images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
@@ -27,6 +31,19 @@ impl Message {
         Self {
             role: Role::User,
             content: Some(text.into()),
+            images: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// A user message carrying images alongside its text. `images` are `image_url` data URLs; the
+    /// provider serializes the message as multimodal `content` parts (text part + one part per image).
+    pub fn user_multimodal(text: impl Into<String>, images: Vec<String>) -> Self {
+        Self {
+            role: Role::User,
+            content: Some(text.into()),
+            images,
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
@@ -36,6 +53,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: Some(text.into()),
+            images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
@@ -47,6 +65,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content,
+            images: Vec::new(),
             tool_calls,
             tool_call_id: None,
         }
@@ -56,6 +75,7 @@ impl Message {
         Self {
             role: Role::Tool,
             content: Some(content.into()),
+            images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
         }

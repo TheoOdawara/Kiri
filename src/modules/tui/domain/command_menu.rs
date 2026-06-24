@@ -41,6 +41,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         blurb: "mostra ou muda o workspace ativo",
     },
     CommandSpec {
+        name: "/paste",
+        aliases: &["/colar"],
+        blurb: "cola imagem ou texto do clipboard no input",
+    },
+    CommandSpec {
         name: "/help",
         aliases: &["/ajuda"],
         blurb: "mostra esta ajuda",

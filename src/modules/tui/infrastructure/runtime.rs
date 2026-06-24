@@ -23,8 +23,10 @@ use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::{NoticeLevel, Transcript, TranscriptItem};
 use crate::modules::tui::domain::view_state::PendingPlan;
 use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
+use crate::modules::tui::infrastructure::clipboard::{self, ClipboardContent};
 use crate::modules::tui::infrastructure::input;
 use crate::modules::tui::infrastructure::terminal_guard::TerminalGuard;
+use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::view::view;
 use crate::shared::kernel::error::AgentError;
 
@@ -78,6 +80,15 @@ impl Tui {
         let mut terminal = ratatui::init();
         let _guard = TerminalGuard;
         let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture);
+
+        // The editor widget owns its own styling; paint it with the brand theme once at startup.
+        let cursor = ratatui::style::Style::default()
+            .fg(theme::VOID)
+            .bg(theme::HIGHLIGHT);
+        let selection = ratatui::style::Style::default()
+            .fg(theme::VOID)
+            .bg(theme::BRAND);
+        model.input.set_styles(theme::base(), cursor, selection);
 
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel::<EngineMsg>();
         let cancel = CancelToken::new();
@@ -138,8 +149,13 @@ impl Tui {
 
             for effect in update(&mut model, msg) {
                 match effect {
-                    Effect::SubmitPrompt(text) => {
-                        conversation.push(Message::user(text));
+                    Effect::SubmitPrompt { text, images } => {
+                        let message = if images.is_empty() {
+                            Message::user(text)
+                        } else {
+                            Message::user_multimodal(text, images)
+                        };
+                        conversation.push(message);
                         drive_turn(
                             &agent_loop,
                             &mut conversation,
@@ -155,10 +171,13 @@ impl Tui {
                         )
                         .await?;
                     }
+                    Effect::CopyToClipboard(text) => clipboard::copy_text(&text),
+                    Effect::PasteClipboard => paste_from_clipboard(&mut model),
                     Effect::Quit => model.should_quit = true,
                     Effect::NewSession => {
                         conversation = Conversation::new(system_prompt);
                         model.transcript = Transcript::default();
+                        model.attachments.clear();
                         model.scroll.pin();
                         model.transcript.push(TranscriptItem::Notice(
                             NoticeLevel::Info,
@@ -179,11 +198,16 @@ impl Tui {
                             format!("erro: {error:#}"),
                         )),
                     },
-                    Effect::ApprovePlan => {
-                        model.approval_mode = ApprovalMode::Default;
+                    Effect::ApprovePlan(mode) => {
+                        model.approval_mode = mode;
+                        let notice = if mode == ApprovalMode::Auto {
+                            "▶ executando o plano (auto)"
+                        } else {
+                            "▶ executando o plano"
+                        };
                         model.transcript.push(TranscriptItem::Notice(
                             NoticeLevel::Info,
-                            "▶ executando o plano".to_string(),
+                            notice.to_string(),
                         ));
                         model.busy = true;
                         conversation.push(Message::user(
@@ -210,6 +234,20 @@ impl Tui {
         }
 
         Ok(())
+    }
+}
+
+/// Read the OS clipboard and route it into the buffer: an image becomes a staged attachment, text is
+/// inserted at the cursor. Best-effort — an empty or unreadable clipboard is a no-op.
+fn paste_from_clipboard(model: &mut Model) {
+    match clipboard::read() {
+        ClipboardContent::Image(attachment) => {
+            let _ = update(model, Msg::ImageAttached(attachment));
+        }
+        ClipboardContent::Text(text) => {
+            let _ = update(model, Msg::Paste(text));
+        }
+        ClipboardContent::Empty => {}
     }
 }
 
@@ -273,10 +311,13 @@ async fn drive_turn(
                                 model.should_quit = true;
                                 cancel.cancel();
                             }
-                            Effect::SubmitPrompt(_)
+                            // Clipboard chords stay live during a turn (composing the next prompt).
+                            Effect::CopyToClipboard(text) => clipboard::copy_text(&text),
+                            Effect::PasteClipboard => paste_from_clipboard(model),
+                            Effect::SubmitPrompt { .. }
                             | Effect::NewSession
                             | Effect::ChangeWorkspace(_)
-                            | Effect::ApprovePlan => {}
+                            | Effect::ApprovePlan(_) => {}
                         }
                     }
                 }

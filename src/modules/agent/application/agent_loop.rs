@@ -58,6 +58,8 @@ impl AgentLoop {
         io: &mut IO,
     ) -> Result<TurnOutcome, AgentError> {
         // The advertised tool set is fixed for the turn; in plan mode it excludes destructive tools.
+        // `mode` may still tighten to `Auto` mid-turn if the user approves a call with "don't ask again".
+        let mut mode = mode;
         let schemas = self.registry.schemas_for(mode);
         let mut checkpoint = Instant::now();
         loop {
@@ -106,6 +108,12 @@ impl AgentLoop {
                     ApprovalMode::Default => match self.registry.confirm(sandbox, call) {
                         Some(confirmation) => match io.decide(&confirmation).await {
                             Approval::Approved => self.registry.execute(sandbox, call),
+                            // "Approve and don't ask again": run this call, then switch the rest of the
+                            // turn to auto so the following calls no longer prompt.
+                            Approval::ApprovedAuto => {
+                                mode = ApprovalMode::Auto;
+                                self.registry.execute(sandbox, call)
+                            }
                             Approval::Declined => ToolOutcome::Declined,
                             Approval::Aborted => return Ok(TurnOutcome::Aborted),
                         },
@@ -122,6 +130,11 @@ impl AgentLoop {
                 let minutes = checkpoint.elapsed().as_secs() / 60;
                 match io.confirm_continue(minutes).await {
                     Approval::Approved => checkpoint = Instant::now(),
+                    // "Keep going, and don't ask again": resume and run the rest of the turn unattended.
+                    Approval::ApprovedAuto => {
+                        mode = ApprovalMode::Auto;
+                        checkpoint = Instant::now();
+                    }
                     Approval::Declined => return Ok(TurnOutcome::Completed),
                     Approval::Aborted => return Ok(TurnOutcome::Aborted),
                 }
@@ -218,9 +231,44 @@ mod tests {
         }
     }
 
+    /// A UI that answers each confirmation from a queue and counts how many times it was asked, so a
+    /// test can prove that later calls in the turn ran without prompting.
+    struct CountingIo {
+        decisions: VecDeque<Approval>,
+        decide_calls: u32,
+    }
+
+    impl EventSink for CountingIo {
+        fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
+            Ok(())
+        }
+    }
+
+    impl Presenter for CountingIo {
+        fn begin_turn(&mut self) {}
+        fn finish_turn(&mut self) -> Result<(), AgentError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl ApprovalPolicy for CountingIo {
+        async fn decide(&mut self, _confirmation: &Confirmation) -> Approval {
+            self.decide_calls += 1;
+            self.decisions.pop_front().unwrap_or(Approval::Declined)
+        }
+        async fn confirm_continue(&mut self, _minutes: u64) -> Approval {
+            Approval::Approved
+        }
+    }
+
     fn tool_call(name: &str, args: &str) -> ToolCall {
+        tool_call_id(name, args, "c1")
+    }
+
+    fn tool_call_id(name: &str, args: &str, id: &str) -> ToolCall {
         ToolCall {
-            id: "c1".to_string(),
+            id: id.to_string(),
             kind: "function".to_string(),
             function: FunctionCall {
                 name: name.to_string(),
@@ -335,6 +383,51 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path.join("a.txt")).unwrap(),
             "hi"
+        );
+    }
+
+    #[tokio::test]
+    async fn approved_auto_stops_asking_for_the_rest_of_the_turn() {
+        let dir = TempDir::new("approved-auto");
+        let sandbox = Sandbox::new(&dir.path).unwrap();
+        // One assistant turn with two destructive calls: the first prompts, the second must not.
+        let agent_loop = agent_loop_with(vec![
+            CompletedTurn {
+                content: "writing".to_string(),
+                tool_calls: vec![
+                    tool_call_id("write_file", r#"{"path":"a.txt","content":"a"}"#, "c1"),
+                    tool_call_id("write_file", r#"{"path":"b.txt","content":"b"}"#, "c2"),
+                ],
+            },
+            CompletedTurn {
+                content: "done".to_string(),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("write two files"));
+        let mut io = CountingIo {
+            decisions: VecDeque::from(vec![Approval::ApprovedAuto]),
+            decide_calls: 0,
+        };
+
+        let outcome = agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TurnOutcome::Completed);
+        assert_eq!(
+            io.decide_calls, 1,
+            "the second call must run under auto without asking again"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path.join("a.txt")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path.join("b.txt")).unwrap(),
+            "b"
         );
     }
 

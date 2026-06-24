@@ -2,9 +2,9 @@ use crate::modules::agent::application::approval_policy::ApprovalMode;
 
 use super::command_menu::CommandMenu;
 use super::transcript::Transcript;
-use super::view_state::{History, InputBuffer, PendingApproval, PendingPlan, Scroll};
-
-use std::time::Instant;
+use super::view_state::{
+    History, ImageAttachment, InputBuffer, PendingApproval, PendingPlan, Scroll,
+};
 
 /// The status line's data: the model id, the active workspace, and the live turn indicators.
 #[derive(Debug, Default)]
@@ -14,9 +14,6 @@ pub struct Status {
     pub streaming: bool,
     pub elapsed_secs: u64,
     pub spinner_frame: usize,
-    /// When the current turn started, so the thinking line can fall back to streaming content once a
-    /// short budget elapses with no reasoning. Reset on `TurnBegan`.
-    pub turn_started: Option<Instant>,
 }
 
 impl Status {
@@ -46,14 +43,10 @@ pub struct Model {
     pub pending_plan: Option<PendingPlan>,
     /// The live slash-command preview, open while the input starts with `/` and has no whitespace yet.
     pub command_menu: Option<CommandMenu>,
+    /// Images pasted from the clipboard, staged for the next prompt and drained on submit.
+    pub attachments: Vec<ImageAttachment>,
     /// A turn is running (the agent loop future is armed).
     pub busy: bool,
-    /// The live reasoning buffer shown as a "thinking" line while a turn runs; cleared on turn end so
-    /// the conversation reverts to the normal chat view. The transcript keeps its own dim copy.
-    pub live_reasoning: String,
-    /// The live content buffer used as a fallback for the thinking line when the model emits no
-    /// reasoning (after a short grace period). Cleared on turn end.
-    pub live_content: String,
     pub should_quit: bool,
     /// How tool calls are gated; cycled with Shift+Tab, read at the start of each turn.
     pub approval_mode: ApprovalMode,

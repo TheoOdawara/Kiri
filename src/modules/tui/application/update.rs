@@ -2,6 +2,7 @@ use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::keymap;
 use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::domain::model::Model;
+use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 
 /// The pure reducer: apply one message to the model and return the effects the runtime must perform.
 /// No I/O, no engine handles — fully unit-testable.
@@ -15,6 +16,17 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }
             Vec::new()
         }
+        Msg::ImageAttached(attachment) => {
+            let label = format!(
+                "🖼 imagem anexada ({}×{})",
+                attachment.width, attachment.height
+            );
+            model.attachments.push(attachment);
+            model
+                .transcript
+                .push(TranscriptItem::Notice(NoticeLevel::Info, label));
+            Vec::new()
+        }
         Msg::Resize => Vec::new(),
         Msg::Tick => {
             if model.status.streaming {
@@ -24,19 +36,14 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::TurnBegan => {
             model.status.streaming = true;
-            model.status.turn_started = Some(std::time::Instant::now());
-            model.live_reasoning.clear();
-            model.live_content.clear();
             Vec::new()
         }
         Msg::StreamDelta(StreamKind::Reasoning, text) => {
             model.transcript.push_reasoning_delta(&text);
-            model.live_reasoning.push_str(&text);
             Vec::new()
         }
         Msg::StreamDelta(StreamKind::Content, text) => {
             model.transcript.push_content_delta(&text);
-            model.live_content.push_str(&text);
             Vec::new()
         }
         Msg::TurnFinished => {
@@ -58,10 +65,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::TurnEnded => {
             model.busy = false;
             model.status.streaming = false;
-            model.status.turn_started = None;
             model.pending_approval = None;
-            model.live_reasoning.clear();
-            model.live_content.clear();
             Vec::new()
         }
     }

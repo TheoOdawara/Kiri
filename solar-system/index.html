@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="description" content="Interactive 3D Solar System Simulation">
+  <meta name="theme-color" content="#0D1117">
+  <title>Solar System 3D</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net">
+  <link rel="stylesheet" href="/styles/variables.css">
+  <link rel="stylesheet" href="/styles/reset.css">
+  <link rel="stylesheet" href="/styles/layout.css">
+  <link rel="stylesheet" href="/styles/components.css">
+  <link rel="stylesheet" href="/styles/themes/dark.css">
+</head>
+<body>
+  <canvas id="canvas" aria-hidden="true"></canvas>
+
+  <div id="app" class="app">
+    <header class="hud" role="banner" aria-label="Heads-up display">
+      <div class="hud-left">
+        <button id="btn-menu" class="btn-icon" aria-label="Menu" aria-expanded="false" aria-controls="menu-panel">
+          <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <div class="hud-title">Solar System</div>
+      </div>
+      <div class="hud-center">
+        <div id="time-display" class="time-display" aria-live="polite" aria-atomic="true">
+          <span id="date-display">Jan 1, 2000 12:00:00 UTC</span>
+          <span id="speed-display" class="speed-display">1×</span>
+        </div>
+      </div>
+      <div class="hud-right">
+        <button id="btn-search" class="btn-icon" aria-label="Search body" aria-expanded="false" aria-controls="search-panel">
+          <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <button id="btn-settings" class="btn-icon" aria-label="Settings" aria-expanded="false" aria-controls="settings-panel">
+          <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <aside id="info-panel" class="panel info-panel" role="complementary" aria-label="Body information" hidden>
+        <div class="panel-header">
+          <h2 id="info-title">Body Name</h2>
+          <button class="btn-close" aria-label="Close panel">&times;</button>
+        </div>
+        <div id="info-content" class="info-content"></div>
+      </aside>
+
+      <div id="time-controls" class="panel time-controls" role="region" aria-label="Time controls" hidden>
+        <div class="panel-header">
+          <h2>Time Controls</h2>
+          <button class="btn-close" aria-label="Close panel">&times;</button>
+        </div>
+        <div class="time-controls-content">
+          <div class="control-group">
+            <label for="time-speed">Speed</label>
+            <input type="range" id="time-speed" min="-6" max="6" value="0" step="1" aria-label="Time speed multiplier">
+            <output id="speed-value">1×</output>
+          </div>
+          <div class="control-group">
+            <label for="time-date">Date</label>
+            <input type="datetime-local" id="time-date" aria-label="Simulation date">
+          </div>
+          <div class="control-group buttons">
+            <button id="btn-play" class="btn-primary" aria-label="Play">▶ Play</button>
+            <button id="btn-pause" class="btn-secondary" aria-label="Pause" hidden>⏸ Pause</button>
+            <button id="btn-now" class="btn-secondary" aria-label="Set to now">Now</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="footer" role="contentinfo">
+      <div class="footer-left">
+        <kbd>?</kbd> Help
+      </div>
+      <div class="footer-right">
+        <a href="https://github.com" target="_blank" rel="noopener">GitHub</a>
+        <span aria-hidden="true">·</span>
+        <a href="/LICENSE" target="_blank" rel="noopener">MIT License</a>
+      </div>
+    </footer>
+  </div>
+
+  <dialog id="menu-panel" class="dialog menu-panel" role="dialog" aria-label="Main menu">
+    <form method="dialog">
+      <header class="dialog-header">
+        <h2>Menu</h2>
+        <button class="btn-close" aria-label="Close menu" value="close">&times;</button>
+      </header>
+      <nav class="menu-nav">
+        <button class="menu-item" data-panel="time-controls">⏱ Time Controls</button>
+        <button class="menu-item" data-panel="search-panel">🔍 Search Body</button>
+        <button class="menu-item" data-panel="settings-panel">⚙ Settings</button>
+        <hr>
+        <button class="menu-item" id="btn-help">❓ Help / Shortcuts</button>
+        <button class="menu-item" id="btn-about">ℹ About</button>
+      </nav>
+    </form>
+  </dialog>
+
+  <dialog id="search-panel" class="dialog search-panel" role="dialog" aria-label="Search body">
+    <form method="dialog">
+      <header class="dialog-header">
+        <h2>Search Body</h2>
+        <button class="btn-close" aria-label="Close search" value="close">&times;</button>
+      </header>
+      <div class="search-content">
+        <label for="search-input" class="visually-hidden">Search for a celestial body</label>
+        <input type="search" id="search-input" placeholder="Type a name (e.g., Mars, Europa)..." autocomplete="off" aria-label="Search body">
+        <ul id="search-results" class="search-results" role="listbox" aria-label="Search results"></ul>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settings-panel" class="dialog settings-panel" role="dialog" aria-label="Settings">
+    <form method="dialog">
+      <header class="dialog-header">
+        <h2>Settings</h2>
+        <button class="btn-close" aria-label="Close settings" value="close">&times;</button>
+      </header>
+      <div class="settings-content">
+        <fieldset>
+          <legend>Visual Quality</legend>
+          <label><input type="radio" name="quality" value="low"> Low (fastest)</label>
+          <label><input type="radio" name="quality" value="medium" checked> Medium</label>
+          <label><input type="radio" name="quality" value="high"> High</label>
+          <label><input type="radio" name="quality" value="ultra"> Ultra (best)</label>
+        </fieldset>
+        <fieldset>
+          <legend>Display Options</legend>
+          <label><input type="checkbox" id="show-orbits" checked> Show Orbits</label>
+          <label><input type="checkbox" id="show-labels" checked> Show Labels</legend>
+          <label><input type="checkbox" id="show-starfield" checked> Starfield</label>
+          <label><input type="checkbox" id="shadows-enabled"> Shadows</label>
+          <label><input type="checkbox" id="bloom-enabled" checked> Bloom Effect</label>
+        </fieldset>
+        <fieldset>
+          <legend>Theme</legend>
+          <label><input type="radio" name="theme" value="dark" checked> Dark</label>
+          <label><input type="radio" name="theme" value="light"> Light</label>
+          <label><input type="radio" name="theme" value="auto"> Auto (system)</label>
+        </fieldset>
+        <fieldset>
+          <legend>Accessibility</legend>
+          <label><input type="checkbox" id="reduced-motion"> Reduce Motion</label>
+          <label><input type="checkbox" id="high-contrast"> High Contrast</label>
+        </fieldset>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="help-dialog" class="dialog help-dialog" role="dialog" aria-label="Help and shortcuts">
+    <form method="dialog">
+      <header class="dialog-header">
+        <h2>Help & Shortcuts</h2>
+        <button class="btn-close" aria-label="Close help" value="close">&times;</button>
+      </header>
+      <div class="help-content">
+        <section>
+          <h3>Mouse / Trackpad</h3>
+          <dl>
+            <dt>Left drag</dt><dd>Rotate view</dd>
+            <dt>Right drag / Shift+Left drag</dt><dd>Pan view</dd>
+            <dt>Scroll</dt><dd>Zoom</dd>
+            <dt>Click body</dt><dd>Focus & show info</dd>
+          </dl>
+        </section>
+        <section>
+          <h3>Touch</h3>
+          <dl>
+            <dt>One finger drag</dt><dd>Rotate</dd>
+            <dt>Two finger drag</dt><dd>Pan</dd>
+            <dt>Pinch</dt><dd>Zoom</dd>
+            <dt>Tap body</dt><dd>Focus & show info</dd>
+            <dt>Long press</dt><dd>Tooltip</dd>
+          </dl>
+        </section>
+        <section>
+          <h3>Keyboard</h3>
+          <dl>
+            <dt><kbd>Space</kbd></dt><dd>Play / Pause</dd>
+            <dt><kbd>←</kbd> / <kbd>→</kbd></dt><dd>Decrease / Increase speed</dd>
+            <dt><kbd>F</kbd></dt><dd>Focus Sun</dd>
+            <dt><kbd>1–9</kbd></dt><dd>Focus planet (1=Mercury...)</dd>
+            <dt><kbd>0</kbd></dt><dd>Focus Pluto</dd>
+            <dt><kbd>Esc</kbd></dt><dd>Clear focus</dd>
+            <dt><kbd>?</kbd></dt><dd>Show this help</dd>
+            <dt><kbd>/</kbd></dt><dd>Open search</dd>
+          </dl>
+        </section>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="about-dialog" class="dialog about-dialog" role="dialog" aria-label="About">
+    <form method="dialog">
+      <header class="dialog-header">
+        <h2>About</h2>
+        <button class="btn-close" aria-label="Close about" value="close">&times;</button>
+      </header>
+      <div class="about-content">
+        <p><strong>Solar System 3D</strong> — Interactive, physically-based simulation</p>
+        <p>Built with <a href="https://threejs.org" target="_blank" rel="noopener">Three.js</a>, TypeScript, and Vite.</p>
+        <p>Orbital data from NASA JPL. Textures from NASA public domain.</p>
+        <p class="muted">MIT License — Open Source</p>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="tooltip" class="tooltip" role="tooltip" aria-hidden="true"></div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

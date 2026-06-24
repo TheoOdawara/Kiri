@@ -5,5 +5,4 @@ pub mod header;
 pub mod hint_line;
 pub mod meta_rule;
 pub mod splash;
-pub mod thinking_line;
 pub mod transcript_pane;

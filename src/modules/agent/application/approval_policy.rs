@@ -4,6 +4,9 @@ use crate::modules::tools::application::tool::Confirmation;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Approval {
     Approved,
+    /// Approve this call and run the rest of the turn unattended — the user chose "auto" at the
+    /// prompt, so the engine switches to auto mode for the remaining calls instead of asking again.
+    ApprovedAuto,
     Declined,
     /// The user's input stream ended (or could not be read): end the session.
     Aborted,

@@ -1,4 +1,4 @@
-use crate::modules::tui::domain::view_state::PendingApproval;
+use crate::modules::tui::domain::view_state::{ImageAttachment, PendingApproval};
 
 /// Which stream a delta belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +43,8 @@ pub enum Key {
 pub enum Msg {
     Key(KeyPress),
     Paste(String),
+    /// An image read from the OS clipboard, staged as an attachment for the next prompt.
+    ImageAttached(ImageAttachment),
     Resize,
     Tick,
     TurnBegan,
