@@ -5,7 +5,7 @@ use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::infrastructure::layout::frame_layout;
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
-    editor, header, hint_line, meta_rule, transcript_pane,
+    approval, editor, header, hint_line, meta_rule, transcript_pane,
 };
 
 /// The sole ratatui render entry point: project the model onto the frame's regions. Pure with respect
@@ -19,6 +19,12 @@ pub fn view(model: &Model, frame: &mut Frame) {
     meta_rule::render(model, frame, regions.meta);
     editor::render(model, frame, regions.input);
     hint_line::render(model, frame, regions.hint);
+    // The approval / plan box is an overlay over the transcript, so it sits above the conversation.
+    if let Some(pending) = &model.pending_approval {
+        approval::render(pending, frame, regions.transcript);
+    } else if let Some(plan) = &model.pending_plan {
+        approval::render_plan(plan, frame, regions.transcript);
+    }
 }
 
 #[cfg(test)]
@@ -65,14 +71,37 @@ mod tests {
         model
             .transcript
             .push(TranscriptItem::Assistant("olá".to_string()));
-        model.pending_approval = Some(PendingApproval {
-            prompt: "ler a.txt".to_string(),
-            default_accept: true,
-        });
-        let out = render(&model, 80, 12);
+        model.pending_approval = Some(PendingApproval::new("ler a.txt".to_string(), true));
+        let out = render(&model, 80, 20);
         assert!(out.contains("você › oi"), "user item missing:\n{out}");
         assert!(out.contains("olá"), "assistant item missing:\n{out}");
-        assert!(out.contains("aprovar?"), "approval prompt missing:\n{out}");
-        assert!(out.contains("ler a.txt"), "approval text missing:\n{out}");
+        assert!(
+            out.contains("aprovação"),
+            "approval box title missing:\n{out}"
+        );
+        assert!(out.contains("ler a.txt"), "approval action missing:\n{out}");
+        assert!(out.contains("Sim"), "approval option missing:\n{out}");
+    }
+
+    #[test]
+    fn meta_rule_shows_the_active_approval_mode() {
+        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.approval_mode = ApprovalMode::Plan;
+        let out = render(&model, 80, 12);
+        assert!(out.contains("PLAN"), "mode badge missing:\n{out}");
+    }
+
+    #[test]
+    fn pending_plan_renders_the_plan_box() {
+        use crate::modules::tui::domain::view_state::PendingPlan;
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model
+            .transcript
+            .push(TranscriptItem::Assistant("meu plano".to_string()));
+        model.pending_plan = Some(PendingPlan::default());
+        let out = render(&model, 80, 20);
+        assert!(out.contains("plano"), "plan box title missing:\n{out}");
+        assert!(out.contains("Executar"), "plan option missing:\n{out}");
     }
 }

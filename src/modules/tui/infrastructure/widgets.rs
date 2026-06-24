@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod editor;
 pub mod header;
 pub mod hint_line;

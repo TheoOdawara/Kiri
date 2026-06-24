@@ -60,4 +60,8 @@ impl Tool for ReadFile {
             ToolOutcome::Ok(String::from_utf8_lossy(&bytes).into_owned())
         }
     }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }

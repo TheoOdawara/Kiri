@@ -86,6 +86,12 @@ pub trait Tool: Send + Sync {
     fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation>;
     /// Run the call against the sandbox. Never panics nor returns `Err` that aborts the turn.
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome;
+    /// Whether the tool only reads, never mutating the filesystem. Read-only tools stay available in
+    /// plan mode and run without confirmation while planning. Defaults to `false` (treated as
+    /// destructive), so a new tool is gated unless it explicitly opts in.
+    fn is_read_only(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

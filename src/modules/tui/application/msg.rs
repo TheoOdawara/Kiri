@@ -33,6 +33,8 @@ pub enum Key {
     PageDown,
     Esc,
     Tab,
+    /// Shift+Tab (crossterm reports it as a distinct back-tab key code).
+    BackTab,
 }
 
 /// Everything that can change the model: UI events (from crossterm), engine events (from the bridge
@@ -46,7 +48,6 @@ pub enum Msg {
     TurnBegan,
     StreamDelta(StreamKind, String),
     TurnFinished,
-    EngineNotice(String),
     ApprovalRequested(PendingApproval),
     /// The agent-loop future resolved; reset per-turn UI state.
     TurnEnded,

@@ -11,7 +11,7 @@ use tokio::time::{self, Interval};
 use tokio_stream::StreamExt;
 
 use crate::modules::agent::application::agent_loop::{AgentLoop, TurnOutcome};
-use crate::modules::agent::application::approval_policy::Approval;
+use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode};
 use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
@@ -20,7 +20,8 @@ use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::application::update::update;
 use crate::modules::tui::domain::model::Model;
-use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
+use crate::modules::tui::domain::transcript::{NoticeLevel, Transcript, TranscriptItem};
+use crate::modules::tui::domain::view_state::PendingPlan;
 use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
 use crate::modules::tui::infrastructure::input;
 use crate::modules::tui::infrastructure::terminal_guard::TerminalGuard;
@@ -34,20 +35,22 @@ type TurnFuture<'a> = Pin<Box<dyn Future<Output = Result<TurnOutcome, AgentError
 const FRAME_INTERVAL: Duration = Duration::from_millis(120);
 
 /// The full-screen TUI frontend: owns the engine handles and the UI model, runs the render/input loop,
-/// and drives one agent turn at a time. Selected over `Repl` in `app::wire` when stdout is a TTY.
+/// and drives one agent turn at a time. The sole frontend, assembled in `app::wire`.
 pub struct Tui {
     agent_loop: AgentLoop,
     sandbox: Sandbox,
     conversation: Conversation,
     model: Model,
     seed: Option<String>,
+    /// Kept so `/new` can rebuild a fresh conversation with the same system prompt.
+    system_prompt: &'static str,
 }
 
 impl Tui {
     pub fn new(
         agent_loop: AgentLoop,
         sandbox: Sandbox,
-        system_prompt: &str,
+        system_prompt: &'static str,
         seed: Option<String>,
         model: String,
     ) -> Self {
@@ -58,16 +61,18 @@ impl Tui {
             conversation: Conversation::new(system_prompt),
             model: Model::new(model, workspace),
             seed,
+            system_prompt,
         }
     }
 
     pub async fn run(self) -> Result<()> {
         let Tui {
             agent_loop,
-            sandbox,
+            mut sandbox,
             mut conversation,
             mut model,
             seed,
+            system_prompt,
         } = self;
 
         let mut terminal = ratatui::init();
@@ -85,6 +90,8 @@ impl Tui {
         if let Some(line) = seed.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
             match command::parse(&line) {
                 Some(Command::Quit) => model.should_quit = true,
+                // A non-quit command as the CLI seed is ignored; the seed is meant to be a prompt.
+                Some(_) => {}
                 None => {
                     model.history.record(&line);
                     model.transcript.push(TranscriptItem::User(line.clone()));
@@ -149,6 +156,54 @@ impl Tui {
                         .await?;
                     }
                     Effect::Quit => model.should_quit = true,
+                    Effect::NewSession => {
+                        conversation = Conversation::new(system_prompt);
+                        model.transcript = Transcript::default();
+                        model.scroll.pin();
+                        model.transcript.push(TranscriptItem::Notice(
+                            NoticeLevel::Info,
+                            "nova sessão".to_string(),
+                        ));
+                    }
+                    Effect::ChangeWorkspace(path) => match sandbox.relocated(&path) {
+                        Ok(new_sandbox) => {
+                            model.status.workspace = new_sandbox.root().display().to_string();
+                            sandbox = new_sandbox;
+                            model.transcript.push(TranscriptItem::Notice(
+                                NoticeLevel::Info,
+                                format!("workspace: {}", model.status.workspace),
+                            ));
+                        }
+                        Err(error) => model.transcript.push(TranscriptItem::Notice(
+                            NoticeLevel::Error,
+                            format!("erro: {error:#}"),
+                        )),
+                    },
+                    Effect::ApprovePlan => {
+                        model.approval_mode = ApprovalMode::Default;
+                        model.transcript.push(TranscriptItem::Notice(
+                            NoticeLevel::Info,
+                            "▶ executando o plano".to_string(),
+                        ));
+                        model.busy = true;
+                        conversation.push(Message::user(
+                            "Plano aprovado. Prossiga com a execução.".to_string(),
+                        ));
+                        drive_turn(
+                            &agent_loop,
+                            &mut conversation,
+                            &sandbox,
+                            &mut bridge,
+                            &mut model,
+                            &mut engine_rx,
+                            &cancel,
+                            &mut pending_reply,
+                            &mut terminal,
+                            &mut events,
+                            &mut ticker,
+                        )
+                        .await?;
+                    }
                     Effect::AnswerApproval(_) | Effect::CancelTurn => {}
                 }
             }
@@ -184,9 +239,11 @@ async fn drive_turn(
 ) -> Result<()> {
     cancel.reset();
     let started = Instant::now();
+    // The approval mode is fixed for this turn; cycling it mid-turn applies to the next one.
+    let mode = model.approval_mode;
 
     let result = {
-        let mut turn: TurnFuture = Box::pin(agent_loop.run(conversation, sandbox, bridge));
+        let mut turn: TurnFuture = Box::pin(agent_loop.run(conversation, sandbox, mode, bridge));
         loop {
             model.status.elapsed_secs = started.elapsed().as_secs();
             terminal.draw(|frame| view(model, frame))?;
@@ -218,7 +275,10 @@ async fn drive_turn(
                                 model.should_quit = true;
                                 cancel.cancel();
                             }
-                            Effect::SubmitPrompt(_) => {}
+                            Effect::SubmitPrompt(_)
+                            | Effect::NewSession
+                            | Effect::ChangeWorkspace(_)
+                            | Effect::ApprovePlan => {}
                         }
                     }
                 }
@@ -245,7 +305,6 @@ fn engine_msg(engine: EngineMsg, pending_reply: &mut Option<oneshot::Sender<Appr
         EngineMsg::Reasoning(text) => Msg::StreamDelta(StreamKind::Reasoning, text),
         EngineMsg::Content(text) => Msg::StreamDelta(StreamKind::Content, text),
         EngineMsg::Finished => Msg::TurnFinished,
-        EngineMsg::Notice(line) => Msg::EngineNotice(line),
         EngineMsg::Approval { pending, reply } => {
             *pending_reply = Some(reply);
             Msg::ApprovalRequested(pending)
@@ -253,8 +312,8 @@ fn engine_msg(engine: EngineMsg, pending_reply: &mut Option<oneshot::Sender<Appr
     }
 }
 
-/// Apply the turn's outcome: surface errors, roll back the conversation exactly as the plain REPL does,
-/// and reset per-turn UI state. A user cancel (^C) is reported as such, not as an error.
+/// Apply the turn's outcome: surface errors, roll back the conversation, and reset per-turn UI state.
+/// A user cancel (^C) is reported as such, not as an error.
 fn on_turn_end(
     result: Result<TurnOutcome, AgentError>,
     cancelled: bool,
@@ -262,7 +321,12 @@ fn on_turn_end(
     conversation: &mut Conversation,
 ) {
     match result {
-        Ok(TurnOutcome::Completed) => {}
+        Ok(TurnOutcome::Completed) => {
+            // A finished plan-mode turn offers its plan for approval before anything is executed.
+            if model.approval_mode == ApprovalMode::Plan && !cancelled {
+                model.pending_plan = Some(PendingPlan::default());
+            }
+        }
         Ok(TurnOutcome::Aborted) => model.should_quit = true,
         Err(error) => {
             if cancelled {

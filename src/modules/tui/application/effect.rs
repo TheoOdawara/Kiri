@@ -12,4 +12,10 @@ pub enum Effect {
     CancelTurn,
     /// Tear down the TUI and end the session.
     Quit,
+    /// Discard the conversation and start a fresh session.
+    NewSession,
+    /// Move the active workspace (sandbox root) to the given `/cd` path argument.
+    ChangeWorkspace(String),
+    /// Approve the proposed plan: leave plan mode and run a turn that executes it.
+    ApprovePlan,
 }

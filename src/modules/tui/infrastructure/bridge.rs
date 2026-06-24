@@ -20,7 +20,6 @@ pub enum EngineMsg {
     Reasoning(String),
     Content(String),
     Finished,
-    Notice(String),
     Approval {
         pending: PendingApproval,
         reply: oneshot::Sender<Approval>,
@@ -73,10 +72,7 @@ impl Bridge {
 
     async fn request(&self, prompt: String, default_accept: bool) -> Approval {
         let (reply, rx) = oneshot::channel();
-        let pending = PendingApproval {
-            prompt,
-            default_accept,
-        };
+        let pending = PendingApproval::new(prompt, default_accept);
         if self.push(EngineMsg::Approval { pending, reply }).is_err() {
             return Approval::Aborted;
         }
@@ -103,10 +99,6 @@ impl Presenter for Bridge {
 
     fn finish_turn(&mut self) -> Result<(), AgentError> {
         self.push(EngineMsg::Finished)
-    }
-
-    fn notice(&mut self, line: &str) {
-        let _ = self.push(EngineMsg::Notice(line.to_string()));
     }
 }
 

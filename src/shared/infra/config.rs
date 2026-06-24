@@ -19,7 +19,9 @@ const SYSTEM_PROMPT: &str = concat!(
     "- Before acting, state your plan in a sentence or two, then carry it out with the tools — ",
     "use them to do the work instead of describing it, chaining as many calls as needed. As you ",
     "go, describe each action in one short line, so your narration always matches what the tools ",
-    "actually do. The CLI asks the user to approve each call; a call may be declined, so adapt.\n",
+    "actually do. Tool calls run under an approval mode the user controls — default confirms each ",
+    "call, auto runs them without asking, and plan offers only read-only tools so you investigate and ",
+    "propose a plan to approve before any change is made. A call may be declined, so adapt.\n",
     "- If the request is ambiguous or underspecified, ask a clarifying question before acting ",
     "instead of guessing.\n",
     "- Stay grounded: read before you assert, never invent file contents or results, and report ",
@@ -49,10 +51,6 @@ struct Cli {
     /// Defaults to the current directory.
     #[arg(long, env = "KIRI_PATH")]
     path: Option<PathBuf>,
-    /// Use the plain line-based REPL instead of the full-screen TUI. The plain REPL is also used
-    /// automatically when stdout is not a TTY (piped output, CI).
-    #[arg(long)]
-    plain: bool,
 }
 
 /// The resolved configuration the composition root needs to wire the harness. The API key and model
@@ -65,8 +63,6 @@ pub struct Settings {
     pub path: PathBuf,
     pub seed: Option<String>,
     pub checkpoint_budget: Duration,
-    /// Force the plain line-based REPL even on a TTY (the `--plain` flag).
-    pub plain: bool,
 }
 
 impl Settings {
@@ -87,7 +83,6 @@ impl Settings {
             path,
             seed: cli.prompt,
             checkpoint_budget: TOOL_CHECKPOINT,
-            plain: cli.plain,
         })
     }
 }

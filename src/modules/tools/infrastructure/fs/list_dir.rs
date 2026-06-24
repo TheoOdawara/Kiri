@@ -63,4 +63,8 @@ impl Tool for ListDir {
             ToolOutcome::Ok(names.join("\n"))
         }
     }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }

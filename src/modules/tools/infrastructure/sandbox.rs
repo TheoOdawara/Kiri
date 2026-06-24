@@ -33,6 +33,19 @@ impl Sandbox {
         &self.root
     }
 
+    /// Resolve a new workspace root from a `/cd` argument and return the relocated sandbox. A relative
+    /// argument is joined onto the current root; an absolute or `~`/`~/…` argument is taken as given.
+    /// The new root is canonicalized and must exist and be a directory (else this fails).
+    pub fn relocated(&self, arg: &str) -> Result<Self> {
+        let expanded = expand_tilde(arg, home().as_deref());
+        let target = if expanded.is_absolute() {
+            expanded
+        } else {
+            self.root.join(arg)
+        };
+        Self::new(&target)
+    }
+
     /// Resolve a path that must already exist (read/edit/overwrite/delete/list/search). A relative path
     /// resolves under the active root and is asserted to stay within it; an absolute path (or `~/…`) is
     /// resolved as given — allowed outside the root, since the CLI gates it with explicit confirmation.
@@ -143,11 +156,6 @@ fn expand_tilde(path: &str, home: Option<&Path>) -> PathBuf {
 
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
-}
-
-/// Expand `~`/`~/…` against the real `$HOME`; used to resolve a `/cd` target the shell didn't expand.
-pub(crate) fn expand_user_path(path: &str) -> PathBuf {
-    expand_tilde(path, home().as_deref())
 }
 
 /// Whether a tool path targets an explicit absolute location (after `~` expansion) — i.e. potentially
