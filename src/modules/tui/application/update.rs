@@ -18,7 +18,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::ImageAttached(attachment) => {
             let label = format!(
-                "🖼 imagem anexada ({}×{})",
+                "🖼 imagem anexada ({}×{}) — vai junto no próximo envio",
                 attachment.width, attachment.height
             );
             model.attachments.push(attachment);

@@ -21,14 +21,14 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
             theme::dim(),
         )
     } else if model.busy {
-        Line::styled("  ^C cancela · streaming…", theme::dim())
+        Line::styled("  ^C cancela · Esc 2× cancela · streaming…", theme::dim())
     } else {
         // Pick the longest hint variant that fits the width, so nothing is cut on narrow terminals.
         let variants = [
-            "  Enter envia · ⇧Tab modo · Alt+Enter nova linha · ↑↓ histórico · ⇧↑↓/PgUp/PgDn rola · ^O expande · ^Home/^End topo/fundo · ^C/^D sai · /help",
-            "  Enter envia · ⇧Tab modo · ↑↓ histórico · PgUp/PgDn rola · ^O expande · ^C sai · /help",
-            "  Enter envia · ^C sai · /help",
-            "  Enter · ^C · /help",
+            "  Enter envia · ⇧Tab modo · Alt+Enter nova linha · ↑↓ histórico · ⇧↑↓/PgUp/PgDn rola · ^O expande · ^Home/^End topo/fundo · ^C 2×/^D sai · /help",
+            "  Enter envia · ⇧Tab modo · ↑↓ histórico · PgUp/PgDn rola · ^O expande · ^C 2×/^D sai · /help",
+            "  Enter envia · ^C 2× sai · /help",
+            "  Enter · ^C 2× · /help",
         ];
         let w = area.width as usize;
         let text = variants
