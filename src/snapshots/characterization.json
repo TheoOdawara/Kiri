@@ -121,6 +121,25 @@
       "label": "move_mkdir",
       "prompt": "Criar diretório(s) 'x, x/y' e mover. Aprova executar: mv exists.txt x/y/c.txt? [S/n] ",
       "tool": "move_path"
+    },
+    {
+      "args": {
+        "command": "echo hi"
+      },
+      "default_accept": true,
+      "label": "run_command",
+      "prompt": "Executar comando no shell. Aprova executar: $ echo hi? [S/n] ",
+      "tool": "run_command"
+    },
+    {
+      "args": {
+        "command": "ls",
+        "cwd": "/tmp"
+      },
+      "default_accept": false,
+      "label": "run_command_absolute",
+      "prompt": "Executar comando no shell. Aprova executar: $ ls? [s/N] ",
+      "tool": "run_command"
     }
   ],
   "tool_definitions": [
@@ -319,6 +338,37 @@
           },
           "required": [
             "query"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Run a shell command and return its combined stdout/stderr output. The command runs in the specified working directory (relative to workspace root, or absolute). Output is truncated at 64 KiB. A timeout (default 30s) prevents runaway commands.",
+        "name": "run_command",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "description": "The shell command to execute.",
+              "type": "string"
+            },
+            "cwd": {
+              "default": ".",
+              "description": "Working directory (relative to workspace root, or absolute). Defaults to workspace root.",
+              "type": "string"
+            },
+            "timeout_ms": {
+              "default": 30000,
+              "description": "Timeout in milliseconds. Defaults to 30000.",
+              "minimum": 1000,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "command"
           ],
           "type": "object"
         }

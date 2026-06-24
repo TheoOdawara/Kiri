@@ -41,11 +41,6 @@ pub const COMMANDS: &[CommandSpec] = &[
         blurb: "mostra ou muda o workspace ativo",
     },
     CommandSpec {
-        name: "/paste",
-        aliases: &["/colar"],
-        blurb: "cola imagem ou texto do clipboard no input",
-    },
-    CommandSpec {
         name: "/help",
         aliases: &["/ajuda"],
         blurb: "mostra esta ajuda",
@@ -201,5 +196,21 @@ mod tests {
         let mut m = CommandMenu::open("/");
         m.move_cursor(1);
         assert_eq!(m.spec().unwrap().name, COMMANDS[1].name);
+    }
+
+    /// Locks the invariant called out at the top of the file: every entry in `COMMANDS` must resolve
+    /// to a real command via `application::command::parse`. If a future change drops a parser arm but
+    /// leaves its catalog row — or vice versa — the test fails and the menu and the parser stop
+    /// disagreeing silently.
+    #[test]
+    fn catalog_matches_parse() {
+        use crate::modules::tui::application::command::{Command, parse};
+        for spec in COMMANDS {
+            let parsed = parse(spec.name).expect("catalog name must parse");
+            assert!(
+                !matches!(parsed, Command::Unknown),
+                "{spec:?} is in the catalog but parse() returned Unknown"
+            );
+        }
     }
 }

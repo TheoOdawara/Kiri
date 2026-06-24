@@ -281,7 +281,6 @@ fn submit(model: &mut Model) -> Vec<Effect> {
             vec![]
         }
         Some(Command::ChangeWorkspace(Some(path))) => vec![Effect::ChangeWorkspace(path)],
-        Some(Command::Paste) => vec![Effect::PasteClipboard],
         Some(Command::Unknown) => {
             model.transcript.push(TranscriptItem::Notice(
                 NoticeLevel::Error,

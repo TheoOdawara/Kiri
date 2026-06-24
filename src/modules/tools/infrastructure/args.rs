@@ -40,8 +40,25 @@ pub struct SearchArgs {
     pub path: String,
 }
 
+#[derive(Deserialize)]
+pub struct RunCommandArgs {
+    pub command: String,
+    #[serde(default = "default_cwd")]
+    pub cwd: String,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
 fn default_path() -> String {
     ".".to_string()
+}
+
+fn default_cwd() -> String {
+    ".".to_string()
+}
+
+fn default_timeout_ms() -> u64 {
+    30_000
 }
 
 pub fn parse<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, serde_json::Error> {

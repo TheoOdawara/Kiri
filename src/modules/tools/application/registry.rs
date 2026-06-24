@@ -135,7 +135,8 @@ mod tests {
                 "list_dir",
                 "create_dir",
                 "delete_dir",
-                "search"
+                "search",
+                "run_command"
             ]
         );
     }

@@ -150,6 +150,20 @@ fn current_snapshot() -> Value {
             "move_path",
             json!({ "source": "exists.txt", "destination": "x/y/c.txt" }),
         ),
+        confirmation_row(
+            r,
+            s,
+            "run_command",
+            "run_command",
+            json!({ "command": "echo hi" }),
+        ),
+        confirmation_row(
+            r,
+            s,
+            "run_command_absolute",
+            "run_command",
+            json!({ "command": "ls", "cwd": "/tmp" }),
+        ),
     ];
 
     json!({
