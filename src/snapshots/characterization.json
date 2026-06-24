@@ -121,25 +121,6 @@
       "label": "move_mkdir",
       "prompt": "Criar diretório(s) 'x, x/y' e mover. Aprova executar: mv exists.txt x/y/c.txt? [S/n] ",
       "tool": "move_path"
-    },
-    {
-      "args": {
-        "command": "echo hi"
-      },
-      "default_accept": true,
-      "label": "run_command",
-      "prompt": "Executar comando no shell. Aprova executar: $ echo hi? [S/n] ",
-      "tool": "run_command"
-    },
-    {
-      "args": {
-        "command": "ls",
-        "cwd": "/tmp"
-      },
-      "default_accept": false,
-      "label": "run_command_absolute",
-      "prompt": "Executar comando no shell. Aprova executar: $ ls? [s/N] ",
-      "tool": "run_command"
     }
   ],
   "tool_definitions": [
