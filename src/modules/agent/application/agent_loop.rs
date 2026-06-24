@@ -119,14 +119,14 @@ impl AgentLoop {
                         io.tool_started(call, &command);
                         timed(self.registry.execute(sandbox, call)).await
                     }
-                    // Plan: destructive tools are withheld from the schema; if the model still names
-                    // one, refuse it without touching the filesystem. Read-only tools run directly so
-                    // the agent can investigate while drafting its plan.
-                    ApprovalMode::Plan if self.registry.is_destructive(&call.function.name) => {
+                    // Plan: non-plannable tools are withheld from the schema; if the model still names
+                    // one, refuse it without touching the filesystem. Plannable tools (read-only +
+                    // run_command) run directly so the agent can investigate while drafting its plan.
+                    ApprovalMode::Plan if !self.registry.is_plannable(&call.function.name) => {
                         io.tool_started(call, &command);
                         (
                             ToolOutcome::Error(format!(
-                                "'{}' is blocked in plan mode (planning is read-only)",
+                                "'{}' is blocked in plan mode (not available for planning)",
                                 call.function.name
                             )),
                             Duration::ZERO,

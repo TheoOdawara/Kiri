@@ -138,6 +138,10 @@ impl Tool for RunCommand {
     fn is_read_only(&self) -> bool {
         false
     }
+
+    fn is_plannable(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

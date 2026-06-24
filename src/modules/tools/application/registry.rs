@@ -19,13 +19,15 @@ impl ToolRegistry {
         self.tools.iter().map(|tool| tool.schema()).collect()
     }
 
-    /// The schema array advertised for `mode`. In plan mode only read-only tools are offered, so the
-    /// model cannot even request a destructive action while planning.
+    /// The schema array advertised for `mode`. In plan mode only plannable tools are offered, so the
+    /// model can investigate (read files, run dev servers, search logs) but not mutate the project
+    /// directly — `run_command` is plannable but its plan-mode blacklist handles destructive shell
+    /// commands at execution time.
     pub fn schemas_for(&self, mode: ApprovalMode) -> Vec<serde_json::Value> {
         if mode == ApprovalMode::Plan {
             self.tools
                 .iter()
-                .filter(|tool| tool.is_read_only())
+                .filter(|tool| tool.is_plannable())
                 .map(|tool| tool.schema())
                 .collect()
         } else {
@@ -33,10 +35,18 @@ impl ToolRegistry {
         }
     }
 
-    /// Whether a named tool exists and mutates the filesystem — used to block it in plan mode. An
-    /// unknown name is not destructive (then `execute` reports the unknown-tool error).
+    /// Whether a named tool exists and mutates the filesystem. Currently unused in the engine path
+    /// (plan mode gates on `is_plannable` instead) but kept as a classification test assertion and
+    /// for future use (e.g. destructive-tool warnings in non-plan modes).
+    #[allow(dead_code)]
     pub fn is_destructive(&self, name: &str) -> bool {
         self.find(name).is_some_and(|tool| !tool.is_read_only())
+    }
+
+    /// Whether a named tool is advertised in plan mode. Plannable tools either never mutate
+    /// (`is_read_only`) or opt in explicitly (`is_plannable` override, e.g. `run_command`).
+    pub fn is_plannable(&self, name: &str) -> bool {
+        self.find(name).is_some_and(|tool| tool.is_plannable())
     }
 
     fn find(&self, name: &str) -> Option<&dyn Tool> {
@@ -142,13 +152,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_mode_schemas_expose_only_read_only_tools() {
+    async fn plan_mode_schemas_expose_only_plannable_tools() {
         let names: Vec<String> = registry()
             .schemas_for(ApprovalMode::Plan)
             .iter()
             .map(|schema| schema["function"]["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names, vec!["read_file", "list_dir", "search"]);
+        assert_eq!(
+            names,
+            vec!["read_file", "list_dir", "search", "run_command"]
+        );
     }
 
     #[tokio::test]

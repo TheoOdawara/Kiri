@@ -98,6 +98,13 @@ pub trait Tool: Send + Sync {
     fn is_read_only(&self) -> bool {
         false
     }
+    /// Whether the tool is advertised in plan mode. Defaults to `is_read_only` — read-only tools are
+    /// always plannable. A tool that can mutate but is safe to run for investigation (e.g.
+    /// `run_command` for starting a dev server or reading logs) overrides this to `true`; the
+    /// plan-mode blacklist (in `run_command::execute`) handles the destructive cases.
+    fn is_plannable(&self) -> bool {
+        self.is_read_only()
+    }
 }
 
 #[cfg(test)]
