@@ -179,6 +179,7 @@ mod tests {
         assert!(r.is_destructive("write_file"));
         assert!(r.is_destructive("delete_dir"));
         assert!(r.is_destructive("move_path"));
+        assert!(r.is_destructive("run_command"));
         assert!(!r.is_destructive("read_file"));
         assert!(!r.is_destructive("search"));
         // An unknown tool is not destructive; execute reports the unknown-tool error instead.
@@ -221,6 +222,17 @@ mod tests {
                 &call("move_path", json!({"source": "a", "destination": "b"}))
             ),
             Some("mv a b".to_string())
+        );
+        // run_command shows the shell wrapper — platform-specific.
+        #[cfg(unix)]
+        assert_eq!(
+            reg.command_line(&sb, &call("run_command", json!({"command": "ls"}))),
+            Some("$ sh -c 'ls'".to_string())
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            reg.command_line(&sb, &call("run_command", json!({"command": "ls"}))),
+            Some("$ cmd /C \"ls\"".to_string())
         );
     }
 
