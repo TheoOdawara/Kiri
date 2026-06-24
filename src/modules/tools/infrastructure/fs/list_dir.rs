@@ -55,6 +55,9 @@ impl Tool for ListDir {
             Ok(dir) => dir,
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
+        if let Some(secret) = sandbox.secret_dir_component(&dir) {
+            return ToolOutcome::Error(format!("refusing to list the secret directory '{secret}'"));
+        }
 
         // `ls -1A -p` lists one entry per line, excludes `.`/`..`, and marks directories with `/`.
         // `QUOTING_STYLE=literal` stops GNU `ls` from quoting unusual names; the lines are re-sorted in

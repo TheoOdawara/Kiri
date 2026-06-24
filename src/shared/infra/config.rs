@@ -103,6 +103,11 @@ const SYSTEM_PROMPT: &str = concat!(
 /// this time checkpoint is the only guard against an unattended runaway.
 const TOOL_CHECKPOINT: Duration = Duration::from_secs(30 * 60);
 
+/// Maximum tool calls in a single user turn before the runaway checkpoint fires (alongside the
+/// wall-clock budget). Bounds an unattended (auto-mode) runaway to a finite number of actions
+/// between check-ins, even when each call is fast enough that the time budget never trips.
+const MAX_TOOL_CALLS_PER_CHECKPOINT: usize = 100;
+
 /// Patterns blocked in plan mode — commands that mutate the project or escalate privilege.
 /// The shell can bypass these (eval, base64, ANSI-C quoting), so this is best-effort; the
 /// real fix is OS-level sandboxing (tracked as security-debt in ADR 0002). Override via
@@ -176,6 +181,7 @@ pub struct Settings {
     pub path: PathBuf,
     pub seed: Option<String>,
     pub checkpoint_budget: Duration,
+    pub max_tool_calls: usize,
     pub plan_blacklist: Arc<[Regex]>,
     pub sensitive: SensitiveMatcher,
 }
@@ -198,6 +204,7 @@ impl Settings {
             path,
             seed: cli.prompt,
             checkpoint_budget: TOOL_CHECKPOINT,
+            max_tool_calls: MAX_TOOL_CALLS_PER_CHECKPOINT,
             plan_blacklist: load_plan_blacklist()?,
             sensitive: load_sensitive_matcher()?,
         })

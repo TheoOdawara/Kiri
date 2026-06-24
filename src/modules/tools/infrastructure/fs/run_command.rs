@@ -12,6 +12,14 @@ use crate::modules::tools::infrastructure::exec::{self, ExecError};
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::shared::kernel::tool_call::ToolCall;
 
+/// Upper bound for a `run_command` timeout, so the model cannot pin a process slot for hours. The
+/// schema advertises a 1s minimum; this clamps the value actually applied into `[1s, 10min]`.
+const RUN_COMMAND_MAX_TIMEOUT_MS: u64 = 600_000;
+
+fn effective_timeout_ms(requested: u64) -> u64 {
+    requested.clamp(1_000, RUN_COMMAND_MAX_TIMEOUT_MS)
+}
+
 pub struct RunCommand {
     plan_blacklist: Arc<[Regex]>,
 }
@@ -90,7 +98,7 @@ impl Tool for RunCommand {
         let result = match exec::run_shell(
             &args.command,
             Some(&cwd),
-            Duration::from_millis(args.timeout_ms),
+            Duration::from_millis(effective_timeout_ms(args.timeout_ms)),
         )
         .await
         {
@@ -121,6 +129,10 @@ impl Tool for RunCommand {
     }
 
     fn is_plannable(&self) -> bool {
+        true
+    }
+
+    fn confirm_in_auto(&self) -> bool {
         true
     }
 
@@ -194,6 +206,14 @@ mod tests {
     }
 
     use crate::modules::tools::application::registry::ToolRegistry;
+
+    #[test]
+    fn effective_timeout_ms_clamps_into_range() {
+        assert_eq!(effective_timeout_ms(0), 1_000);
+        assert_eq!(effective_timeout_ms(500), 1_000);
+        assert_eq!(effective_timeout_ms(30_000), 30_000);
+        assert_eq!(effective_timeout_ms(u64::MAX), RUN_COMMAND_MAX_TIMEOUT_MS);
+    }
 
     #[tokio::test]
     async fn run_command_simple() {

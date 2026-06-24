@@ -32,6 +32,7 @@ pub fn wire(settings: Settings) -> Result<Tui> {
         registry,
         settings.model,
         settings.checkpoint_budget,
+        settings.max_tool_calls,
     );
 
     Ok(Tui::new(

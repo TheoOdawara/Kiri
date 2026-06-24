@@ -34,6 +34,17 @@ fn format_grep_line(line: &str) -> String {
     format!("{path}:{number}: {shown}")
 }
 
+/// Whether a raw `grep` match line comes from a sensitive file (by its last path component). Such
+/// matches are dropped so `search` cannot leak the contents of a `.env`/`id_rsa` the scan reached.
+#[cfg(unix)]
+fn is_sensitive_match(sandbox: &Sandbox, grep_line: &str) -> bool {
+    let path = grep_line.split(':').next().unwrap_or_default();
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| sandbox.sensitive().matches(name).is_some())
+}
+
 #[async_trait::async_trait(?Send)]
 impl Tool for Search {
     fn name(&self) -> &'static str {
@@ -84,6 +95,11 @@ impl Tool for Search {
             Ok(start) => start,
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
+        if let Some(secret) = sandbox.secret_dir_component(&start) {
+            return ToolOutcome::Error(format!(
+                "refusing to search inside the secret directory '{secret}'"
+            ));
+        }
 
         // `grep -rIFn` does the recursive scan: `-r` recurse (without following symlinked dirs), `-I`
         // skip binary files, `-F` fixed-string (literal, case-sensitive) match, `-n` line numbers. The
@@ -132,6 +148,9 @@ impl Tool for Search {
                     truncated = true;
                     break;
                 }
+                if is_sensitive_match(sandbox, line) {
+                    continue;
+                }
                 matches.push(format_grep_line(line));
             }
 
@@ -171,6 +190,13 @@ impl Tool for Search {
                     if file_type.is_dir() {
                         stack.push(path);
                     } else if file_type.is_file() {
+                        if entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|name| sandbox.sensitive().matches(name).is_some())
+                        {
+                            continue; // never leak the contents of a sensitive file
+                        }
                         search_file(&path, &args.query, &base, &mut matches);
                         if matches.len() >= SEARCH_MAX_MATCHES {
                             truncated = true;
@@ -201,7 +227,47 @@ impl Tool for Search {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{SEARCH_MAX_LINE_CHARS, format_grep_line};
+    use super::{SEARCH_MAX_LINE_CHARS, Search, format_grep_line};
+    use crate::modules::tools::application::tool::{Tool, ToolOutcome};
+    use crate::modules::tools::infrastructure::sandbox::Sandbox;
+    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let mut path = std::env::temp_dir();
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            path.push(format!("t-cli-search-{}-{n}-{tag}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn call(args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "1".to_string(),
+            kind: "function".to_string(),
+            function: FunctionCall {
+                name: "search".to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
 
     #[test]
     fn format_grep_line_strips_dot_slash_and_inserts_the_space() {
@@ -218,5 +284,56 @@ mod tests {
         let content = shown.rsplit_once(": ").unwrap().1;
         assert_eq!(content.chars().count(), SEARCH_MAX_LINE_CHARS);
         assert!(content.chars().all(|c| c == 'é'));
+    }
+
+    #[tokio::test]
+    async fn search_refuses_a_secret_directory() {
+        let dir = TempDir::new("secret-dir");
+        fs::create_dir(dir.path.join(".ssh")).unwrap();
+        fs::write(
+            dir.path.join(".ssh").join("id_rsa"),
+            b"PRIVATE KEY material",
+        )
+        .unwrap();
+        let sb = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+
+        let outcome = Search
+            .execute(
+                &sb,
+                &call(serde_json::json!({"query": "PRIVATE", "path": ".ssh"})),
+            )
+            .await;
+        match outcome {
+            ToolOutcome::Error(msg) => assert!(
+                msg.contains("secret directory"),
+                "expected a secret-dir refusal, got: {msg}"
+            ),
+            other => panic!("expected refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn search_drops_matches_from_sensitive_files() {
+        let dir = TempDir::new("filter");
+        fs::write(dir.path.join("a.txt"), b"NEEDLE in code").unwrap();
+        fs::write(dir.path.join(".env"), b"SECRET=NEEDLE").unwrap();
+        let sb = Sandbox::new(&dir.path, SensitiveMatcher::new(&[".env"]).unwrap()).unwrap();
+
+        let outcome = Search
+            .execute(&sb, &call(serde_json::json!({"query": "NEEDLE"})))
+            .await;
+        match outcome {
+            ToolOutcome::Ok(text) => {
+                assert!(
+                    text.contains("a.txt"),
+                    "normal match must be present: {text}"
+                );
+                assert!(
+                    !text.contains(".env") && !text.contains("SECRET"),
+                    "a sensitive file's contents must be filtered out: {text}"
+                );
+            }
+            other => panic!("expected matches, got {other:?}"),
+        }
     }
 }

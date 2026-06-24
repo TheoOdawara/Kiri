@@ -49,6 +49,12 @@ impl ToolRegistry {
         self.find(name).is_some_and(|tool| tool.is_plannable())
     }
 
+    /// Whether a named tool must be confirmed even in auto mode (irreversible / high blast radius).
+    /// An unknown tool is not gated — `execute` reports the unknown-tool error instead.
+    pub fn confirm_in_auto(&self, name: &str) -> bool {
+        self.find(name).is_some_and(|tool| tool.confirm_in_auto())
+    }
+
     /// In plan mode, ask the named tool whether the call should be blocked. Returns
     /// `Some(reason)` if the tool refuses the call, `None` if it's allowed.
     pub fn plan_check(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<String> {

@@ -111,6 +111,14 @@ pub trait Tool: Send + Sync {
     fn plan_check(&self, _sandbox: &Sandbox, _call: &ToolCall) -> Option<String> {
         None
     }
+    /// Whether this tool must still be confirmed in auto mode — a high-blast-radius / irreversible
+    /// action. Defaults to `false`: ordinary mutations (write/edit/create_dir) run unattended in
+    /// auto, while the engine independently gates any out-of-root target. Overridden to `true` by the
+    /// irreversible tools (`run_command`, `delete_file`, `delete_dir`, `move_path`) so an unattended
+    /// turn — including a prompt-injected one — can never silently destroy data or run a shell.
+    fn confirm_in_auto(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

@@ -61,6 +61,10 @@ impl Tool for MovePath {
         Some(confirm(action, default_accept))
     }
 
+    fn confirm_in_auto(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: MoveArgs = match parse_args(call) {
             Ok(args) => args,

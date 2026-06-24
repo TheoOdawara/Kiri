@@ -47,6 +47,10 @@ impl Tool for DeleteFile {
         ))
     }
 
+    fn confirm_in_auto(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: PathArgs = match parse_args(call) {
             Ok(args) => args,

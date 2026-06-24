@@ -40,6 +40,7 @@ pub struct AgentLoop {
     registry: ToolRegistry,
     model: String,
     checkpoint_budget: Duration,
+    max_tool_calls: usize,
 }
 
 impl AgentLoop {
@@ -48,12 +49,14 @@ impl AgentLoop {
         registry: ToolRegistry,
         model: String,
         checkpoint_budget: Duration,
+        max_tool_calls: usize,
     ) -> Self {
         Self {
             provider,
             registry,
             model,
             checkpoint_budget,
+            max_tool_calls,
         }
     }
 
@@ -74,6 +77,7 @@ impl AgentLoop {
         let mut mode = mode;
         let schemas = self.registry.schemas_for(mode);
         let mut checkpoint = Instant::now();
+        let mut calls_since_checkpoint: usize = 0;
         loop {
             io.begin_turn();
             let result = self
@@ -114,11 +118,35 @@ impl AgentLoop {
                 // transcript records every attempt — including declined and plan-blocked calls. The
                 // `Aborted` arm fires neither: the turn ends and the UI resets via `TurnEnded`.
                 let (outcome, elapsed) = match mode {
-                    // Auto: run every call without asking.
-                    ApprovalMode::Auto => {
-                        io.tool_started(call, &command);
-                        timed(self.registry.execute(sandbox, call)).await
-                    }
+                    // Auto: run calls without asking — EXCEPT high-blast-radius tools (run_command,
+                    // delete_*, move_path) and any out-of-root target, which still require a live
+                    // confirmation. This is what keeps an unattended turn — including a prompt-injected
+                    // one — from silently destroying data or reaching outside the workspace, and it is
+                    // the only such guard on platforms without an OS sandbox.
+                    ApprovalMode::Auto => match self.registry.confirm(sandbox, call) {
+                        Some(confirmation)
+                            if self.registry.confirm_in_auto(&call.function.name)
+                                || !confirmation.default_accept =>
+                        {
+                            match io.decide(&confirmation).await {
+                                // Already in auto, so "approve and don't ask again" is just "approve":
+                                // destructive calls keep being confirmed for the rest of the turn.
+                                Approval::Approved | Approval::ApprovedAuto => {
+                                    io.tool_started(call, &command);
+                                    timed(self.registry.execute(sandbox, call)).await
+                                }
+                                Approval::Declined => {
+                                    io.tool_started(call, &command);
+                                    (ToolOutcome::Declined, Duration::ZERO)
+                                }
+                                Approval::Aborted => return Ok(TurnOutcome::Aborted),
+                            }
+                        }
+                        _ => {
+                            io.tool_started(call, &command);
+                            timed(self.registry.execute(sandbox, call)).await
+                        }
+                    },
                     // Plan: non-plannable tools are withheld from the schema; if the model still names
                     // one, refuse it without touching the filesystem. Plannable tools (read-only +
                     // run_command) run directly so the agent can investigate while drafting its plan.
@@ -174,14 +202,24 @@ impl AgentLoop {
                 ));
             }
 
-            if checkpoint.elapsed() >= self.checkpoint_budget {
+            // The runaway checkpoint fires on either guard: a long wall-clock turn, or too many tool
+            // calls since the last check-in. The call cap bounds an unattended (auto) runaway even when
+            // every call is fast enough that the time budget never trips.
+            calls_since_checkpoint += calls.len();
+            if checkpoint.elapsed() >= self.checkpoint_budget
+                || calls_since_checkpoint >= self.max_tool_calls
+            {
                 let minutes = checkpoint.elapsed().as_secs() / 60;
                 match io.confirm_continue(minutes).await {
-                    Approval::Approved => checkpoint = Instant::now(),
+                    Approval::Approved => {
+                        checkpoint = Instant::now();
+                        calls_since_checkpoint = 0;
+                    }
                     // "Keep going, and don't ask again": resume and run the rest of the turn unattended.
                     Approval::ApprovedAuto => {
                         mode = ApprovalMode::Auto;
                         checkpoint = Instant::now();
+                        calls_since_checkpoint = 0;
                     }
                     Approval::Declined => return Ok(TurnOutcome::Completed),
                     Approval::Aborted => return Ok(TurnOutcome::Aborted),
@@ -399,6 +437,7 @@ mod tests {
             ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new()))),
             "model".to_string(),
             Duration::from_secs(3600),
+            1000,
         )
     }
 
@@ -740,5 +779,164 @@ mod tests {
         assert_eq!(io.started, vec!["rm a.txt".to_string()]);
         assert!(matches!(io.finished.as_slice(), [ToolOutcome::Declined]));
         assert!(dir.path.join("a.txt").exists(), "declined must not delete");
+    }
+
+    #[tokio::test]
+    async fn auto_mode_runs_inroot_read_without_confirming() {
+        let dir = TempDir::new("auto-inroot-read");
+        std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let agent_loop = agent_loop_with(vec![
+            CompletedTurn {
+                content: "reading".to_string(),
+                tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+            },
+            CompletedTurn {
+                content: "done".to_string(),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("read a.txt"));
+        let mut io = CountingIo {
+            decisions: VecDeque::new(),
+            decide_calls: 0,
+        };
+
+        agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            io.decide_calls, 0,
+            "an in-root read must not prompt in auto mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_mode_confirms_destructive_delete() {
+        let dir = TempDir::new("auto-confirm-del");
+        std::fs::write(dir.path.join("a.txt"), b"x").unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let agent_loop = agent_loop_with(vec![
+            CompletedTurn {
+                content: "deleting".to_string(),
+                tool_calls: vec![tool_call("delete_file", r#"{"path":"a.txt"}"#)],
+            },
+            CompletedTurn {
+                content: "done".to_string(),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("delete a.txt"));
+        // Declines the destructive call — auto must still ask, so the file survives.
+        let mut io = CountingIo {
+            decisions: VecDeque::from(vec![Approval::Declined]),
+            decide_calls: 0,
+        };
+
+        agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            io.decide_calls, 1,
+            "a destructive tool must be confirmed even in auto mode"
+        );
+        assert!(
+            dir.path.join("a.txt").exists(),
+            "a declined delete must not run, even in auto mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_mode_confirms_out_of_root_target() {
+        let outside = TempDir::new("auto-out-target");
+        let dir = TempDir::new("auto-out-inside");
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let target = outside.path.join("new.txt");
+        let args =
+            serde_json::json!({ "path": target.to_str().unwrap(), "content": "x" }).to_string();
+        let agent_loop = agent_loop_with(vec![
+            CompletedTurn {
+                content: "writing".to_string(),
+                tool_calls: vec![tool_call("write_file", &args)],
+            },
+            CompletedTurn {
+                content: "done".to_string(),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("write outside the workspace"));
+        // write_file is an ordinary mutation, but the target is outside the root — auto must still ask.
+        let mut io = CountingIo {
+            decisions: VecDeque::from(vec![Approval::Declined]),
+            decide_calls: 0,
+        };
+
+        agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            io.decide_calls, 1,
+            "an out-of-root target must be confirmed even in auto mode"
+        );
+        assert!(
+            !target.exists(),
+            "a declined out-of-root write must not run, even in auto mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn iteration_cap_fires_the_checkpoint() {
+        let dir = TempDir::new("iter-cap");
+        std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        // Two read-only rounds are queued; with a cap of 1 the checkpoint must fire after the first.
+        let provider = Arc::new(ScriptedProvider {
+            turns: Mutex::new(VecDeque::from(vec![
+                CompletedTurn {
+                    content: "first".to_string(),
+                    tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+                },
+                CompletedTurn {
+                    content: "second".to_string(),
+                    tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+                },
+            ])),
+        });
+        let agent_loop = AgentLoop::new(
+            provider,
+            ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new()))),
+            "model".to_string(),
+            Duration::from_secs(3600),
+            1,
+        );
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("read repeatedly"));
+        // Declining the checkpoint ends the turn before the second round can run.
+        let mut io = ScriptedIo(Approval::Declined);
+
+        let outcome = agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TurnOutcome::Completed);
+        let tool_results = conversation
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .count();
+        assert_eq!(
+            tool_results, 1,
+            "the call cap must pause the turn before the second tool round"
+        );
     }
 }

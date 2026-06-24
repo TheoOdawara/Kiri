@@ -4,6 +4,11 @@ use anyhow::{Context, Result, bail};
 
 use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
 
+/// Directory names that hold credentials/keys. The recursive read-only tools (`search`, `list_dir`)
+/// refuse to operate *inside* one of these, since the file-name sensitive guard matches files, not
+/// directories — without this, `search` could recurse into `~/.ssh` and print `id_rsa` line by line.
+const SECRET_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker"];
+
 /// Confines every file operation to a canonicalized root directory, and refuses CRUD on files
 /// whose name matches a sensitive pattern (secrets, keys, credentials). All file tools resolve
 /// their path through this type; nothing else touches the filesystem with a raw, unvalidated path.
@@ -42,6 +47,25 @@ impl Sandbox {
         &self.root
     }
 
+    /// The sensitive-file matcher this sandbox enforces, so a tool can filter its own results by file
+    /// name (e.g. `search` dropping matches that come from a secret file the recursive scan reached).
+    pub fn sensitive(&self) -> &SensitiveMatcher {
+        &self.sensitive
+    }
+
+    /// The name of a secret directory (`.ssh`, `.aws`, …) that `real` lies within, if any. The
+    /// recursive read-only tools use this to refuse poking inside a credential store, which the
+    /// file-name guard alone does not cover.
+    pub fn secret_dir_component(&self, real: &Path) -> Option<&'static str> {
+        real.components().find_map(|component| {
+            let Component::Normal(name) = component else {
+                return None;
+            };
+            let name = name.to_str()?;
+            SECRET_DIRS.iter().copied().find(|dir| *dir == name)
+        })
+    }
+
     /// Whether a resolved absolute path lies outside the active workspace root. Used by the file tools
     /// to phrase the out-of-jail case and pick the working directory the command runs in.
     pub fn is_outside_root(&self, resolved: &Path) -> bool {
@@ -62,8 +86,11 @@ impl Sandbox {
                 return dir.to_path_buf();
             }
             match dir.parent() {
-                Some(parent) => dir = parent,
-                None => return self.root.clone(),
+                // Don't let the walk climb out to a filesystem root like `/`: if no existing ancestor
+                // is found within the target's own subtree, run at the workspace root instead, so a
+                // command never executes at `/` or the user's home for a deep nonexistent target.
+                Some(parent) if parent.parent().is_some() => dir = parent,
+                _ => return self.root.clone(),
             }
         }
     }
@@ -322,6 +349,24 @@ mod tests {
     }
 
     #[test]
+    fn secret_dir_component_flags_credential_directories() {
+        let dir = TempDir::new("secret-detect");
+        let sb = sandbox(&dir);
+        assert_eq!(
+            sb.secret_dir_component(Path::new("/home/u/.ssh/id_rsa")),
+            Some(".ssh")
+        );
+        assert_eq!(
+            sb.secret_dir_component(Path::new("/home/u/.aws/config")),
+            Some(".aws")
+        );
+        assert_eq!(
+            sb.secret_dir_component(Path::new("/home/u/project/src/main.rs")),
+            None
+        );
+    }
+
+    #[test]
     fn rejects_empty_path() {
         let dir = TempDir::new("empty");
         let sb = sandbox(&dir);
@@ -414,6 +459,18 @@ mod tests {
             sb.exec_cwd_for(&target),
             fs::canonicalize(&outside.path).unwrap()
         );
+    }
+
+    #[test]
+    fn exec_cwd_for_never_escapes_to_the_filesystem_root() {
+        let sb = sandbox(&TempDir::new("cwd-fsroot"));
+        // A nonexistent target directly under `/`: its only existing ancestor is `/` itself, which
+        // must never become the working directory — fall back to the workspace root instead.
+        let target = sb
+            .resolve_create("/t-cli-nonexistent-top-zzz-9999/f.txt")
+            .unwrap()
+            .target;
+        assert_eq!(sb.exec_cwd_for(&target), sb.root());
     }
 
     #[cfg(unix)]
