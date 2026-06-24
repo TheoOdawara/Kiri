@@ -105,6 +105,12 @@ pub trait Tool: Send + Sync {
     fn is_plannable(&self) -> bool {
         self.is_read_only()
     }
+    /// In plan mode, check whether this call should be blocked before execution. Returns
+    /// `Some(reason)` if blocked, `None` if allowed. Defaults to `None` — tools that need
+    /// plan-mode restrictions (e.g. `run_command` checking a command blacklist) override this.
+    fn plan_check(&self, _sandbox: &Sandbox, _call: &ToolCall) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]

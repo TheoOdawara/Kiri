@@ -49,6 +49,12 @@ impl ToolRegistry {
         self.find(name).is_some_and(|tool| tool.is_plannable())
     }
 
+    /// In plan mode, ask the named tool whether the call should be blocked. Returns
+    /// `Some(reason)` if the tool refuses the call, `None` if it's allowed.
+    pub fn plan_check(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+        self.find(&call.function.name)?.plan_check(sandbox, call)
+    }
+
     fn find(&self, name: &str) -> Option<&dyn Tool> {
         self.tools
             .iter()
@@ -80,9 +86,11 @@ mod tests {
     use crate::modules::tools::infrastructure::fs::default_fs_tools;
     use crate::modules::tools::infrastructure::support::READ_FILE_MAX_BYTES;
     use crate::shared::kernel::tool_call::FunctionCall;
+    use regex::Regex;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -109,7 +117,7 @@ mod tests {
     }
 
     fn registry() -> ToolRegistry {
-        ToolRegistry::new(default_fs_tools())
+        ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new())))
     }
 
     fn sandbox(dir: &TempDir) -> Sandbox {

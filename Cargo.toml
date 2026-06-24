@@ -23,6 +23,7 @@ tui-textarea-2 = { version = "0.11.0", default-features = false, features = ["cr
 arboard = { version = "3.6.1", features = ["image-data"] }
 png = "0.18.1"
 base64 = "0.22.1"
+regex = "1.11"
 
 [lints.rust]
 unsafe_code = "forbid"

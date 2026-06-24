@@ -11,8 +11,10 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::registry::ToolRegistry;
@@ -76,7 +78,7 @@ fn confirmation_row(
 fn current_snapshot() -> Value {
     let dir = TempDir::new("snap");
     let sandbox = Sandbox::new(&dir.path).unwrap();
-    let registry = ToolRegistry::new(default_fs_tools());
+    let registry = ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new())));
     // Pre-seed a file so the overwrite/edit/delete variants resolve against an existing path.
     fs::write(dir.path.join("exists.txt"), b"data").unwrap();
 

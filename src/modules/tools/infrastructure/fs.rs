@@ -9,10 +9,15 @@ pub mod run_command;
 pub mod search;
 pub mod write_file;
 
+use std::sync::Arc;
+
+use regex::Regex;
+
 use crate::modules::tools::application::tool::Tool;
 
-/// The default file tool set, in the order advertised to the model.
-pub fn default_fs_tools() -> Vec<Box<dyn Tool>> {
+/// The default file tool set, in the order advertised to the model. The plan blacklist is
+/// injected into `RunCommand` so it can refuse destructive shell commands in plan mode.
+pub fn default_fs_tools(plan_blacklist: Arc<[Regex]>) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(read_file::ReadFile),
         Box::new(write_file::WriteFile),
@@ -23,6 +28,6 @@ pub fn default_fs_tools() -> Vec<Box<dyn Tool>> {
         Box::new(create_dir::CreateDir),
         Box::new(delete_dir::DeleteDir),
         Box::new(search::Search),
-        Box::new(run_command::RunCommand),
+        Box::new(run_command::RunCommand::new(plan_blacklist)),
     ]
 }

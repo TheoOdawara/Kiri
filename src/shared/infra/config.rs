@@ -1,8 +1,10 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
+use regex::Regex;
 
 /// NVIDIA's OpenAI-compatible endpoint. Hardcoded for now; a future multi-provider feature will move
 /// this into external configuration (see docs/decisions/0001-openai-compatible-provider.md).
@@ -92,6 +94,55 @@ const SYSTEM_PROMPT: &str = concat!(
 /// this time checkpoint is the only guard against an unattended runaway.
 const TOOL_CHECKPOINT: Duration = Duration::from_secs(30 * 60);
 
+/// Patterns blocked in plan mode — commands that mutate the project or escalate privilege.
+/// The shell can bypass these (eval, base64, ANSI-C quoting), so this is best-effort; the
+/// real fix is OS-level sandboxing (tracked as security-debt in ADR 0002). Override via
+/// `KIRI_PLAN_BLACKLIST` (newline-separated, `#` comments, replaces this default).
+const DEFAULT_PLAN_BLACKLIST: &[&str] = &[
+    r"\brm\b",
+    r"\bdel\b",
+    r"\brmdir\b",
+    r"\brd\b",
+    r"\bunlink\b",
+    r"\btee\b",
+    r"\bdd\b",
+    r"\bmv\b",
+    r"\bmove\b",
+    r"\brename\b",
+    r"\bcp\b",
+    r"\bcopy\b",
+    r"\bformat\b",
+    r"\bmkfs\b",
+    r"\bdiskpart\b",
+    r"\bsudo\b",
+    r"\bsu\b",
+    r"\brunas\b",
+    r"git\s+(commit|push|reset|clean|checkout|merge|rebase)",
+    r"(npm|pip|cargo|gem|go)\s+install",
+    r"\bkill\b",
+    r"\bkillall\b",
+    r"\btaskkill\b",
+];
+
+/// Load the plan-mode blacklist: `KIRI_PLAN_BLACKLIST` env var if set (newline-separated,
+/// `#`-prefixed lines are comments, empty lines are ignored), else the hardcoded default.
+/// Each pattern is compiled as a `Regex`; an invalid pattern fails fast with a clear error.
+fn load_plan_blacklist() -> Result<Arc<[Regex]>> {
+    let raw = std::env::var("KIRI_PLAN_BLACKLIST").ok();
+    let patterns: Vec<&str> = match &raw {
+        Some(value) if !value.is_empty() => value
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect(),
+        _ => DEFAULT_PLAN_BLACKLIST.to_vec(),
+    };
+    let regexes: Result<Vec<Regex>, regex::Error> =
+        patterns.iter().map(|p| Regex::new(p)).collect();
+    let regexes = regexes.map_err(|e| anyhow!("invalid regex in KIRI_PLAN_BLACKLIST: {e}"))?;
+    Ok(Arc::from(regexes))
+}
+
 #[derive(Parser)]
 #[command(
     name = "kiri",
@@ -116,6 +167,7 @@ pub struct Settings {
     pub path: PathBuf,
     pub seed: Option<String>,
     pub checkpoint_budget: Duration,
+    pub plan_blacklist: Arc<[Regex]>,
 }
 
 impl Settings {
@@ -136,6 +188,7 @@ impl Settings {
             path,
             seed: cli.prompt,
             checkpoint_budget: TOOL_CHECKPOINT,
+            plan_blacklist: load_plan_blacklist()?,
         })
     }
 }

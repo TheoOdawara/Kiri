@@ -1311,6 +1311,7 @@ dependencies = [
  "png",
  "pulldown-cmark",
  "ratatui",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

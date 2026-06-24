@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use std::time::Duration;
 
+use regex::Regex;
 use serde_json::{Value, json};
 use tokio::process::Command;
 
@@ -12,7 +14,15 @@ use crate::shared::kernel::tool_call::ToolCall;
 
 const RUN_COMMAND_MAX_BYTES: usize = 64 * 1024;
 
-pub struct RunCommand;
+pub struct RunCommand {
+    plan_blacklist: Arc<[Regex]>,
+}
+
+impl RunCommand {
+    pub fn new(plan_blacklist: Arc<[Regex]>) -> Self {
+        Self { plan_blacklist }
+    }
+}
 
 #[async_trait::async_trait(?Send)]
 impl Tool for RunCommand {
@@ -142,6 +152,19 @@ impl Tool for RunCommand {
     fn is_plannable(&self) -> bool {
         true
     }
+
+    fn plan_check(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+        let args: RunCommandArgs = parse_args(call).ok()?;
+        for pattern in self.plan_blacklist.iter() {
+            if pattern.is_match(&args.command) {
+                return Some(format!(
+                    "blocked in plan mode: command matches '{}'",
+                    pattern.as_str()
+                ));
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -149,9 +172,11 @@ mod tests {
     use super::*;
     use crate::modules::tools::infrastructure::fs::default_fs_tools;
     use crate::shared::kernel::tool_call::FunctionCall;
+    use regex::Regex;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -193,7 +218,7 @@ mod tests {
     }
 
     fn registry() -> ToolRegistry {
-        ToolRegistry::new(default_fs_tools())
+        ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new())))
     }
 
     use crate::modules::tools::application::registry::ToolRegistry;

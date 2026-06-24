@@ -133,8 +133,13 @@ impl AgentLoop {
                         )
                     }
                     ApprovalMode::Plan => {
-                        io.tool_started(call, &command);
-                        timed(self.registry.execute(sandbox, call)).await
+                        if let Some(reason) = self.registry.plan_check(sandbox, call) {
+                            io.tool_started(call, &command);
+                            (ToolOutcome::Error(reason), Duration::ZERO)
+                        } else {
+                            io.tool_started(call, &command);
+                            timed(self.registry.execute(sandbox, call)).await
+                        }
                     }
                     // Default: confirm each call through the UI before running it.
                     ApprovalMode::Default => match self.registry.confirm(sandbox, call) {
@@ -191,6 +196,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -204,6 +210,8 @@ mod tests {
     use crate::modules::tools::application::tool::Confirmation;
     use crate::modules::tools::infrastructure::fs::default_fs_tools;
     use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
+
+    use regex::Regex;
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -387,7 +395,7 @@ mod tests {
         });
         AgentLoop::new(
             provider,
-            ToolRegistry::new(default_fs_tools()),
+            ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new()))),
             "model".to_string(),
             Duration::from_secs(3600),
         )

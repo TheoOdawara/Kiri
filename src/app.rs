@@ -25,7 +25,7 @@ pub fn wire(settings: Settings) -> Result<Tui> {
         settings.base_url,
         settings.api_key,
     ));
-    let registry = ToolRegistry::new(default_fs_tools());
+    let registry = ToolRegistry::new(default_fs_tools(settings.plan_blacklist.clone()));
     let model = settings.model.clone();
     let agent_loop = AgentLoop::new(
         provider,
