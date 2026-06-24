@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode};
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
@@ -12,6 +14,9 @@ const SCROLL_STEP: u16 = 5;
 /// A "page" scroll step, used for Shift+PageUp/PageDown. The transcript viewport height is not stored
 /// on the model, so a fixed large step stands in; the view clamps to the available history.
 const SCROLL_PAGE: u16 = 20;
+/// Double-tap window for Ctrl+C (quit) and Esc (cancel): two presses within this interval count as
+/// a double. Tuned to feel deliberate without being sluggish.
+const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(500);
 
 /// Interpret a key press against the current model, mutating it and returning any effects. Pure: no
 /// I/O, so it is fully unit-testable. While an approval is pending, keys answer it; otherwise they
@@ -41,12 +46,19 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                 if let Some(text) = model.input.copy_selection() {
                     return vec![Effect::CopyToClipboard(text)];
                 }
-                return if model.busy {
-                    vec![Effect::CancelTurn]
-                } else {
+                let now = Instant::now();
+                let double_tap = model
+                    .last_ctrl_c
+                    .is_some_and(|t| now.duration_since(t) < DOUBLE_TAP_WINDOW);
+                model.last_ctrl_c = Some(now);
+                if double_tap {
                     model.should_quit = true;
-                    vec![Effect::Quit]
-                };
+                    return vec![Effect::Quit];
+                }
+                if model.busy {
+                    return vec![Effect::CancelTurn];
+                }
+                return vec![];
             }
             Key::Char('x') => {
                 return match model.input.cut_selection() {
@@ -87,6 +99,19 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     }
 
     match key.code {
+        // Double Esc while busy cancels the current turn (alternative to Ctrl+C).
+        // Single Esc while busy is a no-op (recorded for the double-tap window).
+        Key::Esc if model.busy => {
+            let now = Instant::now();
+            let double_tap = model
+                .last_esc
+                .is_some_and(|t| now.duration_since(t) < DOUBLE_TAP_WINDOW);
+            model.last_esc = Some(now);
+            if double_tap {
+                return vec![Effect::CancelTurn];
+            }
+            vec![]
+        }
         // Shift/Alt+Enter inserts a newline; plain Enter submits.
         Key::Enter if key.shift || key.alt => {
             model.input.newline();
@@ -495,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_cancels_a_running_turn_else_quits() {
+    fn ctrl_c_cancels_while_busy_double_ctrl_c_quits() {
         let mut m = Model {
             busy: true,
             ..Model::default()
@@ -506,10 +531,46 @@ mod tests {
             alt: false,
             shift: false,
         };
+        // Single Ctrl+C while busy → cancel the turn.
         assert_eq!(on_key(&mut m, ctrl_c.clone()), vec![Effect::CancelTurn]);
-        m.busy = false;
+        // Second Ctrl+C within the window → quit (double-tap), even though the first cancelled.
         assert_eq!(on_key(&mut m, ctrl_c), vec![Effect::Quit]);
         assert!(m.should_quit);
+    }
+
+    #[test]
+    fn single_ctrl_c_while_idle_does_nothing_then_double_quits() {
+        let mut m = Model::default();
+        let ctrl_c = KeyPress {
+            code: Key::Char('c'),
+            ctrl: true,
+            alt: false,
+            shift: false,
+        };
+        // Single Ctrl+C while idle → no-op (quit requires a double tap).
+        assert_eq!(on_key(&mut m, ctrl_c.clone()), vec![]);
+        assert!(!m.should_quit);
+        // Double Ctrl+C → quit.
+        assert_eq!(on_key(&mut m, ctrl_c), vec![Effect::Quit]);
+        assert!(m.should_quit);
+    }
+
+    #[test]
+    fn double_esc_cancels_while_busy() {
+        let mut m = Model {
+            busy: true,
+            ..Model::default()
+        };
+        let esc = KeyPress {
+            code: Key::Esc,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        };
+        // First Esc while busy → no-op (recorded for the double-tap window).
+        assert_eq!(on_key(&mut m, esc.clone()), vec![]);
+        // Second Esc within the window → cancel the turn.
+        assert_eq!(on_key(&mut m, esc), vec![Effect::CancelTurn]);
     }
 
     #[test]
@@ -827,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_mid_menu_aborts_to_quit_not_navigation() {
+    fn ctrl_c_mid_menu_double_tap_quits() {
         let mut m = Model::default();
         type_str(&mut m, "/");
         let ctrl_c = KeyPress {
@@ -836,6 +897,9 @@ mod tests {
             alt: false,
             shift: false,
         };
+        // Single Ctrl+C → no-op (quit now requires a double tap).
+        assert_eq!(on_key(&mut m, ctrl_c.clone()), vec![]);
+        // Double Ctrl+C → quit.
         assert_eq!(on_key(&mut m, ctrl_c), vec![Effect::Quit]);
         assert!(m.should_quit);
     }

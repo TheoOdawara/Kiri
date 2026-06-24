@@ -307,10 +307,16 @@ async fn drive_turn(
                                     let _ = reply.send(decision);
                                 }
                             }
-                            Effect::CancelTurn => cancel.cancel(),
+                            Effect::CancelTurn => {
+                                cancel.cancel();
+                                // Break the select! loop immediately — dropping the turn future
+                                // kills any running child process (kill_on_drop on run_command).
+                                done = Some(Ok(TurnOutcome::Aborted));
+                            }
                             Effect::Quit => {
                                 model.should_quit = true;
                                 cancel.cancel();
+                                done = Some(Ok(TurnOutcome::Aborted));
                             }
                             // Clipboard chords stay live during a turn (composing the next prompt).
                             Effect::CopyToClipboard(text) => clipboard::copy_text(&text),

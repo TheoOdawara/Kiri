@@ -53,6 +53,10 @@ pub struct Model {
     pub should_quit: bool,
     /// How tool calls are gated; cycled with Shift+Tab, read at the start of each turn.
     pub approval_mode: ApprovalMode,
+    /// Timestamp of the last Ctrl+C press, for double-tap-to-quit detection.
+    pub last_ctrl_c: Option<std::time::Instant>,
+    /// Timestamp of the last Esc press, for double-tap-to-cancel detection while busy.
+    pub last_esc: Option<std::time::Instant>,
 }
 
 impl Model {
