@@ -101,3 +101,55 @@ the same force without more words.
   change to `Settings.system_prompt` or to `Conversation::new(system_prompt)`.
 - `BASE_URL`, `NVIDIA_API_KEY`, `NVIDIA_MODEL`, the tool registry, the approval flow, the agent
   loop, and the TUI are all unchanged. This ADR is text-only plus its own doc update.
+
+## Update — 2026-06-24 — run_command hardening, plan mode, sensitive files, keymap
+
+Eight follow-up phases after the initial revision, all on the `feat/run-command-hardening`
+branch. The prompt text, the tool layer, and the TUI all changed; this section records the
+decisions that touch the prompt or the architecture around it.
+
+**C3 — run_command line rewritten.** The original line said "run a shell command in the
+sandbox" — misleading because the shell can `cd` anywhere. The new line says "starting in
+the given cwd … stay inside by default; only reach outside when the task requires it or the
+user asks." The rule is positive (default to workspace), not defensive.
+
+**L1 — plan mode broadened.** `is_plannable(&self) -> bool` added to `Tool` (default =
+`is_read_only`). `run_command` overrides to `true` — the model can run dev servers and read
+logs while planning. The plan-mode schema now filters by `is_plannable`, not `is_read_only`.
+The engine's plan-mode check changed from `is_destructive` to `!is_plannable`. The prompt's
+plan-mode bullet was updated to reflect this.
+
+**C1 — plan-mode blacklist.** `KIRI_PLAN_BLACKLIST` env var (newline-separated regex, `#`
+comments, replaces a hardcoded default of ~23 patterns: `rm`, `del`, `mv`, `git commit`,
+`sudo`, etc.). `run_command::plan_check` scans the command string before spawning; a match
+returns `Error("blocked in plan mode: command matches '…'")`. Best-effort — the shell can
+bypass via `eval`, `base64`, ANSI-C quoting; OS-level sandboxing remains the real fix
+(`security-debt`, ADR 0002).
+
+**Phase 6 — sensitive file guard.** `KIRI_SENSITIVE_PATTERNS` env var (newline-separated
+globs, `#` comments, replaces a hardcoded default of ~29 patterns: `.env*`, `id_rsa`,
+`*.pem`, `credentials*`, `*.bak`, `service-account*.json`, etc.). The `SensitiveMatcher` in
+`tools/infrastructure/sensitive.rs` compiles globs to anchored regex. `Sandbox::resolve_*
+` calls `assert_not_sensitive` after path resolution — CRUD + move on a matching file name
+returns `Error("path matches sensitive file pattern '…'")` before touching the filesystem.
+Match is on the last path component only (file name). The prompt's Security section now lists
+the sensitive names and the override env var.
+
+**Phase 5 — double-tap keymap + cancel kills child.** Single Ctrl+C while busy cancels the
+turn (unchanged). Double Esc while busy also cancels (new). Single Ctrl+C while idle is now a
+no-op (was: quit). Double Ctrl+C (within 500ms) quits (new). `Effect::CancelTurn` now sets
+`done=Some(Aborted)` in the runtime's `select!` loop, which drops the `turn` future — and
+`run_command`'s `kill_on_drop(true)` on `tokio::process::Command` terminates the child
+immediately instead of waiting for the timeout.
+
+**Phase 2 — run_command tokio.** `std::thread::spawn + cmd.output()` replaced by
+`tokio::process::Command` + `tokio::time::timeout`. The `timeout_ms` argument is now enforced
+(on deadline the child is killed and the tool returns `Error("command timed out after Nms")`).
+`command_line` shows the shell wrapper (`$ sh -c '…'` / `$ cmd /C "…"`) so the user sees the
+call goes through a shell. Status message is portable ("terminated (no exit code)" instead of
+"terminated by signal"). Empty output no longer produces a leading newline.
+
+**Phase 1 — async trait.** `Tool::execute` is now `async fn` via `#[async_trait(?Send)]`,
+matching the existing `CompletionProvider` pattern. All 10 tools, the registry, and the agent
+loop migrated. The file tools keep their blocking `std::fs` bodies (microsecond operations);
+only `run_command` actually awaits (the tokio process).
