@@ -15,9 +15,6 @@ pub enum Command {
     SetMode(ApprovalMode),
     /// `/cd`: show the active workspace (`None`) or move it to a path (`Some`).
     ChangeWorkspace(Option<String>),
-    /// `/paste`: read the OS clipboard (image preferred, else text) into the input — the reliable image
-    /// path when the terminal swallows Ctrl+V for its own paste.
-    Paste,
     /// A `/`-prefixed token that is not a known command.
     Unknown,
 }
@@ -42,7 +39,6 @@ pub fn parse(line: &str) -> Option<Command> {
         "/auto" => Command::SetMode(ApprovalMode::Auto),
         "/default" | "/normal" => Command::SetMode(ApprovalMode::Default),
         "/cd" => Command::ChangeWorkspace((!arg.is_empty()).then(|| arg.to_string())),
-        "/paste" | "/colar" => Command::Paste,
         _ => Command::Unknown,
     };
     Some(command)
@@ -57,7 +53,6 @@ pub fn help_text() -> String {
         "  /auto          modo auto (executa tudo sem pedir aprovação)",
         "  /default       modo default (pede aprovação para cada ação)",
         "  /cd [caminho]  mostra ou muda o workspace ativo",
-        "  /paste         cola imagem ou texto do clipboard no input",
         "  /help          mostra esta ajuda",
         "  /exit          encerra a sessão",
         "Shift+Tab alterna entre os modos (default → auto → plan).",
@@ -96,6 +91,12 @@ mod tests {
         assert_eq!(parse("/new"), Some(Command::NewSession));
         assert_eq!(parse("/novo"), Some(Command::NewSession));
         assert_eq!(parse("/help"), Some(Command::Help));
+    }
+
+    #[test]
+    fn paste_is_now_unknown() {
+        assert_eq!(parse("/paste"), Some(Command::Unknown));
+        assert_eq!(parse("/colar"), Some(Command::Unknown));
     }
 
     #[test]
