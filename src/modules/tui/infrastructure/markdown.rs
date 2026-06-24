@@ -9,6 +9,11 @@
 //! and hard breaks. Links render as their text. Unsupported block constructs fall back to paragraph
 //! text so nothing is lost.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use ratatui::style::{Modifier, Style};
@@ -16,10 +21,47 @@ use ratatui::text::{Line, Span};
 
 use crate::modules::tui::infrastructure::theme;
 
+/// Upper bound on memoized renders before the cache is cleared. Transcript items are immutable once
+/// past, so they hit the cache every frame; only the streaming item and width changes miss. Cleared
+/// wholesale on overflow (cheap, re-warms in one frame) rather than evicting per entry.
+const MAX_RENDER_CACHE: usize = 512;
+
+thread_local! {
+    /// Per-thread memoization of `render` keyed by `(markdown, base, width)`. The TUI runtime is
+    /// single-threaded (`!Send`), so a thread-local is the natural home; rendering the full transcript
+    /// each 120ms frame re-parsed every item before this, the dominant idle/stream CPU cost.
+    static RENDER_CACHE: RefCell<HashMap<u64, Vec<Line<'static>>>> = RefCell::new(HashMap::new());
+}
+
+fn cache_key(markdown: &str, base: Style, width: usize) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    markdown.hash(&mut hasher);
+    base.hash(&mut hasher);
+    width.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Render `markdown` to a wrapped, styled list of lines at `width` columns, with `base` as the
-/// default text style. Each returned `Line` is one visual row; word-wrap carries `Style` through
-/// every word so inline formatting survives wrapping. Blank lines between blocks are preserved.
+/// default text style. Memoized: a re-render of unchanged content at the same width returns a clone of
+/// the cached lines instead of re-parsing. Each returned `Line` is one visual row; word-wrap carries
+/// `Style` through every word so inline formatting survives wrapping. Blank lines are preserved.
 pub fn render(markdown: &str, base: Style, width: usize) -> Vec<Line<'static>> {
+    let key = cache_key(markdown, base, width);
+    if let Some(hit) = RENDER_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let lines = render_uncached(markdown, base, width);
+    RENDER_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= MAX_RENDER_CACHE {
+            cache.clear();
+        }
+        cache.insert(key, lines.clone());
+    });
+    lines
+}
+
+fn render_uncached(markdown: &str, base: Style, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
     let options = Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TABLES
@@ -594,6 +636,18 @@ mod tests {
     fn empty_input_yields_one_blank_line() {
         let lines = render("", Style::default(), 40);
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn render_is_memoized_and_stays_consistent() {
+        let md = "**bold** and `code` and a list:\n- one\n- two";
+        let first = render(md, Style::default(), 40);
+        let cached = render(md, Style::default(), 40);
+        assert_eq!(first, cached, "a cache hit must match a fresh render");
+        // The width is part of the key: a narrower width wraps to more rows.
+        let narrow = render("a b c d e f g h i j", Style::default(), 5);
+        let wide = render("a b c d e f g h i j", Style::default(), 40);
+        assert_ne!(narrow.len(), wide.len());
     }
 
     #[test]

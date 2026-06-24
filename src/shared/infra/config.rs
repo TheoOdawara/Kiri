@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use regex::Regex;
 
@@ -333,5 +333,31 @@ impl Settings {
 }
 
 fn required_env(key: &str) -> Result<String> {
-    std::env::var(key).with_context(|| format!("environment variable {key} must be set (see .env)"))
+    let value = std::env::var(key)
+        .with_context(|| format!("environment variable {key} must be set (see .env)"))?;
+    ensure_nonempty(key, value)
+}
+
+/// Reject a present-but-empty required value at boot, so a blank `NVIDIA_API_KEY`/`NVIDIA_MODEL` fails
+/// with a clear message instead of surfacing as a provider error on the first prompt.
+fn ensure_nonempty(key: &str, value: String) -> Result<String> {
+    if value.trim().is_empty() {
+        bail!("environment variable {key} is set but empty (see .env)");
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_nonempty;
+
+    #[test]
+    fn ensure_nonempty_rejects_blank_values() {
+        assert!(ensure_nonempty("NVIDIA_API_KEY", String::new()).is_err());
+        assert!(ensure_nonempty("NVIDIA_API_KEY", "   ".to_string()).is_err());
+        assert_eq!(
+            ensure_nonempty("NVIDIA_MODEL", "model-x".to_string()).unwrap(),
+            "model-x"
+        );
+    }
 }
