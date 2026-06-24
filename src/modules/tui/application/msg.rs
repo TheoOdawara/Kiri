@@ -1,3 +1,6 @@
+use std::time::Duration;
+
+use crate::modules::tui::domain::transcript::{ToolDiff, ToolStatus};
 use crate::modules::tui::domain::view_state::{ImageAttachment, PendingApproval};
 
 /// Which stream a delta belongs to.
@@ -50,6 +53,17 @@ pub enum Msg {
     TurnBegan,
     StreamDelta(StreamKind, String),
     TurnFinished,
+    /// A tool call started running (engine → TUI), with its display command and an optional edit diff.
+    ToolStarted {
+        command: String,
+        diff: Option<ToolDiff>,
+    },
+    /// A tool call finished (engine → TUI): its outcome status, full (capped) output, and duration.
+    ToolFinished {
+        status: ToolStatus,
+        output: String,
+        elapsed: Duration,
+    },
     ApprovalRequested(PendingApproval),
     /// The user scrolled the mouse wheel up by one notch.
     ScrollUp,

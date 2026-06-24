@@ -45,6 +45,9 @@ pub struct Model {
     pub command_menu: Option<CommandMenu>,
     /// Images pasted from the clipboard, staged for the next prompt and drained on submit.
     pub attachments: Vec<ImageAttachment>,
+    /// When set, tool outputs and edit diffs render in full instead of a bounded preview. Toggled
+    /// with Ctrl+O.
+    pub expand_tools: bool,
     /// A turn is running (the agent loop future is armed).
     pub busy: bool,
     pub should_quit: bool,

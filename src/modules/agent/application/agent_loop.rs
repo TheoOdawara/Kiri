@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode, ApprovalPolicy};
 use crate::modules::agent::application::presenter::Presenter;
+use crate::modules::agent::application::tool_observer::ToolObserver;
 use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
 use crate::modules::provider::application::completion_provider::{
@@ -18,6 +19,14 @@ use crate::shared::kernel::error::AgentError;
 pub enum TurnOutcome {
     Completed,
     Aborted,
+}
+
+/// Run a tool execution, returning its outcome alongside how long only the execution took (so the
+/// reported duration excludes any time the user spent at an approval prompt).
+fn timed(run: impl FnOnce() -> ToolOutcome) -> (ToolOutcome, Duration) {
+    let start = Instant::now();
+    let outcome = run();
+    (outcome, start.elapsed())
 }
 
 /// The agent loop. For one user turn: stream the assistant, then while it requests tools, confirm each
@@ -50,7 +59,7 @@ impl AgentLoop {
     /// message); `Aborted` means the user ended the session at a prompt. `io` is the engine's single UI
     /// surface — the `EventSink`/`Presenter`/`ApprovalPolicy` ports, all satisfied by the `Bridge`
     /// adapter in production.
-    pub async fn run<IO: EventSink + Presenter + ApprovalPolicy>(
+    pub async fn run<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
         &self,
         conversation: &mut Conversation,
         sandbox: &Sandbox,
@@ -91,35 +100,66 @@ impl AgentLoop {
             conversation.push(Message::assistant_tool_calls(narration, calls.clone()));
 
             for call in &calls {
-                let outcome = match mode {
+                // The display command for this call, shown in every mode so the user sees each action
+                // even under auto. Falls back to the tool name if the args do not parse.
+                let command = self
+                    .registry
+                    .command_line(sandbox, call)
+                    .unwrap_or_else(|| call.function.name.clone());
+
+                // `tool_started` is emitted just before running (paired with `tool_finished`), so the
+                // transcript records every attempt — including declined and plan-blocked calls. The
+                // `Aborted` arm fires neither: the turn ends and the UI resets via `TurnEnded`.
+                let (outcome, elapsed) = match mode {
                     // Auto: run every call without asking.
-                    ApprovalMode::Auto => self.registry.execute(sandbox, call),
+                    ApprovalMode::Auto => {
+                        io.tool_started(call, &command);
+                        timed(|| self.registry.execute(sandbox, call))
+                    }
                     // Plan: destructive tools are withheld from the schema; if the model still names
                     // one, refuse it without touching the filesystem. Read-only tools run directly so
                     // the agent can investigate while drafting its plan.
                     ApprovalMode::Plan if self.registry.is_destructive(&call.function.name) => {
-                        ToolOutcome::Error(format!(
-                            "'{}' is blocked in plan mode (planning is read-only)",
-                            call.function.name
-                        ))
+                        io.tool_started(call, &command);
+                        (
+                            ToolOutcome::Error(format!(
+                                "'{}' is blocked in plan mode (planning is read-only)",
+                                call.function.name
+                            )),
+                            Duration::ZERO,
+                        )
                     }
-                    ApprovalMode::Plan => self.registry.execute(sandbox, call),
+                    ApprovalMode::Plan => {
+                        io.tool_started(call, &command);
+                        timed(|| self.registry.execute(sandbox, call))
+                    }
                     // Default: confirm each call through the UI before running it.
                     ApprovalMode::Default => match self.registry.confirm(sandbox, call) {
                         Some(confirmation) => match io.decide(&confirmation).await {
-                            Approval::Approved => self.registry.execute(sandbox, call),
+                            Approval::Approved => {
+                                io.tool_started(call, &command);
+                                timed(|| self.registry.execute(sandbox, call))
+                            }
                             // "Approve and don't ask again": run this call, then switch the rest of the
                             // turn to auto so the following calls no longer prompt.
                             Approval::ApprovedAuto => {
                                 mode = ApprovalMode::Auto;
-                                self.registry.execute(sandbox, call)
+                                io.tool_started(call, &command);
+                                timed(|| self.registry.execute(sandbox, call))
                             }
-                            Approval::Declined => ToolOutcome::Declined,
+                            Approval::Declined => {
+                                io.tool_started(call, &command);
+                                (ToolOutcome::Declined, Duration::ZERO)
+                            }
                             Approval::Aborted => return Ok(TurnOutcome::Aborted),
                         },
-                        None => self.registry.execute(sandbox, call),
+                        None => {
+                            io.tool_started(call, &command);
+                            timed(|| self.registry.execute(sandbox, call))
+                        }
                     },
                 };
+                io.tool_finished(call, &outcome, elapsed);
                 conversation.push(Message::tool_result(
                     call.id.as_str(),
                     outcome.into_message_content(),
@@ -153,6 +193,7 @@ mod tests {
 
     use crate::modules::agent::application::approval_policy::ApprovalPolicy;
     use crate::modules::agent::application::presenter::Presenter;
+    use crate::modules::agent::application::tool_observer::ToolObserver;
     use crate::modules::agent::domain::completed_turn::CompletedTurn;
     use crate::modules::agent::domain::role::Role;
     use crate::modules::agent::domain::stream_event::StreamEvent;
@@ -231,6 +272,11 @@ mod tests {
         }
     }
 
+    impl ToolObserver for ScriptedIo {
+        fn tool_started(&mut self, _call: &ToolCall, _command: &str) {}
+        fn tool_finished(&mut self, _call: &ToolCall, _outcome: &ToolOutcome, _elapsed: Duration) {}
+    }
+
     /// A UI that answers each confirmation from a queue and counts how many times it was asked, so a
     /// test can prove that later calls in the turn ran without prompting.
     struct CountingIo {
@@ -259,6 +305,61 @@ mod tests {
         }
         async fn confirm_continue(&mut self, _minutes: u64) -> Approval {
             Approval::Approved
+        }
+    }
+
+    impl ToolObserver for CountingIo {
+        fn tool_started(&mut self, _call: &ToolCall, _command: &str) {}
+        fn tool_finished(&mut self, _call: &ToolCall, _outcome: &ToolOutcome, _elapsed: Duration) {}
+    }
+
+    /// A UI double that records the command of every `tool_started` and the outcome of every
+    /// `tool_finished`, so a test can prove the loop surfaces each call in any approval mode.
+    struct RecordingIo {
+        decision: Approval,
+        started: Vec<String>,
+        finished: Vec<ToolOutcome>,
+    }
+
+    impl RecordingIo {
+        fn new(decision: Approval) -> Self {
+            Self {
+                decision,
+                started: Vec::new(),
+                finished: Vec::new(),
+            }
+        }
+    }
+
+    impl EventSink for RecordingIo {
+        fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
+            Ok(())
+        }
+    }
+
+    impl Presenter for RecordingIo {
+        fn begin_turn(&mut self) {}
+        fn finish_turn(&mut self) -> Result<(), AgentError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl ApprovalPolicy for RecordingIo {
+        async fn decide(&mut self, _confirmation: &Confirmation) -> Approval {
+            self.decision
+        }
+        async fn confirm_continue(&mut self, _minutes: u64) -> Approval {
+            self.decision
+        }
+    }
+
+    impl ToolObserver for RecordingIo {
+        fn tool_started(&mut self, _call: &ToolCall, command: &str) {
+            self.started.push(command.to_string());
+        }
+        fn tool_finished(&mut self, _call: &ToolCall, outcome: &ToolOutcome, _elapsed: Duration) {
+            self.finished.push(outcome.clone());
         }
     }
 
@@ -505,5 +606,127 @@ mod tests {
             .find(|m| m.role == Role::Tool)
             .unwrap();
         assert_eq!(tool_msg.content.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn auto_mode_emits_tool_started_and_finished() {
+        let dir = TempDir::new("emit-auto");
+        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let agent_loop = agent_loop_with(vec![
+            CompletedTurn {
+                content: "writing".to_string(),
+                tool_calls: vec![tool_call(
+                    "write_file",
+                    r#"{"path":"a.txt","content":"hi"}"#,
+                )],
+            },
+            CompletedTurn {
+                content: "done".to_string(),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("write a.txt"));
+        // Would decline if asked — auto must not ask, and must still surface the call.
+        let mut io = RecordingIo::new(Approval::Declined);
+
+        agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(io.started, vec!["write a.txt".to_string()]);
+        assert!(matches!(io.finished.as_slice(), [ToolOutcome::Ok(_)]));
+    }
+
+    #[tokio::test]
+    async fn default_mode_emits_around_execution() {
+        let dir = TempDir::new("emit-default");
+        std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
+        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let agent_loop = agent_loop_with(vec![
+            CompletedTurn {
+                content: "reading".to_string(),
+                tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+            },
+            CompletedTurn {
+                content: "done".to_string(),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("read a.txt"));
+        let mut io = RecordingIo::new(Approval::Approved);
+
+        agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(io.started, vec!["cat a.txt".to_string()]);
+        assert!(matches!(io.finished.as_slice(), [ToolOutcome::Ok(_)]));
+    }
+
+    #[tokio::test]
+    async fn plan_block_emits_started_and_error_finish() {
+        let dir = TempDir::new("emit-plan");
+        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let agent_loop = agent_loop_with(vec![
+            CompletedTurn {
+                content: "writing".to_string(),
+                tool_calls: vec![tool_call(
+                    "write_file",
+                    r#"{"path":"a.txt","content":"hi"}"#,
+                )],
+            },
+            CompletedTurn {
+                content: "plan".to_string(),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("write a.txt"));
+        let mut io = RecordingIo::new(Approval::Approved);
+
+        agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(io.started, vec!["write a.txt".to_string()]);
+        match io.finished.as_slice() {
+            [ToolOutcome::Error(msg)] => assert!(msg.contains("blocked in plan mode")),
+            other => panic!("expected a single Error finish, got {other:?}"),
+        }
+        assert!(!dir.path.join("a.txt").exists(), "plan mode must not write");
+    }
+
+    #[tokio::test]
+    async fn declined_emits_started_and_declined_finish() {
+        let dir = TempDir::new("emit-declined");
+        std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
+        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let agent_loop = agent_loop_with(vec![
+            CompletedTurn {
+                content: "deleting".to_string(),
+                tool_calls: vec![tool_call("delete_file", r#"{"path":"a.txt"}"#)],
+            },
+            CompletedTurn {
+                content: "done".to_string(),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("delete a.txt"));
+        let mut io = RecordingIo::new(Approval::Declined);
+
+        agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(io.started, vec!["rm a.txt".to_string()]);
+        assert!(matches!(io.finished.as_slice(), [ToolOutcome::Declined]));
+        assert!(dir.path.join("a.txt").exists(), "declined must not delete");
     }
 }

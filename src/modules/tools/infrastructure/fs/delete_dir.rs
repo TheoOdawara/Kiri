@@ -3,10 +3,10 @@ use std::fs;
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, function_schema, simple_confirm,
+    Confirmation, Tool, ToolOutcome, confirm, function_schema, simple_command,
 };
-use crate::modules::tools::infrastructure::args::{PathArgs, parse_args};
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
+use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::modules::tools::infrastructure::support::stat_guard;
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -31,17 +31,19 @@ impl Tool for DeleteDir {
         )
     }
 
-    fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        simple_confirm(
-            call,
-            |a: &PathArgs| {
-                format!(
-                    "Excluir recursivamente o diretório e todo o seu conteúdo. Aprova executar: rm -rf {}?",
-                    a.path
-                )
-            },
-            |a| a.path.as_str(),
-        )
+    fn command_line(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+        simple_command(call, |a: &PathArgs| format!("rm -rf {}", a.path))
+    }
+
+    fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+        let cmd = self.command_line(sandbox, call)?;
+        let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
+        Some(confirm(
+            format!(
+                "Excluir recursivamente o diretório e todo o seu conteúdo. Aprova executar: {cmd}?"
+            ),
+            default_accept_for(&a.path),
+        ))
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {

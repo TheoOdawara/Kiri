@@ -162,6 +162,90 @@ mod tests {
     }
 
     #[test]
+    fn tool_activity_renders_command_result_and_diff() {
+        use crate::modules::tui::domain::transcript::{ToolActivity, ToolDiff, ToolStatus};
+        use std::time::Duration;
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.transcript.push(TranscriptItem::Tool(ToolActivity {
+            command: "edit src/app.rs".to_string(),
+            diff: Some(ToolDiff {
+                old: "let mode = mode;".to_string(),
+                new: "let mut mode = mode;".to_string(),
+            }),
+            result: Some((
+                ToolStatus::Ok,
+                "edited src/app.rs".to_string(),
+                Duration::from_millis(7),
+            )),
+        }));
+        let out = render(&model, 80, 20);
+        assert!(
+            out.contains("⏺ edit src/app.rs"),
+            "command line missing:\n{out}"
+        );
+        assert!(out.contains("⎿"), "result marker missing:\n{out}");
+        assert!(
+            out.contains("- let mode = mode;"),
+            "removed diff line missing:\n{out}"
+        );
+        assert!(
+            out.contains("+ let mut mode = mode;"),
+            "added diff line missing:\n{out}"
+        );
+        assert!(
+            out.contains("edited src/app.rs"),
+            "result detail missing:\n{out}"
+        );
+    }
+
+    #[test]
+    fn long_tool_output_is_previewed_until_expanded() {
+        use crate::modules::tui::domain::transcript::{ToolActivity, ToolStatus};
+        use std::time::Duration;
+        let output = (1..=20)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.transcript.push(TranscriptItem::Tool(ToolActivity {
+            command: "cat big.txt".to_string(),
+            diff: None,
+            result: Some((ToolStatus::Ok, output, Duration::from_millis(1))),
+        }));
+        let collapsed = render(&model, 80, 40);
+        assert!(
+            collapsed.contains("para expandir"),
+            "elision hint missing when collapsed:\n{collapsed}"
+        );
+        model.expand_tools = true;
+        let expanded = render(&model, 80, 40);
+        assert!(
+            expanded.contains("line20"),
+            "expanded output should show every line:\n{expanded}"
+        );
+        assert!(
+            !expanded.contains("para expandir"),
+            "no elision hint once expanded:\n{expanded}"
+        );
+    }
+
+    #[test]
+    fn meta_rule_keeps_mode_badge_with_a_long_workspace() {
+        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        let mut model = Model::new(
+            "some-long-model-name".to_string(),
+            "C:/Users/dev/very/deep/workspace/path/kiri".to_string(),
+        );
+        model.approval_mode = ApprovalMode::Auto;
+        // On a tight width the overlong workspace must not push the mode badge off the rule.
+        let out = render(&model, 40, 12);
+        assert!(
+            out.contains("AUTO"),
+            "mode badge must survive a long workspace:\n{out}"
+        );
+    }
+
+    #[test]
     fn typed_input_renders_in_the_editor() {
         let mut model = Model::new("m".to_string(), "/w".to_string());
         model.input.set("ola mundo".to_string());

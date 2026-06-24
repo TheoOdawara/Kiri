@@ -5,6 +5,7 @@ pub mod layout;
 pub mod markdown;
 pub mod runtime;
 pub mod terminal_guard;
+pub mod text;
 pub mod theme;
 pub mod view;
 pub mod widgets;

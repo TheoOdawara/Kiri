@@ -1,16 +1,20 @@
 use std::cell::Cell;
 use std::io;
 use std::rc::Rc;
+use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 
 use crate::modules::agent::application::approval_policy::{Approval, ApprovalPolicy};
 use crate::modules::agent::application::presenter::Presenter;
+use crate::modules::agent::application::tool_observer::ToolObserver;
 use crate::modules::agent::domain::stream_event::StreamEvent;
 use crate::modules::provider::application::completion_provider::EventSink;
-use crate::modules::tools::application::tool::Confirmation;
+use crate::modules::tools::application::tool::{Confirmation, ToolOutcome};
+use crate::modules::tui::domain::transcript::{ToolDiff, ToolStatus};
 use crate::modules::tui::domain::view_state::PendingApproval;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::tool_call::ToolCall;
 
 /// What the engine ports emit to the TUI runtime over the channel. An approval carries its reply
 /// channel: the engine confirms tool calls one at a time, so there is never more than one pending and
@@ -19,6 +23,15 @@ pub enum EngineMsg {
     Began,
     Reasoning(String),
     Content(String),
+    ToolStarted {
+        command: String,
+        diff: Option<ToolDiff>,
+    },
+    ToolFinished {
+        status: ToolStatus,
+        output: String,
+        elapsed: Duration,
+    },
     Finished,
     Approval {
         pending: PendingApproval,
@@ -100,6 +113,46 @@ impl Presenter for Bridge {
     fn finish_turn(&mut self) -> Result<(), AgentError> {
         self.push(EngineMsg::Finished)
     }
+}
+
+impl ToolObserver for Bridge {
+    fn tool_started(&mut self, call: &ToolCall, command: &str) {
+        let _ = self.push(EngineMsg::ToolStarted {
+            command: command.to_string(),
+            diff: edit_diff(call),
+        });
+    }
+
+    fn tool_finished(&mut self, _call: &ToolCall, outcome: &ToolOutcome, elapsed: Duration) {
+        let (status, output) = display_outcome(outcome);
+        let _ = self.push(EngineMsg::ToolFinished {
+            status,
+            output,
+            elapsed,
+        });
+    }
+}
+
+/// Map a tool outcome to its display status and text. The model still receives the original outcome
+/// via the conversation; this projection only feeds the transcript.
+fn display_outcome(outcome: &ToolOutcome) -> (ToolStatus, String) {
+    match outcome {
+        ToolOutcome::Ok(text) => (ToolStatus::Ok, text.clone()),
+        ToolOutcome::Error(error) => (ToolStatus::Error, error.clone()),
+        ToolOutcome::Declined => (ToolStatus::Declined, String::new()),
+    }
+}
+
+/// Extract an `edit_file` call's old/new text for an inline diff, straight from the call arguments —
+/// the tool is not involved, so the adapter stays decoupled from the tool internals.
+fn edit_diff(call: &ToolCall) -> Option<ToolDiff> {
+    if call.function.name != "edit_file" {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&call.function.arguments).ok()?;
+    let old = value.get("old_string")?.as_str()?.to_string();
+    let new = value.get("new_string")?.as_str()?.to_string();
+    Some(ToolDiff { old, new })
 }
 
 #[async_trait::async_trait(?Send)]

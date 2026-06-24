@@ -3,10 +3,10 @@ use std::fs;
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, function_schema, simple_confirm,
+    Confirmation, Tool, ToolOutcome, confirm, function_schema, simple_command,
 };
-use crate::modules::tools::infrastructure::args::{ListArgs, parse_args};
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
+use crate::modules::tools::infrastructure::args::{ListArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct ListDir;
@@ -29,12 +29,17 @@ impl Tool for ListDir {
         )
     }
 
-    fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        simple_confirm(
-            call,
-            |a: &ListArgs| format!("Listar o diretório. Aprova executar: ls {}?", a.path),
-            |a| a.path.as_str(),
-        )
+    fn command_line(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+        simple_command(call, |a: &ListArgs| format!("ls {}", a.path))
+    }
+
+    fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+        let cmd = self.command_line(sandbox, call)?;
+        let a: ListArgs = parse(call.function.arguments.as_str()).ok()?;
+        Some(confirm(
+            format!("Listar o diretório. Aprova executar: {cmd}?"),
+            default_accept_for(&a.path),
+        ))
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {

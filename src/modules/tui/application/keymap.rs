@@ -72,6 +72,12 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                 sync_menu(model);
                 return vec![];
             }
+            // Toggle full vs preview-bounded tool output / edit diffs. A pure view flag, live even
+            // mid-turn so the user can expand a long output while it streams.
+            Key::Char('o') => {
+                model.expand_tools = !model.expand_tools;
+                return vec![];
+            }
             Key::Char('d') if model.input.is_empty() => {
                 model.should_quit = true;
                 return vec![Effect::Quit];
@@ -583,6 +589,16 @@ mod tests {
             on_key(&mut m, ctrl_c),
             vec![Effect::AnswerApproval(Approval::Aborted)]
         );
+    }
+
+    #[test]
+    fn ctrl_o_toggles_tool_output_expansion() {
+        let mut m = Model::default();
+        assert!(!m.expand_tools);
+        assert!(on_key(&mut m, ctrl(Key::Char('o'))).is_empty());
+        assert!(m.expand_tools, "Ctrl+O should expand tool output");
+        on_key(&mut m, ctrl(Key::Char('o')));
+        assert!(!m.expand_tools, "Ctrl+O again should collapse it");
     }
 
     #[test]

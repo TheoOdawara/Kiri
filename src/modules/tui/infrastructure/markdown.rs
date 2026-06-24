@@ -371,7 +371,14 @@ fn render_block(block: &Block, width: usize, out: &mut Vec<Line<'static>>) {
         Block::Code { lines } => {
             let style = Style::default().fg(theme::CODE_FG).bg(theme::CODE_BG);
             for line in lines {
-                out.push(Line::from(vec![Span::styled(format!(" {line}"), style)]));
+                // Pad each row to the full width so the code background renders as a solid band
+                // instead of stopping at the end of the text.
+                let mut content = format!(" {line}");
+                let len = content.chars().count();
+                if len < width {
+                    content.push_str(&" ".repeat(width - len));
+                }
+                out.push(Line::from(vec![Span::styled(content, style)]));
             }
         }
         Block::Quote { inner } => {
@@ -570,6 +577,17 @@ mod tests {
                 .any(|l| l.spans.iter().any(|s| s.style.fg == Some(theme::CODE_FG))),
             "no code-styled line: {lines:?}"
         );
+    }
+
+    #[test]
+    fn fenced_code_block_fills_the_width_with_background() {
+        let lines = render("```\nx\n```\n", Style::default(), 12);
+        let code = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.style.fg == Some(theme::CODE_FG)))
+            .expect("a code line");
+        let len: usize = code.spans.iter().map(|s| s.content.chars().count()).sum();
+        assert_eq!(len, 12, "code row should be padded to the full width");
     }
 
     #[test]

@@ -26,6 +26,7 @@ use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg
 use crate::modules::tui::infrastructure::clipboard::{self, ClipboardContent};
 use crate::modules::tui::infrastructure::input;
 use crate::modules::tui::infrastructure::terminal_guard::TerminalGuard;
+use crate::modules::tui::infrastructure::text;
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::view::view;
 use crate::shared::kernel::error::AgentError;
@@ -56,7 +57,7 @@ impl Tui {
         seed: Option<String>,
         model: String,
     ) -> Self {
-        let workspace = sandbox.root().display().to_string();
+        let workspace = text::display_path(sandbox.root());
         Self {
             agent_loop,
             sandbox,
@@ -186,7 +187,7 @@ impl Tui {
                     }
                     Effect::ChangeWorkspace(path) => match sandbox.relocated(&path) {
                         Ok(new_sandbox) => {
-                            model.status.workspace = new_sandbox.root().display().to_string();
+                            model.status.workspace = text::display_path(new_sandbox.root());
                             sandbox = new_sandbox;
                             model.transcript.push(TranscriptItem::Notice(
                                 NoticeLevel::Info,
@@ -350,6 +351,16 @@ fn engine_msg(engine: EngineMsg, pending_reply: &mut Option<oneshot::Sender<Appr
         EngineMsg::Began => Msg::TurnBegan,
         EngineMsg::Reasoning(text) => Msg::StreamDelta(StreamKind::Reasoning, text),
         EngineMsg::Content(text) => Msg::StreamDelta(StreamKind::Content, text),
+        EngineMsg::ToolStarted { command, diff } => Msg::ToolStarted { command, diff },
+        EngineMsg::ToolFinished {
+            status,
+            output,
+            elapsed,
+        } => Msg::ToolFinished {
+            status,
+            output,
+            elapsed,
+        },
         EngineMsg::Finished => Msg::TurnFinished,
         EngineMsg::Approval { pending, reply } => {
             *pending_reply = Some(reply);

@@ -3,10 +3,10 @@ use std::fs;
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, function_schema, simple_confirm,
+    Confirmation, Tool, ToolOutcome, confirm, function_schema, simple_command,
 };
-use crate::modules::tools::infrastructure::args::{SearchArgs, parse_args};
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
+use crate::modules::tools::infrastructure::args::{SearchArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::modules::tools::infrastructure::support::{SEARCH_MAX_MATCHES, search_file};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -34,17 +34,19 @@ impl Tool for Search {
         )
     }
 
-    fn confirmation(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        simple_confirm(
-            call,
-            |a: &SearchArgs| {
-                format!(
-                    "Buscar '{}'. Aprova executar: rg '{}' {}?",
-                    a.query, a.query, a.path
-                )
-            },
-            |a| a.path.as_str(),
-        )
+    fn command_line(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+        simple_command(call, |a: &SearchArgs| {
+            format!("rg '{}' {}", a.query, a.path)
+        })
+    }
+
+    fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+        let cmd = self.command_line(sandbox, call)?;
+        let a: SearchArgs = parse(call.function.arguments.as_str()).ok()?;
+        Some(confirm(
+            format!("Buscar '{}'. Aprova executar: {cmd}?", a.query),
+            default_accept_for(&a.path),
+        ))
     }
 
     fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {

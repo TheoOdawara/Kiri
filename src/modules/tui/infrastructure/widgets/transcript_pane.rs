@@ -1,14 +1,23 @@
+use std::time::Duration;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::modules::tui::domain::model::Model;
-use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
+use crate::modules::tui::domain::transcript::{
+    NoticeLevel, ToolActivity, ToolDiff, ToolStatus, TranscriptItem,
+};
 use crate::modules::tui::infrastructure::markdown;
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::splash;
+
+/// Lines of tool output (or edit-diff old/new block) shown before eliding, unless expanded (Ctrl+O).
+const PREVIEW_LINES: usize = 6;
+/// Per side (old/new) diff lines shown before eliding, unless expanded.
+const DIFF_LINES_PER_SIDE: usize = 6;
 
 /// Render the scrolling transcript. Items are pre-wrapped to the pane width (so scroll offsets are
 /// exact line counts), then scrolled so the newest content is pinned to the bottom unless the user has
@@ -27,7 +36,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         if !lines.is_empty() {
             lines.push(Line::default());
         }
-        render_item(item, width, &mut lines);
+        render_item(item, width, model.expand_tools, &mut lines);
     }
 
     let total = lines.len() as u16;
@@ -43,7 +52,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn render_item(item: &TranscriptItem, width: usize, out: &mut Vec<Line<'static>>) {
+fn render_item(item: &TranscriptItem, width: usize, expanded: bool, out: &mut Vec<Line<'static>>) {
     match item {
         TranscriptItem::User(text) => push_wrapped(
             &format!("você › {text}"),
@@ -54,13 +63,23 @@ fn render_item(item: &TranscriptItem, width: usize, out: &mut Vec<Line<'static>>
             out,
         ),
         TranscriptItem::Reasoning(text) => {
-            let mut rendered = markdown::render(text, theme::dim(), width);
+            // Thinking reads clearly apart from the answer: a label plus a dim, italic body.
+            let style = theme::dim().add_modifier(Modifier::ITALIC);
+            out.push(Line::styled("⋮ pensando", style));
+            let mut rendered = markdown::render(text, style, width);
             out.append(&mut rendered);
         }
         TranscriptItem::Assistant(text) => {
+            out.push(Line::styled(
+                "◆ kiri",
+                Style::default()
+                    .fg(theme::HEADING)
+                    .add_modifier(Modifier::BOLD),
+            ));
             let mut rendered = markdown::render(text, Style::default().fg(theme::STEEL), width);
             out.append(&mut rendered);
         }
+        TranscriptItem::Tool(activity) => render_tool(activity, width, expanded, out),
         TranscriptItem::Notice(level, text) => {
             let color = match level {
                 NoticeLevel::Info => theme::WARNING,
@@ -68,6 +87,150 @@ fn render_item(item: &TranscriptItem, width: usize, out: &mut Vec<Line<'static>>
             };
             push_wrapped(text, width, Style::default().fg(color), out);
         }
+    }
+}
+
+/// Render one tool call: a `⏺ command` line, an inline diff for edits, then the indented `⎿` result
+/// (preview-bounded unless `expanded`). While the call is still running, a faint `⎿ …` placeholder
+/// shows it is in flight.
+fn render_tool(
+    activity: &ToolActivity,
+    width: usize,
+    expanded: bool,
+    out: &mut Vec<Line<'static>>,
+) {
+    let running = activity.result.is_none();
+    let cmd_color = if running {
+        theme::HIGHLIGHT
+    } else {
+        theme::STEEL
+    };
+    out.push(Line::from(vec![
+        Span::styled("⏺ ", Style::default().fg(cmd_color)),
+        Span::styled(
+            activity.command.clone(),
+            Style::default().fg(cmd_color).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    if let Some(diff) = &activity.diff {
+        render_diff(diff, width, expanded, out);
+    }
+
+    match &activity.result {
+        None => out.push(Line::styled("  ⎿ …", theme::dim())),
+        Some((status, output, elapsed)) => render_result(
+            *status,
+            output,
+            *elapsed,
+            activity.diff.is_some(),
+            width,
+            expanded,
+            out,
+        ),
+    }
+}
+
+/// Render the `⎿` result block: a leading marker line carrying the first output line and the elapsed
+/// time, then (for multi-line read/list/search output) a bounded preview of the remaining lines with
+/// an elision hint. Errors render red, declines dim. A diff already showed the change, so an edit's
+/// one-line confirmation is enough.
+fn render_result(
+    status: ToolStatus,
+    output: &str,
+    elapsed: Duration,
+    has_diff: bool,
+    width: usize,
+    expanded: bool,
+    out: &mut Vec<Line<'static>>,
+) {
+    let (marker_color, text_style) = match status {
+        ToolStatus::Ok => (theme::SUCCESS, theme::dim()),
+        ToolStatus::Error => (theme::ERROR, Style::default().fg(theme::ERROR)),
+        ToolStatus::Declined => (theme::BRAND, theme::dim()),
+    };
+    let detail = match status {
+        ToolStatus::Declined => "recusado pelo usuário",
+        _ => output.trim_end_matches('\n'),
+    };
+    let lines: Vec<&str> = if detail.is_empty() {
+        vec!["(vazio)"]
+    } else {
+        detail.split('\n').collect()
+    };
+
+    let head = format!("{} · {}", lines[0], fmt_dur(elapsed));
+    out.push(Line::from(vec![
+        Span::styled("  ⎿ ", Style::default().fg(marker_color)),
+        Span::styled(head, text_style),
+    ]));
+
+    // For read/list/search the remaining output lines are the value the user wants to see; preview
+    // them (bounded) unless expanded. Edits already rendered a diff, so skip their body.
+    if has_diff || lines.len() <= 1 {
+        return;
+    }
+    let body = &lines[1..];
+    let shown = if expanded {
+        body.len()
+    } else {
+        body.len().min(PREVIEW_LINES)
+    };
+    for line in &body[..shown] {
+        for row in hard_wrap(line, width.saturating_sub(5).max(1)) {
+            out.push(Line::styled(format!("     {row}"), text_style));
+        }
+    }
+    if body.len() > shown {
+        out.push(Line::styled(
+            format!("     … (+{}) · ^O para expandir", body.len() - shown),
+            theme::dim(),
+        ));
+    }
+}
+
+/// Render an `edit_file` change as red `-` / green `+` lines, wrapped, bounded per side unless
+/// expanded. This is a literal old→new replacement block, not a line-level diff algorithm.
+fn render_diff(diff: &ToolDiff, width: usize, expanded: bool, out: &mut Vec<Line<'static>>) {
+    emit_diff_block(&diff.old, '-', theme::ERROR, width, expanded, out);
+    emit_diff_block(&diff.new, '+', theme::SUCCESS, width, expanded, out);
+}
+
+fn emit_diff_block(
+    text: &str,
+    sign: char,
+    color: Color,
+    width: usize,
+    expanded: bool,
+    out: &mut Vec<Line<'static>>,
+) {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let shown = if expanded {
+        lines.len()
+    } else {
+        lines.len().min(DIFF_LINES_PER_SIDE)
+    };
+    let style = Style::default().fg(color);
+    for line in &lines[..shown] {
+        for row in hard_wrap(&format!("  {sign} {line}"), width) {
+            out.push(Line::styled(row, style));
+        }
+    }
+    if lines.len() > shown {
+        out.push(Line::styled(
+            format!("  … (+{})", lines.len() - shown),
+            theme::dim(),
+        ));
+    }
+}
+
+/// A compact elapsed label for a single tool call: milliseconds under a second, else seconds.
+fn fmt_dur(elapsed: Duration) -> String {
+    let ms = elapsed.as_millis();
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", elapsed.as_secs_f64())
     }
 }
 
