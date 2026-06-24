@@ -1,4 +1,5 @@
-use std::fs;
+#[cfg(unix)]
+use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
@@ -6,6 +7,8 @@ use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema, simple_command,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
+#[cfg(unix)]
+use crate::modules::tools::infrastructure::exec;
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -56,9 +59,43 @@ impl Tool for CreateDir {
         if resolution.target.is_dir() {
             return ToolOutcome::Ok(format!("directory already exists: {}", args.path));
         }
-        match fs::create_dir_all(&resolution.target) {
-            Ok(()) => ToolOutcome::Ok(format!("created directory {}", args.path)),
-            Err(error) => ToolOutcome::Error(format!("cannot create {}: {error}", args.path)),
+
+        #[cfg(unix)]
+        {
+            let cwd = sandbox.exec_cwd_for(&resolution.target);
+            match exec::run_argv(
+                &[
+                    OsStr::new("mkdir"),
+                    OsStr::new("-p"),
+                    resolution.target.as_os_str(),
+                ],
+                Some(&cwd),
+                None,
+                &[],
+                exec::DEFAULT_TIMEOUT,
+            )
+            .await
+            {
+                Ok(result) if result.succeeded() => {
+                    ToolOutcome::Ok(format!("created directory {}", args.path))
+                }
+                Ok(result) => ToolOutcome::Error(format!(
+                    "cannot create {}: {}",
+                    args.path,
+                    result.stderr_text()
+                )),
+                Err(error) => {
+                    ToolOutcome::Error(format!("cannot create {}: {}", args.path, error.message()))
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            match std::fs::create_dir_all(&resolution.target) {
+                Ok(()) => ToolOutcome::Ok(format!("created directory {}", args.path)),
+                Err(error) => ToolOutcome::Error(format!("cannot create {}: {error}", args.path)),
+            }
         }
     }
 }

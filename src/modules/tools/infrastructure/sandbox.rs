@@ -42,6 +42,32 @@ impl Sandbox {
         &self.root
     }
 
+    /// Whether a resolved absolute path lies outside the active workspace root. Used by the file tools
+    /// to phrase the out-of-jail case and pick the working directory the command runs in.
+    pub fn is_outside_root(&self, resolved: &Path) -> bool {
+        !resolved.starts_with(&self.root)
+    }
+
+    /// The working directory a command should run in for `resolved`. Inside the jail every command runs
+    /// at the workspace root. When the user has approved an out-of-jail target, the command runs at that
+    /// target's nearest existing directory — the harness "moves" there for that one call and, since each
+    /// call builds its own process, is back at the root for the next (no process-global `chdir`).
+    pub fn exec_cwd_for(&self, resolved: &Path) -> PathBuf {
+        if !self.is_outside_root(resolved) {
+            return self.root.clone();
+        }
+        let mut dir = resolved;
+        loop {
+            if dir.is_dir() {
+                return dir.to_path_buf();
+            }
+            match dir.parent() {
+                Some(parent) => dir = parent,
+                None => return self.root.clone(),
+            }
+        }
+    }
+
     /// Resolve a new workspace root from a `/cd` argument and return the relocated sandbox. A relative
     /// argument is joined onto the current root; an absolute or `~`/`~/…` argument is taken as given.
     /// The new root is canonicalized and must exist and be a directory (else this fails).
@@ -346,6 +372,48 @@ mod tests {
         let dir = TempDir::new("create-dot");
         let sb = sandbox(&dir);
         assert!(sb.resolve_create(".").is_err());
+    }
+
+    #[test]
+    fn exec_cwd_for_stays_at_root_inside_the_jail() {
+        let dir = TempDir::new("cwd-inside");
+        let sb = sandbox(&dir);
+        fs::write(sb.root().join("f.txt"), b"x").unwrap();
+        let inside = sb.resolve_existing("f.txt").unwrap();
+        assert!(!sb.is_outside_root(&inside));
+        assert_eq!(sb.exec_cwd_for(&inside), sb.root());
+    }
+
+    #[test]
+    fn exec_cwd_for_uses_the_external_dir_outside_the_jail() {
+        let outside = TempDir::new("cwd-outside");
+        let file = outside.path.join("f.txt");
+        fs::write(&file, b"x").unwrap();
+        let dir = TempDir::new("cwd-outside-inside");
+        let sb = sandbox(&dir);
+
+        let resolved = sb.resolve_existing(file.to_str().unwrap()).unwrap();
+        assert!(sb.is_outside_root(&resolved));
+        // The command runs in the target file's directory, not the workspace root.
+        assert_eq!(
+            sb.exec_cwd_for(&resolved),
+            fs::canonicalize(&outside.path).unwrap()
+        );
+    }
+
+    #[test]
+    fn exec_cwd_for_falls_back_to_nearest_existing_ancestor() {
+        let outside = TempDir::new("cwd-missing");
+        let sb = sandbox(&TempDir::new("cwd-missing-inside"));
+        // A deep, not-yet-created target outside the jail: cwd must be an existing directory.
+        let target = sb
+            .resolve_create(outside.path.join("a/b/c.txt").to_str().unwrap())
+            .unwrap()
+            .target;
+        assert_eq!(
+            sb.exec_cwd_for(&target),
+            fs::canonicalize(&outside.path).unwrap()
+        );
     }
 
     #[cfg(unix)]

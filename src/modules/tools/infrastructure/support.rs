@@ -1,6 +1,8 @@
+#[cfg(windows)]
 use std::borrow::Cow;
 use std::fs;
 use std::fs::Metadata;
+#[cfg(windows)]
 use std::io::Read;
 use std::path::Path;
 
@@ -9,12 +11,16 @@ use crate::modules::tools::infrastructure::sandbox::{CreateResolution, Sandbox};
 
 pub const READ_FILE_MAX_BYTES: usize = 64 * 1024;
 pub const EDIT_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
-pub const SEARCH_FILE_MAX_BYTES: u64 = 1024 * 1024;
 pub const SEARCH_MAX_MATCHES: usize = 100;
 pub const SEARCH_MAX_LINE_CHARS: usize = 200;
+#[cfg(windows)]
+pub const SEARCH_FILE_MAX_BYTES: u64 = 1024 * 1024;
+#[cfg(windows)]
 pub const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
-/// Read at most `cap` bytes from `path`, bounding allocation against very large files.
+/// Read at most `cap` bytes from `path`, bounding allocation against very large files. The Unix tools
+/// shell out (`head -c`) for the same effect; this backs the native Windows file tools.
+#[cfg(windows)]
 pub fn read_capped(path: &Path, cap: usize) -> std::io::Result<Vec<u8>> {
     let mut buffer = Vec::new();
     fs::File::open(path)?
@@ -24,7 +30,9 @@ pub fn read_capped(path: &Path, cap: usize) -> std::io::Result<Vec<u8>> {
 }
 
 /// Scan one file for `query`, appending `relative:line: text` matches (capped) to `matches`. Skips
-/// files over the size cap and NUL-containing (binary) files.
+/// files over the size cap and NUL-containing (binary) files. The Unix `search` tool delegates the
+/// scan to `grep`; this backs the native Windows implementation.
+#[cfg(windows)]
 pub fn search_file(path: &Path, query: &str, root: &Path, matches: &mut Vec<String>) {
     match fs::metadata(path) {
         Ok(metadata) if metadata.len() > SEARCH_FILE_MAX_BYTES => return, // skip large files
@@ -105,7 +113,7 @@ pub fn stat_guard(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::{SEARCH_MAX_LINE_CHARS, search_file};
     use std::fs;

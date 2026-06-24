@@ -319,6 +319,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_file_round_trips_content_with_shell_metacharacters() {
+        // The content reaches `tee` through the child's stdin, never the command line — so newlines,
+        // quotes, `$`, and backticks must survive verbatim with no interpolation.
+        let dir = TempDir::new("write-special");
+        let sb = sandbox(&dir);
+        let reg = registry();
+        let content = "line1\n\"quoted\" $HOME `whoami`\n$(echo nope)\tend";
+
+        let written = reg
+            .execute(
+                &sb,
+                &call("write_file", json!({"path": "x.sh", "content": content})),
+            )
+            .await;
+        assert!(matches!(written, ToolOutcome::Ok(_)));
+        assert_eq!(
+            reg.execute(&sb, &call("read_file", json!({"path": "x.sh"})))
+                .await,
+            ToolOutcome::Ok(content.to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn read_file_truncates_files_larger_than_the_cap() {
         let dir = TempDir::new("read-cap");
         let sb = sandbox(&dir);

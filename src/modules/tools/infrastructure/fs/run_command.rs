@@ -3,16 +3,14 @@ use std::time::Duration;
 
 use regex::Regex;
 use serde_json::{Value, json};
-use tokio::process::Command;
 
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{RunCommandArgs, parse_args};
+use crate::modules::tools::infrastructure::exec::{self, ExecError};
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::shared::kernel::tool_call::ToolCall;
-
-const RUN_COMMAND_MAX_BYTES: usize = 64 * 1024;
 
 pub struct RunCommand {
     plan_blacklist: Arc<[Regex]>,
@@ -89,51 +87,24 @@ impl Tool for RunCommand {
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
 
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd");
-            c.args(["/C", &args.command]);
-            c
-        } else {
-            let mut c = Command::new("sh");
-            c.args(["-c", &args.command]);
-            c
-        };
-        cmd.current_dir(&cwd);
-        // Kill the child if the timeout future is dropped, so a timed-out command doesn't
-        // keep running in the background after the tool returns.
-        cmd.kill_on_drop(true);
-
-        let timeout = Duration::from_millis(args.timeout_ms);
-        let output = match tokio::time::timeout(timeout, cmd.output()).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(error)) => {
+        let result = match exec::run_shell(
+            &args.command,
+            Some(&cwd),
+            Duration::from_millis(args.timeout_ms),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(ExecError::Timeout(ms)) => {
+                return ToolOutcome::Error(format!("command timed out after {ms}ms"));
+            }
+            Err(ExecError::Spawn(error)) => {
                 return ToolOutcome::Error(format!("failed to spawn command: {error}"));
             }
-            Err(_) => {
-                return ToolOutcome::Error(format!(
-                    "command timed out after {}ms",
-                    args.timeout_ms
-                ));
-            }
         };
 
-        let mut combined = Vec::new();
-        combined.extend_from_slice(&output.stdout);
-        if !output.stderr.is_empty() {
-            if !combined.is_empty() {
-                combined.push(b'\n');
-            }
-            combined.extend_from_slice(&output.stderr);
-        }
-
-        let content = if combined.len() > RUN_COMMAND_MAX_BYTES {
-            let head = String::from_utf8_lossy(&combined[..RUN_COMMAND_MAX_BYTES]);
-            format!("{head}\n… (truncated at {RUN_COMMAND_MAX_BYTES} bytes)")
-        } else {
-            String::from_utf8_lossy(&combined).into_owned()
-        };
-
-        let status_str = match output.status.code() {
+        let content = exec::capped_combined(&result);
+        let status_str = match result.exit_code {
             Some(code) => format!("exit code {code}"),
             None => "terminated (no exit code)".to_string(),
         };
@@ -351,7 +322,7 @@ mod tests {
         match outcome {
             ToolOutcome::Ok(text) => {
                 assert!(text.contains("truncated at"));
-                assert!(text.len() <= RUN_COMMAND_MAX_BYTES + 200);
+                assert!(text.len() <= exec::EXEC_MAX_BYTES + 200);
             }
             other => panic!("expected truncated Ok, got {other:?}"),
         }

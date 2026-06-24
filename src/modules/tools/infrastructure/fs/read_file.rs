@@ -1,11 +1,18 @@
+#[cfg(unix)]
+use std::ffi::OsStr;
+
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema, simple_command,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
+#[cfg(unix)]
+use crate::modules::tools::infrastructure::exec;
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
-use crate::modules::tools::infrastructure::support::{READ_FILE_MAX_BYTES, read_capped};
+use crate::modules::tools::infrastructure::support::READ_FILE_MAX_BYTES;
+#[cfg(windows)]
+use crate::modules::tools::infrastructure::support::read_capped;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct ReadFile;
@@ -53,10 +60,52 @@ impl Tool for ReadFile {
             Ok(path) => path,
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
+
+        // `head -c (cap+1)` bounds the read just like the native `read_capped`; the truncation marker
+        // below is still decided here, so the model sees the exact same output as before.
+        #[cfg(unix)]
+        let bytes = {
+            let cap = (READ_FILE_MAX_BYTES + 1).to_string();
+            let cwd = sandbox.exec_cwd_for(&path);
+            let result = match exec::run_argv(
+                &[
+                    OsStr::new("head"),
+                    OsStr::new("-c"),
+                    OsStr::new(&cap),
+                    path.as_os_str(),
+                ],
+                Some(&cwd),
+                None,
+                &[],
+                exec::DEFAULT_TIMEOUT,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    return ToolOutcome::Error(format!(
+                        "cannot read {}: {}",
+                        args.path,
+                        error.message()
+                    ));
+                }
+            };
+            if !result.succeeded() {
+                return ToolOutcome::Error(format!(
+                    "cannot read {}: {}",
+                    args.path,
+                    result.stderr_text()
+                ));
+            }
+            result.stdout
+        };
+
+        #[cfg(windows)]
         let bytes = match read_capped(&path, READ_FILE_MAX_BYTES + 1) {
             Ok(bytes) => bytes,
             Err(error) => return ToolOutcome::Error(format!("cannot read {}: {error}", args.path)),
         };
+
         if bytes.len() > READ_FILE_MAX_BYTES {
             let head = String::from_utf8_lossy(&bytes[..READ_FILE_MAX_BYTES]);
             ToolOutcome::Ok(format!(

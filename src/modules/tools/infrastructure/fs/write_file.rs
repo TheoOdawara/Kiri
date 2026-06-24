@@ -1,4 +1,5 @@
-use std::fs;
+#[cfg(unix)]
+use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
@@ -6,6 +7,8 @@ use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, WriteArgs, parse, parse_args};
+#[cfg(unix)]
+use crate::modules::tools::infrastructure::exec;
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
 use crate::shared::kernel::tool_call::ToolCall;
@@ -69,13 +72,47 @@ impl Tool for WriteFile {
         if let Err(out) = ensure_parent_dirs(&resolution, &args.path) {
             return out;
         }
-        match fs::write(&resolution.target, args.content.as_bytes()) {
-            Ok(()) => ToolOutcome::Ok(format!(
-                "wrote {} bytes to {}",
-                args.content.len(),
-                args.path
-            )),
-            Err(error) => ToolOutcome::Error(format!("cannot write {}: {error}", args.path)),
+
+        // Pipe the content through the child's stdin so arbitrary bytes (newlines, quotes, `$`) reach
+        // `tee` untouched — nothing is interpolated into the command. `tee` truncates/creates the file.
+        #[cfg(unix)]
+        {
+            let cwd = sandbox.exec_cwd_for(&resolution.target);
+            match exec::run_argv(
+                &[OsStr::new("tee"), resolution.target.as_os_str()],
+                Some(&cwd),
+                Some(args.content.as_bytes()),
+                &[],
+                exec::DEFAULT_TIMEOUT,
+            )
+            .await
+            {
+                Ok(result) if result.succeeded() => ToolOutcome::Ok(format!(
+                    "wrote {} bytes to {}",
+                    args.content.len(),
+                    args.path
+                )),
+                Ok(result) => ToolOutcome::Error(format!(
+                    "cannot write {}: {}",
+                    args.path,
+                    result.stderr_text()
+                )),
+                Err(error) => {
+                    ToolOutcome::Error(format!("cannot write {}: {}", args.path, error.message()))
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            match std::fs::write(&resolution.target, args.content.as_bytes()) {
+                Ok(()) => ToolOutcome::Ok(format!(
+                    "wrote {} bytes to {}",
+                    args.content.len(),
+                    args.path
+                )),
+                Err(error) => ToolOutcome::Error(format!("cannot write {}: {error}", args.path)),
+            }
         }
     }
 }

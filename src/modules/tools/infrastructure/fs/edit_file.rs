@@ -1,4 +1,5 @@
-use std::fs;
+#[cfg(unix)]
+use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
@@ -6,9 +7,24 @@ use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema, simple_command,
 };
 use crate::modules::tools::infrastructure::args::{EditArgs, PathArgs, parse, parse_args};
+#[cfg(unix)]
+use crate::modules::tools::infrastructure::exec;
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::modules::tools::infrastructure::support::{EDIT_FILE_MAX_BYTES, stat_guard};
 use crate::shared::kernel::tool_call::ToolCall;
+
+/// The replacement, done by `python3`: read the file, find the first literal occurrence of `$KIRI_OLD`,
+/// splice in `$KIRI_NEW`, write it back. The old/new strings travel via the environment, never the
+/// command line, so arbitrary content cannot be interpreted. Exit 3 signals "old_string not found".
+#[cfg(unix)]
+const EDIT_SCRIPT: &str = "import os,sys\n\
+p=sys.argv[1]\n\
+o=os.environ['KIRI_OLD']\n\
+n=os.environ['KIRI_NEW']\n\
+d=open(p,encoding='utf-8').read()\n\
+i=d.find(o)\n\
+if i<0: sys.exit(3)\n\
+open(p,'w',encoding='utf-8').write(d[:i]+n+d[i+len(o):])";
 
 pub struct EditFile;
 
@@ -70,22 +86,65 @@ impl Tool for EditFile {
         }) {
             return out;
         }
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) => {
-                return ToolOutcome::Error(format!("cannot read {} as text: {error}", args.path));
+        #[cfg(unix)]
+        {
+            let cwd = sandbox.exec_cwd_for(&path);
+            match exec::run_argv(
+                &[
+                    OsStr::new("python3"),
+                    OsStr::new("-c"),
+                    OsStr::new(EDIT_SCRIPT),
+                    path.as_os_str(),
+                ],
+                Some(&cwd),
+                None,
+                &[
+                    ("KIRI_OLD", OsStr::new(args.old_string.as_str())),
+                    ("KIRI_NEW", OsStr::new(args.new_string.as_str())),
+                ],
+                exec::DEFAULT_TIMEOUT,
+            )
+            .await
+            {
+                Ok(result) if result.succeeded() => {
+                    ToolOutcome::Ok(format!("edited {}", args.path))
+                }
+                Ok(result) if result.exit_code == Some(3) => {
+                    ToolOutcome::Error(format!("old_string not found in {}", args.path))
+                }
+                Ok(result) => ToolOutcome::Error(format!(
+                    "cannot edit {}: {}",
+                    args.path,
+                    result.stderr_text()
+                )),
+                Err(error) => {
+                    ToolOutcome::Error(format!("cannot edit {}: {}", args.path, error.message()))
+                }
             }
-        };
-        let Some(position) = content.find(&args.old_string) else {
-            return ToolOutcome::Error(format!("old_string not found in {}", args.path));
-        };
-        let mut updated = String::with_capacity(content.len() + args.new_string.len());
-        updated.push_str(&content[..position]);
-        updated.push_str(&args.new_string);
-        updated.push_str(&content[position + args.old_string.len()..]);
-        match fs::write(&path, updated.as_bytes()) {
-            Ok(()) => ToolOutcome::Ok(format!("edited {}", args.path)),
-            Err(error) => ToolOutcome::Error(format!("cannot write {}: {error}", args.path)),
+        }
+
+        #[cfg(windows)]
+        {
+            let content = match std::fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(error) => {
+                    return ToolOutcome::Error(format!(
+                        "cannot read {} as text: {error}",
+                        args.path
+                    ));
+                }
+            };
+            let Some(position) = content.find(&args.old_string) else {
+                return ToolOutcome::Error(format!("old_string not found in {}", args.path));
+            };
+            let mut updated = String::with_capacity(content.len() + args.new_string.len());
+            updated.push_str(&content[..position]);
+            updated.push_str(&args.new_string);
+            updated.push_str(&content[position + args.old_string.len()..]);
+            match std::fs::write(&path, updated.as_bytes()) {
+                Ok(()) => ToolOutcome::Ok(format!("edited {}", args.path)),
+                Err(error) => ToolOutcome::Error(format!("cannot write {}: {error}", args.path)),
+            }
         }
     }
 }

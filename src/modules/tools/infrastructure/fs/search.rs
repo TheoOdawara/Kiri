@@ -1,3 +1,6 @@
+#[cfg(unix)]
+use std::ffi::OsStr;
+#[cfg(windows)]
 use std::fs;
 
 use serde_json::{Value, json};
@@ -6,11 +9,30 @@ use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema, simple_command,
 };
 use crate::modules::tools::infrastructure::args::{SearchArgs, parse, parse_args};
+#[cfg(unix)]
+use crate::modules::tools::infrastructure::exec;
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
-use crate::modules::tools::infrastructure::support::{SEARCH_MAX_MATCHES, search_file};
+#[cfg(unix)]
+use crate::modules::tools::infrastructure::support::SEARCH_MAX_LINE_CHARS;
+use crate::modules::tools::infrastructure::support::SEARCH_MAX_MATCHES;
+#[cfg(windows)]
+use crate::modules::tools::infrastructure::support::search_file;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct Search;
+
+/// Reformat one `grep -rIFn` line (`./path:line:content`) to the native shape `path:line: content`:
+/// drop the `./` grep prepends, and bound the content to the per-line char cap.
+#[cfg(unix)]
+fn format_grep_line(line: &str) -> String {
+    let mut parts = line.splitn(3, ':');
+    let path = parts.next().unwrap_or_default();
+    let number = parts.next().unwrap_or_default();
+    let content = parts.next().unwrap_or_default();
+    let path = path.strip_prefix("./").unwrap_or(path);
+    let shown: String = content.chars().take(SEARCH_MAX_LINE_CHARS).collect();
+    format!("{path}:{number}: {shown}")
+}
 
 #[async_trait::async_trait(?Send)]
 impl Tool for Search {
@@ -63,53 +85,138 @@ impl Tool for Search {
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
 
-        let mut matches: Vec<String> = Vec::new();
-        // Bound the recursion (and the displayed paths) to the resolved start directory, so a search begun
-        // outside the active workspace stays within its own subtree.
-        let base = start.clone();
-        let mut stack = vec![start];
-        let mut truncated = false;
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&dir) else {
-                continue;
+        // `grep -rIFn` does the recursive scan: `-r` recurse (without following symlinked dirs), `-I`
+        // skip binary files, `-F` fixed-string (literal, case-sensitive) match, `-n` line numbers. The
+        // query is its own argv element, so it is never shell-interpreted. The command runs *in* the
+        // resolved start directory and searches `.`, so the paths grep prints are relative to it.
+        #[cfg(unix)]
+        {
+            let result = match exec::run_argv(
+                &[
+                    OsStr::new("grep"),
+                    OsStr::new("-rIFn"),
+                    OsStr::new("-e"),
+                    OsStr::new(args.query.as_str()),
+                    OsStr::new("."),
+                ],
+                Some(&start),
+                None,
+                &[],
+                exec::DEFAULT_TIMEOUT,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    return ToolOutcome::Error(format!(
+                        "cannot search {}: {}",
+                        args.path,
+                        error.message()
+                    ));
+                }
             };
-            for entry in entries.flatten() {
-                let Ok(file_type) = entry.file_type() else {
-                    continue;
-                };
-                if file_type.is_symlink() {
-                    continue; // never follow symlinks: avoids escape and traversal loops
-                }
-                let path = entry.path();
-                if !path.starts_with(&base) {
-                    continue;
-                }
-                if file_type.is_dir() {
-                    stack.push(path);
-                } else if file_type.is_file() {
-                    search_file(&path, &args.query, &base, &mut matches);
-                    if matches.len() >= SEARCH_MAX_MATCHES {
-                        truncated = true;
-                        break;
-                    }
-                }
+            // grep exit status: 0 = matches found, 1 = none, >= 2 = a real error.
+            if result.exit_code.unwrap_or(2) >= 2 {
+                return ToolOutcome::Error(format!(
+                    "cannot search {}: {}",
+                    args.path,
+                    result.stderr_text()
+                ));
             }
+
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            let mut matches: Vec<String> = Vec::new();
+            let mut truncated = false;
+            for line in stdout.lines() {
+                if matches.len() >= SEARCH_MAX_MATCHES {
+                    truncated = true;
+                    break;
+                }
+                matches.push(format_grep_line(line));
+            }
+
+            if matches.is_empty() {
+                return ToolOutcome::Ok("no matches".to_string());
+            }
+            let mut output = matches.join("\n");
             if truncated {
-                break;
+                output.push_str(&format!("\n… (truncated at {SEARCH_MAX_MATCHES} matches)"));
             }
+            ToolOutcome::Ok(output)
         }
 
-        if matches.is_empty() {
-            return ToolOutcome::Ok("no matches".to_string());
+        #[cfg(windows)]
+        {
+            let mut matches: Vec<String> = Vec::new();
+            // Bound the recursion (and the displayed paths) to the resolved start directory, so a search
+            // begun outside the active workspace stays within its own subtree.
+            let base = start.clone();
+            let mut stack = vec![start];
+            let mut truncated = false;
+            while let Some(dir) = stack.pop() {
+                let Ok(entries) = fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let Ok(file_type) = entry.file_type() else {
+                        continue;
+                    };
+                    if file_type.is_symlink() {
+                        continue; // never follow symlinks: avoids escape and traversal loops
+                    }
+                    let path = entry.path();
+                    if !path.starts_with(&base) {
+                        continue;
+                    }
+                    if file_type.is_dir() {
+                        stack.push(path);
+                    } else if file_type.is_file() {
+                        search_file(&path, &args.query, &base, &mut matches);
+                        if matches.len() >= SEARCH_MAX_MATCHES {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                }
+                if truncated {
+                    break;
+                }
+            }
+
+            if matches.is_empty() {
+                return ToolOutcome::Ok("no matches".to_string());
+            }
+            let mut output = matches.join("\n");
+            if truncated {
+                output.push_str(&format!("\n… (truncated at {SEARCH_MAX_MATCHES} matches)"));
+            }
+            ToolOutcome::Ok(output)
         }
-        let mut output = matches.join("\n");
-        if truncated {
-            output.push_str(&format!("\n… (truncated at {SEARCH_MAX_MATCHES} matches)"));
-        }
-        ToolOutcome::Ok(output)
     }
 
     fn is_read_only(&self) -> bool {
         true
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{SEARCH_MAX_LINE_CHARS, format_grep_line};
+
+    #[test]
+    fn format_grep_line_strips_dot_slash_and_inserts_the_space() {
+        assert_eq!(
+            format_grep_line("./sub/f.txt:2:NEEDLE here"),
+            "sub/f.txt:2: NEEDLE here"
+        );
+    }
+
+    #[test]
+    fn format_grep_line_truncates_long_content_at_a_char_boundary() {
+        let long = "é".repeat(300);
+        let shown = format_grep_line(&format!("f.txt:1:{long}"));
+        let content = shown.rsplit_once(": ").unwrap().1;
+        assert_eq!(content.chars().count(), SEARCH_MAX_LINE_CHARS);
+        assert!(content.chars().all(|c| c == 'é'));
     }
 }
