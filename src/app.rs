@@ -19,7 +19,7 @@ pub fn wire(settings: Settings) -> Result<Tui> {
     if !std::io::stdout().is_terminal() {
         bail!("Kiri requires an interactive terminal (stdout is not a TTY)");
     }
-    let sandbox = Sandbox::new(&settings.path)?;
+    let sandbox = Sandbox::new(&settings.path, settings.sensitive.clone())?;
     let provider: Arc<dyn CompletionProvider> = Arc::new(OpenAiProvider::new(
         reqwest::Client::new(),
         settings.base_url,

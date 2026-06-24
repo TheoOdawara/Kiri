@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
+use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -77,7 +78,7 @@ fn confirmation_row(
 /// The full, exact tool surface as it behaves today: every schema + every confirmation variant.
 fn current_snapshot() -> Value {
     let dir = TempDir::new("snap");
-    let sandbox = Sandbox::new(&dir.path).unwrap();
+    let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
     let registry = ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new())));
     // Pre-seed a file so the overwrite/edit/delete variants resolve against an existing path.
     fs::write(dir.path.join("exists.txt"), b"data").unwrap();

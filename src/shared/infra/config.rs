@@ -6,6 +6,8 @@ use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use regex::Regex;
 
+use crate::modules::tools::infrastructure::sensitive::{SensitiveMatcher, load_sensitive_matcher};
+
 /// NVIDIA's OpenAI-compatible endpoint. Hardcoded for now; a future multi-provider feature will move
 /// this into external configuration (see docs/decisions/0001-openai-compatible-provider.md).
 const BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
@@ -168,6 +170,7 @@ pub struct Settings {
     pub seed: Option<String>,
     pub checkpoint_budget: Duration,
     pub plan_blacklist: Arc<[Regex]>,
+    pub sensitive: SensitiveMatcher,
 }
 
 impl Settings {
@@ -189,6 +192,7 @@ impl Settings {
             seed: cli.prompt,
             checkpoint_budget: TOOL_CHECKPOINT,
             plan_blacklist: load_plan_blacklist()?,
+            sensitive: load_sensitive_matcher()?,
         })
     }
 }

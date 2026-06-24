@@ -2,11 +2,15 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-/// Confines every file operation to a canonicalized root directory. All file tools resolve their path
-/// through this type; nothing else touches the filesystem with a raw, unvalidated path.
+use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+
+/// Confines every file operation to a canonicalized root directory, and refuses CRUD on files
+/// whose name matches a sensitive pattern (secrets, keys, credentials). All file tools resolve
+/// their path through this type; nothing else touches the filesystem with a raw, unvalidated path.
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     root: PathBuf,
+    sensitive: SensitiveMatcher,
 }
 
 /// The resolved target of a create operation, plus any parent directories that do not yet exist (in
@@ -18,15 +22,20 @@ pub struct CreateResolution {
 }
 
 impl Sandbox {
-    /// Canonicalize the root once. Fails if it does not exist or is not a directory.
-    pub fn new(root: impl AsRef<Path>) -> Result<Self> {
+    /// Canonicalize the root once. Fails if it does not exist or is not a directory. The
+    /// `SensitiveMatcher` is carried on the sandbox so every path resolution can check the file
+    /// name against the sensitive patterns before the tool touches the filesystem.
+    pub fn new(root: impl AsRef<Path>, sensitive: SensitiveMatcher) -> Result<Self> {
         let root = root.as_ref();
         let canonical = std::fs::canonicalize(root)
             .with_context(|| format!("sandbox root {} does not exist", root.display()))?;
         if !canonical.is_dir() {
             bail!("sandbox root {} is not a directory", canonical.display());
         }
-        Ok(Self { root: canonical })
+        Ok(Self {
+            root: canonical,
+            sensitive,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -43,7 +52,7 @@ impl Sandbox {
         } else {
             self.root.join(arg)
         };
-        Self::new(&target)
+        Self::new(&target, self.sensitive.clone())
     }
 
     /// Resolve a path that must already exist (read/edit/overwrite/delete/list/search). A relative path
@@ -52,13 +61,16 @@ impl Sandbox {
     pub fn resolve_existing(&self, rel: &str) -> Result<PathBuf> {
         let expanded = expand_tilde(rel, home().as_deref());
         if expanded.is_absolute() {
-            return std::fs::canonicalize(&expanded)
-                .with_context(|| format!("path not found: {rel}"));
+            let real = std::fs::canonicalize(&expanded)
+                .with_context(|| format!("path not found: {rel}"))?;
+            self.assert_not_sensitive(&real, rel)?;
+            return Ok(real);
         }
         let candidate = self.join_checked(rel)?;
         let real =
             std::fs::canonicalize(&candidate).with_context(|| format!("path not found: {rel}"))?;
         self.assert_within(&real)?;
+        self.assert_not_sensitive(&real, rel)?;
         Ok(real)
     }
 
@@ -106,6 +118,7 @@ impl Sandbox {
             }
         }
 
+        self.assert_not_sensitive(&real_target, rel)?;
         Ok(CreateResolution {
             target: real_target,
             missing_dirs,
@@ -135,6 +148,18 @@ impl Sandbox {
     fn assert_within(&self, real: &Path) -> Result<()> {
         if !real.starts_with(&self.root) {
             bail!("path escapes the sandbox root");
+        }
+        Ok(())
+    }
+
+    /// Refuse CRUD on files whose name matches a sensitive pattern (secrets, keys, credentials).
+    /// The check is on the last path component only, so a directory named `.ssh` is not blocked
+    /// (the files inside it are: `id_rsa`, `authorized_keys`, etc.).
+    fn assert_not_sensitive(&self, real: &Path, display: &str) -> Result<()> {
+        if let Some(name) = real.file_name().and_then(|n| n.to_str())
+            && let Some(glob) = self.sensitive.matches(name)
+        {
+            bail!("path matches sensitive file pattern '{glob}': {display}");
         }
         Ok(())
     }
@@ -203,12 +228,12 @@ mod tests {
     }
 
     fn sandbox(dir: &TempDir) -> Sandbox {
-        Sandbox::new(&dir.path).unwrap()
+        Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap()
     }
 
     #[test]
     fn new_rejects_missing_root() {
-        assert!(Sandbox::new("/nonexistent/t-cli/xyz-9999").is_err());
+        assert!(Sandbox::new("/nonexistent/t-cli/xyz-9999", SensitiveMatcher::empty()).is_err());
     }
 
     #[test]
@@ -216,7 +241,7 @@ mod tests {
         let dir = TempDir::new("file-root");
         let file = dir.path.join("f.txt");
         fs::write(&file, b"x").unwrap();
-        assert!(Sandbox::new(&file).is_err());
+        assert!(Sandbox::new(&file, SensitiveMatcher::empty()).is_err());
     }
 
     #[test]

@@ -79,11 +79,12 @@ impl Tool for ListDir {
 mod tests {
     use super::*;
     use crate::modules::tools::infrastructure::sandbox::Sandbox;
+    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
     use std::path::PathBuf;
 
     fn sandbox() -> Sandbox {
-        Sandbox::new(PathBuf::from(".")).unwrap()
+        Sandbox::new(PathBuf::from("."), SensitiveMatcher::empty()).unwrap()
     }
 
     fn call(args: &str) -> ToolCall {

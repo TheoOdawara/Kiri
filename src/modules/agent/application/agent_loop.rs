@@ -194,6 +194,7 @@ impl AgentLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -405,7 +406,7 @@ mod tests {
     async fn run_drives_a_tool_turn_then_a_text_turn() {
         let dir = TempDir::new("seq");
         std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
 
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
@@ -447,7 +448,7 @@ mod tests {
     #[tokio::test]
     async fn run_aborts_when_the_user_ends_the_session_at_a_prompt() {
         let dir = TempDir::new("abort");
-        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![CompletedTurn {
             content: String::new(),
             tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
@@ -467,7 +468,7 @@ mod tests {
     #[tokio::test]
     async fn auto_mode_runs_tools_without_asking() {
         let dir = TempDir::new("auto");
-        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "writing".to_string(),
@@ -501,7 +502,7 @@ mod tests {
     #[tokio::test]
     async fn approved_auto_stops_asking_for_the_rest_of_the_turn() {
         let dir = TempDir::new("approved-auto");
-        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
         // One assistant turn with two destructive calls: the first prompts, the second must not.
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
@@ -546,7 +547,7 @@ mod tests {
     #[tokio::test]
     async fn plan_mode_blocks_destructive_tools() {
         let dir = TempDir::new("plan-block");
-        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "writing".to_string(),
@@ -589,7 +590,7 @@ mod tests {
     async fn plan_mode_allows_read_only_tools() {
         let dir = TempDir::new("plan-read");
         std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "reading".to_string(),
@@ -622,7 +623,7 @@ mod tests {
     #[tokio::test]
     async fn auto_mode_emits_tool_started_and_finished() {
         let dir = TempDir::new("emit-auto");
-        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "writing".to_string(),
@@ -654,7 +655,7 @@ mod tests {
     async fn default_mode_emits_around_execution() {
         let dir = TempDir::new("emit-default");
         std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "reading".to_string(),
@@ -681,7 +682,7 @@ mod tests {
     #[tokio::test]
     async fn plan_block_emits_started_and_error_finish() {
         let dir = TempDir::new("emit-plan");
-        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "writing".to_string(),
@@ -716,7 +717,7 @@ mod tests {
     async fn declined_emits_started_and_declined_finish() {
         let dir = TempDir::new("emit-declined");
         std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(&dir.path).unwrap();
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "deleting".to_string(),

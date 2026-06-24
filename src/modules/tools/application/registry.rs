@@ -84,6 +84,7 @@ impl ToolRegistry {
 mod tests {
     use super::*;
     use crate::modules::tools::infrastructure::fs::default_fs_tools;
+    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use crate::modules::tools::infrastructure::support::READ_FILE_MAX_BYTES;
     use crate::shared::kernel::tool_call::FunctionCall;
     use regex::Regex;
@@ -121,7 +122,7 @@ mod tests {
     }
 
     fn sandbox(dir: &TempDir) -> Sandbox {
-        Sandbox::new(&dir.path).unwrap()
+        Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap()
     }
 
     fn call(name: &str, args: serde_json::Value) -> ToolCall {
