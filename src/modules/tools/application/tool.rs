@@ -72,7 +72,10 @@ pub fn function_schema(name: &str, description: &str, parameters: Value) -> Valu
 
 /// A self-describing file tool: its wire schema, its pt-BR confirmation phrasing, and its execution
 /// against the sandbox. Adding a tool is one new file implementing this trait, registered in
-/// `infrastructure::fs::default_fs_tools`.
+/// `infrastructure::fs::default_fs_tools`. The `execute` method is async so a tool can await
+/// external processes (e.g. `run_command` awaiting a child) without blocking the runtime; the
+/// `?Send` flavor matches the single-threaded TUI runtime (the rest of the engine already uses it).
+#[async_trait::async_trait(?Send)]
 pub trait Tool: Send + Sync {
     /// The stable name the model calls (e.g. `"read_file"`).
     fn name(&self) -> &'static str;
@@ -85,8 +88,10 @@ pub trait Tool: Send + Sync {
     /// Phrase the confirmation from the parsed args; `None` only when the args do not parse (then
     /// `execute` reports the error). May resolve paths via the sandbox to phrase write/move precisely.
     fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation>;
-    /// Run the call against the sandbox. Never panics nor returns `Err` that aborts the turn.
-    fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome;
+    /// Run the call against the sandbox. Never panics nor returns `Err` that aborts the turn. Async so
+    /// tools that spawn processes (`run_command`) can await them; the fast file tools keep their
+    /// blocking `std::fs` bodies — they complete in microseconds and the runtime is unaffected.
+    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome;
     /// Whether the tool only reads, never mutating the filesystem. Read-only tools stay available in
     /// plan mode and run without confirmation while planning. Defaults to `false` (treated as
     /// destructive), so a new tool is gated unless it explicitly opts in.

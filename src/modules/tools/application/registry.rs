@@ -56,9 +56,9 @@ impl ToolRegistry {
         self.find(&call.function.name)?.command_line(sandbox, call)
     }
 
-    pub fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    pub async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         match self.find(&call.function.name) {
-            Some(tool) => tool.execute(sandbox, call),
+            Some(tool) => tool.execute(sandbox, call).await,
             None => ToolOutcome::Error(format!("unknown tool '{}'", call.function.name)),
         }
     }
@@ -117,8 +117,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn schemas_expose_all_tools_in_order() {
+    #[tokio::test]
+    async fn schemas_expose_all_tools_in_order() {
         let names: Vec<String> = registry()
             .schemas()
             .iter()
@@ -141,8 +141,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn plan_mode_schemas_expose_only_read_only_tools() {
+    #[tokio::test]
+    async fn plan_mode_schemas_expose_only_read_only_tools() {
         let names: Vec<String> = registry()
             .schemas_for(ApprovalMode::Plan)
             .iter()
@@ -151,8 +151,8 @@ mod tests {
         assert_eq!(names, vec!["read_file", "list_dir", "search"]);
     }
 
-    #[test]
-    fn is_destructive_classifies_tools() {
+    #[tokio::test]
+    async fn is_destructive_classifies_tools() {
         let r = registry();
         assert!(r.is_destructive("write_file"));
         assert!(r.is_destructive("delete_dir"));
@@ -163,8 +163,8 @@ mod tests {
         assert!(!r.is_destructive("nope"));
     }
 
-    #[test]
-    fn command_line_returns_the_bare_command_per_tool() {
+    #[tokio::test]
+    async fn command_line_returns_the_bare_command_per_tool() {
         let dir = TempDir::new("cmdline");
         let sb = sandbox(&dir);
         let reg = registry();
@@ -202,8 +202,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn command_line_is_none_for_unknown_tool_or_bad_args() {
+    #[tokio::test]
+    async fn command_line_is_none_for_unknown_tool_or_bad_args() {
         let dir = TempDir::new("cmdline-none");
         let sb = sandbox(&dir);
         let reg = registry();
@@ -214,19 +214,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unknown_tool_returns_error() {
+    #[tokio::test]
+    async fn unknown_tool_returns_error() {
         let dir = TempDir::new("unknown");
         let sb = sandbox(&dir);
-        let outcome = registry().execute(&sb, &call("nope", json!({})));
+        let outcome = registry().execute(&sb, &call("nope", json!({}))).await;
         assert!(matches!(outcome, ToolOutcome::Error(_)));
     }
 
-    #[test]
-    fn bad_arguments_return_error() {
+    #[tokio::test]
+    async fn bad_arguments_return_error() {
         let dir = TempDir::new("bad-args");
         let sb = sandbox(&dir);
-        let outcome = registry().execute(&sb, &call("read_file", json!({"wrong": 1})));
+        let outcome = registry()
+            .execute(&sb, &call("read_file", json!({"wrong": 1})))
+            .await;
         let ToolOutcome::Error(message) = outcome else {
             panic!("expected an error outcome");
         };
@@ -236,8 +238,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn read_write_edit_delete_roundtrip() {
+    #[tokio::test]
+    async fn read_write_edit_delete_roundtrip() {
         let dir = TempDir::new("roundtrip");
         let sb = sandbox(&dir);
         let reg = registry();
@@ -249,11 +251,13 @@ mod tests {
                     "write_file",
                     json!({"path": "a.txt", "content": "hello world"})
                 )
-            ),
+            )
+            .await,
             ToolOutcome::Ok("wrote 11 bytes to a.txt".to_string())
         );
         assert_eq!(
-            reg.execute(&sb, &call("read_file", json!({"path": "a.txt"}))),
+            reg.execute(&sb, &call("read_file", json!({"path": "a.txt"})))
+                .await,
             ToolOutcome::Ok("hello world".to_string())
         );
         assert_eq!(
@@ -263,81 +267,93 @@ mod tests {
                     "edit_file",
                     json!({"path": "a.txt", "old_string": "world", "new_string": "rust"})
                 )
-            ),
+            )
+            .await,
             ToolOutcome::Ok("edited a.txt".to_string())
         );
         assert_eq!(
-            reg.execute(&sb, &call("read_file", json!({"path": "a.txt"}))),
+            reg.execute(&sb, &call("read_file", json!({"path": "a.txt"})))
+                .await,
             ToolOutcome::Ok("hello rust".to_string())
         );
         assert_eq!(
-            reg.execute(&sb, &call("delete_file", json!({"path": "a.txt"}))),
+            reg.execute(&sb, &call("delete_file", json!({"path": "a.txt"})))
+                .await,
             ToolOutcome::Ok("deleted a.txt".to_string())
         );
         assert!(!sb.root().join("a.txt").exists());
     }
 
-    #[test]
-    fn read_file_truncates_files_larger_than_the_cap() {
+    #[tokio::test]
+    async fn read_file_truncates_files_larger_than_the_cap() {
         let dir = TempDir::new("read-cap");
         let sb = sandbox(&dir);
         let big = "a".repeat(READ_FILE_MAX_BYTES + 500);
         fs::write(sb.root().join("big.txt"), big.as_bytes()).unwrap();
-        match registry().execute(&sb, &call("read_file", json!({"path": "big.txt"}))) {
+        match registry()
+            .execute(&sb, &call("read_file", json!({"path": "big.txt"})))
+            .await
+        {
             ToolOutcome::Ok(text) => assert!(text.contains("truncated at")),
             other => panic!("expected truncated content, got {other:?}"),
         }
     }
 
-    #[test]
-    fn write_creates_missing_parent_directories() {
+    #[tokio::test]
+    async fn write_creates_missing_parent_directories() {
         let dir = TempDir::new("write-nested");
         let sb = sandbox(&dir);
-        let outcome = registry().execute(
-            &sb,
-            &call("write_file", json!({"path": "a/b/c.txt", "content": "x"})),
-        );
+        let outcome = registry()
+            .execute(
+                &sb,
+                &call("write_file", json!({"path": "a/b/c.txt", "content": "x"})),
+            )
+            .await;
         assert!(matches!(outcome, ToolOutcome::Ok(_)));
         assert!(sb.root().join("a").join("b").join("c.txt").exists());
     }
 
-    #[test]
-    fn edit_missing_old_string_returns_error() {
+    #[tokio::test]
+    async fn edit_missing_old_string_returns_error() {
         let dir = TempDir::new("edit-miss");
         let sb = sandbox(&dir);
         fs::write(sb.root().join("a.txt"), b"hello").unwrap();
-        let outcome = registry().execute(
-            &sb,
-            &call(
-                "edit_file",
-                json!({"path": "a.txt", "old_string": "zzz", "new_string": "y"}),
-            ),
-        );
+        let outcome = registry()
+            .execute(
+                &sb,
+                &call(
+                    "edit_file",
+                    json!({"path": "a.txt", "old_string": "zzz", "new_string": "y"}),
+                ),
+            )
+            .await;
         assert!(matches!(outcome, ToolOutcome::Error(_)));
     }
 
-    #[test]
-    fn delete_refuses_directories() {
+    #[tokio::test]
+    async fn delete_refuses_directories() {
         let dir = TempDir::new("delete-dir");
         let sb = sandbox(&dir);
         fs::create_dir(sb.root().join("sub")).unwrap();
-        let outcome = registry().execute(&sb, &call("delete_file", json!({"path": "sub"})));
+        let outcome = registry()
+            .execute(&sb, &call("delete_file", json!({"path": "sub"})))
+            .await;
         assert!(matches!(outcome, ToolOutcome::Error(_)));
         assert!(sb.root().join("sub").is_dir());
     }
 
-    #[test]
-    fn list_dir_sorts_and_marks_directories() {
+    #[tokio::test]
+    async fn list_dir_sorts_and_marks_directories() {
         let dir = TempDir::new("list");
         let sb = sandbox(&dir);
         fs::write(sb.root().join("b.txt"), b"x").unwrap();
         fs::create_dir(sb.root().join("a_dir")).unwrap();
-        let outcome = registry().execute(&sb, &call("list_dir", json!({})));
+        let outcome = registry().execute(&sb, &call("list_dir", json!({}))).await;
         assert_eq!(outcome, ToolOutcome::Ok("a_dir/\nb.txt".to_string()));
     }
 
-    #[test]
-    fn search_finds_substring_recursively() {
+    #[tokio::test]
+    async fn search_finds_substring_recursively() {
         let dir = TempDir::new("search");
         let sb = sandbox(&dir);
         fs::create_dir(sb.root().join("sub")).unwrap();
@@ -346,7 +362,9 @@ mod tests {
             b"alpha\nNEEDLE here\nbeta",
         )
         .unwrap();
-        let outcome = registry().execute(&sb, &call("search", json!({"query": "NEEDLE"})));
+        let outcome = registry()
+            .execute(&sb, &call("search", json!({"query": "NEEDLE"})))
+            .await;
         match outcome {
             ToolOutcome::Ok(text) => {
                 assert!(text.contains("sub/f.txt:2:"));
@@ -356,141 +374,163 @@ mod tests {
         }
     }
 
-    #[test]
-    fn search_skips_binary_files() {
+    #[tokio::test]
+    async fn search_skips_binary_files() {
         let dir = TempDir::new("search-binary");
         let sb = sandbox(&dir);
         fs::write(sb.root().join("bin"), [b'N', b'E', b'E', 0, b'D']).unwrap();
-        let outcome = registry().execute(&sb, &call("search", json!({"query": "NEE"})));
+        let outcome = registry()
+            .execute(&sb, &call("search", json!({"query": "NEE"})))
+            .await;
         assert_eq!(outcome, ToolOutcome::Ok("no matches".to_string()));
     }
 
-    #[test]
-    fn move_path_relocates_a_file() {
+    #[tokio::test]
+    async fn move_path_relocates_a_file() {
         let dir = TempDir::new("move-file");
         let sb = sandbox(&dir);
         fs::write(sb.root().join("a.txt"), b"data").unwrap();
         assert_eq!(
-            registry().execute(
-                &sb,
-                &call(
-                    "move_path",
-                    json!({"source": "a.txt", "destination": "b.txt"})
+            registry()
+                .execute(
+                    &sb,
+                    &call(
+                        "move_path",
+                        json!({"source": "a.txt", "destination": "b.txt"})
+                    )
                 )
-            ),
+                .await,
             ToolOutcome::Ok("moved a.txt to b.txt".to_string())
         );
         assert!(!sb.root().join("a.txt").exists());
         assert_eq!(fs::read_to_string(sb.root().join("b.txt")).unwrap(), "data");
     }
 
-    #[test]
-    fn move_path_relocates_a_directory_with_contents() {
+    #[tokio::test]
+    async fn move_path_relocates_a_directory_with_contents() {
         let dir = TempDir::new("move-dir");
         let sb = sandbox(&dir);
         fs::create_dir(sb.root().join("src")).unwrap();
         fs::write(sb.root().join("src").join("f.txt"), b"x").unwrap();
-        let outcome = registry().execute(
-            &sb,
-            &call("move_path", json!({"source": "src", "destination": "dst"})),
-        );
+        let outcome = registry()
+            .execute(
+                &sb,
+                &call("move_path", json!({"source": "src", "destination": "dst"})),
+            )
+            .await;
         assert!(matches!(outcome, ToolOutcome::Ok(_)));
         assert!(!sb.root().join("src").exists());
         assert!(sb.root().join("dst").join("f.txt").exists());
     }
 
-    #[test]
-    fn move_path_creates_missing_destination_dirs() {
+    #[tokio::test]
+    async fn move_path_creates_missing_destination_dirs() {
         let dir = TempDir::new("move-mkdir");
         let sb = sandbox(&dir);
         fs::write(sb.root().join("a.txt"), b"x").unwrap();
-        let outcome = registry().execute(
-            &sb,
-            &call(
-                "move_path",
-                json!({"source": "a.txt", "destination": "nested/deep/b.txt"}),
-            ),
-        );
+        let outcome = registry()
+            .execute(
+                &sb,
+                &call(
+                    "move_path",
+                    json!({"source": "a.txt", "destination": "nested/deep/b.txt"}),
+                ),
+            )
+            .await;
         assert!(matches!(outcome, ToolOutcome::Ok(_)));
         assert!(sb.root().join("nested").join("deep").join("b.txt").exists());
     }
 
-    #[test]
-    fn move_path_missing_source_returns_error() {
+    #[tokio::test]
+    async fn move_path_missing_source_returns_error() {
         let dir = TempDir::new("move-missing");
         let sb = sandbox(&dir);
-        let outcome = registry().execute(
-            &sb,
-            &call(
-                "move_path",
-                json!({"source": "nope.txt", "destination": "b.txt"}),
-            ),
-        );
+        let outcome = registry()
+            .execute(
+                &sb,
+                &call(
+                    "move_path",
+                    json!({"source": "nope.txt", "destination": "b.txt"}),
+                ),
+            )
+            .await;
         assert!(matches!(outcome, ToolOutcome::Error(_)));
     }
 
-    #[test]
-    fn move_path_refuses_to_move_the_root() {
+    #[tokio::test]
+    async fn move_path_refuses_to_move_the_root() {
         let dir = TempDir::new("move-root");
         let sb = sandbox(&dir);
-        let outcome = registry().execute(
-            &sb,
-            &call("move_path", json!({"source": ".", "destination": "x"})),
-        );
+        let outcome = registry()
+            .execute(
+                &sb,
+                &call("move_path", json!({"source": ".", "destination": "x"})),
+            )
+            .await;
         assert!(matches!(outcome, ToolOutcome::Error(_)));
     }
 
-    #[test]
-    fn create_dir_creates_nested_directories() {
+    #[tokio::test]
+    async fn create_dir_creates_nested_directories() {
         let dir = TempDir::new("create-dir");
         let sb = sandbox(&dir);
-        let outcome = registry().execute(&sb, &call("create_dir", json!({"path": "a/b/c"})));
+        let outcome = registry()
+            .execute(&sb, &call("create_dir", json!({"path": "a/b/c"})))
+            .await;
         assert!(matches!(outcome, ToolOutcome::Ok(_)));
         assert!(sb.root().join("a").join("b").join("c").is_dir());
     }
 
-    #[test]
-    fn create_dir_is_idempotent_for_existing_directory() {
+    #[tokio::test]
+    async fn create_dir_is_idempotent_for_existing_directory() {
         let dir = TempDir::new("create-dir-exists");
         let sb = sandbox(&dir);
         fs::create_dir(sb.root().join("a")).unwrap();
-        let outcome = registry().execute(&sb, &call("create_dir", json!({"path": "a"})));
+        let outcome = registry()
+            .execute(&sb, &call("create_dir", json!({"path": "a"})))
+            .await;
         assert!(matches!(outcome, ToolOutcome::Ok(_)));
         assert!(sb.root().join("a").is_dir());
     }
 
-    #[test]
-    fn delete_dir_removes_a_directory_recursively() {
+    #[tokio::test]
+    async fn delete_dir_removes_a_directory_recursively() {
         let dir = TempDir::new("delete-dir");
         let sb = sandbox(&dir);
         fs::create_dir_all(sb.root().join("a").join("b")).unwrap();
         fs::write(sb.root().join("a").join("b").join("f.txt"), b"x").unwrap();
-        let outcome = registry().execute(&sb, &call("delete_dir", json!({"path": "a"})));
+        let outcome = registry()
+            .execute(&sb, &call("delete_dir", json!({"path": "a"})))
+            .await;
         assert_eq!(outcome, ToolOutcome::Ok("deleted directory a".to_string()));
         assert!(!sb.root().join("a").exists());
     }
 
-    #[test]
-    fn delete_dir_refuses_a_file() {
+    #[tokio::test]
+    async fn delete_dir_refuses_a_file() {
         let dir = TempDir::new("delete-dir-file");
         let sb = sandbox(&dir);
         fs::write(sb.root().join("a.txt"), b"x").unwrap();
-        let outcome = registry().execute(&sb, &call("delete_dir", json!({"path": "a.txt"})));
+        let outcome = registry()
+            .execute(&sb, &call("delete_dir", json!({"path": "a.txt"})))
+            .await;
         assert!(matches!(outcome, ToolOutcome::Error(_)));
         assert!(sb.root().join("a.txt").exists());
     }
 
-    #[test]
-    fn delete_dir_refuses_the_root() {
+    #[tokio::test]
+    async fn delete_dir_refuses_the_root() {
         let dir = TempDir::new("delete-dir-root");
         let sb = sandbox(&dir);
-        let outcome = registry().execute(&sb, &call("delete_dir", json!({"path": "."})));
+        let outcome = registry()
+            .execute(&sb, &call("delete_dir", json!({"path": "."})))
+            .await;
         assert!(matches!(outcome, ToolOutcome::Error(_)));
         assert!(sb.root().is_dir());
     }
 
-    #[test]
-    fn execute_edits_file_outside_workspace() {
+    #[tokio::test]
+    async fn execute_edits_file_outside_workspace() {
         let outside = TempDir::new("edit-abs");
         let file = outside.path.join("f.txt");
         fs::write(&file, b"hello world").unwrap();
@@ -502,7 +542,7 @@ mod tests {
                 "edit_file",
                 json!({ "path": file.to_str().unwrap(), "old_string": "world", "new_string": "rust" }),
             ),
-        );
+        ).await;
         assert!(matches!(outcome, ToolOutcome::Ok(_)));
         assert_eq!(fs::read_to_string(&file).unwrap(), "hello rust");
     }

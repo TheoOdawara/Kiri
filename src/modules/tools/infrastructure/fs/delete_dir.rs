@@ -12,6 +12,7 @@ use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct DeleteDir;
 
+#[async_trait::async_trait(?Send)]
 impl Tool for DeleteDir {
     fn name(&self) -> &'static str {
         "delete_dir"
@@ -46,7 +47,7 @@ impl Tool for DeleteDir {
         ))
     }
 
-    fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: PathArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,

@@ -13,6 +13,7 @@ const RUN_COMMAND_MAX_BYTES: usize = 64 * 1024;
 
 pub struct RunCommand;
 
+#[async_trait::async_trait(?Send)]
 impl Tool for RunCommand {
     fn name(&self) -> &'static str {
         "run_command"
@@ -62,7 +63,7 @@ impl Tool for RunCommand {
         Some(confirm(action, default_accept))
     }
 
-    fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: RunCommandArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,
@@ -185,13 +186,15 @@ mod tests {
 
     use crate::modules::tools::application::registry::ToolRegistry;
 
-    #[test]
-    fn run_command_simple() {
+    #[tokio::test]
+    async fn run_command_simple() {
         let dir = TempDir::new("simple");
         let sb = sandbox(&dir);
         let reg = registry();
 
-        let outcome = reg.execute(&sb, &call("run_command", json!({"command": "echo hello"})));
+        let outcome = reg
+            .execute(&sb, &call("run_command", json!({"command": "echo hello"})))
+            .await;
         match outcome {
             ToolOutcome::Ok(text) => {
                 assert!(text.contains("hello"));
@@ -201,8 +204,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn run_command_with_cwd() {
+    #[tokio::test]
+    async fn run_command_with_cwd() {
         let dir = TempDir::new("cwd");
         fs::create_dir(dir.path.join("sub")).unwrap();
         fs::write(dir.path.join("sub").join("f.txt"), b"content").unwrap();
@@ -216,10 +219,12 @@ mod tests {
         #[cfg(windows)]
         let read_cmd = "type f.txt";
 
-        let outcome = reg.execute(
-            &sb,
-            &call("run_command", json!({"command": read_cmd, "cwd": "sub"})),
-        );
+        let outcome = reg
+            .execute(
+                &sb,
+                &call("run_command", json!({"command": read_cmd, "cwd": "sub"})),
+            )
+            .await;
         match outcome {
             ToolOutcome::Ok(text) => {
                 assert!(text.contains("content"));
@@ -229,45 +234,51 @@ mod tests {
         }
     }
 
-    #[test]
-    fn run_command_nonexistent_cwd_returns_error() {
+    #[tokio::test]
+    async fn run_command_nonexistent_cwd_returns_error() {
         let dir = TempDir::new("bad-cwd");
         let sb = sandbox(&dir);
         let reg = registry();
 
-        let outcome = reg.execute(
-            &sb,
-            &call("run_command", json!({"command": "echo x", "cwd": "nope"})),
-        );
+        let outcome = reg
+            .execute(
+                &sb,
+                &call("run_command", json!({"command": "echo x", "cwd": "nope"})),
+            )
+            .await;
         assert!(matches!(outcome, ToolOutcome::Error(_)));
     }
 
-    #[test]
-    fn run_command_failure_exit_code() {
+    #[tokio::test]
+    async fn run_command_failure_exit_code() {
         let dir = TempDir::new("fail");
         let sb = sandbox(&dir);
         let reg = registry();
 
-        let outcome = reg.execute(&sb, &call("run_command", json!({"command": "exit 42"})));
+        let outcome = reg
+            .execute(&sb, &call("run_command", json!({"command": "exit 42"})))
+            .await;
         match outcome {
             ToolOutcome::Ok(text) => assert!(text.contains("exit code 42")),
             other => panic!("expected Ok with exit code, got {other:?}"),
         }
     }
 
-    #[test]
-    fn run_command_not_found() {
+    #[tokio::test]
+    async fn run_command_not_found() {
         let dir = TempDir::new("notfound");
         let sb = sandbox(&dir);
         let reg = registry();
 
-        let outcome = reg.execute(
-            &sb,
-            &call(
-                "run_command",
-                json!({"command": "this_command_does_not_exist_xyz"}),
-            ),
-        );
+        let outcome = reg
+            .execute(
+                &sb,
+                &call(
+                    "run_command",
+                    json!({"command": "this_command_does_not_exist_xyz"}),
+                ),
+            )
+            .await;
         // On unix the inner exec fails before the shell is reached; on Windows the shell runs and
         // reports "not recognized" (or its localized variant) to stderr with a non-zero exit code.
         // Both reach the model as diagnostic text — the shape differs, the contract is the same:
@@ -279,8 +290,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn run_command_truncates_large_output() {
+    #[tokio::test]
+    async fn run_command_truncates_large_output() {
         let dir = TempDir::new("truncate");
         let sb = sandbox(&dir);
         let reg = registry();
@@ -292,7 +303,9 @@ mod tests {
         #[cfg(windows)]
         let spam = "for /L %i in (1,1,50000) do @echo %i";
 
-        let outcome = reg.execute(&sb, &call("run_command", json!({"command": spam})));
+        let outcome = reg
+            .execute(&sb, &call("run_command", json!({"command": spam})))
+            .await;
         match outcome {
             ToolOutcome::Ok(text) => {
                 assert!(text.contains("truncated at"));
@@ -302,20 +315,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn run_command_timeout() {
+    #[tokio::test]
+    async fn run_command_timeout() {
         let dir = TempDir::new("timeout");
         let sb = sandbox(&dir);
         let reg = registry();
 
         // Sleep for longer than the 1s timeout
-        let outcome = reg.execute(
-            &sb,
-            &call(
-                "run_command",
-                json!({"command": "sleep 2", "timeout_ms": 1000}),
-            ),
-        );
+        let outcome = reg
+            .execute(
+                &sb,
+                &call(
+                    "run_command",
+                    json!({"command": "sleep 2", "timeout_ms": 1000}),
+                ),
+            )
+            .await;
         // Note: timeout is not enforced at the OS level here; this just documents the argument exists.
         // A real timeout would need a more complex implementation (e.g. tokio::process with timeout).
         match outcome {

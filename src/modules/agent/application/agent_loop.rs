@@ -21,11 +21,14 @@ pub enum TurnOutcome {
     Aborted,
 }
 
-/// Run a tool execution, returning its outcome alongside how long only the execution took (so the
-/// reported duration excludes any time the user spent at an approval prompt).
-fn timed(run: impl FnOnce() -> ToolOutcome) -> (ToolOutcome, Duration) {
+/// Run a tool execution to completion, returning its outcome alongside how long only the execution
+/// took (so the reported duration excludes any time the user spent at an approval prompt). Async so
+/// tools that spawn processes can await them; the wall clock still measures only the await span.
+async fn timed<Fut: std::future::Future<Output = ToolOutcome>>(
+    run: Fut,
+) -> (ToolOutcome, Duration) {
     let start = Instant::now();
-    let outcome = run();
+    let outcome = run.await;
     (outcome, start.elapsed())
 }
 
@@ -114,7 +117,7 @@ impl AgentLoop {
                     // Auto: run every call without asking.
                     ApprovalMode::Auto => {
                         io.tool_started(call, &command);
-                        timed(|| self.registry.execute(sandbox, call))
+                        timed(self.registry.execute(sandbox, call)).await
                     }
                     // Plan: destructive tools are withheld from the schema; if the model still names
                     // one, refuse it without touching the filesystem. Read-only tools run directly so
@@ -131,21 +134,21 @@ impl AgentLoop {
                     }
                     ApprovalMode::Plan => {
                         io.tool_started(call, &command);
-                        timed(|| self.registry.execute(sandbox, call))
+                        timed(self.registry.execute(sandbox, call)).await
                     }
                     // Default: confirm each call through the UI before running it.
                     ApprovalMode::Default => match self.registry.confirm(sandbox, call) {
                         Some(confirmation) => match io.decide(&confirmation).await {
                             Approval::Approved => {
                                 io.tool_started(call, &command);
-                                timed(|| self.registry.execute(sandbox, call))
+                                timed(self.registry.execute(sandbox, call)).await
                             }
                             // "Approve and don't ask again": run this call, then switch the rest of the
                             // turn to auto so the following calls no longer prompt.
                             Approval::ApprovedAuto => {
                                 mode = ApprovalMode::Auto;
                                 io.tool_started(call, &command);
-                                timed(|| self.registry.execute(sandbox, call))
+                                timed(self.registry.execute(sandbox, call)).await
                             }
                             Approval::Declined => {
                                 io.tool_started(call, &command);
@@ -155,7 +158,7 @@ impl AgentLoop {
                         },
                         None => {
                             io.tool_started(call, &command);
-                            timed(|| self.registry.execute(sandbox, call))
+                            timed(self.registry.execute(sandbox, call)).await
                         }
                     },
                 };

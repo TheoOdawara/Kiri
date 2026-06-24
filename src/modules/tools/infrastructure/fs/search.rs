@@ -12,6 +12,7 @@ use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct Search;
 
+#[async_trait::async_trait(?Send)]
 impl Tool for Search {
     fn name(&self) -> &'static str {
         "search"
@@ -49,7 +50,7 @@ impl Tool for Search {
         ))
     }
 
-    fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: SearchArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,

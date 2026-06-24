@@ -12,6 +12,7 @@ use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct EditFile;
 
+#[async_trait::async_trait(?Send)]
 impl Tool for EditFile {
     fn name(&self) -> &'static str {
         "edit_file"
@@ -47,7 +48,7 @@ impl Tool for EditFile {
         ))
     }
 
-    fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: EditArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,

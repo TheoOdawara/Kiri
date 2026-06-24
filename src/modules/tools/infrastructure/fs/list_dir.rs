@@ -11,6 +11,7 @@ use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct ListDir;
 
+#[async_trait::async_trait(?Send)]
 impl Tool for ListDir {
     fn name(&self) -> &'static str {
         "list_dir"
@@ -42,7 +43,7 @@ impl Tool for ListDir {
         ))
     }
 
-    fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: ListArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,

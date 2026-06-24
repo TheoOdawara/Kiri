@@ -12,6 +12,7 @@ use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct MovePath;
 
+#[async_trait::async_trait(?Send)]
 impl Tool for MovePath {
     fn name(&self) -> &'static str {
         "move_path"
@@ -57,7 +58,7 @@ impl Tool for MovePath {
         Some(confirm(action, default_accept))
     }
 
-    fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: MoveArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,

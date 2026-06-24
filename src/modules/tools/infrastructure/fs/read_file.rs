@@ -10,6 +10,7 @@ use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct ReadFile;
 
+#[async_trait::async_trait(?Send)]
 impl Tool for ReadFile {
     fn name(&self) -> &'static str {
         "read_file"
@@ -43,7 +44,7 @@ impl Tool for ReadFile {
         ))
     }
 
-    fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: PathArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,

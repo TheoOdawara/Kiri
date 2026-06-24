@@ -12,6 +12,7 @@ use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct WriteFile;
 
+#[async_trait::async_trait(?Send)]
 impl Tool for WriteFile {
     fn name(&self) -> &'static str {
         "write_file"
@@ -56,7 +57,7 @@ impl Tool for WriteFile {
         Some(confirm(action, default_accept))
     }
 
-    fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: WriteArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,

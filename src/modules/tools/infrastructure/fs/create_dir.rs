@@ -11,6 +11,7 @@ use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct CreateDir;
 
+#[async_trait::async_trait(?Send)]
 impl Tool for CreateDir {
     fn name(&self) -> &'static str {
         "create_dir"
@@ -43,7 +44,7 @@ impl Tool for CreateDir {
         ))
     }
 
-    fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: PathArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,
