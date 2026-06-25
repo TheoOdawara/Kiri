@@ -380,10 +380,9 @@ fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         return vec![];
     };
 
-    let pending = model
-        .pending_approval
-        .take()
-        .expect("an approval is pending");
+    let Some(pending) = model.pending_approval.take() else {
+        return vec![];
+    };
     let (decision, switch_auto) = match choice {
         Choice::Abort => (Approval::Aborted, false),
         Choice::Decline => (Approval::Declined, false),
@@ -583,6 +582,15 @@ mod tests {
         assert_eq!(effects, vec![Effect::AnswerApproval(Approval::Declined)]);
         assert!(m.pending_approval.is_none());
         assert_eq!(m.transcript.items().len(), 1);
+    }
+
+    #[test]
+    fn approval_key_with_no_pending_approval_is_a_noop() {
+        // Guards the invariant that on_approval_key never panics if reached without a pending
+        // approval (e.g. a future routing change) — it answers nothing rather than unwrapping None.
+        let mut m = Model::default();
+        assert!(m.pending_approval.is_none());
+        assert_eq!(on_approval_key(&mut m, press(Key::Enter)), vec![]);
     }
 
     #[test]

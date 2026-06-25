@@ -120,6 +120,8 @@ async fn build_memory(settings: &Settings) -> Result<(Vec<Box<dyn Tool>>, String
         }
     };
     let project_entries = if project_ok {
+        // The startup digest is best-effort: a listing failure must not block the session, so fall
+        // back to an empty digest rather than aborting.
         project_memory
             .list(0, DIGEST_PROJECT_CAP)
             .await
@@ -145,6 +147,7 @@ async fn build_memory(settings: &Settings) -> Result<(Vec<Box<dyn Tool>>, String
             }
         };
     let shared_entries = if shared_ok {
+        // Best-effort digest: continue with an empty list instead of aborting if the query fails.
         shared_memory
             .list(0, DIGEST_SHARED_CAP)
             .await

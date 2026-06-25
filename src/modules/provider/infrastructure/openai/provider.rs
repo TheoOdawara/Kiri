@@ -79,7 +79,12 @@ impl CompletionProvider for OpenAiProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            // The status drives the error path; the body is only diagnostic. If reading it fails, keep
+            // the failure visible in the message rather than silently blanking it.
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|error| format!("<error body unavailable: {error}>"));
             // A 4xx means the body we sent is unacceptable; resending it unchanged fails identically,
             // so it is surfaced distinctly to let the frontend drop the offending turn. 5xx/other stay
             // a plain (transient) provider error.
