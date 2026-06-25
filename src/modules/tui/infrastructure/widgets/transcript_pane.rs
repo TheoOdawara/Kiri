@@ -11,6 +11,7 @@ use crate::modules::tui::domain::transcript::{
     NoticeLevel, ToolActivity, ToolDiff, ToolStatus, TranscriptItem,
 };
 use crate::modules::tui::infrastructure::markdown;
+use crate::modules::tui::infrastructure::text::{chunk_by_width, display_width};
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::splash;
 
@@ -288,32 +289,23 @@ fn hard_wrap(text: &str, width: usize) -> Vec<String> {
 fn wrap_line(line: &str, width: usize, rows: &mut Vec<String>) {
     let mut current = String::new();
     for word in line.split(' ') {
-        let word_chars = word.chars().count();
+        let word_cols = display_width(word);
         if current.is_empty() {
-            if word_chars <= width {
+            if word_cols <= width {
                 current.push_str(word);
             } else {
-                // Word alone exceeds the width: chunk it by chars.
-                let mut chars = word.chars().peekable();
-                while chars.peek().is_some() {
-                    let chunk: String = chars.by_ref().take(width).collect();
-                    rows.push(chunk);
-                }
-                continue;
+                // Word alone exceeds the width: chunk it by display cells.
+                rows.extend(chunk_by_width(word, width));
             }
-        } else if current.chars().count() + 1 + word_chars <= width {
+        } else if display_width(&current) + 1 + word_cols <= width {
             current.push(' ');
             current.push_str(word);
         } else {
             rows.push(std::mem::take(&mut current));
-            if word_chars <= width {
+            if word_cols <= width {
                 current.push_str(word);
             } else {
-                let mut chars = word.chars().peekable();
-                while chars.peek().is_some() {
-                    let chunk: String = chars.by_ref().take(width).collect();
-                    rows.push(chunk);
-                }
+                rows.extend(chunk_by_width(word, width));
             }
         }
     }

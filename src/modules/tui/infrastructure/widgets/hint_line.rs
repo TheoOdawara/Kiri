@@ -4,6 +4,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use crate::modules::tui::domain::model::Model;
+use crate::modules::tui::infrastructure::text::display_width;
 use crate::modules::tui::infrastructure::theme;
 
 /// Render the bottom line: approval navigation while a confirmation is pending (the box shows the
@@ -33,7 +34,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         let w = area.width as usize;
         let text = variants
             .iter()
-            .find(|v| v.chars().count() <= w)
+            .find(|v| display_width(v) <= w)
             .copied()
             .unwrap_or("  Enter · /help");
         Line::styled(text, theme::dim())

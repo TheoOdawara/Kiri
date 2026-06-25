@@ -19,6 +19,7 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::modules::tui::infrastructure::text::{chunk_by_width, display_width};
 use crate::modules::tui::infrastructure::theme;
 
 /// Upper bound on memoized renders before the cache is cleared. Transcript items are immutable once
@@ -416,7 +417,7 @@ fn render_block(block: &Block, width: usize, out: &mut Vec<Line<'static>>) {
                 // Pad each row to the full width so the code background renders as a solid band
                 // instead of stopping at the end of the text.
                 let mut content = format!(" {line}");
-                let len = content.chars().count();
+                let len = display_width(&content);
                 if len < width {
                     content.push_str(&" ".repeat(width - len));
                 }
@@ -444,7 +445,7 @@ fn render_block(block: &Block, width: usize, out: &mut Vec<Line<'static>>) {
                 }
                 render_block(
                     b,
-                    width.saturating_sub(marker.chars().count()),
+                    width.saturating_sub(display_width(marker)),
                     &mut inner_out,
                 );
             }
@@ -452,7 +453,7 @@ fn render_block(block: &Block, width: usize, out: &mut Vec<Line<'static>>) {
                 if i == 0 {
                     out.push(prepend_prefix(marker, line.clone()));
                 } else {
-                    let pad = " ".repeat(marker.chars().count());
+                    let pad = " ".repeat(display_width(marker));
                     out.push(prepend_prefix(&pad, line.clone()));
                 }
             }
@@ -481,17 +482,15 @@ fn wrap_spans(runs: &[Span<'static>], width: usize, out: &mut Vec<Line<'static>>
             }
             continue;
         }
-        let cols = content.chars().count();
+        let cols = display_width(content);
         if current.is_empty() {
             if cols <= width {
                 current.push(run.clone());
                 current_cols = cols;
             } else {
-                // Hard-cut a long word.
+                // Hard-cut a long word by display cells.
                 let style = run.style;
-                let mut chars = content.chars().peekable();
-                while chars.peek().is_some() {
-                    let chunk: String = chars.by_ref().take(width).collect();
+                for chunk in chunk_by_width(content, width) {
                     out.push(Line::from(vec![Span::styled(chunk, style)]));
                 }
             }
@@ -506,9 +505,7 @@ fn wrap_spans(runs: &[Span<'static>], width: usize, out: &mut Vec<Line<'static>>
                 current_cols = cols;
             } else {
                 let style = run.style;
-                let mut chars = content.chars().peekable();
-                while chars.peek().is_some() {
-                    let chunk: String = chars.by_ref().take(width).collect();
+                for chunk in chunk_by_width(content, width) {
                     out.push(Line::from(vec![Span::styled(chunk, style)]));
                 }
                 current_cols = 0;

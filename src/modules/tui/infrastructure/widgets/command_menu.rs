@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::modules::tui::domain::command_menu::CommandMenu;
+use crate::modules::tui::infrastructure::text::{chunk_by_width, display_width};
 use crate::modules::tui::infrastructure::theme;
 
 /// Render the live slash-command preview as an overlay anchored just above the input editor. Each row
@@ -31,7 +32,7 @@ pub fn render(menu: &CommandMenu, frame: &mut Frame, anchor: Rect) {
         };
         // Truncate the blurb so the row never overflows the box's inner width.
         let inner_w = region.width.saturating_sub(2) as usize;
-        let name_cols = spec.name.chars().count();
+        let name_cols = display_width(spec.name);
         let prefix_cols = 2 + name_cols + 2; // marker + name + gap
         let blurb_budget = inner_w.saturating_sub(prefix_cols);
         let blurb = truncate_blurb(spec.blurb, blurb_budget);
@@ -74,11 +75,17 @@ fn truncate_blurb(blurb: &str, budget: usize) -> String {
     if budget == 0 {
         return String::new();
     }
-    if blurb.chars().count() <= budget {
+    if display_width(blurb) <= budget {
         return blurb.to_string();
     }
-    let end = budget.saturating_sub(1);
-    let prefix: String = blurb.chars().take(end).collect();
+    let end = budget.saturating_sub(1); // reserve one cell for the ellipsis
+    if end == 0 {
+        return "…".to_string();
+    }
+    let prefix = chunk_by_width(blurb, end)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
     format!("{prefix}…")
 }
 

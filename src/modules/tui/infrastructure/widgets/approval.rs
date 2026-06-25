@@ -8,6 +8,7 @@ use crate::modules::tui::domain::view_state::{
     APPROVAL_OPTIONS, PLAN_OPTIONS, PendingApproval, PendingPlan,
 };
 use crate::modules::tui::infrastructure::markdown;
+use crate::modules::tui::infrastructure::text::display_width;
 use crate::modules::tui::infrastructure::theme;
 
 /// Render the tool-call confirmation box: the proposed action plus its options.
@@ -108,11 +109,7 @@ pub fn box_dims(area: Rect, action: &str, option_count: usize) -> (u16, u16) {
         .saturating_sub(BOX_H_PADDING)
         .clamp(BOX_MIN_WIDTH, BOX_MAX_WIDTH);
     // Desired width: the longest unwrapped logical line of the action, capped; options are short.
-    let action_w = action
-        .split('\n')
-        .map(|l| l.chars().count())
-        .max()
-        .unwrap_or(0);
+    let action_w = action.split('\n').map(display_width).max().unwrap_or(0);
     let width = max_w
         .max(action_w.min(BOX_MAX_WIDTH as usize) as u16 + BOX_BORDER_COLS)
         .min(area.width.max(1));
