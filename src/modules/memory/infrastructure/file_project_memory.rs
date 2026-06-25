@@ -176,14 +176,22 @@ impl ProjectMemory for FileProjectMemory {
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
-        let index = self.index.read().await;
-        let mut results = Vec::new();
+        // Snapshot the candidate paths under the lock, then release it before any file I/O so a long
+        // read can never block a concurrent writer (matches `list`/`list_by_kind`).
+        let paths: Vec<PathBuf> = {
+            let index = self.index.read().await;
+            index
+                .entries
+                .values()
+                .map(|index_entry| self.root.join(&index_entry.path))
+                .collect()
+        };
 
-        for index_entry in index.entries.values() {
+        let mut results = Vec::new();
+        for path in paths {
             if results.len() >= limit {
                 break;
             }
-            let path = self.root.join(&index_entry.path);
             if let Ok(content) = fs::read_to_string(&path).await
                 && let Ok(entry) = self.parse_markdown_file(&path, &content)
                 && entry.matches_query(query)

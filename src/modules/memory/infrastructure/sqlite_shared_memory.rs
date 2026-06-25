@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rusqlite::{Connection, Row, params};
@@ -54,6 +55,25 @@ fn lock(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
         .map_err(|error| AgentError::Memory(format!("sqlite mutex poisoned: {error}")))
 }
 
+/// Upper bound for a single blocking database operation, so a wedged lock or pathological query
+/// surfaces as a clear error instead of hanging the runtime.
+const DB_OP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Run a blocking database closure on the blocking pool, bounded by `DB_OP_TIMEOUT`. Centralizes the
+/// spawn-blocking, timeout, and join-error handling every query shares.
+async fn run_blocking<T, F>(op: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::time::timeout(DB_OP_TIMEOUT, spawn_blocking(op)).await {
+        Ok(joined) => joined.map_err(mem)?,
+        Err(_) => Err(AgentError::Memory(
+            "database operation timed out".to_string(),
+        )),
+    }
+}
+
 /// Map a SQLite row to a `MemoryEntry`. Unknown kinds fall back to `Fact` and unparseable tags to an
 /// empty set — defensive recovery, never a panic, for a database an external tool may have touched.
 fn row_to_entry(row: &Row) -> rusqlite::Result<MemoryEntry> {
@@ -76,7 +96,7 @@ async fn query_entries(
     sql: String,
     bind: Vec<Box<dyn rusqlite::ToSql + Send>>,
 ) -> Result<Vec<MemoryEntry>> {
-    spawn_blocking(move || -> Result<Vec<MemoryEntry>> {
+    run_blocking(move || -> Result<Vec<MemoryEntry>> {
         let conn = lock(&conn)?;
         let mut stmt = conn.prepare(&sql).map_err(mem)?;
         let params = rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref()));
@@ -88,14 +108,13 @@ async fn query_entries(
         Ok(out)
     })
     .await
-    .map_err(mem)?
 }
 
 #[async_trait]
 impl SharedMemory for SqliteSharedMemory {
     async fn init(&self) -> Result<()> {
         let conn = self.conn.clone();
-        spawn_blocking(move || -> Result<()> {
+        run_blocking(move || -> Result<()> {
             let conn = lock(&conn)?;
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS entries (
@@ -114,13 +133,12 @@ impl SharedMemory for SqliteSharedMemory {
             Ok(())
         })
         .await
-        .map_err(mem)?
     }
 
     async fn save(&self, entry: &MemoryEntry) -> Result<()> {
         let conn = self.conn.clone();
         let entry = entry.clone();
-        spawn_blocking(move || -> Result<()> {
+        run_blocking(move || -> Result<()> {
             let tags = serde_json::to_string(&entry.tags).map_err(mem)?;
             let conn = lock(&conn)?;
             conn.execute(
@@ -142,13 +160,12 @@ impl SharedMemory for SqliteSharedMemory {
             Ok(())
         })
         .await
-        .map_err(mem)?
     }
 
     async fn load(&self, id: &str) -> Result<Option<MemoryEntry>> {
         let conn = self.conn.clone();
         let id = id.to_string();
-        spawn_blocking(move || -> Result<Option<MemoryEntry>> {
+        run_blocking(move || -> Result<Option<MemoryEntry>> {
             let conn = lock(&conn)?;
             let mut stmt = conn
                 .prepare(&format!("SELECT {SELECT_COLUMNS} WHERE id = ?1"))
@@ -160,13 +177,12 @@ impl SharedMemory for SqliteSharedMemory {
             }
         })
         .await
-        .map_err(mem)?
     }
 
     async fn delete(&self, id: &str) -> Result<bool> {
         let conn = self.conn.clone();
         let id = id.to_string();
-        spawn_blocking(move || -> Result<bool> {
+        run_blocking(move || -> Result<bool> {
             let conn = lock(&conn)?;
             let affected = conn
                 .execute("DELETE FROM entries WHERE id = ?1", params![id])
@@ -174,7 +190,6 @@ impl SharedMemory for SqliteSharedMemory {
             Ok(affected > 0)
         })
         .await
-        .map_err(mem)?
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
@@ -232,7 +247,7 @@ impl SharedMemory for SqliteSharedMemory {
 
     async fn count(&self) -> Result<usize> {
         let conn = self.conn.clone();
-        spawn_blocking(move || -> Result<usize> {
+        run_blocking(move || -> Result<usize> {
             let conn = lock(&conn)?;
             let count: i64 = conn
                 .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
@@ -240,13 +255,12 @@ impl SharedMemory for SqliteSharedMemory {
             Ok(count as usize)
         })
         .await
-        .map_err(mem)?
     }
 
     async fn count_by_project(&self, project_id: &str) -> Result<usize> {
         let conn = self.conn.clone();
         let project_id = project_id.to_string();
-        spawn_blocking(move || -> Result<usize> {
+        run_blocking(move || -> Result<usize> {
             let conn = lock(&conn)?;
             let count: i64 = conn
                 .query_row(
@@ -258,7 +272,6 @@ impl SharedMemory for SqliteSharedMemory {
             Ok(count as usize)
         })
         .await
-        .map_err(mem)?
     }
 }
 
