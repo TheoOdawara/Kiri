@@ -266,10 +266,8 @@ mod tests {
     use super::*;
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use std::collections::VecDeque;
-    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     use crate::modules::agent::application::approval_policy::ApprovalPolicy;
     use crate::modules::agent::application::presenter::Presenter;
@@ -284,28 +282,7 @@ mod tests {
 
     use regex::Regex;
 
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let mut path = std::env::temp_dir();
-            let pid = std::process::id();
-            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            path.push(format!("t-cli-runturn-{tag}-{pid}-{n}"));
-            std::fs::create_dir_all(&path).unwrap();
-            Self { path }
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
+    use crate::shared::test_support::TempDir;
 
     /// A provider that replays pre-canned turns, ignoring the request — drives the loop without a network.
     struct ScriptedProvider {

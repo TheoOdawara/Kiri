@@ -99,35 +99,11 @@ mod tests {
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use crate::modules::tools::infrastructure::support::READ_FILE_MAX_BYTES;
     use crate::shared::kernel::tool_call::FunctionCall;
+    use crate::shared::test_support::TempDir;
     use regex::Regex;
     use serde_json::json;
     use std::fs;
-    use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let mut path = std::env::temp_dir();
-            let pid = std::process::id();
-            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            path.push(format!("t-cli-tools-{tag}-{pid}-{n}"));
-            fs::create_dir_all(&path).unwrap();
-            Self { path }
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
 
     fn registry() -> ToolRegistry {
         ToolRegistry::new(default_fs_tools(

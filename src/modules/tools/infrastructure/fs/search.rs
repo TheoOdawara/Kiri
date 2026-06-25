@@ -236,31 +236,8 @@ mod tests {
     use crate::modules::tools::infrastructure::sandbox::Sandbox;
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
+    use crate::shared::test_support::TempDir;
     use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let mut path = std::env::temp_dir();
-            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            path.push(format!("t-cli-search-{}-{n}-{tag}", std::process::id()));
-            fs::create_dir_all(&path).unwrap();
-            Self { path }
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
 
     fn call(args: serde_json::Value) -> ToolCall {
         ToolCall {

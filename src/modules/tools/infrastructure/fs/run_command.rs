@@ -200,32 +200,9 @@ mod tests {
     use regex::Regex;
     use serde_json::json;
     use std::fs;
-    use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let mut path = std::env::temp_dir();
-            let pid = std::process::id();
-            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            path.push(format!("t-cli-run-cmd-{tag}-{pid}-{n}"));
-            fs::create_dir_all(&path).unwrap();
-            Self { path }
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
+    use crate::shared::test_support::TempDir;
 
     fn sandbox(dir: &TempDir) -> Sandbox {
         Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap()
