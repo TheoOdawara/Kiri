@@ -15,10 +15,10 @@ fn mem<E: std::fmt::Display>(error: E) -> AgentError {
     AgentError::Memory(error.to_string())
 }
 
-/// Armazenamento de memória de projeto baseado em arquivos Markdown com front-matter YAML.
-/// Estrutura:
+/// Markdown-based project memory storage with YAML front-matter.
+/// Structure:
 ///   .kiri/memory/
-///   ├── index.json          # Índice: id -> { path, kind, tags, updated_at }
+///   ├── index.json          # Index: id -> { path, kind, tags, updated_at }
 ///   ├── architecture.md
 ///   ├── patterns.md
 ///   └── decisions/
@@ -122,14 +122,14 @@ impl ProjectMemory for FileProjectMemory {
         let path = self.entry_path(entry.kind, &entry.id);
         let content = self.render_markdown_file(entry)?;
 
-        // Garante que o diretório pai existe
+        // Ensure the parent directory exists.
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
         }
 
         fs::write(&path, content).await?;
 
-        // Atualiza índice. The path is built by joining `root`, so stripping it back cannot fail; the
+        // Update the index. The path is built by joining `root`, so stripping it back cannot fail; the
         // fallback to the full path keeps this total without an `unwrap`.
         let rel = path.strip_prefix(&self.root).unwrap_or(path.as_path());
         let mut index = self.index.write().await;
@@ -374,7 +374,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join(".kiri").join("memory");
 
-        // Primeira instância salva
+        // First instance saves.
         {
             let memory = FileProjectMemory::new(root.clone());
             memory.init().await.unwrap();
@@ -387,7 +387,7 @@ mod tests {
             memory.save(&entry).await.unwrap();
         }
 
-        // Segunda instância carrega do índice
+        // Second instance loads from the index.
         {
             let memory = FileProjectMemory::new(root.clone());
             memory.init().await.unwrap();

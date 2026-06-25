@@ -28,16 +28,17 @@ infrastructure}` + a thin composition root.
 - `domain/` — pure data and rules, no I/O (e.g. `agent/domain`: `Role`, `Message`, `Conversation`,
   `StreamEvent`, `CompletedTurn`).
 - `application/` — use-cases and the **ports** they depend on, expressed as **traits** (no `I` prefix,
-  named by capability). The agent loop (`RunTurn`) lives here, depending on `CompletionProvider`, the
-  `Tool`/`ToolRegistry` contract, and the UI port `AgentIo` (`EventSink` + `Presenter` +
-  `ApprovalPolicy`).
+  named by capability). The agent loop (`AgentLoop`) lives here, depending on `CompletionProvider`, the
+  `Tool`/`ToolRegistry` contract, and the UI ports `EventSink` + `Presenter` + `ApprovalPolicy` +
+  `ToolObserver`, taken as individual trait bounds.
 - `infrastructure/` — **adapters** implementing the ports: the OpenAI-compatible provider (HTTP + SSE),
   the filesystem tools + sandbox, and the terminal.
 
-**Modules (bounded contexts).** `agent` (conversation domain + the `RunTurn` use-case + UI ports),
+**Modules (bounded contexts).** `agent` (conversation domain + the `AgentLoop` use-case + UI ports),
 `provider` (the `CompletionProvider` port + per-provider adapters + the OpenAI wire DTOs), `tools` (the
-`Tool` trait + `ToolRegistry` + the sandbox + one fs adapter per tool), `repl` (the terminal + the REPL
-driving adapter). `session` (SQLite-persisted conversations) is a planned vertical, not yet built.
+`Tool` trait + `ToolRegistry` + the sandbox + one fs adapter per tool), `tui` (the terminal + the
+Elm-style TUI driving adapter), `memory` (durable project + shared knowledge — built). `session`
+(SQLite-persisted conversations) is a planned vertical, not yet built.
 
 **shared/kernel** holds cross-cutting primitives that more than two modules need: the protocol types
 `ToolCall`/`FunctionCall`, and the typed `AgentError` (thiserror) that ports return. **shared/infra**
@@ -52,9 +53,16 @@ holds cross-cutting infrastructure: `config` (the CLI, env loading, `Settings`).
   wire layer does not depend on a typed tool struct, and a tool's `schema()` is its own concern.
 - The provider port streams via a callback (`EventSink`), not a `Stream`, to stay `dyn`-compatible for
   runtime provider swapping (`Arc<dyn CompletionProvider>`); `async-trait` boxes the async port methods.
-- The terminal is a single owner of stdin/stdout, exposed to the engine through one unified `AgentIo`
-  port (a supertrait of the three UI ports), so the agent loop borrows it once and never touches the
-  console directly. `RunTurn::run<IO: AgentIo>` is generic over it (monomorphized, no trait upcasting).
+- The terminal is a single owner of stdin/stdout, exposed to the engine through the UI ports
+  (`EventSink` + `Presenter` + `ApprovalPolicy` + `ToolObserver`), so the agent loop borrows it once and
+  never touches the console directly. `AgentLoop::run<IO: EventSink + Presenter + ApprovalPolicy +
+  ToolObserver>` is generic over those bounds (monomorphized, no trait upcasting); they are kept as
+  separate bounds rather than a unified supertrait, consistent with the no-over-engineering rule.
+- The `Sandbox` is referenced by application use-cases (`AgentLoop`, `ToolRegistry`, the `Tool` trait)
+  as a **concrete** type, not behind a port trait. It is the single, deliberate filesystem chokepoint
+  with one implementation; a port abstraction for one adapter would be speculative (YAGNI), so the
+  concrete dependency is accepted by design. `ApprovalMode` lives in `shared/kernel` (a cross-cutting
+  primitive) so the `tui` domain can reference it without depending on `agent/application`.
 
 **Invariants (enforced).** Network I/O only in `provider/infrastructure`; filesystem I/O only in
 `tools/infrastructure` (the sandbox is the single path chokepoint); `domain` has no I/O; the engine

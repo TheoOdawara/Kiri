@@ -3,21 +3,21 @@ use std::collections::HashSet;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-/// Tipo de entrada de memória — categoriza o conteúdo para facilitar busca e uso.
+/// Memory entry kind — categorizes the content to ease search and use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MemoryKind {
-    /// Decisão arquitetural ou de design (equivalente a ADR).
+    /// Architectural or design decision (equivalent to an ADR).
     Decision,
-    /// Padrão de código ou arquitetura recomendado.
+    /// A recommended code or architecture pattern.
     Pattern,
-    /// Anti-pattern: o que evitar e por quê.
+    /// Anti-pattern: what to avoid and why.
     AntiPattern,
-    /// Trecho de código reutilizável (template, boilerplate, snippet).
+    /// A reusable piece of code (template, boilerplate, snippet).
     Snippet,
-    /// Heurística ou regra prática aprendida.
+    /// A learned heuristic or rule of thumb.
     Heuristic,
-    /// Fato técnico verificável (versão, limite, comportamento de API).
+    /// A verifiable technical fact (version, limit, API behavior).
     Fact,
 }
 
@@ -65,24 +65,24 @@ impl std::fmt::Display for MemoryKind {
     }
 }
 
-/// Entrada única de memória.
+/// A single memory entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntry {
-    /// Identificador único (UUID v7 para ordenação temporal).
+    /// Unique identifier (UUID v7 for time ordering).
     pub id: String,
-    /// Tipo da entrada.
+    /// The entry kind.
     pub kind: MemoryKind,
-    /// Conteúdo principal (Markdown suportado).
+    /// Main content (Markdown supported).
     pub content: String,
-    /// Tags para busca e organização.
+    /// Tags for search and organization.
     #[serde(default)]
     pub tags: HashSet<String>,
-    /// Identificador do projeto (hash do path) — None = memória global compartilhada.
+    /// Project identifier (hash of the path) — None = global shared memory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
-    /// Timestamp de criação (ISO 8601).
+    /// Creation timestamp (ISO 8601).
     pub created_at: String,
-    /// Timestamp de última atualização (ISO 8601).
+    /// Last-update timestamp (ISO 8601).
     pub updated_at: String,
 }
 
@@ -95,7 +95,7 @@ fn now_rfc3339() -> String {
 }
 
 impl MemoryEntry {
-    /// Cria uma nova entrada com timestamps atuais e UUID v7.
+    /// Create a new entry with current timestamps and a UUID v7.
     pub fn new(
         kind: MemoryKind,
         content: String,
@@ -115,22 +115,22 @@ impl MemoryEntry {
         }
     }
 
-    /// Atualiza o conteúdo e o timestamp de atualização. Usada por testes e reservada para a futura UI
-    /// de edição de memória.
+    /// Update the content and the last-update timestamp. Used by tests and reserved for the future
+    /// memory-editing UI.
     #[allow(dead_code)]
     pub fn update_content(&mut self, content: String) {
         self.content = content;
         self.updated_at = now_rfc3339();
     }
 
-    /// Adiciona tags. Reservada para a futura UI de gestão de memória.
+    /// Add tags. Reserved for the future memory-management UI.
     #[allow(dead_code)]
     pub fn add_tags(&mut self, tags: impl IntoIterator<Item = String>) {
         self.tags.extend(tags);
         self.updated_at = now_rfc3339();
     }
 
-    /// Verifica se a entry corresponde a uma query textual simples.
+    /// Whether the entry matches a simple text query.
     pub fn matches_query(&self, query: &str) -> bool {
         let q = query.to_lowercase();
         self.content.to_lowercase().contains(&q)
@@ -138,7 +138,7 @@ impl MemoryEntry {
             || self.kind.as_str().contains(&q)
     }
 
-    /// Formata para exibição no contexto do agente.
+    /// Format for display in the agent's context.
     pub fn format_for_context(&self) -> String {
         let tags = if self.tags.is_empty() {
             String::new()

@@ -4,29 +4,29 @@ use async_trait::async_trait;
 
 type Result<T> = std::result::Result<T, AgentError>;
 
-/// Casos de uso para memória compartilhada entre projetos.
-/// Implementado por `SqliteSharedStore` (adapter sobre `SqliteSharedMemory`).
+/// Use cases for shared memory across projects. Implemented by `SqliteSharedStore` (adapter over
+/// `SqliteSharedMemory`).
 #[async_trait]
 pub trait SharedStore: Send + Sync {
-    /// Salva uma entrada (cria ou atualiza).
+    /// Save an entry (create or update).
     async fn save(&self, entry: MemoryEntry) -> Result<()>;
 
-    /// Busca entradas por query textual.
+    /// Search entries by text query.
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
 
-    /// Lista entradas por tipo. Reservada para a futura UI de gestão de memória.
+    /// List entries by kind. Reserved for the future memory-management UI.
     #[allow(dead_code)]
     async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>>;
 
-    /// Lista entradas por tag. Reservada para a futura UI de gestão de memória.
+    /// List entries by tag. Reserved for the future memory-management UI.
     #[allow(dead_code)]
     async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
 
-    /// Lista entradas de um projeto específico. Reservada para a futura UI de gestão de memória.
+    /// List entries for a specific project. Reserved for the future memory-management UI.
     #[allow(dead_code)]
     async fn list_by_project(&self, project_id: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
 
-    /// Verifica se o store está disponível.
+    /// Whether the store is available.
     fn is_available(&self) -> bool;
 }
 

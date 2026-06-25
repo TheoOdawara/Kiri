@@ -4,30 +4,29 @@ use async_trait::async_trait;
 
 type Result<T> = std::result::Result<T, AgentError>;
 
-/// Porta unificada de memória para o AgentLoop.
-/// Combina acesso a memória de projeto e memória compartilhada.
+/// Unified memory port for the AgentLoop. Combines access to project memory and shared memory.
 #[async_trait]
 pub trait MemoryPort: Send + Sync {
-    /// Recupera memórias de projeto relevantes para a query.
+    /// Recall project memories relevant to the query.
     async fn recall_project(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
 
-    /// Recupera memórias compartilhadas relevantes para a query.
+    /// Recall shared memories relevant to the query.
     async fn recall_shared(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
 
-    /// Salva uma memória no escopo do projeto.
+    /// Save a memory in the project scope.
     async fn remember_project(&self, entry: MemoryEntry) -> Result<()>;
 
-    /// Salva uma memória no escopo compartilhado.
+    /// Save a memory in the shared scope.
     async fn remember_shared(&self, entry: MemoryEntry) -> Result<()>;
 
-    /// Verifica se a memória de projeto está disponível.
+    /// Whether project memory is available.
     fn project_memory_available(&self) -> bool;
 
-    /// Verifica se a memória compartilhada está disponível.
+    /// Whether shared memory is available.
     fn shared_memory_available(&self) -> bool;
 }
 
-/// Implementação padrão que delega para stores separados.
+/// Default implementation that delegates to separate stores.
 pub struct MemoryPortImpl<P, S> {
     project_store: P,
     shared_store: S,

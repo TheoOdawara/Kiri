@@ -4,26 +4,25 @@ use async_trait::async_trait;
 
 type Result<T> = std::result::Result<T, AgentError>;
 
-/// Casos de uso para memória de projeto.
-/// Implementado por `FileProjectStore` (adapter sobre `FileProjectMemory`).
+/// Use cases for project memory. Implemented by `FileProjectStore` (adapter over `FileProjectMemory`).
 #[async_trait]
 pub trait ProjectStore: Send + Sync {
-    /// Salva uma entrada (cria ou atualiza).
+    /// Save an entry (create or update).
     async fn save(&self, entry: MemoryEntry) -> Result<()>;
 
-    /// Busca entradas por query textual.
+    /// Search entries by text query.
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
 
-    /// Lista entradas por tipo. Parte da superfície do store consumida pela futura UI de gestão de
-    /// memória; ainda não chamada pelo agent loop.
+    /// List entries by kind. Part of the store surface the future memory-management UI will consume;
+    /// not yet called by the agent loop.
     #[allow(dead_code)]
     async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>>;
 
-    /// Lista entradas por tag. Reservada para a futura UI de gestão de memória.
+    /// List entries by tag. Reserved for the future memory-management UI.
     #[allow(dead_code)]
     async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
 
-    /// Verifica se o store está disponível (inicializado, acessível).
+    /// Whether the store is available (initialized, reachable).
     fn is_available(&self) -> bool;
 }
 
