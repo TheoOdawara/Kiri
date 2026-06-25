@@ -11,7 +11,7 @@ use tokio::time::{self, Interval};
 use tokio_stream::StreamExt;
 
 use crate::modules::agent::application::agent_loop::{AgentLoop, TurnOutcome};
-use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode};
+use crate::modules::agent::application::approval_policy::Approval;
 use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
 use crate::modules::agent::domain::role::Role;
@@ -30,6 +30,7 @@ use crate::modules::tui::infrastructure::terminal_guard::TerminalGuard;
 use crate::modules::tui::infrastructure::text;
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::view::view;
+use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::error::AgentError;
 
 /// The agent-turn future, boxed and `!Send`. Driven as a `select!` arm — never spawned — so no
@@ -512,11 +513,11 @@ fn turn_produced_nothing(conversation: &Conversation) -> bool {
 mod tests {
     use super::{on_turn_end, turn_produced_nothing};
     use crate::modules::agent::application::agent_loop::TurnOutcome;
-    use crate::modules::agent::application::approval_policy::ApprovalMode;
     use crate::modules::agent::domain::conversation::Conversation;
     use crate::modules::agent::domain::message::Message;
     use crate::modules::tui::domain::model::Model;
     use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
+    use crate::shared::kernel::approval_mode::ApprovalMode;
 
     fn has_error_notice(model: &Model) -> bool {
         model

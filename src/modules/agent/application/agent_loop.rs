@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode, ApprovalPolicy};
+use crate::modules::agent::application::approval_policy::{Approval, ApprovalPolicy};
 use crate::modules::agent::application::presenter::Presenter;
 use crate::modules::agent::application::tool_observer::ToolObserver;
 use crate::modules::agent::domain::conversation::Conversation;
@@ -9,10 +9,11 @@ use crate::modules::agent::domain::message::Message;
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
+use crate::modules::tools::application::plan::{PRESENT_PLAN, extract_plan};
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::ToolOutcome;
-use crate::modules::tools::infrastructure::control::present_plan::{PRESENT_PLAN, extract_plan};
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
+use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::error::AgentError;
 
 /// Whether a user turn ran to completion, proposed a plan for approval, or the user ended the session

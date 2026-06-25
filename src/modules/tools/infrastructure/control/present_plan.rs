@@ -1,26 +1,9 @@
-use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::modules::tools::application::plan::{PRESENT_PLAN, extract_plan};
 use crate::modules::tools::application::tool::{Confirmation, Tool, ToolOutcome, function_schema};
-use crate::modules::tools::infrastructure::args::parse;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::tool_call::ToolCall;
-
-/// The stable name the model calls to submit a finished plan for approval. Shared with the agent loop,
-/// which intercepts the call instead of executing it against the sandbox.
-pub const PRESENT_PLAN: &str = "present_plan";
-
-#[derive(Deserialize)]
-struct PlanArgs {
-    plan: String,
-}
-
-/// Extract the plan text from a `present_plan` call's arguments. `None` when the args do not parse —
-/// the agent loop falls back to the turn's narration content so a finished plan is never lost.
-pub fn extract_plan(call: &ToolCall) -> Option<String> {
-    let args: PlanArgs = parse(call.function.arguments.as_str()).ok()?;
-    Some(args.plan)
-}
 
 /// The plan-mode control tool: the model calls it once, with the complete plan as a single markdown
 /// string, to surface the plan for the user's approval. It performs no filesystem action — the agent
@@ -83,30 +66,6 @@ impl Tool for PresentPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::kernel::tool_call::FunctionCall;
-
-    fn call(args: &str) -> ToolCall {
-        ToolCall {
-            id: "c1".to_string(),
-            kind: "function".to_string(),
-            function: FunctionCall {
-                name: PRESENT_PLAN.to_string(),
-                arguments: args.to_string(),
-            },
-        }
-    }
-
-    #[test]
-    fn extract_plan_reads_the_plan_argument() {
-        let c = call("{\"plan\":\"Plano\\n1. fazer X\"}");
-        assert_eq!(extract_plan(&c).as_deref(), Some("Plano\n1. fazer X"));
-    }
-
-    #[test]
-    fn extract_plan_is_none_for_unparseable_args() {
-        assert!(extract_plan(&call("{not json")).is_none());
-        assert!(extract_plan(&call(r#"{"wrong":1}"#)).is_none());
-    }
 
     #[test]
     fn present_plan_is_plan_only_and_plannable() {

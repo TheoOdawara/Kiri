@@ -1,4 +1,5 @@
-use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode};
+use crate::modules::agent::application::approval_policy::Approval;
+use crate::shared::kernel::approval_mode::ApprovalMode;
 
 /// A side effect the pure reducer requests of the runtime, which owns the engine handles. The reducer
 /// itself performs no I/O.

@@ -1,4 +1,4 @@
-use crate::modules::agent::application::approval_policy::ApprovalMode;
+use crate::shared::kernel::approval_mode::ApprovalMode;
 
 use super::command_menu::CommandMenu;
 use super::transcript::Transcript;

@@ -1,6 +1,6 @@
-use crate::modules::agent::application::approval_policy::ApprovalMode;
 use crate::modules::tools::application::tool::{Confirmation, Tool, ToolOutcome};
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
+use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// Holds the registered tools and dispatches by name. Replaces the central `tool_definitions`/

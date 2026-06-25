@@ -1,4 +1,4 @@
-use crate::modules::agent::application::approval_policy::ApprovalMode;
+use crate::shared::kernel::approval_mode::ApprovalMode;
 
 /// A slash command parsed from a submitted input line. A line that does not start with `/` is a model
 /// prompt (the parser returns `None`); a `/`-prefixed line that matches nothing is `Unknown`, so the UI

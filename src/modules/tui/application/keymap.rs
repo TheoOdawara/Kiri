@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode};
+use crate::modules::agent::application::approval_policy::Approval;
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::msg::{Key, KeyPress};
@@ -8,6 +8,7 @@ use crate::modules::tui::domain::command_menu::CommandMenu;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::modules::tui::domain::view_state::{APPROVAL_OPTIONS, PLAN_OPTIONS};
+use crate::shared::kernel::approval_mode::ApprovalMode;
 use tui_textarea::{Input, Key as TaKey};
 
 const SCROLL_STEP: u16 = 5;
@@ -607,7 +608,7 @@ mod tests {
 
     #[test]
     fn approval_arrows_move_selection_then_enter_confirms_and_switches_to_auto() {
-        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        use crate::shared::kernel::approval_mode::ApprovalMode;
         let mut m = Model {
             pending_approval: Some(PendingApproval::new("p".to_string(), true)),
             ..Model::default()
@@ -671,7 +672,7 @@ mod tests {
 
     #[test]
     fn back_tab_cycles_the_approval_mode_when_idle() {
-        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        use crate::shared::kernel::approval_mode::ApprovalMode;
         let mut m = Model::default();
         assert_eq!(m.approval_mode, ApprovalMode::Default);
         assert!(on_key(&mut m, press(Key::BackTab)).is_empty());
@@ -684,7 +685,7 @@ mod tests {
 
     #[test]
     fn back_tab_is_ignored_mid_turn() {
-        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        use crate::shared::kernel::approval_mode::ApprovalMode;
         let mut m = Model {
             busy: true,
             ..Model::default()
@@ -702,7 +703,7 @@ mod tests {
 
     #[test]
     fn mode_command_sets_mode_without_effect() {
-        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        use crate::shared::kernel::approval_mode::ApprovalMode;
         let mut m = Model::default();
         m.input.set("/plan".to_string());
         assert!(on_key(&mut m, press(Key::Enter)).is_empty());
@@ -729,7 +730,7 @@ mod tests {
 
     #[test]
     fn plan_enter_executes_the_plan() {
-        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        use crate::shared::kernel::approval_mode::ApprovalMode;
         let mut m = Model {
             pending_plan: Some(PendingPlan::default()),
             ..Model::default()
@@ -743,7 +744,7 @@ mod tests {
 
     #[test]
     fn plan_execute_in_auto_emits_auto_mode() {
-        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        use crate::shared::kernel::approval_mode::ApprovalMode;
         let mut m = Model {
             pending_plan: Some(PendingPlan::default()),
             approval_mode: ApprovalMode::Plan,
@@ -759,7 +760,7 @@ mod tests {
 
     #[test]
     fn plan_keep_planning_closes_box_and_stays_in_plan() {
-        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        use crate::shared::kernel::approval_mode::ApprovalMode;
         let mut m = Model {
             pending_plan: Some(PendingPlan::default()),
             approval_mode: ApprovalMode::Plan,
@@ -774,7 +775,7 @@ mod tests {
 
     #[test]
     fn plan_cancel_leaves_plan_mode() {
-        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        use crate::shared::kernel::approval_mode::ApprovalMode;
         let mut m = Model {
             pending_plan: Some(PendingPlan::default()),
             approval_mode: ApprovalMode::Plan,

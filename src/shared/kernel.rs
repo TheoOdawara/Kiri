@@ -1,2 +1,3 @@
+pub mod approval_mode;
 pub mod error;
 pub mod tool_call;

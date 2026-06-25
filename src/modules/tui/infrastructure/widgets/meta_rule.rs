@@ -4,10 +4,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::modules::agent::application::approval_policy::ApprovalMode;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::infrastructure::text::display_width;
 use crate::modules::tui::infrastructure::theme;
+use crate::shared::kernel::approval_mode::ApprovalMode;
 
 /// One empty cell kept at the line's end so a glyph a terminal renders wider than its measured width
 /// (the ambiguous-width brand caps) nudges into the slack instead of pushing the closing cap off-screen.

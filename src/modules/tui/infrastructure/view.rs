@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn meta_rule_shows_the_active_approval_mode() {
-        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        use crate::shared::kernel::approval_mode::ApprovalMode;
         let mut model = Model::new("m".to_string(), "/w".to_string());
         model.approval_mode = ApprovalMode::Plan;
         let out = render(&model, 80, 12);
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn meta_rule_keeps_mode_badge_with_a_long_workspace() {
-        use crate::modules::agent::application::approval_policy::ApprovalMode;
+        use crate::shared::kernel::approval_mode::ApprovalMode;
         let mut model = Model::new(
             "some-long-model-name".to_string(),
             "C:/Users/dev/very/deep/workspace/path/kiri".to_string(),
