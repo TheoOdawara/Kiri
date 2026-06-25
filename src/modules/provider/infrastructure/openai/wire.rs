@@ -7,7 +7,7 @@ use super::message_dto::MessageDto;
 /// domain `Message`s through `MessageDto`, and `tools` are the opaque JSON schemas the tool registry
 /// produced, passed through verbatim.
 #[derive(Debug, Serialize)]
-pub struct ChatRequest<'a> {
+pub(crate) struct ChatRequest<'a> {
     pub model: &'a str,
     pub messages: Vec<MessageDto<'a>>,
     pub stream: bool,
@@ -20,22 +20,22 @@ pub struct ChatRequest<'a> {
 /// Provider-specific knob that asks the model to emit reasoning. Reasoning models stream it by
 /// default; sending this makes the intent explicit.
 #[derive(Debug, Serialize)]
-pub struct ChatTemplateKwargs {
+pub(crate) struct ChatTemplateKwargs {
     pub thinking: bool,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ChatStreamChunk {
+pub(crate) struct ChatStreamChunk {
     pub choices: Vec<StreamChoice>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct StreamChoice {
+pub(crate) struct StreamChoice {
     pub delta: Delta,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Delta {
+pub(crate) struct Delta {
     pub content: Option<String>,
     /// Reasoning text under the standard `reasoning_content` name (vLLM/NVIDIA convention).
     #[serde(default, deserialize_with = "string_or_none")]
@@ -52,7 +52,7 @@ pub struct Delta {
 /// One streamed slice of a tool call. Every field but `index` is optional: the first fragment for an
 /// index carries `id`/`type`/`function.name`, later fragments carry only `function.arguments` slices.
 #[derive(Debug, Deserialize)]
-pub struct ToolCallFragment {
+pub(crate) struct ToolCallFragment {
     pub index: u32,
     pub id: Option<String>,
     #[serde(rename = "type")]
@@ -61,7 +61,7 @@ pub struct ToolCallFragment {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct FunctionFragment {
+pub(crate) struct FunctionFragment {
     pub name: Option<String>,
     pub arguments: Option<String>,
 }

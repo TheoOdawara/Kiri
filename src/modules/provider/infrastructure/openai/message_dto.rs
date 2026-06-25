@@ -13,7 +13,7 @@ use crate::shared::kernel::tool_call::ToolCall;
 /// `Message` free of any wire concern — so a future provider with a different message shape only adds
 /// its own DTO.
 #[derive(Debug, Serialize)]
-pub struct MessageDto<'a> {
+pub(crate) struct MessageDto<'a> {
     #[serde(serialize_with = "serialize_role")]
     pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,7 +51,7 @@ impl<'a> From<&'a Message> for MessageDto<'a> {
 /// The OpenAI-compatible `content` value: a plain string when there are no images (the common case,
 /// byte-for-byte unchanged), or the multimodal parts array when a user message carries images.
 #[derive(Debug)]
-pub enum ContentDto<'a> {
+pub(crate) enum ContentDto<'a> {
     Text(&'a str),
     Parts { text: &'a str, images: &'a [String] },
 }

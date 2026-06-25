@@ -19,7 +19,7 @@ use crate::shared::kernel::tool_call::ToolCall;
 /// What the engine ports emit to the TUI runtime over the channel. An approval carries its reply
 /// channel: the engine confirms tool calls one at a time, so there is never more than one pending and
 /// no correlation id is needed.
-pub enum EngineMsg {
+pub(crate) enum EngineMsg {
     Began,
     Reasoning(String),
     Content(String),
@@ -44,7 +44,7 @@ pub enum EngineMsg {
 /// unwinds the provider's `complete()` through its existing `?` so the turn's normal error/rollback
 /// path runs.
 #[derive(Clone, Default)]
-pub struct CancelToken(Rc<Cell<bool>>);
+pub(crate) struct CancelToken(Rc<Cell<bool>>);
 
 impl CancelToken {
     pub fn new() -> Self {
@@ -73,7 +73,7 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub fn new(tx: mpsc::UnboundedSender<EngineMsg>, cancel: CancelToken) -> Self {
+    pub(crate) fn new(tx: mpsc::UnboundedSender<EngineMsg>, cancel: CancelToken) -> Self {
         Self { tx, cancel }
     }
 
