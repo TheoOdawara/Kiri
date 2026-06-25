@@ -57,6 +57,8 @@ impl Tool for MovePath {
             Ok(r) if r.target.exists() => {
                 format!("Sobrescrever o destino movendo. Aprova executar: {cmd}?")
             }
+            // Also covers a resolve_create error: the user is still asked (returning None here would
+            // skip confirmation), and execute() re-validates the path and surfaces the real error.
             _ => format!("Mover o caminho. Aprova executar: {cmd}?"),
         };
         let default_accept = default_accept_for(&a.destination);

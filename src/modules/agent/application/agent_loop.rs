@@ -125,12 +125,15 @@ impl AgentLoop {
             {
                 let plan = extract_plan(plan_call).unwrap_or(content);
                 for call in &calls {
-                    let result = if call.function.name == PRESENT_PLAN {
+                    let response_message = if call.function.name == PRESENT_PLAN {
                         "Plano apresentado ao usuário para aprovação."
                     } else {
                         "ignorada: present_plan encerra o turno"
                     };
-                    conversation.push(Message::tool_result(call.id.as_str(), result.to_string()));
+                    conversation.push(Message::tool_result(
+                        call.id.as_str(),
+                        response_message.to_string(),
+                    ));
                 }
                 return Ok(TurnOutcome::PlanProposed(plan));
             }

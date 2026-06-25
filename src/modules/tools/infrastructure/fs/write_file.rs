@@ -56,6 +56,8 @@ impl Tool for WriteFile {
             Ok(r) if r.target.exists() => {
                 format!("Sobrescrever o arquivo. Aprova executar: {cmd}?")
             }
+            // Also covers a resolve_create error: the user is still asked (returning None here would
+            // skip confirmation), and execute() re-validates the path and surfaces the real error.
             _ => format!("Criar e gravar o arquivo. Aprova executar: {cmd}?"),
         };
         let default_accept = default_accept_for(&a.path);
