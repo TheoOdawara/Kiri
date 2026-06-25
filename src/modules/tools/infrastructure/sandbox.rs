@@ -201,9 +201,17 @@ impl Sandbox {
     /// Resolve a path for creation. The target need not exist and intermediate directories may be
     /// missing. The deepest existing ancestor is canonicalized and asserted within the root, so the
     /// remaining (lexically clean) components appended onto it cannot escape.
+    ///
+    /// Security model: a relative path is confined to the root (relative-path traversal cannot escape).
+    /// An absolute path — including a tilde that expands to one — is taken as an explicit, out-of-root
+    /// location the user must approve at the confirmation prompt, so it deliberately bypasses the
+    /// within-root check (`confined == false`). It is still run through `assert_not_sensitive`, so
+    /// secret paths are rejected regardless.
     pub fn resolve_create(&self, rel: &str) -> Result<CreateResolution> {
         let expanded = expand_tilde(rel, home().as_deref());
         let (candidate, confined) = if expanded.is_absolute() {
+            // Absolute/tilde-expanded paths are user-approved out-of-root targets — not confined here;
+            // see the security model above.
             (expanded, false)
         } else {
             (self.join_checked(rel)?, true)

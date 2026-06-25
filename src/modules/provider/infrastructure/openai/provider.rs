@@ -188,4 +188,53 @@ mod tests {
             Ok(Err(_)) => {}
         }
     }
+
+    /// A 4xx means the body we sent is unacceptable; it must surface as `ProviderRejected` carrying the
+    /// status and body so the frontend can drop the offending turn instead of resending it forever.
+    #[tokio::test]
+    async fn complete_surfaces_a_client_error_as_provider_rejected() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await; // drain the request before replying
+                let body = "invalid model: nope";
+                let response = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            }
+        });
+
+        let client = reqwest::Client::builder().build().unwrap();
+        let provider = OpenAiProvider::new(client, format!("http://{addr}/v1"), "k", false);
+        let messages = vec![Message::user("hi")];
+        let request = TurnRequest {
+            messages: &messages,
+            model: "m",
+            tools: &[],
+        };
+        let mut sink = NullSink;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.complete(request, &mut sink),
+        )
+        .await
+        .expect("provider should not hang");
+        match result {
+            Err(AgentError::ProviderRejected { status, body }) => {
+                assert_eq!(status, 400);
+                assert!(body.contains("invalid model"), "body lost: {body:?}");
+            }
+            other => panic!("expected ProviderRejected(400), got {other:?}"),
+        }
+    }
 }
