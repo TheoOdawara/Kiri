@@ -36,7 +36,7 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
 - **Layers, depending inward:** `domain/` = pure data/rules, no I/O · `application/` = use-cases + the
   **ports** they need, as **traits** (named by capability, no `I` prefix) · `infrastructure/` = **adapters**
   implementing the ports.
-- **Modules (bounded contexts):** `agent` (conversation domain + the `AgentLoop` + `ApprovalMode` + the UI
+- **Modules (bounded contexts):** `agent` (conversation domain + the `AgentLoop` + the UI
   ports `Presenter`/`ApprovalPolicy`, plus the provider's `EventSink`), `provider` (the `CompletionProvider`
   port + the OpenAI-compatible adapter: wire DTOs, SSE assembly), `tools` (the `Tool` trait + `ToolRegistry`
   + the sandbox + one fs adapter per tool), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
@@ -46,8 +46,8 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
   `DocsLibrary` over `docs/` — and the `recall_memory`/`remember`/`consult_docs` tools; see
   `docs/decisions/0010-memory-and-docs-knowledge.md`). Planned: `session` (SQLite-persisted conversations),
   and a memory-management GUI.
-- **shared/kernel:** cross-cutting primitives — `ToolCall`/`FunctionCall`, `AgentError` (thiserror).
-  **shared/infra:** `config` (CLI + env + `Settings`).
+- **shared/kernel:** cross-cutting primitives — `ToolCall`/`FunctionCall`, `AgentError` (thiserror), and
+  `ApprovalMode` (shared by `agent`, `tools`, and `tui`). **shared/infra:** `config` (CLI + env + `Settings`).
 
 **Invariants:** network I/O only in `provider/infrastructure`; filesystem I/O only in `tools/infrastructure`
 (the sandbox is the single path chokepoint) — **except** the `memory` context, which owns its data dirs
@@ -90,7 +90,7 @@ that is surfaced is a failure you can fix; a swallowed one costs hours).
 
 ## Branches
 
-- Protected: **`main`** — never commit directly. No remote yet.
+- Protected: **`main`** — never commit directly. Remote: `origin` (github.com/TheoOdawara/Kiri).
 - Real work on feature branches (`feat/...`, `fix/...`).
 
 ## Language
