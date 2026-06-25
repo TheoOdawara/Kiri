@@ -31,12 +31,18 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     }
 
     let width = area.width.max(1) as usize;
+    let items = model.transcript.items();
+    let last = items.len().saturating_sub(1);
     let mut lines: Vec<Line> = Vec::new();
-    for item in model.transcript.items() {
+    for (idx, item) in items.iter().enumerate() {
         if !lines.is_empty() {
             lines.push(Line::default());
         }
-        render_item(item, width, model.expand_tools, &mut lines);
+        // The still-streaming item (the trailing assistant/reasoning while a turn streams) renders as
+        // plain text — skipping the per-frame markdown parse keeps the ~30 fps stream cheap; once the
+        // turn finishes it re-renders formatted (and is then memoized).
+        let active = model.status.streaming && idx == last;
+        render_item(item, width, model.expand_tools, active, &mut lines);
     }
 
     let total = lines.len() as u16;
@@ -52,7 +58,13 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn render_item(item: &TranscriptItem, width: usize, expanded: bool, out: &mut Vec<Line<'static>>) {
+fn render_item(
+    item: &TranscriptItem,
+    width: usize,
+    expanded: bool,
+    active: bool,
+    out: &mut Vec<Line<'static>>,
+) {
     match item {
         TranscriptItem::User(text) => push_wrapped(
             &format!("você › {text}"),
@@ -66,8 +78,7 @@ fn render_item(item: &TranscriptItem, width: usize, expanded: bool, out: &mut Ve
             // Thinking reads clearly apart from the answer: a label plus a dim, italic body.
             let style = theme::dim().add_modifier(Modifier::ITALIC);
             out.push(Line::styled("⋮ pensando", style));
-            let mut rendered = markdown::render(text, style, width);
-            out.append(&mut rendered);
+            render_body(text, style, width, active, out);
         }
         TranscriptItem::Assistant(text) => {
             out.push(Line::styled(
@@ -76,8 +87,7 @@ fn render_item(item: &TranscriptItem, width: usize, expanded: bool, out: &mut Ve
                     .fg(theme::HEADING)
                     .add_modifier(Modifier::BOLD),
             ));
-            let mut rendered = markdown::render(text, Style::default().fg(theme::STEEL), width);
-            out.append(&mut rendered);
+            render_body(text, Style::default().fg(theme::STEEL), width, active, out);
         }
         TranscriptItem::Tool(activity) => render_tool(activity, width, expanded, out),
         TranscriptItem::Notice(level, text) => {
@@ -231,6 +241,18 @@ fn fmt_dur(elapsed: Duration) -> String {
         format!("{ms}ms")
     } else {
         format!("{:.1}s", elapsed.as_secs_f64())
+    }
+}
+
+/// Render an assistant/reasoning body. While it is the actively streaming item, emit plain wrapped text
+/// so the per-frame markdown parse is skipped (cheap at ~30 fps); a finalized item goes through the
+/// memoized markdown renderer, so bold/lists/code render once the turn ends.
+fn render_body(text: &str, style: Style, width: usize, active: bool, out: &mut Vec<Line<'static>>) {
+    if active {
+        push_wrapped(text, width, style, out);
+    } else {
+        let mut rendered = markdown::render(text, style, width);
+        out.append(&mut rendered);
     }
 }
 

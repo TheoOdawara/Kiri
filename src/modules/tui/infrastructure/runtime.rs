@@ -38,6 +38,11 @@ type TurnFuture<'a> = Pin<Box<dyn Future<Output = Result<TurnOutcome, AgentError
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(120);
 
+/// Minimum spacing between redraws while a turn streams. Finer than `FRAME_INTERVAL` so streamed text
+/// flows at ~30 fps instead of appearing in coarse 120 ms blocks. It only paces draws that are already
+/// being driven by incoming deltas, so an idle TUI still ticks at `FRAME_INTERVAL` and burns no extra CPU.
+const STREAM_FRAME: Duration = Duration::from_millis(33);
+
 /// The full-screen TUI frontend: owns the engine handles and the UI model, runs the render/input loop,
 /// and drives one agent turn at a time. The sole frontend, assembled in `app::wire`.
 pub struct Tui {
@@ -375,13 +380,14 @@ async fn drive_turn(
             // spins during the wait for the first token and during tool execution, not only while
             // content streams.
             model.status.spinner_frame = spinner_frame(started.elapsed());
-            // Draw on a forced step or once the frame budget elapsed. The 120ms ticker guarantees a
-            // periodic draw, so coalesced stream deltas flush at most ~8×/s — bounding the transcript
-            // markdown re-render to one per frame rather than one per token (the cause of the lag).
+            // Draw on a forced step or once the stream-frame budget elapsed. Incoming deltas pace the
+            // redraws at ~30 fps (smooth, no coarse blocks), while the 120ms ticker still guarantees a
+            // periodic draw during a quiet wait. Coalescing keeps it to one transcript re-render per
+            // frame rather than one per token (the cause of the lag).
             // A draw failure must NOT `?`-propagate out of this loop: that would skip `on_turn_end` and
             // leave `model.busy` stuck true, silently deadening every future submit. End the turn with
             // the error instead, so cleanup always runs.
-            if force || last_draw.elapsed() >= FRAME_INTERVAL {
+            if force || last_draw.elapsed() >= STREAM_FRAME {
                 if let Err(error) = terminal.draw(|frame| view(model, frame)) {
                     break Err(AgentError::Io(error));
                 }

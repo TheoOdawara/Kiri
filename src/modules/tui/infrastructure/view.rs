@@ -3,7 +3,7 @@ use ratatui::widgets::Block;
 
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::view_state::APPROVAL_OPTIONS;
-use crate::modules::tui::infrastructure::layout::frame_layout;
+use crate::modules::tui::infrastructure::layout::{frame_layout, h_pad};
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
     approval, command_menu, editor, header, hint_line, meta_rule, transcript_pane,
@@ -14,9 +14,12 @@ use crate::modules::tui::infrastructure::widgets::{
 /// with the Tamahagane Void base so every cell inherits steel-on-void.
 pub fn view(model: &Model, frame: &mut Frame) {
     frame.render_widget(Block::default().style(theme::base()), frame.area());
+    // Match the editor's real content width: the side gutters reduce it by `2 * h_pad`, and the prompt
+    // gutter takes `PROMPT_COLS` more, so the wrapped-line count stays in step with what is rendered.
     let wrap_w = frame
         .area()
         .width
+        .saturating_sub(2 * h_pad(frame.area()))
         .saturating_sub(editor::PROMPT_COLS)
         .max(1) as usize;
     let input_lines = editor::wrapped_line_count(&model.input, wrap_w) as u16;
@@ -106,6 +109,31 @@ mod tests {
         );
         assert!(out.contains("ler a.txt"), "approval action missing:\n{out}");
         assert!(out.contains("Sim"), "approval option missing:\n{out}");
+    }
+
+    #[test]
+    fn active_streaming_item_is_plain_then_formats_when_finished() {
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model
+            .transcript
+            .push(TranscriptItem::Assistant("**negrito**".to_string()));
+
+        // While streaming, the trailing item renders as plain text — the markdown markers stay literal
+        // (no per-frame parse).
+        model.status.streaming = true;
+        let streaming = render(&model, 100, 30);
+        assert!(
+            streaming.contains("**negrito**"),
+            "streaming item must render plain (literal markers):\n{streaming}"
+        );
+
+        // Once the turn finishes, the same item re-renders formatted: the `**` markers are gone.
+        model.status.streaming = false;
+        let finished = render(&model, 100, 30);
+        assert!(
+            finished.contains("negrito") && !finished.contains("**negrito**"),
+            "finished item must render markdown (markers stripped):\n{finished}"
+        );
     }
 
     #[test]
