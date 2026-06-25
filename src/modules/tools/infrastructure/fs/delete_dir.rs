@@ -71,7 +71,9 @@ impl Tool for DeleteDir {
         if let Err(out) = stat_guard(&path, &args.path, |metadata| {
             (!metadata.is_dir())
                 .then(|| format!("{} is not a directory; use delete_file", args.path))
-        }) {
+        })
+        .await
+        {
             return out;
         }
 

@@ -99,12 +99,12 @@ pub fn ensure_parent_dirs(resolution: &CreateResolution, path: &str) -> Result<(
 /// Stat `path` once as a pre-flight guard. `reject` inspects the metadata and returns `Some(error)` to
 /// veto the operation; a stat failure maps to the shared `cannot stat` error. `label` is the
 /// user-facing path interpolated into both messages.
-pub fn stat_guard(
+pub async fn stat_guard(
     path: &Path,
     label: &str,
     reject: impl FnOnce(&Metadata) -> Option<String>,
 ) -> Result<(), ToolOutcome> {
-    match fs::metadata(path) {
+    match tokio::fs::metadata(path).await {
         Ok(metadata) => match reject(&metadata) {
             Some(error) => Err(ToolOutcome::Error(error)),
             None => Ok(()),

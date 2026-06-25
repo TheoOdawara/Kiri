@@ -85,7 +85,9 @@ impl Tool for EditFile {
                     args.path
                 )
             })
-        }) {
+        })
+        .await
+        {
             return out;
         }
         #[cfg(unix)]

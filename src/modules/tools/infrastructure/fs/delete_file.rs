@@ -66,7 +66,9 @@ impl Tool for DeleteFile {
             metadata
                 .is_dir()
                 .then(|| format!("{} is a directory; not deleted", args.path))
-        }) {
+        })
+        .await
+        {
             return out;
         }
 
