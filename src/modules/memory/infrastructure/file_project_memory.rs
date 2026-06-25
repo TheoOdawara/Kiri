@@ -192,6 +192,8 @@ impl ProjectMemory for FileProjectMemory {
             if results.len() >= limit {
                 break;
             }
+            // Deliberately skip an unreadable entry rather than fail the whole search: one corrupt or
+            // racing file must not blank out every other match.
             if let Ok(content) = fs::read_to_string(&path).await
                 && let Ok(entry) = self.parse_markdown_file(&path, &content)
                 && entry.matches_query(query)

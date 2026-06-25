@@ -332,11 +332,11 @@ pub(crate) fn default_accept_for(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::test_support::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     fn sandbox(dir: &TempDir) -> Sandbox {
-        Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap()
+        Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap()
     }
 
     #[test]
@@ -346,15 +346,15 @@ mod tests {
 
     #[test]
     fn new_rejects_file_as_root() {
-        let dir = TempDir::new("file-root");
-        let file = dir.path.join("f.txt");
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("f.txt");
         fs::write(&file, b"x").unwrap();
         assert!(Sandbox::new(&file, SensitiveMatcher::empty()).is_err());
     }
 
     #[test]
     fn new_canonicalizes_root_to_absolute_existing_dir() {
-        let dir = TempDir::new("canon");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         assert!(sb.root().is_absolute());
         assert!(sb.root().is_dir());
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn rejects_parent_traversal() {
-        let dir = TempDir::new("traversal");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         assert!(sb.resolve_existing("../etc").is_err());
         assert!(sb.resolve_existing("a/../../x").is_err());
@@ -371,22 +371,22 @@ mod tests {
 
     #[test]
     fn allows_absolute_path_outside_root() {
-        let outside = TempDir::new("abs-outside");
-        let file = outside.path.join("f.txt");
+        let outside = TempDir::new().unwrap();
+        let file = outside.path().join("f.txt");
         fs::write(&file, b"x").unwrap();
 
-        let dir = TempDir::new("abs-inside");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
 
         let resolved = sb.resolve_existing(file.to_str().unwrap()).unwrap();
         assert_eq!(resolved, fs::canonicalize(&file).unwrap());
 
         let created = sb
-            .resolve_create(outside.path.join("new.txt").to_str().unwrap())
+            .resolve_create(outside.path().join("new.txt").to_str().unwrap())
             .unwrap();
         assert_eq!(
             created.target,
-            fs::canonicalize(&outside.path).unwrap().join("new.txt")
+            fs::canonicalize(outside.path()).unwrap().join("new.txt")
         );
     }
 
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn secret_dir_component_flags_credential_directories() {
-        let dir = TempDir::new("secret-detect");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         assert_eq!(
             sb.secret_dir_component(Path::new("/home/u/.ssh/id_rsa")),
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_path() {
-        let dir = TempDir::new("empty");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         assert!(sb.resolve_existing("").is_err());
         assert!(sb.resolve_existing("   ").is_err());
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn resolve_existing_finds_file_in_root() {
-        let dir = TempDir::new("find");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         fs::write(sb.root().join("f.txt"), b"hi").unwrap();
         let real = sb.resolve_existing("f.txt").unwrap();
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn resolve_create_new_file_in_existing_dir_has_no_missing_dirs() {
-        let dir = TempDir::new("create-flat");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let res = sb.resolve_create("new.txt").unwrap();
         assert!(res.missing_dirs.is_empty());
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn resolve_create_reports_missing_intermediate_dirs() {
-        let dir = TempDir::new("create-nested");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let res = sb.resolve_create("a/b/c.txt").unwrap();
         assert_eq!(
@@ -462,21 +462,21 @@ mod tests {
 
     #[test]
     fn resolve_create_rejects_traversal_even_with_missing_parents() {
-        let dir = TempDir::new("create-traversal");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         assert!(sb.resolve_create("../../x/y.txt").is_err());
     }
 
     #[test]
     fn resolve_create_rejects_root_only_path() {
-        let dir = TempDir::new("create-dot");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         assert!(sb.resolve_create(".").is_err());
     }
 
     #[test]
     fn exec_cwd_for_stays_at_root_inside_the_jail() {
-        let dir = TempDir::new("cwd-inside");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         fs::write(sb.root().join("f.txt"), b"x").unwrap();
         let inside = sb.resolve_existing("f.txt").unwrap();
@@ -486,10 +486,10 @@ mod tests {
 
     #[test]
     fn exec_cwd_for_uses_the_external_dir_outside_the_jail() {
-        let outside = TempDir::new("cwd-outside");
-        let file = outside.path.join("f.txt");
+        let outside = TempDir::new().unwrap();
+        let file = outside.path().join("f.txt");
         fs::write(&file, b"x").unwrap();
-        let dir = TempDir::new("cwd-outside-inside");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
 
         let resolved = sb.resolve_existing(file.to_str().unwrap()).unwrap();
@@ -497,28 +497,28 @@ mod tests {
         // The command runs in the target file's directory, not the workspace root.
         assert_eq!(
             sb.exec_cwd_for(&resolved),
-            fs::canonicalize(&outside.path).unwrap()
+            fs::canonicalize(outside.path()).unwrap()
         );
     }
 
     #[test]
     fn exec_cwd_for_falls_back_to_nearest_existing_ancestor() {
-        let outside = TempDir::new("cwd-missing");
-        let sb = sandbox(&TempDir::new("cwd-missing-inside"));
+        let outside = TempDir::new().unwrap();
+        let sb = sandbox(&TempDir::new().unwrap());
         // A deep, not-yet-created target outside the jail: cwd must be an existing directory.
         let target = sb
-            .resolve_create(outside.path.join("a/b/c.txt").to_str().unwrap())
+            .resolve_create(outside.path().join("a/b/c.txt").to_str().unwrap())
             .unwrap()
             .target;
         assert_eq!(
             sb.exec_cwd_for(&target),
-            fs::canonicalize(&outside.path).unwrap()
+            fs::canonicalize(outside.path()).unwrap()
         );
     }
 
     #[test]
     fn exec_cwd_for_never_escapes_to_the_filesystem_root() {
-        let sb = sandbox(&TempDir::new("cwd-fsroot"));
+        let sb = sandbox(&TempDir::new().unwrap());
         // A nonexistent target directly under `/`: its only existing ancestor is `/` itself, which
         // must never become the working directory — fall back to the workspace root instead.
         let target = sb
@@ -531,11 +531,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_existing_rejects_symlink_out_of_root() {
-        let outside = TempDir::new("outside-target");
-        let secret = outside.path.join("secret.txt");
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.txt");
         fs::write(&secret, b"top secret").unwrap();
 
-        let dir = TempDir::new("inside-symlink");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         std::os::unix::fs::symlink(&secret, sb.root().join("link.txt")).unwrap();
 
@@ -545,12 +545,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_existing_rejects_symlinked_parent_out_of_root() {
-        let outside = TempDir::new("outside-dir");
-        fs::write(outside.path.join("f.txt"), b"x").unwrap();
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("f.txt"), b"x").unwrap();
 
-        let dir = TempDir::new("inside-parent");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
-        std::os::unix::fs::symlink(&outside.path, sb.root().join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), sb.root().join("link")).unwrap();
 
         assert!(sb.resolve_existing("link/f.txt").is_err());
     }
@@ -558,10 +558,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_create_rejects_symlinked_ancestor_out_of_root() {
-        let outside = TempDir::new("outside-create");
-        let dir = TempDir::new("inside-create");
+        let outside = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
-        std::os::unix::fs::symlink(&outside.path, sb.root().join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), sb.root().join("link")).unwrap();
 
         assert!(sb.resolve_create("link/new.txt").is_err());
     }

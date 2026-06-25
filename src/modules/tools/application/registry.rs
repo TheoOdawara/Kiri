@@ -99,11 +99,11 @@ mod tests {
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use crate::modules::tools::infrastructure::support::READ_FILE_MAX_BYTES;
     use crate::shared::kernel::tool_call::FunctionCall;
-    use crate::shared::test_support::TempDir;
     use regex::Regex;
     use serde_json::json;
     use std::fs;
     use std::sync::Arc;
+    use tempfile::TempDir;
 
     fn registry() -> ToolRegistry {
         ToolRegistry::new(default_fs_tools(
@@ -114,7 +114,7 @@ mod tests {
     }
 
     fn sandbox(dir: &TempDir) -> Sandbox {
-        Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap()
+        Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap()
     }
 
     fn call(name: &str, args: serde_json::Value) -> ToolCall {
@@ -215,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn command_line_returns_the_bare_command_per_tool() {
-        let dir = TempDir::new("cmdline");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
         assert_eq!(
@@ -265,7 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn command_line_is_none_for_unknown_tool_or_bad_args() {
-        let dir = TempDir::new("cmdline-none");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
         assert_eq!(reg.command_line(&sb, &call("nope", json!({}))), None);
@@ -277,7 +277,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_tool_returns_error() {
-        let dir = TempDir::new("unknown");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let outcome = registry().execute(&sb, &call("nope", json!({}))).await;
         assert!(matches!(outcome, ToolOutcome::Error(_)));
@@ -285,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn bad_arguments_return_error() {
-        let dir = TempDir::new("bad-args");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let outcome = registry()
             .execute(&sb, &call("read_file", json!({"wrong": 1})))
@@ -301,7 +301,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_write_edit_delete_roundtrip() {
-        let dir = TempDir::new("roundtrip");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
 
@@ -349,7 +349,7 @@ mod tests {
     async fn write_file_round_trips_content_with_shell_metacharacters() {
         // The content reaches `tee` through the child's stdin, never the command line — so newlines,
         // quotes, `$`, and backticks must survive verbatim with no interpolation.
-        let dir = TempDir::new("write-special");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
         let content = "line1\n\"quoted\" $HOME `whoami`\n$(echo nope)\tend";
@@ -370,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_truncates_files_larger_than_the_cap() {
-        let dir = TempDir::new("read-cap");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let big = "a".repeat(READ_FILE_MAX_BYTES + 500);
         fs::write(sb.root().join("big.txt"), big.as_bytes()).unwrap();
@@ -385,7 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_creates_missing_parent_directories() {
-        let dir = TempDir::new("write-nested");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let outcome = registry()
             .execute(
@@ -399,7 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_missing_old_string_returns_error() {
-        let dir = TempDir::new("edit-miss");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         fs::write(sb.root().join("a.txt"), b"hello").unwrap();
         let outcome = registry()
@@ -416,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_refuses_directories() {
-        let dir = TempDir::new("delete-dir");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         fs::create_dir(sb.root().join("sub")).unwrap();
         let outcome = registry()
@@ -428,7 +428,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_dir_sorts_and_marks_directories() {
-        let dir = TempDir::new("list");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         fs::write(sb.root().join("b.txt"), b"x").unwrap();
         fs::create_dir(sb.root().join("a_dir")).unwrap();
@@ -438,7 +438,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_finds_substring_recursively() {
-        let dir = TempDir::new("search");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         fs::create_dir(sb.root().join("sub")).unwrap();
         fs::write(
@@ -460,7 +460,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_skips_binary_files() {
-        let dir = TempDir::new("search-binary");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         // A NUL byte amid text marks the file as binary, so search must skip it (even though the
         // surrounding bytes spell the query "NEE").
@@ -473,7 +473,7 @@ mod tests {
 
     #[tokio::test]
     async fn move_path_relocates_a_file() {
-        let dir = TempDir::new("move-file");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         fs::write(sb.root().join("a.txt"), b"data").unwrap();
         assert_eq!(
@@ -494,7 +494,7 @@ mod tests {
 
     #[tokio::test]
     async fn move_path_relocates_a_directory_with_contents() {
-        let dir = TempDir::new("move-dir");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         fs::create_dir(sb.root().join("src")).unwrap();
         fs::write(sb.root().join("src").join("f.txt"), b"x").unwrap();
@@ -511,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn move_path_creates_missing_destination_dirs() {
-        let dir = TempDir::new("move-mkdir");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         fs::write(sb.root().join("a.txt"), b"x").unwrap();
         let outcome = registry()
@@ -529,7 +529,7 @@ mod tests {
 
     #[tokio::test]
     async fn move_path_missing_source_returns_error() {
-        let dir = TempDir::new("move-missing");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let outcome = registry()
             .execute(
@@ -545,7 +545,7 @@ mod tests {
 
     #[tokio::test]
     async fn move_path_refuses_to_move_the_root() {
-        let dir = TempDir::new("move-root");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let outcome = registry()
             .execute(
@@ -558,7 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_dir_creates_nested_directories() {
-        let dir = TempDir::new("create-dir");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let outcome = registry()
             .execute(&sb, &call("create_dir", json!({"path": "a/b/c"})))
@@ -569,7 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_dir_is_idempotent_for_existing_directory() {
-        let dir = TempDir::new("create-dir-exists");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         fs::create_dir(sb.root().join("a")).unwrap();
         let outcome = registry()
@@ -581,7 +581,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_dir_removes_a_directory_recursively() {
-        let dir = TempDir::new("delete-dir");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         fs::create_dir_all(sb.root().join("a").join("b")).unwrap();
         fs::write(sb.root().join("a").join("b").join("f.txt"), b"x").unwrap();
@@ -594,7 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_dir_refuses_a_file() {
-        let dir = TempDir::new("delete-dir-file");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         fs::write(sb.root().join("a.txt"), b"x").unwrap();
         let outcome = registry()
@@ -606,7 +606,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_dir_refuses_the_root() {
-        let dir = TempDir::new("delete-dir-root");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let outcome = registry()
             .execute(&sb, &call("delete_dir", json!({"path": "."})))
@@ -617,10 +617,10 @@ mod tests {
 
     #[tokio::test]
     async fn execute_edits_file_outside_workspace() {
-        let outside = TempDir::new("edit-abs");
-        let file = outside.path.join("f.txt");
+        let outside = TempDir::new().unwrap();
+        let file = outside.path().join("f.txt");
         fs::write(&file, b"hello world").unwrap();
-        let dir = TempDir::new("edit-abs-inside");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let outcome = registry().execute(
             &sb,

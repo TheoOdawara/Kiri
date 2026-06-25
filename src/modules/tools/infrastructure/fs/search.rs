@@ -236,8 +236,8 @@ mod tests {
     use crate::modules::tools::infrastructure::sandbox::Sandbox;
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
-    use crate::shared::test_support::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     fn call(args: serde_json::Value) -> ToolCall {
         ToolCall {
@@ -269,14 +269,14 @@ mod tests {
 
     #[tokio::test]
     async fn search_refuses_a_secret_directory() {
-        let dir = TempDir::new("secret-dir");
-        fs::create_dir(dir.path.join(".ssh")).unwrap();
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".ssh")).unwrap();
         fs::write(
-            dir.path.join(".ssh").join("id_rsa"),
+            dir.path().join(".ssh").join("id_rsa"),
             b"PRIVATE KEY material",
         )
         .unwrap();
-        let sb = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let sb = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
 
         let outcome = Search
             .execute(
@@ -295,10 +295,10 @@ mod tests {
 
     #[tokio::test]
     async fn search_drops_matches_from_sensitive_files() {
-        let dir = TempDir::new("filter");
-        fs::write(dir.path.join("a.txt"), b"NEEDLE in code").unwrap();
-        fs::write(dir.path.join(".env"), b"SECRET=NEEDLE").unwrap();
-        let sb = Sandbox::new(&dir.path, SensitiveMatcher::new(&[".env"]).unwrap()).unwrap();
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.txt"), b"NEEDLE in code").unwrap();
+        fs::write(dir.path().join(".env"), b"SECRET=NEEDLE").unwrap();
+        let sb = Sandbox::new(dir.path(), SensitiveMatcher::new(&[".env"]).unwrap()).unwrap();
 
         let outcome = Search
             .execute(&sb, &call(serde_json::json!({"query": "NEEDLE"})))

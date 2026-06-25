@@ -20,7 +20,7 @@ use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
-use crate::shared::test_support::TempDir;
+use tempfile::TempDir;
 
 fn call(name: &str, args: Value) -> ToolCall {
     ToolCall {
@@ -53,15 +53,15 @@ fn confirmation_row(
 
 /// The full, exact tool surface as it behaves today: every schema + every confirmation variant.
 fn current_snapshot() -> Value {
-    let dir = TempDir::new("snap");
-    let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+    let dir = TempDir::new().unwrap();
+    let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
     let registry = ToolRegistry::new(default_fs_tools(
         Arc::from(Vec::<Regex>::new()),
         Arc::from(Vec::<Regex>::new()),
         false,
     ));
     // Pre-seed a file so the overwrite/edit/delete variants resolve against an existing path.
-    fs::write(dir.path.join("exists.txt"), b"data").unwrap();
+    fs::write(dir.path().join("exists.txt"), b"data").unwrap();
 
     let r = &registry;
     let s = &sandbox;

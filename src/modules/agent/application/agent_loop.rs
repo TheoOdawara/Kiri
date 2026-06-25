@@ -282,7 +282,7 @@ mod tests {
 
     use regex::Regex;
 
-    use crate::shared::test_support::TempDir;
+    use tempfile::TempDir;
 
     /// A provider that replays pre-canned turns, ignoring the request — drives the loop without a network.
     struct ScriptedProvider {
@@ -456,9 +456,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_drives_a_tool_turn_then_a_text_turn() {
-        let dir = TempDir::new("seq");
-        std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
 
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
@@ -499,8 +499,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_aborts_when_the_user_ends_the_session_at_a_prompt() {
-        let dir = TempDir::new("abort");
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![CompletedTurn {
             content: String::new(),
             tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
@@ -519,8 +519,8 @@ mod tests {
 
     #[tokio::test]
     async fn auto_mode_runs_tools_without_asking() {
-        let dir = TempDir::new("auto");
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "writing".to_string(),
@@ -546,15 +546,15 @@ mod tests {
 
         assert_eq!(outcome, TurnOutcome::Completed);
         assert_eq!(
-            std::fs::read_to_string(dir.path.join("a.txt")).unwrap(),
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
             "hi"
         );
     }
 
     #[tokio::test]
     async fn approved_auto_stops_asking_for_the_rest_of_the_turn() {
-        let dir = TempDir::new("approved-auto");
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         // One assistant turn with two destructive calls: the first prompts, the second must not.
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
@@ -587,19 +587,19 @@ mod tests {
             "the second call must run under auto without asking again"
         );
         assert_eq!(
-            std::fs::read_to_string(dir.path.join("a.txt")).unwrap(),
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
             "a"
         );
         assert_eq!(
-            std::fs::read_to_string(dir.path.join("b.txt")).unwrap(),
+            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
             "b"
         );
     }
 
     #[tokio::test]
     async fn plan_mode_blocks_destructive_tools() {
-        let dir = TempDir::new("plan-block");
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "writing".to_string(),
@@ -623,7 +623,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome, TurnOutcome::Completed);
-        assert!(!dir.path.join("a.txt").exists(), "plan mode must not write");
+        assert!(
+            !dir.path().join("a.txt").exists(),
+            "plan mode must not write"
+        );
         let tool_msg = conversation
             .messages()
             .iter()
@@ -640,9 +643,9 @@ mod tests {
 
     #[tokio::test]
     async fn plan_mode_allows_read_only_tools() {
-        let dir = TempDir::new("plan-read");
-        std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "reading".to_string(),
@@ -677,8 +680,8 @@ mod tests {
         // The explicit plan signal: a `present_plan` call in plan mode ends the turn as `PlanProposed`
         // (no execution), and the conversation stays a valid tool round (assistant tool_call answered
         // by a tool result) so the next turn after approval is accepted by the provider.
-        let dir = TempDir::new("present-plan");
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![CompletedTurn {
             content: "vou planejar".to_string(),
             tool_calls: vec![tool_call("present_plan", r#"{"plan":"Plano final"}"#)],
@@ -717,8 +720,8 @@ mod tests {
 
     #[tokio::test]
     async fn auto_mode_emits_tool_started_and_finished() {
-        let dir = TempDir::new("emit-auto");
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "writing".to_string(),
@@ -748,9 +751,9 @@ mod tests {
 
     #[tokio::test]
     async fn default_mode_emits_around_execution() {
-        let dir = TempDir::new("emit-default");
-        std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "reading".to_string(),
@@ -776,8 +779,8 @@ mod tests {
 
     #[tokio::test]
     async fn plan_block_emits_started_and_error_finish() {
-        let dir = TempDir::new("emit-plan");
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "writing".to_string(),
@@ -805,14 +808,17 @@ mod tests {
             [ToolOutcome::Error(msg)] => assert!(msg.contains("blocked in plan mode")),
             other => panic!("expected a single Error finish, got {other:?}"),
         }
-        assert!(!dir.path.join("a.txt").exists(), "plan mode must not write");
+        assert!(
+            !dir.path().join("a.txt").exists(),
+            "plan mode must not write"
+        );
     }
 
     #[tokio::test]
     async fn declined_emits_started_and_declined_finish() {
-        let dir = TempDir::new("emit-declined");
-        std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "deleting".to_string(),
@@ -834,14 +840,17 @@ mod tests {
 
         assert_eq!(io.started, vec!["rm a.txt".to_string()]);
         assert!(matches!(io.finished.as_slice(), [ToolOutcome::Declined]));
-        assert!(dir.path.join("a.txt").exists(), "declined must not delete");
+        assert!(
+            dir.path().join("a.txt").exists(),
+            "declined must not delete"
+        );
     }
 
     #[tokio::test]
     async fn auto_mode_runs_inroot_read_without_confirming() {
-        let dir = TempDir::new("auto-inroot-read");
-        std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "reading".to_string(),
@@ -872,9 +881,9 @@ mod tests {
 
     #[tokio::test]
     async fn auto_mode_confirms_destructive_delete() {
-        let dir = TempDir::new("auto-confirm-del");
-        std::fs::write(dir.path.join("a.txt"), b"x").unwrap();
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "deleting".to_string(),
@@ -903,17 +912,17 @@ mod tests {
             "a destructive tool must be confirmed even in auto mode"
         );
         assert!(
-            dir.path.join("a.txt").exists(),
+            dir.path().join("a.txt").exists(),
             "a declined delete must not run, even in auto mode"
         );
     }
 
     #[tokio::test]
     async fn auto_mode_confirms_out_of_root_target() {
-        let outside = TempDir::new("auto-out-target");
-        let dir = TempDir::new("auto-out-inside");
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
-        let target = outside.path.join("new.txt");
+        let outside = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let target = outside.path().join("new.txt");
         let args =
             serde_json::json!({ "path": target.to_str().unwrap(), "content": "x" }).to_string();
         let agent_loop = agent_loop_with(vec![
@@ -951,9 +960,9 @@ mod tests {
 
     #[tokio::test]
     async fn iteration_cap_fires_the_checkpoint() {
-        let dir = TempDir::new("iter-cap");
-        std::fs::write(dir.path.join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         // Two read-only rounds are queued; with a cap of 1 the checkpoint must fire after the first.
         let provider = Arc::new(ScriptedProvider {
             turns: Mutex::new(VecDeque::from(vec![
@@ -1026,8 +1035,8 @@ mod tests {
             }
         }
 
-        let dir = TempDir::new("bridge-seam");
-        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let dir = TempDir::new().unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = AgentLoop::new(
             Arc::new(EmittingProvider),
             ToolRegistry::new(default_fs_tools(

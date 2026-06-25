@@ -202,10 +202,10 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
-    use crate::shared::test_support::TempDir;
+    use tempfile::TempDir;
 
     fn sandbox(dir: &TempDir) -> Sandbox {
-        Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap()
+        Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap()
     }
 
     fn call(name: &str, args: serde_json::Value) -> ToolCall {
@@ -239,7 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_simple() {
-        let dir = TempDir::new("simple");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
 
@@ -257,9 +257,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_with_cwd() {
-        let dir = TempDir::new("cwd");
-        fs::create_dir(dir.path.join("sub")).unwrap();
-        fs::write(dir.path.join("sub").join("f.txt"), b"content").unwrap();
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub").join("f.txt"), b"content").unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
 
@@ -287,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_nonexistent_cwd_returns_error() {
-        let dir = TempDir::new("bad-cwd");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
 
@@ -302,7 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_failure_exit_code() {
-        let dir = TempDir::new("fail");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
 
@@ -317,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_not_found() {
-        let dir = TempDir::new("notfound");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
 
@@ -347,7 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_truncates_large_output() {
-        let dir = TempDir::new("truncate");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
 
@@ -372,7 +372,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_timeout() {
-        let dir = TempDir::new("timeout");
+        let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
 
@@ -406,7 +406,7 @@ mod tests {
     fn confined_sandbox(dir: &TempDir) -> Sandbox {
         use crate::modules::tools::infrastructure::confine::macos::MacosSeatbelt;
         Sandbox::with_confinement(
-            &dir.path,
+            dir.path(),
             SensitiveMatcher::empty(),
             Arc::new(MacosSeatbelt),
             NetworkPolicy::Deny,
@@ -423,7 +423,7 @@ mod tests {
         if MacosSeatbelt::detect().is_none() {
             return; // sandbox-exec unavailable on this host
         }
-        let dir = TempDir::new("confine-out");
+        let dir = TempDir::new().unwrap();
         let sb = confined_sandbox(&dir);
         let reg = registry();
         let probe = format!(
@@ -451,7 +451,7 @@ mod tests {
         if MacosSeatbelt::detect().is_none() {
             return;
         }
-        let dir = TempDir::new("confine-in");
+        let dir = TempDir::new().unwrap();
         let sb = confined_sandbox(&dir);
         let reg = registry();
         let outcome = reg
