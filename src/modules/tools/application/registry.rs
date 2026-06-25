@@ -486,7 +486,9 @@ mod tests {
     async fn search_skips_binary_files() {
         let dir = TempDir::new("search-binary");
         let sb = sandbox(&dir);
-        fs::write(sb.root().join("bin"), [b'N', b'E', b'E', 0, b'D']).unwrap();
+        // A NUL byte amid text marks the file as binary, so search must skip it (even though the
+        // surrounding bytes spell the query "NEE").
+        fs::write(sb.root().join("bin"), b"NEE\0D").unwrap();
         let outcome = registry()
             .execute(&sb, &call("search", json!({"query": "NEE"})))
             .await;

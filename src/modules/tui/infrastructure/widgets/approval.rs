@@ -93,10 +93,20 @@ pub fn plan_options_len() -> usize {
     PLAN_OPTIONS.len()
 }
 
+/// Horizontal padding (columns per side) kept around the plan box, and the width bounds it clamps to.
+const BOX_H_PADDING: u16 = 4;
+const BOX_MIN_WIDTH: u16 = 1;
+const BOX_MAX_WIDTH: u16 = 64;
+/// Extra columns added to the action text width for the box's left/right borders.
+const BOX_BORDER_COLS: u16 = 2;
+
 /// The width and height the box would occupy in `area`, without positioning it. Used by the view to
 /// reserve space at the bottom of the transcript so the plan box never overlays the plan text.
 pub fn box_dims(area: Rect, action: &str, option_count: usize) -> (u16, u16) {
-    let max_w = area.width.saturating_sub(4).clamp(1, 64);
+    let max_w = area
+        .width
+        .saturating_sub(BOX_H_PADDING)
+        .clamp(BOX_MIN_WIDTH, BOX_MAX_WIDTH);
     // Desired width: the longest unwrapped logical line of the action, capped; options are short.
     let action_w = action
         .split('\n')
@@ -104,7 +114,7 @@ pub fn box_dims(area: Rect, action: &str, option_count: usize) -> (u16, u16) {
         .max()
         .unwrap_or(0);
     let width = max_w
-        .max(action_w.min(64) as u16 + 2)
+        .max(action_w.min(BOX_MAX_WIDTH as usize) as u16 + BOX_BORDER_COLS)
         .min(area.width.max(1));
     let inner_w = width.saturating_sub(2).max(1) as usize;
     let base = Style::default()

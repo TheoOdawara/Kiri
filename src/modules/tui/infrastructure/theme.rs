@@ -2,16 +2,16 @@ use ratatui::style::{Color, Modifier, Style};
 
 /// The "Tamahagane Void" brand palette (truecolor). Deliberately drops the old ANSI-16 fallback: the
 /// goal is brand fidelity on modern truecolor terminals — deep steel-on-void, gates in sharp accents.
-pub const VOID: Color = Color::Rgb(0x0D, 0x11, 0x17); // base background
-pub const STEEL: Color = Color::Rgb(0xE6, 0xED, 0xF3); // default text (polished steel)
-pub const BRAND: Color = Color::Rgb(0x8B, 0x94, 0x9E); // rules, delimiters, dim, idle gate
-pub const SUCCESS: Color = Color::Rgb(0x3F, 0xB9, 0x50); // green gate — passed / [OK]
-pub const WARNING: Color = Color::Rgb(0xD2, 0x99, 0x22); // yellow gate — info / approval pending
-pub const ERROR: Color = Color::Rgb(0xF8, 0x51, 0x49); // red gate — error / blade cut
-pub const HIGHLIGHT: Color = Color::Rgb(0x58, 0xA6, 0xFF); // cyan action — active input / loading
-pub const CODE_FG: Color = Color::Rgb(0xF0, 0x88, 0x3E); // orange — inline code / fenced code
-pub const CODE_BG: Color = Color::Rgb(0x1C, 0x22, 0x2B); // code block background
-pub const HEADING: Color = Color::Rgb(0x7D, 0xC9, 0xE8); // soft cyan — headings
+pub const VOID: Color = Color::Rgb(0x0D, 0x11, 0x17); // #0D1117 — base background
+pub const STEEL: Color = Color::Rgb(0xE6, 0xED, 0xF3); // #E6EDF3 — default text (polished steel)
+pub const BRAND: Color = Color::Rgb(0x8B, 0x94, 0x9E); // #8B949E — rules, delimiters, dim, idle gate
+pub const SUCCESS: Color = Color::Rgb(0x3F, 0xB9, 0x50); // #3FB950 — green gate — passed / [OK]
+pub const WARNING: Color = Color::Rgb(0xD2, 0x99, 0x22); // #D29922 — yellow gate — info / approval pending
+pub const ERROR: Color = Color::Rgb(0xF8, 0x51, 0x49); // #F85149 — red gate — error / blade cut
+pub const HIGHLIGHT: Color = Color::Rgb(0x58, 0xA6, 0xFF); // #58A6FF — cyan action — active input / loading
+pub const CODE_FG: Color = Color::Rgb(0xF0, 0x88, 0x3E); // #F0883E — orange — inline code / fenced code
+pub const CODE_BG: Color = Color::Rgb(0x1C, 0x22, 0x2B); // #1C222B — code block background
+pub const HEADING: Color = Color::Rgb(0x7D, 0xC9, 0xE8); // #7DC9E8 — soft cyan — headings
 
 /// The 10-frame braille spinner.
 pub const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];

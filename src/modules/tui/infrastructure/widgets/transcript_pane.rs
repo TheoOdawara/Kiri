@@ -18,6 +18,10 @@ use crate::modules::tui::infrastructure::widgets::splash;
 const PREVIEW_LINES: usize = 6;
 /// Per side (old/new) diff lines shown before eliding, unless expanded.
 const DIFF_LINES_PER_SIDE: usize = 6;
+/// Columns each previewed body line is indented under its tool-call header.
+const PREVIEW_INDENT_WIDTH: usize = 5;
+/// Milliseconds in one second — the threshold below which an elapsed label stays in `ms`.
+const MS_PER_SECOND: u128 = 1000;
 
 /// Render the scrolling transcript. Items are pre-wrapped to the pane width (so scroll offsets are
 /// exact line counts), then scrolled so the newest content is pinned to the bottom unless the user has
@@ -186,9 +190,10 @@ fn render_result(
     } else {
         body.len().min(PREVIEW_LINES)
     };
+    let indent = " ".repeat(PREVIEW_INDENT_WIDTH);
     for line in &body[..shown] {
-        for row in hard_wrap(line, width.saturating_sub(5).max(1)) {
-            out.push(Line::styled(format!("     {row}"), text_style));
+        for row in hard_wrap(line, width.saturating_sub(PREVIEW_INDENT_WIDTH).max(1)) {
+            out.push(Line::styled(format!("{indent}{row}"), text_style));
         }
     }
     if body.len() > shown {
@@ -237,7 +242,7 @@ fn emit_diff_block(
 /// A compact elapsed label for a single tool call: milliseconds under a second, else seconds.
 fn fmt_dur(elapsed: Duration) -> String {
     let ms = elapsed.as_millis();
-    if ms < 1000 {
+    if ms < MS_PER_SECOND {
         format!("{ms}ms")
     } else {
         format!("{:.1}s", elapsed.as_secs_f64())

@@ -63,10 +63,13 @@ fn parse_stream_error(data: &str) -> Option<String> {
     }
 }
 
+/// The sentinel payload OpenAI-compatible SSE streams send to mark the end of a completion.
+const SSE_DONE_SENTINEL: &str = "[DONE]";
+
 /// Parse one event's `data` payload into its first choice. Yields nothing for the `[DONE]` sentinel,
 /// an empty payload, or malformed JSON.
 fn parse_chunk(data: &str) -> Option<StreamChoice> {
-    if data.is_empty() || data == "[DONE]" {
+    if data.is_empty() || data == SSE_DONE_SENTINEL {
         return None;
     }
     let chunk: ChatStreamChunk = serde_json::from_str(data).ok()?;

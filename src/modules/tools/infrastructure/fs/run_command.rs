@@ -13,12 +13,13 @@ use crate::modules::tools::infrastructure::exec::{self, ExecError};
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 use crate::shared::kernel::tool_call::ToolCall;
 
-/// Upper bound for a `run_command` timeout, so the model cannot pin a process slot for hours. The
-/// schema advertises a 1s minimum; this clamps the value actually applied into `[1s, 10min]`.
+/// Bounds for a `run_command` timeout, so the model cannot pin a process slot for hours nor request a
+/// sub-second deadline that kills every command. The applied value is clamped into `[1s, 10min]`.
+const RUN_COMMAND_MIN_TIMEOUT_MS: u64 = 1_000;
 const RUN_COMMAND_MAX_TIMEOUT_MS: u64 = 600_000;
 
 fn effective_timeout_ms(requested: u64) -> u64 {
-    requested.clamp(1_000, RUN_COMMAND_MAX_TIMEOUT_MS)
+    requested.clamp(RUN_COMMAND_MIN_TIMEOUT_MS, RUN_COMMAND_MAX_TIMEOUT_MS)
 }
 
 pub struct RunCommand {

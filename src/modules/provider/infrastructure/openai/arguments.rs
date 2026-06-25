@@ -2,6 +2,15 @@ use std::borrow::Cow;
 
 use serde_json::Value;
 
+/// ASCII space — the first printable character. Every byte below it (newline, tab, NUL, ...) is a
+/// control character that strict JSON forbids unescaped inside a string value. Naming the boundary
+/// keeps the intent of every comparison explicit instead of a bare `0x20`.
+const FIRST_PRINTABLE_ASCII: u8 = 0x20;
+
+fn is_json_control(byte: u8) -> bool {
+    byte < FIRST_PRINTABLE_ASCII
+}
+
 /// Escape raw control characters that appear INSIDE a JSON string value, leaving control characters
 /// BETWEEN tokens (structural whitespace) untouched.
 ///
@@ -12,57 +21,57 @@ use serde_json::Value;
 /// Escaping only the control chars inside string values keeps the JSON structure intact and the
 /// content faithful (a real newline becomes `\n`).
 ///
-/// Fast path: returns the input borrowed and untouched when it contains no control byte (`< 0x20`).
-/// A raw-byte scan is correct because control bytes never appear as a UTF-8 continuation byte
-/// (those are always `>= 0x80`).
+/// Fast path: returns the input borrowed and untouched when it holds no control character.
+/// A raw-byte scan is correct because control bytes are pure ASCII and never appear as a UTF-8
+/// continuation byte (those are always >= 0x80). The result is built by copying verbatim runs of the
+/// original `&str` (always valid UTF-8) and splicing in ASCII escape sequences, so the output is
+/// valid UTF-8 by construction — no fallible reassembly is needed.
 pub(crate) fn escape_control_chars_in_strings(args: &str) -> Cow<'_, str> {
-    if !args.bytes().any(|byte| byte < 0x20) {
+    if !args.bytes().any(is_json_control) {
         return Cow::Borrowed(args);
     }
 
-    let mut out = Vec::with_capacity(args.len() + 16);
+    let mut out = String::with_capacity(args.len() + 16);
+    let mut run_start = 0;
     let mut in_string = false;
     let mut escaped = false;
-    for &byte in args.as_bytes() {
-        if in_string && !escaped && byte == b'\\' {
-            out.push(byte);
-            escaped = true;
-            continue;
-        }
+    for (index, &byte) in args.as_bytes().iter().enumerate() {
         if escaped {
             // Previous byte was a backslash inside a string. A raw control char here is still illegal
-            // JSON and must be escaped; anything else is a legitimate escape body (`\"`, `\n`, ...).
+            // JSON and must be escaped; anything else is a legitimate escape body (`\"`, `\n`, ...)
+            // that stays in the verbatim run.
             escaped = false;
-            if byte >= 0x20 {
-                out.push(byte);
-            } else {
+            if is_json_control(byte) {
+                out.push_str(&args[run_start..index]);
                 push_escaped_control(&mut out, byte);
+                run_start = index + 1;
             }
+            continue;
+        }
+        if in_string && byte == b'\\' {
+            escaped = true;
             continue;
         }
         if byte == b'"' {
             in_string = !in_string;
-            out.push(byte);
             continue;
         }
-        if in_string && byte < 0x20 {
+        if in_string && is_json_control(byte) {
+            out.push_str(&args[run_start..index]);
             push_escaped_control(&mut out, byte);
-            continue;
+            run_start = index + 1;
         }
-        out.push(byte);
     }
-
-    // WHY the expect cannot fire: the input was a valid `&str` and we only ever inject ASCII escape
-    // sequences, so the assembled bytes are always valid UTF-8.
-    Cow::Owned(String::from_utf8(out).expect("valid UTF-8: str input, ASCII-only insertions"))
+    out.push_str(&args[run_start..]);
+    Cow::Owned(out)
 }
 
-fn push_escaped_control(out: &mut Vec<u8>, byte: u8) {
+fn push_escaped_control(out: &mut String, byte: u8) {
     match byte {
-        b'\n' => out.extend_from_slice(b"\\n"),
-        b'\t' => out.extend_from_slice(b"\\t"),
-        b'\r' => out.extend_from_slice(b"\\r"),
-        other => out.extend_from_slice(format!("\\u{other:04x}").as_bytes()),
+        b'\n' => out.push_str("\\n"),
+        b'\t' => out.push_str("\\t"),
+        b'\r' => out.push_str("\\r"),
+        other => out.push_str(&format!("\\u{other:04x}")),
     }
 }
 

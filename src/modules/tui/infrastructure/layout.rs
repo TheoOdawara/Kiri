@@ -1,5 +1,16 @@
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 
+/// Columns of side gutter (per edge) reserved on a roomy terminal so content never touches the edges.
+const SIDE_GUTTER: u16 = 4;
+/// Minimum width/height for the terminal to be considered "roomy" enough for decorative padding.
+const MIN_ROOMY_WIDTH: u16 = 60;
+const MIN_ROOMY_HEIGHT: u16 = 12;
+/// Bounds for the borderless input editor height: at least one row, capped so it never eats the frame.
+const MIN_INPUT_HEIGHT: u16 = 1;
+const MAX_INPUT_HEIGHT: u16 = 6;
+/// Below this height the terminal is "short": header and hint collapse so the transcript keeps a row.
+const SHORT_TERMINAL_HEIGHT: u16 = 8;
+
 /// The stacked regions of the core. The brand seal sits on top; the model/workspace context drops
 /// down to the forged `meta` rule directly above the input, so identity and context cluster around where
 /// the user actually types. `prompt_box` is the dedicated slot — directly above the input — for a pending
@@ -18,13 +29,13 @@ pub struct Regions {
 /// terminal edges. Generous when the terminal is roomy, zero on small ones so nothing is squeezed.
 /// Public so the view sizes the input wrap width against the same content width.
 pub fn h_pad(area: Rect) -> u16 {
-    if roomy(area) { 4 } else { 0 }
+    if roomy(area) { SIDE_GUTTER } else { 0 }
 }
 
 /// Whether the terminal has room to spare for decorative padding (side gutters, top margin, the gap
 /// above the input cluster). Below this the UI runs edge-to-edge to keep every row usable.
 fn roomy(area: Rect) -> bool {
-    area.width >= 60 && area.height >= 12
+    area.width >= MIN_ROOMY_WIDTH && area.height >= MIN_ROOMY_HEIGHT
 }
 
 /// Split the frame into the brand seal, the transcript, the forged meta rule, the optional confirmation
@@ -43,12 +54,12 @@ pub fn frame_layout(area: Rect, input_lines: u16, box_h: u16) -> Regions {
     // Inset the stack so content breathes away from the edges. The base block already paints the full
     // frame, so the margin shows as background padding rather than a gap artifact.
     let area = area.inner(Margin {
-        horizontal: if roomy { 4 } else { 0 },
+        horizontal: if roomy { SIDE_GUTTER } else { 0 },
         vertical: vertical_pad,
     });
 
-    let input_height = input_lines.clamp(1, 6); // borderless: no extra rows for a frame
-    let short = area.height < 8;
+    let input_height = input_lines.clamp(MIN_INPUT_HEIGHT, MAX_INPUT_HEIGHT); // borderless: no frame rows
+    let short = area.height < SHORT_TERMINAL_HEIGHT;
     let header_h = if short { 0 } else { 1 };
     let hint_h = if short { 0 } else { 1 };
     // The confirmation box must render in full (the user reads its options to answer), so it takes
