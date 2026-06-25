@@ -105,6 +105,13 @@ pub trait Tool: Send + Sync {
     fn is_plannable(&self) -> bool {
         self.is_read_only()
     }
+    /// Whether the tool is advertised *only* in plan mode, never in default/auto. Defaults to `false`.
+    /// A plan-only tool (e.g. `present_plan`) is a planning control surface, not a filesystem action,
+    /// so it must not appear outside the plan workflow. `schemas()` excludes it; `schemas_for(Plan)`
+    /// keeps it via `is_plannable`.
+    fn plan_only(&self) -> bool {
+        false
+    }
     /// In plan mode, check whether this call should be blocked before execution. Returns
     /// `Some(reason)` if blocked, `None` if allowed. Defaults to `None` — tools that need
     /// plan-mode restrictions (e.g. `run_command` checking a command blacklist) override this.

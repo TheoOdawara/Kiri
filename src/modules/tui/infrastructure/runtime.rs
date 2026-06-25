@@ -264,6 +264,21 @@ enum Step {
     Idle,
 }
 
+/// Whether applying `msg` must force an immediate redraw. Stream deltas and the periodic tick are
+/// throttled to at most one draw per `FRAME_INTERVAL`, so a burst of tokens coalesces into a single
+/// re-render; every structural change (tool lines, approvals, turn boundaries, user input) draws at
+/// once for responsiveness.
+fn forces_draw(msg: &Msg) -> bool {
+    !matches!(msg, Msg::StreamDelta(..) | Msg::Tick)
+}
+
+/// The spinner frame index for an elapsed time: one step per `FRAME_INTERVAL`. Wrapping into the glyph
+/// table is the renderer's job (`% SPINNER.len()`). Pure, so the animation cadence is unit-testable and
+/// is driven by wall clock rather than message arrival.
+fn spinner_frame(elapsed: Duration) -> usize {
+    (elapsed.as_millis() / FRAME_INTERVAL.as_millis()) as usize
+}
+
 /// Drive one agent turn to completion while keeping the UI live: stream deltas render, approvals show
 /// a prompt, and ^C cancels cooperatively. The agent future borrows `conversation`/`sandbox`/`bridge`
 /// only inside the inner block, so the caller may start another turn afterward.
@@ -288,6 +303,7 @@ async fn drive_turn(
 
     let result = {
         let mut turn: TurnFuture = Box::pin(agent_loop.run(conversation, sandbox, mode, bridge));
+        let mut last_draw = Instant::now();
         loop {
             let step = tokio::select! {
                 biased;
@@ -301,10 +317,16 @@ async fn drive_turn(
             };
 
             let mut done: Option<_> = None;
+            // Forced steps redraw immediately; throttled ones (stream deltas, ticks) wait for the frame.
+            let mut force = false;
             match step {
-                Step::Done(outcome) => done = Some(outcome),
+                Step::Done(outcome) => {
+                    done = Some(outcome);
+                    force = true;
+                }
                 Step::Idle => {}
                 Step::Apply(msg) => {
+                    force = forces_draw(&msg);
                     for effect in update(model, msg) {
                         match effect {
                             Effect::AnswerApproval(decision) => {
@@ -320,11 +342,13 @@ async fn drive_turn(
                                 // Break the select! loop immediately — dropping the turn future
                                 // kills any running child process (kill_on_drop on run_command).
                                 done = Some(Ok(TurnOutcome::Aborted));
+                                force = true;
                             }
                             Effect::Quit => {
                                 model.should_quit = true;
                                 cancel.cancel();
                                 done = Some(Ok(TurnOutcome::Aborted));
+                                force = true;
                             }
                             // Clipboard chords stay live during a turn (composing the next prompt).
                             Effect::CopyToClipboard(text) => clipboard::copy_text(&text),
@@ -335,17 +359,33 @@ async fn drive_turn(
                             | Effect::ApprovePlan(_) => {}
                         }
                     }
+                    // Coalesce a burst: drain every engine message already queued before drawing, so
+                    // many tokens that arrived together become one re-render instead of one per token.
+                    // These messages only mutate the model (no effects); a structural one among them
+                    // (tool line, approval, turn boundary) still forces an immediate draw.
+                    while let Ok(engine) = engine_rx.try_recv() {
+                        let queued = engine_msg(engine, pending_reply);
+                        force |= forces_draw(&queued);
+                        let _ = update(model, queued);
+                    }
                 }
             }
-            // Draw after applying the step, so the frame reflects the latest model state (no one-frame
-            // lag between a streaming delta and the thinking line / transcript).
             model.status.elapsed_secs = started.elapsed().as_secs();
+            // The spinner animates by wall clock, so its rate is independent of message cadence — it
+            // spins during the wait for the first token and during tool execution, not only while
+            // content streams.
+            model.status.spinner_frame = spinner_frame(started.elapsed());
+            // Draw on a forced step or once the frame budget elapsed. The 120ms ticker guarantees a
+            // periodic draw, so coalesced stream deltas flush at most ~8×/s — bounding the transcript
+            // markdown re-render to one per frame rather than one per token (the cause of the lag).
             // A draw failure must NOT `?`-propagate out of this loop: that would skip `on_turn_end` and
             // leave `model.busy` stuck true, silently deadening every future submit. End the turn with
-            // the error instead, so cleanup always runs; a persistent terminal fault then exits the app
-            // via the main loop's own draw.
-            if let Err(error) = terminal.draw(|frame| view(model, frame)) {
-                break Err(AgentError::Io(error));
+            // the error instead, so cleanup always runs.
+            if force || last_draw.elapsed() >= FRAME_INTERVAL {
+                if let Err(error) = terminal.draw(|frame| view(model, frame)) {
+                    break Err(AgentError::Io(error));
+                }
+                last_draw = Instant::now();
             }
             if let Some(outcome) = done {
                 break outcome;
@@ -402,17 +442,22 @@ fn on_turn_end(
         Ok(TurnOutcome::Completed) => {
             if turn_produced_nothing(conversation) {
                 // A 200 with an empty assistant reply and no tool activity: the provider returned
-                // nothing usable (e.g. an empty stream). Surface it — never silent — and do NOT pop a
-                // phantom plan box in plan mode (the bug where a dead model looked like "plan ready").
+                // nothing usable (e.g. an empty stream). Surface it — never silent.
                 model.transcript.push(TranscriptItem::Notice(
                     NoticeLevel::Error,
                     "o provedor não retornou conteúdo — verifique o modelo/endpoint".to_string(),
                 ));
-            } else if model.approval_mode == ApprovalMode::Plan && !cancelled {
-                // A finished plan-mode turn offers its plan for approval before anything is executed.
-                model.pending_plan = Some(PendingPlan::default());
             }
         }
+        // A plan-mode turn called `present_plan`: render the finished plan and open the approval box.
+        // The box appears ONLY here — never on a plain text turn — so the model may think or ask
+        // questions in plan mode without prematurely triggering approval, and the plan shown is always
+        // the complete tool argument, never a half-streamed transcript.
+        Ok(TurnOutcome::PlanProposed(plan)) if !cancelled => {
+            model.transcript.push(TranscriptItem::Assistant(plan));
+            model.pending_plan = Some(PendingPlan::default());
+        }
+        Ok(TurnOutcome::PlanProposed(_)) => {}
         Ok(TurnOutcome::Aborted) => model.should_quit = true,
         Err(error) => {
             if cancelled {
@@ -503,13 +548,48 @@ mod tests {
     }
 
     #[test]
-    fn plan_turn_with_content_offers_the_plan_box() {
-        // The correct behavior must still hold: a real plan turn offers its plan for approval.
+    fn present_plan_outcome_renders_the_plan_and_offers_the_box() {
+        // A plan is surfaced ONLY via the explicit `present_plan` tool (TurnOutcome::PlanProposed):
+        // the plan text is rendered and the approval box opens.
         let mut model = Model::new("m".to_string(), "/w".to_string());
         model.approval_mode = ApprovalMode::Plan;
         let mut conversation = Conversation::new("system");
         conversation.push(Message::user("faça um plano"));
-        conversation.push(Message::assistant_text("aqui está o plano"));
+
+        on_turn_end(
+            Ok(TurnOutcome::PlanProposed(
+                "## Plano\n1. fazer X".to_string(),
+            )),
+            false,
+            &mut model,
+            &mut conversation,
+        );
+
+        assert!(
+            model.pending_plan.is_some(),
+            "a proposed plan must offer the plan box"
+        );
+        assert!(
+            model.transcript.items().iter().any(|item| matches!(
+                item,
+                TranscriptItem::Assistant(text) if text.contains("Plano")
+            )),
+            "the proposed plan text must be rendered in the transcript"
+        );
+        assert!(!has_error_notice(&model), "a proposed plan is not an error");
+    }
+
+    #[test]
+    fn plain_plan_mode_completion_does_not_pop_the_box() {
+        // A plain text turn in plan mode (the model thought aloud or asked a question, but did NOT
+        // call present_plan) must NOT open the approval box — the old eager heuristic was the bug.
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.approval_mode = ApprovalMode::Plan;
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("faça um plano"));
+        conversation.push(Message::assistant_text(
+            "Preciso de mais detalhes: qual módulo?",
+        ));
 
         on_turn_end(
             Ok(TurnOutcome::Completed),
@@ -519,13 +599,20 @@ mod tests {
         );
 
         assert!(
-            model.pending_plan.is_some(),
-            "a real plan turn must offer the plan box"
+            model.pending_plan.is_none(),
+            "a plain plan-mode turn must not pop the box without present_plan"
         );
-        assert!(
-            !has_error_notice(&model),
-            "a real plan turn is not an error"
-        );
+        assert!(!has_error_notice(&model), "a real reply is not an error");
+    }
+
+    #[test]
+    fn spinner_frame_advances_one_step_per_frame_interval() {
+        use super::{FRAME_INTERVAL, spinner_frame};
+        use std::time::Duration;
+        assert_eq!(spinner_frame(Duration::ZERO), 0);
+        assert_eq!(spinner_frame(FRAME_INTERVAL - Duration::from_millis(1)), 0);
+        assert_eq!(spinner_frame(FRAME_INTERVAL), 1);
+        assert_eq!(spinner_frame(FRAME_INTERVAL * 5), 5);
     }
 
     #[test]

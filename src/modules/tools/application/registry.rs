@@ -14,9 +14,15 @@ impl ToolRegistry {
         Self { tools }
     }
 
-    /// The schema array advertised to the provider (replaces `tool_definitions()`).
+    /// The schema array advertised to the provider (replaces `tool_definitions()`). Plan-only tools
+    /// (e.g. `present_plan`) are a planning control surface, not a filesystem action, so they are
+    /// withheld outside plan mode; `schemas_for(Plan)` re-includes them via `is_plannable`.
     pub fn schemas(&self) -> Vec<serde_json::Value> {
-        self.tools.iter().map(|tool| tool.schema()).collect()
+        self.tools
+            .iter()
+            .filter(|tool| !tool.plan_only())
+            .map(|tool| tool.schema())
+            .collect()
     }
 
     /// The schema array advertised for `mode`. In plan mode only plannable tools are offered, so the
@@ -180,6 +186,41 @@ mod tests {
         assert_eq!(
             names,
             vec!["read_file", "list_dir", "search", "run_command"]
+        );
+    }
+
+    /// `present_plan` is a plan-only control tool: present only in plan mode, withheld from
+    /// `schemas()` (default/auto) so the model can never call it to short-circuit a normal turn.
+    #[tokio::test]
+    async fn present_plan_is_plan_only() {
+        use crate::modules::tools::infrastructure::control::present_plan::PresentPlan;
+        let mut tools = default_fs_tools(
+            Arc::from(Vec::<Regex>::new()),
+            Arc::from(Vec::<Regex>::new()),
+            false,
+        );
+        tools.push(Box::new(PresentPlan));
+        let registry = ToolRegistry::new(tools);
+
+        let names = |schemas: Vec<serde_json::Value>| -> Vec<String> {
+            schemas
+                .iter()
+                .map(|schema| schema["function"]["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        assert!(
+            !names(registry.schemas()).contains(&"present_plan".to_string()),
+            "present_plan must be withheld outside plan mode"
+        );
+        assert!(
+            !names(registry.schemas_for(ApprovalMode::Default))
+                .contains(&"present_plan".to_string()),
+            "present_plan must be absent in default mode"
+        );
+        assert!(
+            names(registry.schemas_for(ApprovalMode::Plan)).contains(&"present_plan".to_string()),
+            "present_plan must be advertised in plan mode"
         );
     }
 

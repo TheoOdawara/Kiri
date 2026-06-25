@@ -8,6 +8,7 @@ use crate::modules::provider::application::completion_provider::CompletionProvid
 use crate::modules::provider::infrastructure::openai::provider::OpenAiProvider;
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::infrastructure::confine;
+use crate::modules::tools::infrastructure::control::present_plan::PresentPlan;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tui::infrastructure::runtime::Tui;
@@ -43,11 +44,15 @@ pub fn wire(settings: Settings) -> Result<Tui> {
         settings.api_key,
         settings.thinking,
     ));
-    let registry = ToolRegistry::new(default_fs_tools(
+    // The file tools plus the plan-mode control tool. `present_plan` is advertised only in plan mode
+    // (it carries `plan_only`); the registry's `schemas()` withholds it everywhere else.
+    let mut tools = default_fs_tools(
         settings.plan_blacklist.clone(),
         settings.net_allow.clone(),
         settings.require_confinement,
-    ));
+    );
+    tools.push(Box::new(PresentPlan));
+    let registry = ToolRegistry::new(tools);
     let model = settings.model.clone();
     let agent_loop = AgentLoop::new(
         provider,

@@ -11,13 +11,18 @@ use crate::modules::provider::application::completion_provider::{
 };
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::ToolOutcome;
+use crate::modules::tools::infrastructure::control::present_plan::{PRESENT_PLAN, extract_plan};
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::error::AgentError;
 
-/// Whether a user turn ran to completion or the user ended the session at a prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether a user turn ran to completion, proposed a plan for approval, or the user ended the session
+/// at a prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnOutcome {
     Completed,
+    /// A plan-mode turn called `present_plan`: the carried text is the finished plan, surfaced for the
+    /// user's approval before anything is executed.
+    PlanProposed(String),
     Aborted,
 }
 
@@ -105,8 +110,29 @@ impl AgentLoop {
             }
 
             let calls = turn.tool_calls;
-            let narration = (!turn.content.is_empty()).then_some(turn.content);
+            let content = turn.content;
+            let narration = (!content.is_empty()).then_some(content.clone());
             conversation.push(Message::assistant_tool_calls(narration, calls.clone()));
+
+            // Plan mode: a `present_plan` call is the explicit "plan is ready" signal — surface the
+            // plan for approval and end the planning turn without executing anything. Every call in the
+            // turn gets a tool result so the round stays a valid OpenAI tool exchange (each `tool_call`
+            // must be answered before the next message).
+            if mode == ApprovalMode::Plan
+                && let Some(plan_call) =
+                    calls.iter().find(|call| call.function.name == PRESENT_PLAN)
+            {
+                let plan = extract_plan(plan_call).unwrap_or(content);
+                for call in &calls {
+                    let result = if call.function.name == PRESENT_PLAN {
+                        "Plano apresentado ao usuário para aprovação."
+                    } else {
+                        "ignorada: present_plan encerra o turno"
+                    };
+                    conversation.push(Message::tool_result(call.id.as_str(), result.to_string()));
+                }
+                return Ok(TurnOutcome::PlanProposed(plan));
+            }
 
             for call in &calls {
                 // The display command for this call, shown in every mode so the user sees each action
@@ -663,6 +689,49 @@ mod tests {
             .find(|m| m.role == Role::Tool)
             .unwrap();
         assert_eq!(tool_msg.content.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn plan_mode_present_plan_proposes_the_plan_and_keeps_the_wire_valid() {
+        // The explicit plan signal: a `present_plan` call in plan mode ends the turn as `PlanProposed`
+        // (no execution), and the conversation stays a valid tool round (assistant tool_call answered
+        // by a tool result) so the next turn after approval is accepted by the provider.
+        let dir = TempDir::new("present-plan");
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let agent_loop = agent_loop_with(vec![CompletedTurn {
+            content: "vou planejar".to_string(),
+            tool_calls: vec![tool_call("present_plan", r#"{"plan":"Plano final"}"#)],
+        }]);
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("faça um plano"));
+        // Would decline if asked — present_plan never goes through the confirmation flow.
+        let mut io = ScriptedIo(Approval::Declined);
+
+        let outcome = agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            TurnOutcome::PlanProposed("Plano final".to_string())
+        );
+        let roles: Vec<Role> = conversation.messages().iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            vec![Role::System, Role::User, Role::Assistant, Role::Tool],
+            "the present_plan tool_call must be answered by a tool result"
+        );
+        assert!(
+            conversation
+                .messages()
+                .last()
+                .unwrap()
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("apresentado")
+        );
     }
 
     #[tokio::test]

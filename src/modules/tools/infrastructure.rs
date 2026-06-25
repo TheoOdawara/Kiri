@@ -1,5 +1,6 @@
 pub mod args;
 pub mod confine;
+pub mod control;
 pub mod exec;
 pub mod fs;
 pub mod sandbox;

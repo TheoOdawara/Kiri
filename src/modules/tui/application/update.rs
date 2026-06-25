@@ -28,12 +28,10 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             Vec::new()
         }
         Msg::Resize => Vec::new(),
-        Msg::Tick => {
-            if model.status.streaming {
-                model.status.spinner_frame = model.status.spinner_frame.wrapping_add(1);
-            }
-            Vec::new()
-        }
+        // The spinner frame is derived from wall-clock elapsed in the runtime's draw step, so it
+        // animates at a steady rate regardless of message cadence. A tick just keeps the loop
+        // redrawing on schedule.
+        Msg::Tick => Vec::new(),
         Msg::TurnBegan => {
             model.status.streaming = true;
             Vec::new()
