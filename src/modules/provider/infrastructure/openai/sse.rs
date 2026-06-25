@@ -16,6 +16,13 @@ pub(crate) fn handle_event(
     accumulator: &mut TurnAccumulator,
     sink: &mut dyn EventSink,
 ) -> Result<(), AgentError> {
+    // An OpenAI-compatible provider can deliver an error in-band on an HTTP 200 stream:
+    // `data: {"error": {...}}` (then `[DONE]`). Surface it as a turn failure instead of silently
+    // dropping the chunk — a swallowed in-band error left an empty turn with no feedback at all (a
+    // phantom "plan ready" box in plan mode, with the model never appearing to have been contacted).
+    if let Some(message) = parse_stream_error(data) {
+        return Err(AgentError::Provider(message));
+    }
     let Some(choice) = parse_chunk(data) else {
         return Ok(());
     };
@@ -27,6 +34,33 @@ pub(crate) fn handle_event(
         sink.on_event(event)?;
     }
     Ok(())
+}
+
+/// Detect an in-band error payload (`{"error": {...}}`) the provider can stream on a 200 response,
+/// returning a human-readable message. Yields nothing for a normal chunk, `[DONE]`, a non-JSON line,
+/// or an `error` field that is explicitly `null` (some providers include a null `error` on success).
+fn parse_stream_error(data: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    let error = value.get("error").filter(|error| !error.is_null())?;
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .unwrap_or("unknown error");
+    match error.get("code").filter(|code| !code.is_null()) {
+        Some(code) => {
+            // Prefer a bare string code; otherwise its JSON form (e.g. the number 500).
+            let code = code
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| code.to_string());
+            Some(format!(
+                "stream error from provider: {message} (code {code})"
+            ))
+        }
+        None => Some(format!("stream error from provider: {message}")),
+    }
 }
 
 /// Parse one event's `data` payload into its first choice. Yields nothing for the `[DONE]` sentinel,
@@ -210,6 +244,34 @@ mod tests {
     #[test]
     fn done_sentinel_yields_nothing() {
         assert!(events_from_data("[DONE]").is_empty());
+    }
+
+    #[test]
+    fn in_band_error_event_is_surfaced_as_an_error() {
+        // Regression: NVIDIA can return HTTP 200 whose stream carries `{"error": {...}}` (a broken
+        // model). This used to be dropped silently, leaving an empty turn; it must now fail the turn.
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        let data = r#"{"error":{"message":"Internal server error","type":"internal_server_error","code":500}}"#;
+        let error = handle_event(data, &mut accumulator, &mut sink)
+            .expect_err("an in-band error event must fail the turn");
+        let message = error.to_string();
+        assert!(
+            message.contains("Internal server error"),
+            "the provider message must be surfaced: {message}"
+        );
+        assert!(
+            message.contains("500"),
+            "the code must be surfaced: {message}"
+        );
+    }
+
+    #[test]
+    fn null_error_field_is_not_treated_as_an_error() {
+        // A normal chunk that carries `"error": null` (some providers include it on success) must not
+        // abort the turn — its content still flows.
+        let turn = accumulate(&[r#"{"error":null,"choices":[{"delta":{"content":"Hi"}}]}"#]);
+        assert_eq!(turn.content, "Hi");
     }
 
     #[test]

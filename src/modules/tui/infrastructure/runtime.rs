@@ -14,6 +14,7 @@ use crate::modules::agent::application::agent_loop::{AgentLoop, TurnOutcome};
 use crate::modules::agent::application::approval_policy::{Approval, ApprovalMode};
 use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
+use crate::modules::agent::domain::role::Role;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
@@ -399,8 +400,16 @@ fn on_turn_end(
 ) {
     match result {
         Ok(TurnOutcome::Completed) => {
-            // A finished plan-mode turn offers its plan for approval before anything is executed.
-            if model.approval_mode == ApprovalMode::Plan && !cancelled {
+            if turn_produced_nothing(conversation) {
+                // A 200 with an empty assistant reply and no tool activity: the provider returned
+                // nothing usable (e.g. an empty stream). Surface it — never silent — and do NOT pop a
+                // phantom plan box in plan mode (the bug where a dead model looked like "plan ready").
+                model.transcript.push(TranscriptItem::Notice(
+                    NoticeLevel::Error,
+                    "o provedor não retornou conteúdo — verifique o modelo/endpoint".to_string(),
+                ));
+            } else if model.approval_mode == ApprovalMode::Plan && !cancelled {
+                // A finished plan-mode turn offers its plan for approval before anything is executed.
                 model.pending_plan = Some(PendingPlan::default());
             }
         }
@@ -430,4 +439,102 @@ fn on_turn_end(
     // `TurnEnded` only resets per-turn model state (no effects); the returned Vec is intentionally
     // discarded.
     let _ = update(model, Msg::TurnEnded);
+}
+
+/// True when the turn ended with an empty assistant reply and no tool activity — the provider returned
+/// a 200 with nothing usable. The agent loop appends the final assistant text even when it is blank, so
+/// the trailing message is the signal: an assistant message with blank content and no tool calls. A
+/// turn that ran tools (trailing `Role::Tool`) or produced real text is not "nothing".
+fn turn_produced_nothing(conversation: &Conversation) -> bool {
+    match conversation.messages().last() {
+        Some(last) => {
+            last.role == Role::Assistant
+                && last.tool_calls.is_empty()
+                && last.content.as_deref().unwrap_or("").trim().is_empty()
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{on_turn_end, turn_produced_nothing};
+    use crate::modules::agent::application::agent_loop::TurnOutcome;
+    use crate::modules::agent::application::approval_policy::ApprovalMode;
+    use crate::modules::agent::domain::conversation::Conversation;
+    use crate::modules::agent::domain::message::Message;
+    use crate::modules::tui::domain::model::Model;
+    use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
+
+    fn has_error_notice(model: &Model) -> bool {
+        model
+            .transcript
+            .items()
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::Notice(NoticeLevel::Error, _)))
+    }
+
+    #[test]
+    fn empty_completion_surfaces_a_notice_and_no_plan_box() {
+        // The exact regression: a plan-mode turn whose provider returned nothing must NOT show a plan
+        // box, and must surface a visible error instead of failing silently.
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.approval_mode = ApprovalMode::Plan;
+        model.busy = true;
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("faça um plano"));
+        conversation.push(Message::assistant_text("")); // the empty reply the loop appended
+
+        on_turn_end(
+            Ok(TurnOutcome::Completed),
+            false,
+            &mut model,
+            &mut conversation,
+        );
+
+        assert!(
+            model.pending_plan.is_none(),
+            "an empty turn must not pop a phantom plan box"
+        );
+        assert!(
+            has_error_notice(&model),
+            "an empty turn must surface an error notice"
+        );
+    }
+
+    #[test]
+    fn plan_turn_with_content_offers_the_plan_box() {
+        // The correct behavior must still hold: a real plan turn offers its plan for approval.
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.approval_mode = ApprovalMode::Plan;
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("faça um plano"));
+        conversation.push(Message::assistant_text("aqui está o plano"));
+
+        on_turn_end(
+            Ok(TurnOutcome::Completed),
+            false,
+            &mut model,
+            &mut conversation,
+        );
+
+        assert!(
+            model.pending_plan.is_some(),
+            "a real plan turn must offer the plan box"
+        );
+        assert!(
+            !has_error_notice(&model),
+            "a real plan turn is not an error"
+        );
+    }
+
+    #[test]
+    fn a_tool_only_turn_is_not_treated_as_empty() {
+        // A turn that ended on a tool result (e.g. a declined checkpoint) produced activity — it is not
+        // "nothing", so no spurious error notice.
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("read a.txt"));
+        conversation.push(Message::tool_result("c1", "hello"));
+        assert!(!turn_produced_nothing(&conversation));
+    }
 }
