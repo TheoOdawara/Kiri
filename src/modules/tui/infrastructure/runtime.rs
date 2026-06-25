@@ -51,15 +51,16 @@ pub struct Tui {
     conversation: Conversation,
     model: Model,
     seed: Option<String>,
-    /// Kept so `/new` can rebuild a fresh conversation with the same system prompt.
-    system_prompt: &'static str,
+    /// Kept so `/new` can rebuild a fresh conversation with the same system prompt. Owned because it
+    /// may carry a per-session memory digest composed at wire time, not just the static base prompt.
+    system_prompt: String,
 }
 
 impl Tui {
     pub fn new(
         agent_loop: AgentLoop,
         sandbox: Sandbox,
-        system_prompt: &'static str,
+        system_prompt: String,
         seed: Option<String>,
         model: String,
     ) -> Self {
@@ -67,7 +68,7 @@ impl Tui {
         Self {
             agent_loop,
             sandbox,
-            conversation: Conversation::new(system_prompt),
+            conversation: Conversation::new(system_prompt.clone()),
             model: Model::new(model, workspace),
             seed,
             system_prompt,
@@ -184,7 +185,7 @@ impl Tui {
                     Effect::PasteClipboard => paste_from_clipboard(&mut model),
                     Effect::Quit => model.should_quit = true,
                     Effect::NewSession => {
-                        conversation = Conversation::new(system_prompt);
+                        conversation = Conversation::new(system_prompt.clone());
                         model.transcript = Transcript::default();
                         model.attachments.clear();
                         model.scroll.pin();

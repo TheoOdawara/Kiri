@@ -40,16 +40,24 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
   ports `Presenter`/`ApprovalPolicy`, plus the provider's `EventSink`), `provider` (the `CompletionProvider`
   port + the OpenAI-compatible adapter: wire DTOs, SSE assembly), `tools` (the `Tool` trait + `ToolRegistry`
   + the sandbox + one fs adapter per tool), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
-  adapter + the ratatui runtime — the sole front-end). Planned: `session` (SQLite-persisted conversations).
+  adapter + the ratatui runtime — the sole front-end), `memory` (durable knowledge: `MemoryEntry`/`MemoryKind`
+  domain + the `MemoryPort`/`ProjectStore`/`SharedStore` ports + adapters — `FileProjectMemory` for project
+  memory in `<workspace>/.kiri/memory/`, `SqliteSharedMemory` for shared memory in `~/.kiri/memory/shared.db`,
+  `DocsLibrary` over `docs/` — and the `recall_memory`/`remember`/`consult_docs` tools; see
+  `docs/decisions/0010-memory-and-docs-knowledge.md`). Planned: `session` (SQLite-persisted conversations),
+  and a memory-management GUI.
 - **shared/kernel:** cross-cutting primitives — `ToolCall`/`FunctionCall`, `AgentError` (thiserror).
   **shared/infra:** `config` (CLI + env + `Settings`).
 
 **Invariants:** network I/O only in `provider/infrastructure`; filesystem I/O only in `tools/infrastructure`
-(the sandbox is the single path chokepoint); `domain` has no I/O; the engine never touches stdin/stdout
+(the sandbox is the single path chokepoint) — **except** the `memory` context, which owns its data dirs
+(`.kiri/memory`, `~/.kiri/memory`) and does its own file/SQLite I/O for harness-owned storage, never for
+agent-supplied paths (ref ADR 0010); `domain` has no I/O; the engine never touches stdin/stdout
 directly (all UI via the engine ports). Ports return `AgentError`; `anyhow` only at the binary edge.
 
 **Extending:** a new tool = one file under `tools/infrastructure/fs/` implementing `Tool`, registered in
-`default_fs_tools`; a new provider = one adapter implementing `CompletionProvider`, chosen in `app::wire`.
+`default_fs_tools`; a new provider = one adapter implementing `CompletionProvider`, chosen in `app::wire`;
+a new memory/docs tool = one file under `memory/infrastructure/tools/`, registered in `default_memory_tools`.
 
 Provider target: **NVIDIA**'s OpenAI-compatible endpoint `<base-url>/chat/completions`. The base URL is
 injected via `Settings` into the provider adapter at `app::wire` (default

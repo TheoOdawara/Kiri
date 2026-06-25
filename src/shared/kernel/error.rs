@@ -16,4 +16,8 @@ pub enum AgentError {
     /// Failed to set up OS-level command confinement before spawning a tool's child process.
     #[error("sandbox error: {0}")]
     Sandbox(String),
+    /// A memory-store failure (file/SQLite persistence, serialization) in the `memory` context. The
+    /// harness's own knowledge store is auxiliary, so callers degrade gracefully rather than abort.
+    #[error("memory error: {0}")]
+    Memory(String),
 }

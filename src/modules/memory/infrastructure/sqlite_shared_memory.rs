@@ -1,0 +1,378 @@
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use async_trait::async_trait;
+use rusqlite::{Connection, Row, params};
+use tokio::task::spawn_blocking;
+
+use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
+use crate::modules::memory::domain::project_memory::SharedMemory;
+use crate::shared::kernel::error::AgentError;
+
+type Result<T> = std::result::Result<T, AgentError>;
+
+/// Map any non-IO failure (SQLite, serde, join, lock) into the kernel's memory error variant.
+fn mem<E: std::fmt::Display>(error: E) -> AgentError {
+    AgentError::Memory(error.to_string())
+}
+
+const SELECT_COLUMNS: &str =
+    "id, kind, content, tags, project_id, created_at, updated_at FROM entries";
+
+/// Cross-project shared memory persisted in a single SQLite database (`~/.kiri/memory/shared.db`).
+/// The blocking `rusqlite` connection lives behind an `Arc<Mutex<_>>` and every query runs on a
+/// blocking thread (`spawn_blocking`), so a slow disk never stalls the single-threaded TUI runtime.
+pub struct SqliteSharedMemory {
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl SqliteSharedMemory {
+    /// Open (creating it and its parent directory if needed) the shared database. Does not yet create
+    /// the schema — call `init` for that.
+    pub fn new(db_path: PathBuf) -> Result<Self> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(&db_path).map_err(mem)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    /// Open an ephemeral in-memory database. Used as an inert fallback when the on-disk store cannot
+    /// be opened, so the harness still wires a (unavailable) store instead of failing to start.
+    pub fn in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory().map_err(mem)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+}
+
+fn lock(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
+    conn.lock()
+        .map_err(|error| AgentError::Memory(format!("sqlite mutex poisoned: {error}")))
+}
+
+/// Map a SQLite row to a `MemoryEntry`. Unknown kinds fall back to `Fact` and unparseable tags to an
+/// empty set — defensive recovery, never a panic, for a database an external tool may have touched.
+fn row_to_entry(row: &Row) -> rusqlite::Result<MemoryEntry> {
+    let kind: String = row.get("kind")?;
+    let tags: String = row.get("tags")?;
+    Ok(MemoryEntry {
+        id: row.get("id")?,
+        kind: MemoryKind::from_str(&kind).unwrap_or(MemoryKind::Fact),
+        content: row.get("content")?,
+        tags: serde_json::from_str(&tags).unwrap_or_default(),
+        project_id: row.get("project_id")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+/// Run a parameterless "list" query on a blocking thread, collecting the rows into entries.
+async fn query_entries(
+    conn: Arc<Mutex<Connection>>,
+    sql: String,
+    bind: Vec<Box<dyn rusqlite::ToSql + Send>>,
+) -> Result<Vec<MemoryEntry>> {
+    spawn_blocking(move || -> Result<Vec<MemoryEntry>> {
+        let conn = lock(&conn)?;
+        let mut stmt = conn.prepare(&sql).map_err(mem)?;
+        let params = rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref()));
+        let rows = stmt.query_map(params, row_to_entry).map_err(mem)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(mem)?);
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(mem)?
+}
+
+#[async_trait]
+impl SharedMemory for SqliteSharedMemory {
+    async fn init(&self) -> Result<()> {
+        let conn = self.conn.clone();
+        spawn_blocking(move || -> Result<()> {
+            let conn = lock(&conn)?;
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS entries (
+                    id          TEXT PRIMARY KEY,
+                    kind        TEXT NOT NULL,
+                    content     TEXT NOT NULL,
+                    tags        TEXT NOT NULL,
+                    project_id  TEXT,
+                    created_at  TEXT NOT NULL,
+                    updated_at  TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_entries_project ON entries(project_id);
+                CREATE INDEX IF NOT EXISTS idx_entries_kind ON entries(kind);",
+            )
+            .map_err(mem)?;
+            Ok(())
+        })
+        .await
+        .map_err(mem)?
+    }
+
+    async fn save(&self, entry: &MemoryEntry) -> Result<()> {
+        let conn = self.conn.clone();
+        let entry = entry.clone();
+        spawn_blocking(move || -> Result<()> {
+            let tags = serde_json::to_string(&entry.tags).map_err(mem)?;
+            let conn = lock(&conn)?;
+            conn.execute(
+                "INSERT INTO entries (id, kind, content, tags, project_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(id) DO UPDATE SET
+                    kind = ?2, content = ?3, tags = ?4, project_id = ?5, updated_at = ?7",
+                params![
+                    entry.id,
+                    entry.kind.as_str(),
+                    entry.content,
+                    tags,
+                    entry.project_id,
+                    entry.created_at,
+                    entry.updated_at,
+                ],
+            )
+            .map_err(mem)?;
+            Ok(())
+        })
+        .await
+        .map_err(mem)?
+    }
+
+    async fn load(&self, id: &str) -> Result<Option<MemoryEntry>> {
+        let conn = self.conn.clone();
+        let id = id.to_string();
+        spawn_blocking(move || -> Result<Option<MemoryEntry>> {
+            let conn = lock(&conn)?;
+            let mut stmt = conn
+                .prepare(&format!("SELECT {SELECT_COLUMNS} WHERE id = ?1"))
+                .map_err(mem)?;
+            let mut rows = stmt.query_map(params![id], row_to_entry).map_err(mem)?;
+            match rows.next() {
+                Some(row) => Ok(Some(row.map_err(mem)?)),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(mem)?
+    }
+
+    async fn delete(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.clone();
+        let id = id.to_string();
+        spawn_blocking(move || -> Result<bool> {
+            let conn = lock(&conn)?;
+            let affected = conn
+                .execute("DELETE FROM entries WHERE id = ?1", params![id])
+                .map_err(mem)?;
+            Ok(affected > 0)
+        })
+        .await
+        .map_err(mem)?
+    }
+
+    async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+        let like = format!("%{}%", query.to_lowercase());
+        query_entries(
+            self.conn.clone(),
+            format!(
+                "SELECT {SELECT_COLUMNS} WHERE lower(content) LIKE ?1 OR lower(tags) LIKE ?1 \
+                 OR kind LIKE ?1 ORDER BY updated_at DESC LIMIT ?2"
+            ),
+            vec![Box::new(like), Box::new(limit as i64)],
+        )
+        .await
+    }
+
+    async fn list(&self, offset: usize, limit: usize) -> Result<Vec<MemoryEntry>> {
+        query_entries(
+            self.conn.clone(),
+            format!("SELECT {SELECT_COLUMNS} ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2"),
+            vec![Box::new(limit as i64), Box::new(offset as i64)],
+        )
+        .await
+    }
+
+    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>> {
+        query_entries(
+            self.conn.clone(),
+            format!("SELECT {SELECT_COLUMNS} WHERE kind = ?1 ORDER BY updated_at DESC LIMIT ?2"),
+            vec![Box::new(kind.as_str().to_string()), Box::new(limit as i64)],
+        )
+        .await
+    }
+
+    async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+        // Tags are stored as a JSON array; match the quoted token to avoid prefix collisions.
+        let like = format!("%\"{tag}\"%");
+        query_entries(
+            self.conn.clone(),
+            format!("SELECT {SELECT_COLUMNS} WHERE tags LIKE ?1 ORDER BY updated_at DESC LIMIT ?2"),
+            vec![Box::new(like), Box::new(limit as i64)],
+        )
+        .await
+    }
+
+    async fn list_by_project(&self, project_id: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+        query_entries(
+            self.conn.clone(),
+            format!(
+                "SELECT {SELECT_COLUMNS} WHERE project_id = ?1 ORDER BY updated_at DESC LIMIT ?2"
+            ),
+            vec![Box::new(project_id.to_string()), Box::new(limit as i64)],
+        )
+        .await
+    }
+
+    async fn count(&self) -> Result<usize> {
+        let conn = self.conn.clone();
+        spawn_blocking(move || -> Result<usize> {
+            let conn = lock(&conn)?;
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+                .map_err(mem)?;
+            Ok(count as usize)
+        })
+        .await
+        .map_err(mem)?
+    }
+
+    async fn count_by_project(&self, project_id: &str) -> Result<usize> {
+        let conn = self.conn.clone();
+        let project_id = project_id.to_string();
+        spawn_blocking(move || -> Result<usize> {
+            let conn = lock(&conn)?;
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM entries WHERE project_id = ?1",
+                    params![project_id],
+                    |row| row.get(0),
+                )
+                .map_err(mem)?;
+            Ok(count as usize)
+        })
+        .await
+        .map_err(mem)?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn memory(dir: &TempDir) -> SqliteSharedMemory {
+        let db = dir.path().join("memory").join("shared.db");
+        let memory = SqliteSharedMemory::new(db).unwrap();
+        memory.init().await.unwrap();
+        memory
+    }
+
+    fn entry(kind: MemoryKind, content: &str, tags: &[&str], project: Option<&str>) -> MemoryEntry {
+        MemoryEntry::new(
+            kind,
+            content.into(),
+            tags.iter().map(|t| t.to_string()).collect(),
+            project.map(String::from),
+        )
+    }
+
+    #[tokio::test]
+    async fn save_load_and_delete() {
+        let dir = TempDir::new().unwrap();
+        let memory = memory(&dir).await;
+
+        let e = entry(
+            MemoryKind::Heuristic,
+            "fail fast on bad input",
+            &["rust"],
+            None,
+        );
+        memory.save(&e).await.unwrap();
+
+        let loaded = memory.load(&e.id).await.unwrap().unwrap();
+        assert_eq!(loaded.id, e.id);
+        assert_eq!(loaded.kind, MemoryKind::Heuristic);
+        assert!(loaded.tags.contains("rust"));
+
+        assert!(memory.delete(&e.id).await.unwrap());
+        assert!(memory.load(&e.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn search_and_scopes() {
+        let dir = TempDir::new().unwrap();
+        let memory = memory(&dir).await;
+
+        memory
+            .save(&entry(
+                MemoryKind::Pattern,
+                "Use newtypes for ids",
+                &["rust", "types"],
+                Some("proj-a"),
+            ))
+            .await
+            .unwrap();
+        memory
+            .save(&entry(
+                MemoryKind::Fact,
+                "python uses None",
+                &["python"],
+                None,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(memory.search("newtypes", 10).await.unwrap().len(), 1);
+        assert_eq!(memory.search("rust", 10).await.unwrap().len(), 1);
+        assert_eq!(
+            memory
+                .list_by_kind(MemoryKind::Fact, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(memory.list_by_tag("types", 10).await.unwrap().len(), 1);
+        assert_eq!(memory.list_by_project("proj-a", 10).await.unwrap().len(), 1);
+        assert_eq!(memory.count().await.unwrap(), 2);
+        assert_eq!(memory.count_by_project("proj-a").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn upsert_updates_in_place() {
+        let dir = TempDir::new().unwrap();
+        let memory = memory(&dir).await;
+
+        let mut e = entry(MemoryKind::Fact, "old", &[], None);
+        memory.save(&e).await.unwrap();
+        e.update_content("new".into());
+        memory.save(&e).await.unwrap();
+
+        assert_eq!(memory.count().await.unwrap(), 1);
+        assert_eq!(memory.load(&e.id).await.unwrap().unwrap().content, "new");
+    }
+
+    #[tokio::test]
+    async fn persists_across_reopen() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("memory").join("shared.db");
+        {
+            let memory = SqliteSharedMemory::new(db.clone()).unwrap();
+            memory.init().await.unwrap();
+            memory
+                .save(&entry(MemoryKind::Snippet, "boilerplate", &[], None))
+                .await
+                .unwrap();
+        }
+        let reopened = SqliteSharedMemory::new(db).unwrap();
+        reopened.init().await.unwrap();
+        assert_eq!(reopened.count().await.unwrap(), 1);
+    }
+}

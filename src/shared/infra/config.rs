@@ -350,6 +350,14 @@ pub struct Settings {
     /// Ask the model to stream reasoning via `chat_template_kwargs.thinking`. On by default; disable
     /// with `KIRI_THINKING=off` for a model that rejects or stalls on the kwarg.
     pub thinking: bool,
+    /// Whether the memory contexts (project + shared) and the docs/memory tools are wired. On by
+    /// default; disable with `KIRI_MEMORY=off`.
+    pub memory_enabled: bool,
+    /// The project's documentation root that `consult_docs` searches. Defaults to `<path>/docs`;
+    /// override with `KIRI_DOCS_PATH`.
+    pub docs_path: PathBuf,
+    /// The cross-project shared memory database. Defaults to `~/.kiri/memory/shared.db`.
+    pub shared_memory_db: PathBuf,
 }
 
 impl Settings {
@@ -363,6 +371,9 @@ impl Settings {
             .or_else(|| std::env::var_os("T_CLI_PATH").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("."));
         let (sandbox_enabled, require_confinement) = parse_sandbox_mode();
+        let docs_path = std::env::var_os("KIRI_DOCS_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.join("docs"));
         Ok(Self {
             base_url: BASE_URL.to_string(),
             api_key: required_env("NVIDIA_API_KEY")?,
@@ -383,6 +394,9 @@ impl Settings {
             connect_timeout: duration_env_ms("KIRI_HTTP_CONNECT_TIMEOUT_MS", HTTP_CONNECT_TIMEOUT),
             read_timeout: duration_env_ms("KIRI_HTTP_READ_TIMEOUT_MS", HTTP_READ_TIMEOUT),
             thinking: bool_env("KIRI_THINKING", true),
+            memory_enabled: bool_env("KIRI_MEMORY", true),
+            docs_path,
+            shared_memory_db: expand_home("~/.kiri/memory").join("shared.db"),
         })
     }
 }
