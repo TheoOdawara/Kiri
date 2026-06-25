@@ -29,7 +29,8 @@ pub fn read() -> ClipboardContent {
     }
 }
 
-/// Copy text to the OS clipboard, best-effort (errors are swallowed).
+/// Copy text to the OS clipboard, best-effort: clipboard access is device I/O that must never crash or
+/// block the TUI, and there is no recovery for a failed copy — so the error is deliberately ignored.
 pub fn copy_text(text: &str) {
     if let Ok(mut clipboard) = Clipboard::new() {
         let _ = clipboard.set_text(text.to_string());

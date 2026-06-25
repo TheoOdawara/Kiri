@@ -107,6 +107,9 @@ impl EventSink for Bridge {
 
 impl Presenter for Bridge {
     fn begin_turn(&mut self) {
+        // These synchronous ports return `()` and cannot propagate. `push` fails only when the
+        // runtime's receiver has been dropped — i.e. the app is already tearing down — so a dropped
+        // send here is benign by construction. The same holds for the ToolObserver sends below.
         let _ = self.push(EngineMsg::Began);
     }
 
@@ -117,6 +120,7 @@ impl Presenter for Bridge {
 
 impl ToolObserver for Bridge {
     fn tool_started(&mut self, call: &ToolCall, command: &str) {
+        // Best-effort; a dropped send means the runtime is gone (see `begin_turn`).
         let _ = self.push(EngineMsg::ToolStarted {
             command: command.to_string(),
             diff: edit_diff(call),
@@ -125,6 +129,7 @@ impl ToolObserver for Bridge {
 
     fn tool_finished(&mut self, _call: &ToolCall, outcome: &ToolOutcome, elapsed: Duration) {
         let (status, output) = display_outcome(outcome);
+        // Best-effort; a dropped send means the runtime is gone (see `begin_turn`).
         let _ = self.push(EngineMsg::ToolFinished {
             status,
             output,

@@ -30,6 +30,8 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    /// Whether to send `chat_template_kwargs.thinking`; off for a model that rejects/stalls on it.
+    thinking: bool,
 }
 
 impl OpenAiProvider {
@@ -37,11 +39,13 @@ impl OpenAiProvider {
         client: reqwest::Client,
         base_url: impl Into<String>,
         api_key: impl Into<String>,
+        thinking: bool,
     ) -> Self {
         Self {
             client,
             base_url: base_url.into(),
             api_key: api_key.into(),
+            thinking,
         }
     }
 }
@@ -57,7 +61,9 @@ impl CompletionProvider for OpenAiProvider {
             model: request.model,
             messages: request.messages.iter().map(MessageDto::from).collect(),
             stream: true,
-            chat_template_kwargs: Some(ChatTemplateKwargs { thinking: true }),
+            chat_template_kwargs: self
+                .thinking
+                .then_some(ChatTemplateKwargs { thinking: true }),
             tools: request.tools,
         };
 
@@ -105,7 +111,14 @@ impl CompletionProvider for OpenAiProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_ERROR_BODY_CHARS, truncate_body};
+    use super::{MAX_ERROR_BODY_CHARS, OpenAiProvider, truncate_body};
+    use crate::modules::agent::domain::message::Message;
+    use crate::modules::agent::domain::stream_event::StreamEvent;
+    use crate::modules::provider::application::completion_provider::{
+        CompletionProvider, EventSink, TurnRequest,
+    };
+    use crate::shared::kernel::error::AgentError;
+    use std::time::Duration;
 
     #[test]
     fn truncate_body_keeps_short_bodies_verbatim() {
@@ -118,5 +131,56 @@ mod tests {
         let out = truncate_body("x".repeat(5_000));
         assert!(out.ends_with("… (truncated)"));
         assert!(out.chars().count() <= MAX_ERROR_BODY_CHARS + 16);
+    }
+
+    struct NullSink;
+    impl EventSink for NullSink {
+        fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
+            Ok(())
+        }
+    }
+
+    /// Run-to-verify of the timeout fix: a local listener that ACCEPTS the connection but never sends a
+    /// byte models a provider that hangs after connect — the reported "first message does nothing, no
+    /// error". `read_timeout` must make `complete()` fail fast instead of hanging forever. Hermetic
+    /// (loopback only), bounded well under the outer guard.
+    #[tokio::test]
+    async fn complete_fails_fast_when_the_provider_accepts_but_never_responds() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Hold every accepted connection open without ever responding.
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .read_timeout(Duration::from_millis(300))
+            .build()
+            .unwrap();
+        let provider = OpenAiProvider::new(client, format!("http://{addr}/v1"), "k", false);
+
+        let messages = vec![Message::user("hi")];
+        let request = TurnRequest {
+            messages: &messages,
+            model: "m",
+            tools: &[],
+        };
+        let mut sink = NullSink;
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.complete(request, &mut sink),
+        )
+        .await;
+        match outcome {
+            Err(_) => panic!("provider hung past 5s — the read timeout regressed"),
+            Ok(Ok(_)) => panic!("expected an error from a non-responding provider, got a turn"),
+            Ok(Err(_)) => {}
+        }
     }
 }

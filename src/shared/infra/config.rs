@@ -112,6 +112,16 @@ const TOOL_CHECKPOINT: Duration = Duration::from_secs(30 * 60);
 /// between check-ins, even when each call is fast enough that the time budget never trips.
 const MAX_TOOL_CALLS_PER_CHECKPOINT: usize = 100;
 
+/// HTTP client timeouts for the provider. `connect` caps establishing the TCP/TLS connection; `read`
+/// caps idle time waiting for the next chunk (response headers or an SSE chunk) — streaming-safe, since
+/// it resets on each received chunk, so a legitimately long but active stream is never killed. A hung
+/// provider thus fails fast with a clear error instead of hanging forever (the cause of "first message
+/// does nothing, no error"). `read` is generous (5 min) because it also bounds the wait for the FIRST
+/// chunk: a reasoning model can take a while to emit its first token. Override via
+/// `KIRI_HTTP_CONNECT_TIMEOUT_MS` / `KIRI_HTTP_READ_TIMEOUT_MS`.
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Patterns blocked in plan mode — commands that mutate the project or escalate privilege.
 /// The shell can bypass these (eval, base64, ANSI-C quoting), so this is best-effort; the
 /// real fix is OS-level sandboxing (tracked as security-debt in ADR 0002). Override via
@@ -197,6 +207,33 @@ fn parse_sandbox_network() -> NetworkPolicy {
         Some("allow") => NetworkPolicy::Allow,
         _ => NetworkPolicy::Deny,
     }
+}
+
+/// Parse a millisecond duration from raw env text, falling back to `default` when absent, unparseable,
+/// or zero. Pure (no env read) so the parsing is unit-testable.
+fn parse_duration_ms(raw: Option<&str>, default: Duration) -> Duration {
+    match raw.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(ms) if ms > 0 => Duration::from_millis(ms),
+        _ => default,
+    }
+}
+
+fn duration_env_ms(key: &str, default: Duration) -> Duration {
+    parse_duration_ms(std::env::var(key).ok().as_deref(), default)
+}
+
+/// Parse a boolean from raw env text (`1/true/on/yes` vs `0/false/off/no`, case-insensitive), falling
+/// back to `default`. Pure (no env read) so the parsing is unit-testable.
+fn parse_bool(raw: Option<&str>, default: bool) -> bool {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("0" | "false" | "off" | "no") => false,
+        Some("1" | "true" | "on" | "yes") => true,
+        _ => default,
+    }
+}
+
+fn bool_env(key: &str, default: bool) -> bool {
+    parse_bool(std::env::var(key).ok().as_deref(), default)
 }
 
 /// Load the network allow-list from `KIRI_SANDBOX_NET_ALLOW_CMDS` (newline-separated regexes, `#`
@@ -298,6 +335,14 @@ pub struct Settings {
     /// Extra paths a confined command may read / write beyond the workspace (toolchain dirs, config).
     pub extra_ro: Arc<[PathBuf]>,
     pub extra_rw: Arc<[PathBuf]>,
+    /// HTTP client timeouts for the provider: `connect_timeout` caps connection setup, `read_timeout`
+    /// caps idle time between received bytes (streaming-safe). Bound a hung provider so a turn fails
+    /// fast with a clear error instead of hanging silently.
+    pub connect_timeout: Duration,
+    pub read_timeout: Duration,
+    /// Ask the model to stream reasoning via `chat_template_kwargs.thinking`. On by default; disable
+    /// with `KIRI_THINKING=off` for a model that rejects or stalls on the kwarg.
+    pub thinking: bool,
 }
 
 impl Settings {
@@ -328,6 +373,9 @@ impl Settings {
             net_allow: load_net_allow()?,
             extra_ro: load_extra_paths("KIRI_SANDBOX_RO_PATHS", &[]),
             extra_rw: load_extra_paths("KIRI_SANDBOX_RW_PATHS", DEFAULT_RW_DIRS),
+            connect_timeout: duration_env_ms("KIRI_HTTP_CONNECT_TIMEOUT_MS", HTTP_CONNECT_TIMEOUT),
+            read_timeout: duration_env_ms("KIRI_HTTP_READ_TIMEOUT_MS", HTTP_READ_TIMEOUT),
+            thinking: bool_env("KIRI_THINKING", true),
         })
     }
 }
@@ -349,7 +397,8 @@ fn ensure_nonempty(key: &str, value: String) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_nonempty;
+    use super::{ensure_nonempty, parse_bool, parse_duration_ms};
+    use std::time::Duration;
 
     #[test]
     fn ensure_nonempty_rejects_blank_values() {
@@ -359,5 +408,34 @@ mod tests {
             ensure_nonempty("NVIDIA_MODEL", "model-x".to_string()).unwrap(),
             "model-x"
         );
+    }
+
+    #[test]
+    fn parse_duration_ms_uses_default_when_absent_invalid_or_zero() {
+        let default = Duration::from_secs(15);
+        assert_eq!(parse_duration_ms(None, default), default);
+        assert_eq!(parse_duration_ms(Some("not-a-number"), default), default);
+        assert_eq!(parse_duration_ms(Some("0"), default), default);
+        assert_eq!(parse_duration_ms(Some("  "), default), default);
+    }
+
+    #[test]
+    fn parse_duration_ms_reads_a_positive_value() {
+        assert_eq!(
+            parse_duration_ms(Some("  2500 "), Duration::from_secs(15)),
+            Duration::from_millis(2500)
+        );
+    }
+
+    #[test]
+    fn parse_bool_reads_truthy_and_falsy_and_falls_back() {
+        for truthy in ["1", "true", "on", "yes", " TRUE "] {
+            assert!(parse_bool(Some(truthy), false), "{truthy} should be true");
+        }
+        for falsy in ["0", "false", "off", "no", " Off "] {
+            assert!(!parse_bool(Some(falsy), true), "{falsy} should be false");
+        }
+        assert!(parse_bool(None, true), "absent falls back to default");
+        assert!(!parse_bool(Some("garbage"), false), "unknown falls back");
     }
 }

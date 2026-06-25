@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::modules::agent::application::agent_loop::AgentLoop;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
@@ -29,10 +29,19 @@ pub fn wire(settings: Settings) -> Result<Tui> {
         settings.extra_ro.clone(),
         settings.extra_rw.clone(),
     )?;
+    // A timed client: a hung provider must fail fast with a clear error, never hang the turn forever.
+    // `read_timeout` caps idle time between received bytes, so it bounds a stalled stream without
+    // killing a long but active one.
+    let client = reqwest::Client::builder()
+        .connect_timeout(settings.connect_timeout)
+        .read_timeout(settings.read_timeout)
+        .build()
+        .context("failed to build the HTTP client")?;
     let provider: Arc<dyn CompletionProvider> = Arc::new(OpenAiProvider::new(
-        reqwest::Client::new(),
+        client,
         settings.base_url,
         settings.api_key,
+        settings.thinking,
     ));
     let registry = ToolRegistry::new(default_fs_tools(
         settings.plan_blacklist.clone(),

@@ -68,7 +68,9 @@ pub async fn run_argv(
     confiner: &dyn CommandSandbox,
     policy: &SandboxPolicy,
 ) -> Result<ExecResult, ExecError> {
-    let (program, rest) = argv.split_first().expect("argv must not be empty");
+    let (program, rest) = argv
+        .split_first()
+        .ok_or_else(|| ExecError::Spawn("argv must not be empty".to_string()))?;
     let mut cmd = Command::new(program);
     cmd.args(rest);
     if let Some(dir) = cwd {
@@ -153,20 +155,32 @@ async fn run(
             .map_err(|error| ExecError::Spawn(error.to_string()))?;
         let sink = child.stdin.take();
         let writer = async move {
-            // Write the payload, then drop `sink` to close the pipe so the child reads EOF and finishes.
-            if let Some(mut sink) = sink
-                && let Some(bytes) = stdin
-            {
-                let _ = sink.write_all(bytes).await;
+            // Write the payload, then drop `sink` (at scope end) to close the pipe so the child reads
+            // EOF and finishes. The write result is returned, not swallowed: a partial stdin write means
+            // the payload (e.g. a file's content) did not fully reach the child.
+            match (sink, stdin) {
+                (Some(mut sink), Some(bytes)) => sink.write_all(bytes).await,
+                _ => Ok(()),
             }
         };
-        let (_, output) = tokio::join!(writer, child.wait_with_output());
+        let (write_result, output) = tokio::join!(writer, child.wait_with_output());
         let output = output.map_err(|error| ExecError::Spawn(error.to_string()))?;
-        Ok(ExecResult {
+        let result = ExecResult {
             stdout: output.stdout,
             stderr: output.stderr,
             exit_code: output.status.code(),
-        })
+        };
+        // Surface a failed stdin write only when the child otherwise reported success — a truncated
+        // write that the child silently accepted (a wrong file) must fail loudly; a child that itself
+        // failed keeps its own (more useful) stderr/exit code instead.
+        if result.succeeded()
+            && let Err(error) = write_result
+        {
+            return Err(ExecError::Spawn(format!(
+                "failed to write command input: {error}"
+            )));
+        }
+        Ok(result)
     };
 
     match tokio::time::timeout(timeout, fut).await {
@@ -285,6 +299,27 @@ mod tests {
         .await
         .err()
         .expect("missing binary fails to spawn");
+        assert!(matches!(error, ExecError::Spawn(_)));
+    }
+
+    #[tokio::test]
+    async fn run_argv_surfaces_a_failed_stdin_write() {
+        // A child that reads nothing and exits 0 closes the read end of the pipe; writing a payload
+        // larger than the pipe buffer then fails with EPIPE. That must surface as an error — a silently
+        // truncated stdin write (e.g. a partial file write) is a defect, not a success.
+        let big = vec![b'x'; 1 << 20]; // 1 MiB, well over the OS pipe buffer
+        let error = run_argv(
+            &[OsStr::new("sh"), OsStr::new("-c"), OsStr::new("exit 0")],
+            None,
+            Some(&big),
+            &[],
+            DEFAULT_TIMEOUT,
+            &NoConfinement,
+            &policy(),
+        )
+        .await
+        .err()
+        .expect("a failed stdin write must surface, not be swallowed");
         assert!(matches!(error, ExecError::Spawn(_)));
     }
 }

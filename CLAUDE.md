@@ -59,6 +59,27 @@ environment, both required — `NVIDIA_MODEL` and `NVIDIA_API_KEY` (loaded from 
 is **never** a CLI flag. The bearer header is always sent. See `docs/ollama.ps1` for the raw
 OpenAI-compatible protocol shape.
 
+## Error handling (production-ready, mandatory)
+
+Robust error handling is non-negotiable on every surface — it is what keeps development fluid (a failure
+that is surfaced is a failure you can fix; a swallowed one costs hours).
+
+- **Nothing is swallowed.** Every fallible `Result`/`Option` is either **propagated** as a typed
+  `AgentError` (`anyhow` only at the binary edge), **surfaced** to the user (a transcript `Notice`), or
+  **deliberately ignored with a one-line comment justifying why it is safe**. A bare `let _ = <fallible>`
+  (or `.ok()` / `.unwrap_or_default()` that hides a real failure) without that justification is a defect.
+- **All I/O has a timeout.** Provider HTTP (`connect_timeout` + `read_timeout`), process exec (the
+  kill-on-drop bound in `exec::run`), and any blocking await. A hung dependency must fail fast with a
+  clear error — never hang silently. (Regression that motivated this: the provider client had no timeout,
+  so the first message hung forever with no error.)
+- **No silent no-ops on user intent.** An action that cannot run (busy, gated, invalid) gives visible
+  feedback, never nothing.
+- **No `unwrap`/`expect`/`panic!` on any runtime-reachable path** outside `#[cfg(test)]`; model the
+  failure as `AgentError`.
+- **Lifecycle state always resets.** Per-turn flags (e.g. `busy`) are reset on every exit path, including
+  errors — a render/draw failure must not strand the UI.
+- **Error paths are tested like behavior** — a feature's test contract includes its failure modes.
+
 ## Branches
 
 - Protected: **`main`** — never commit directly. No remote yet.

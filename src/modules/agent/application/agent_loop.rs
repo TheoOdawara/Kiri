@@ -93,6 +93,8 @@ impl AgentLoop {
                 .await;
             // Finish rendering (erase the spinner, reset the terminal) before `?` can propagate a
             // provider error: the cleanup must run on the failure path too, so its Result is dropped.
+            // A failed finish send means the runtime's receiver is gone (the app is tearing down) —
+            // benign, and nothing useful could be done with the error here.
             let _ = io.finish_turn();
             let turn = result?;
 
@@ -945,6 +947,81 @@ mod tests {
         assert_eq!(
             tool_results, 1,
             "the call cap must pause the turn before the second tool round"
+        );
+    }
+
+    /// The production seam the other tests skip: drive a turn through the REAL `Bridge` adapter (not the
+    /// scripted IO double) and assert the engine emits `Began` first — the message that flips the
+    /// spinner / streaming on. A regression here is exactly "first message does nothing, no spinner".
+    #[tokio::test]
+    async fn run_through_the_real_bridge_emits_began_first_then_content() {
+        use crate::modules::agent::domain::stream_event::StreamEvent;
+        use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
+        use tokio::sync::mpsc;
+
+        // A provider that streams one content delta through the sink, then finishes (no tools).
+        struct EmittingProvider;
+        #[async_trait::async_trait(?Send)]
+        impl CompletionProvider for EmittingProvider {
+            async fn complete(
+                &self,
+                _request: TurnRequest<'_>,
+                sink: &mut dyn EventSink,
+            ) -> Result<CompletedTurn, AgentError> {
+                sink.on_event(StreamEvent::Content("hi".to_string()))?;
+                Ok(CompletedTurn {
+                    content: "hi".to_string(),
+                    tool_calls: vec![],
+                })
+            }
+        }
+
+        let dir = TempDir::new("bridge-seam");
+        let sandbox = Sandbox::new(&dir.path, SensitiveMatcher::empty()).unwrap();
+        let agent_loop = AgentLoop::new(
+            Arc::new(EmittingProvider),
+            ToolRegistry::new(default_fs_tools(
+                Arc::from(Vec::<Regex>::new()),
+                Arc::from(Vec::<Regex>::new()),
+                false,
+            )),
+            "model".to_string(),
+            Duration::from_secs(3600),
+            1000,
+        );
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("hi"));
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<EngineMsg>();
+        let mut bridge = Bridge::new(tx, CancelToken::new());
+
+        let outcome = agent_loop
+            .run(
+                &mut conversation,
+                &sandbox,
+                ApprovalMode::Default,
+                &mut bridge,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, TurnOutcome::Completed);
+
+        let mut msgs = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            msgs.push(m);
+        }
+        assert!(
+            matches!(msgs.first(), Some(EngineMsg::Began)),
+            "the first engine message must be Began (the spinner / streaming trigger)"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, EngineMsg::Content(t) if t == "hi")),
+            "the streamed content delta must be forwarded to the runtime"
+        );
+        assert!(
+            msgs.iter().any(|m| matches!(m, EngineMsg::Finished)),
+            "the turn must signal Finished"
         );
     }
 }

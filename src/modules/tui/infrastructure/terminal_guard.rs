@@ -8,6 +8,8 @@ pub struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        // In `Drop` there is nowhere to propagate an error and no recovery on the exit path; restoring
+        // the terminal is inherently best-effort, so the Result is deliberately ignored.
         let _ = crossterm::execute!(
             std::io::stdout(),
             DisableBracketedPaste,

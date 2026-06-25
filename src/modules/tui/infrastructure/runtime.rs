@@ -80,6 +80,8 @@ impl Tui {
 
         let mut terminal = ratatui::init();
         let _guard = TerminalGuard;
+        // Best-effort: bracketed paste / mouse capture are nice-to-have enhancements; a terminal that
+        // rejects them still runs fully. The TerminalGuard disables them symmetrically on exit.
         let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture);
 
         // The editor widget owns its own styling; paint it with the brand theme once at startup.
@@ -241,6 +243,8 @@ impl Tui {
 /// Read the OS clipboard and route it into the buffer: an image becomes a staged attachment, text is
 /// inserted at the cursor. Best-effort — an empty or unreadable clipboard is a no-op.
 fn paste_from_clipboard(model: &mut Model) {
+    // `update` for these messages produces no effects (they only mutate the model), so the returned
+    // Vec is intentionally discarded — there is nothing for the runtime to perform.
     match clipboard::read() {
         ClipboardContent::Image(attachment) => {
             let _ = update(model, Msg::ImageAttached(attachment));
@@ -304,6 +308,9 @@ async fn drive_turn(
                         match effect {
                             Effect::AnswerApproval(decision) => {
                                 if let Some(reply) = pending_reply.take() {
+                                    // Best-effort: the engine awaits this reply, but if the turn future
+                                    // was already dropped (cancel/quit) the receiver is gone — a failed
+                                    // send is then expected and harmless.
                                     let _ = reply.send(decision);
                                 }
                             }
@@ -332,14 +339,21 @@ async fn drive_turn(
             // Draw after applying the step, so the frame reflects the latest model state (no one-frame
             // lag between a streaming delta and the thinking line / transcript).
             model.status.elapsed_secs = started.elapsed().as_secs();
-            terminal.draw(|frame| view(model, frame))?;
+            // A draw failure must NOT `?`-propagate out of this loop: that would skip `on_turn_end` and
+            // leave `model.busy` stuck true, silently deadening every future submit. End the turn with
+            // the error instead, so cleanup always runs; a persistent terminal fault then exits the app
+            // via the main loop's own draw.
+            if let Err(error) = terminal.draw(|frame| view(model, frame)) {
+                break Err(AgentError::Io(error));
+            }
             if let Some(outcome) = done {
                 break outcome;
             }
         }
     };
 
-    // Drain any deltas/notices buffered when the turn future resolved, so nothing is lost.
+    // Drain any deltas/notices buffered when the turn future resolved, so nothing is lost. These
+    // messages only mutate the model (no effects), so the returned Vec is intentionally discarded.
     while let Ok(engine) = engine_rx.try_recv() {
         let _ = update(model, engine_msg(engine, pending_reply));
     }
@@ -413,5 +427,7 @@ fn on_turn_end(
             }
         }
     }
+    // `TurnEnded` only resets per-turn model state (no effects); the returned Vec is intentionally
+    // discarded.
     let _ = update(model, Msg::TurnEnded);
 }
