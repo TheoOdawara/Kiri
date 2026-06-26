@@ -48,6 +48,69 @@ impl SqliteSharedMemory {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
+
+    /// Persist (or replace) the embedding vector for an entry. Stored as little-endian f32 bytes.
+    pub async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> Result<()> {
+        let conn = self.conn.clone();
+        let entry_id = entry_id.to_string();
+        let model = model.to_string();
+        let dim = vector.len() as i64;
+        let blob = vec_to_blob(vector);
+        run_blocking(move || -> Result<()> {
+            let conn = lock(&conn)?;
+            conn.execute(
+                "INSERT INTO entry_embeddings (entry_id, model, dim, vector)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(entry_id) DO UPDATE SET model = ?2, dim = ?3, vector = ?4",
+                params![entry_id, model, dim, blob],
+            )
+            .map_err(mem)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// The most recently updated entries that carry an embedding, paired with their vector. Backs the
+    /// semantic recall's candidate set (ranked by cosine in the application layer).
+    pub async fn embedded_candidates(&self, limit: usize) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+        let conn = self.conn.clone();
+        run_blocking(move || -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+            let conn = lock(&conn)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT e.id, e.kind, e.content, e.tags, e.project_id, e.created_at, \
+                     e.updated_at, emb.vector \
+                     FROM entries e JOIN entry_embeddings emb ON emb.entry_id = e.id \
+                     ORDER BY e.updated_at DESC LIMIT ?1",
+                )
+                .map_err(mem)?;
+            let rows = stmt
+                .query_map(params![limit as i64], |row| {
+                    let entry = row_to_entry(row)?;
+                    let blob: Vec<u8> = row.get("vector")?;
+                    Ok((entry, blob_to_vec(&blob)))
+                })
+                .map_err(mem)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(mem)?);
+            }
+            Ok(out)
+        })
+        .await
+    }
+}
+
+/// Encode an f32 vector as little-endian bytes for BLOB storage.
+fn vec_to_blob(vector: &[f32]) -> Vec<u8> {
+    vector.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// Decode a little-endian f32 BLOB. A trailing partial chunk (corrupt row) is ignored defensively.
+fn blob_to_vec(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 fn lock(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
@@ -127,7 +190,13 @@ impl SharedMemory for SqliteSharedMemory {
                     updated_at  TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_entries_project ON entries(project_id);
-                CREATE INDEX IF NOT EXISTS idx_entries_kind ON entries(kind);",
+                CREATE INDEX IF NOT EXISTS idx_entries_kind ON entries(kind);
+                CREATE TABLE IF NOT EXISTS entry_embeddings (
+                    entry_id TEXT PRIMARY KEY,
+                    model    TEXT NOT NULL,
+                    dim      INTEGER NOT NULL,
+                    vector   BLOB NOT NULL
+                );",
             )
             .map_err(mem)?;
             Ok(())

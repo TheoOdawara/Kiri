@@ -16,8 +16,11 @@ use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMe
 use crate::modules::memory::infrastructure::sqlite_shared_store::SqliteSharedStore;
 use crate::modules::memory::infrastructure::tools::default_memory_tools;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
+use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
 use crate::modules::provider::application::secret_store::SecretStore;
-use crate::modules::provider::infrastructure::factory::{api_key_from_env, build_provider};
+use crate::modules::provider::infrastructure::factory::{
+    api_key_from_env, build_embedding_provider, build_provider,
+};
 use crate::modules::provider::infrastructure::secrets::default_secret_store;
 use crate::modules::provider::infrastructure::unconfigured::UnconfiguredProvider;
 use crate::modules::session::application::session_store::SessionStore;
@@ -45,8 +48,19 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     if !std::io::stdout().is_terminal() {
         bail!("Kiri requires an interactive terminal (stdout is not a TTY)");
     }
-    // Memory & docs first: a degraded store (init failure) is surfaced and left inert, never fatal.
-    let (memory_tools, memory_digest, memory) = build_memory(&settings).await?;
+    // A timed HTTP client, built up front so both the chat provider and the (optional) embeddings adapter
+    // share it. `read_timeout` bounds a stalled stream without killing a long but active one.
+    let client = reqwest::Client::builder()
+        .connect_timeout(settings.connect_timeout)
+        .read_timeout(settings.read_timeout)
+        .build()
+        .context("failed to build the HTTP client")?;
+    let secrets = default_secret_store(settings.credentials_file.clone());
+    // Optional embeddings adapter for semantic recall; None (and a stderr note) on any misconfiguration,
+    // so recall degrades to keyword rather than failing the boot.
+    let embedder = build_embedder(&settings, &client, secrets.as_ref());
+    // Memory & docs: a degraded store (init failure) is surfaced and left inert, never fatal.
+    let (memory_tools, memory_digest, memory) = build_memory(&settings, embedder).await?;
     // Session persistence shares the same degrade-never-abort contract as memory.
     let project_id = project_id_from_path(&settings.path);
     let session_store = build_session(&settings).await?;
@@ -59,17 +73,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         settings.extra_ro.clone(),
         settings.extra_rw.clone(),
     )?;
-    // A timed client: a hung provider must fail fast with a clear error, never hang the turn forever.
-    // `read_timeout` caps idle time between received bytes, so it bounds a stalled stream without
-    // killing a long but active one.
-    let client = reqwest::Client::builder()
-        .connect_timeout(settings.connect_timeout)
-        .read_timeout(settings.read_timeout)
-        .build()
-        .context("failed to build the HTTP client")?;
     // Resolve the active provider profile and its credential (OS keyring, or a 0600 fallback file),
     // then select the adapter. This is the one place adapters are chosen.
-    let secrets = default_secret_store(settings.credentials_file.clone());
     let profile = settings.active_profile()?.clone();
     let credential = resolve_credential(&profile, secrets.as_ref())?;
     // Pick the initial adapter without ever aborting the boot: with a usable credential AND a non-blank
@@ -149,6 +154,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
 /// memory is disabled (`KIRI_MEMORY=off`).
 async fn build_memory(
     settings: &Settings,
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
 ) -> Result<(Vec<Box<dyn Tool>>, String, Arc<dyn MemoryPort>)> {
     if !settings.memory_enabled {
         return Ok((Vec::new(), String::new(), inert_memory_port(settings)?));
@@ -201,10 +207,14 @@ async fn build_memory(
         Vec::new()
     };
 
-    let memory: Arc<dyn MemoryPort> = Arc::new(MemoryPortImpl::new(
+    let port = MemoryPortImpl::new(
         FileProjectStore::new(project_memory, project_ok),
         SqliteSharedStore::new(shared_memory, shared_ok),
-    ));
+    );
+    let memory: Arc<dyn MemoryPort> = match embedder {
+        Some(embedder) => Arc::new(port.with_embedder(embedder)),
+        None => Arc::new(port),
+    };
     let docs = Arc::new(DocsLibrary::new(settings.docs_path.clone()));
 
     // Clone the port out before it is moved into the tools: the runtime also needs it to drive the
@@ -212,6 +222,46 @@ async fn build_memory(
     let tools = default_memory_tools(memory.clone(), docs, project_id);
     let digest = render_digest(&project_entries, &shared_entries);
     Ok((tools, digest, memory))
+}
+
+/// Build the embeddings adapter from the `[embeddings]` config: it names an existing provider id whose
+/// endpoint + credential to reuse, plus the model. Returns `None` (with a stderr note) on any
+/// misconfiguration — an unknown provider, a missing credential, or an embeddings-less provider — so
+/// semantic recall degrades to keyword rather than failing the boot.
+fn build_embedder(
+    settings: &Settings,
+    client: &reqwest::Client,
+    secrets: &dyn SecretStore,
+) -> Option<Arc<dyn EmbeddingProvider>> {
+    let config = settings.embeddings.as_ref()?;
+    let Some(profile) = settings
+        .providers
+        .iter()
+        .find(|p| p.id == config.provider_id)
+    else {
+        eprintln!(
+            "kiri: embeddings provider '{}' is not in the catalog; semantic recall disabled",
+            config.provider_id
+        );
+        return None;
+    };
+    let credential = match resolve_credential(profile, secrets) {
+        Ok(Some(credential)) => credential,
+        _ => {
+            eprintln!(
+                "kiri: no credential for embeddings provider '{}'; semantic recall disabled",
+                config.provider_id
+            );
+            return None;
+        }
+    };
+    match build_embedding_provider(client.clone(), profile, credential, config.model.clone()) {
+        Ok(embedder) => Some(embedder),
+        Err(error) => {
+            eprintln!("kiri: embeddings disabled ({error}); semantic recall falls back to keyword");
+            None
+        }
+    }
 }
 
 /// Build an inert memory port (both scopes unavailable) for the memory-disabled boot, so the runtime can

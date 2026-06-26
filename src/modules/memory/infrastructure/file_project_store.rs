@@ -40,6 +40,14 @@ impl ProjectStore for FileProjectStore {
         self.inner.list_by_tag(tag, limit).await
     }
 
+    async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> Result<()> {
+        self.inner.save_embedding(entry_id, model, vector).await
+    }
+
+    async fn embedded_candidates(&self, limit: usize) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+        self.inner.embedded_candidates(limit).await
+    }
+
     fn is_available(&self) -> bool {
         self.available
     }

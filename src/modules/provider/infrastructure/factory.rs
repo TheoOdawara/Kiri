@@ -6,8 +6,10 @@
 use std::sync::Arc;
 
 use super::anthropic::provider::AnthropicProvider;
+use super::openai::embeddings::OpenAiEmbeddingProvider;
 use super::openai::provider::OpenAiProvider;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
+use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::{
     AuthMethod, Credential, Effort, ProviderKind, ProviderProfile, Secret,
@@ -62,6 +64,35 @@ pub fn build_provider(
             )))
         }
     }
+}
+
+/// Build the embeddings adapter for `profile` + `credential` + `model`. Only the OpenAI-compatible
+/// endpoint exposes embeddings; an Anthropic profile fails fast so the caller degrades to keyword recall
+/// rather than issuing a request that endpoint cannot serve.
+pub fn build_embedding_provider(
+    client: reqwest::Client,
+    profile: &ProviderProfile,
+    credential: Credential,
+    model: String,
+) -> Result<Arc<dyn EmbeddingProvider>, AgentError> {
+    if model.trim().is_empty() {
+        return Err(AgentError::Provider(
+            "embeddings model is empty; set [embeddings].model in ~/.kiri/config.toml".to_string(),
+        ));
+    }
+    if profile.kind == ProviderKind::Anthropic {
+        return Err(AgentError::Provider(format!(
+            "provider '{}' (Anthropic) exposes no embeddings endpoint; point [embeddings].provider at an OpenAI-compatible provider",
+            profile.id
+        )));
+    }
+    let key = api_key_of(credential, profile)?;
+    Ok(Arc::new(OpenAiEmbeddingProvider::new(
+        client,
+        profile.base_url.clone(),
+        key.expose().to_string(),
+        model,
+    )))
 }
 
 /// The legacy/CI env var an API-key provider can be primed from, by vendor plus a generic per-id form.

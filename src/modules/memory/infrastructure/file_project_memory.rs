@@ -41,6 +41,14 @@ struct IndexEntry {
     updated_at: String,
 }
 
+/// A stored embedding in the sidecar (`embeddings.json`), keyed by entry id. Kept out of `index.json`
+/// so the human-readable index stays small; the sidecar is a derived cache (re-derivable from content).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredEmbedding {
+    model: String,
+    vector: Vec<f32>,
+}
+
 impl FileProjectMemory {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -70,8 +78,69 @@ impl FileProjectMemory {
         Ok(())
     }
 
+    fn embeddings_path(&self) -> PathBuf {
+        self.root.join("embeddings.json")
+    }
+
+    async fn load_embeddings(&self) -> Result<HashMap<String, StoredEmbedding>> {
+        let path = self.embeddings_path();
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+        let content = fs::read_to_string(&path).await?;
+        serde_json::from_str(&content).map_err(mem)
+    }
+
+    /// Persist (or replace) the embedding vector for an entry in the sidecar cache.
+    pub async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> Result<()> {
+        let mut sidecar = self.load_embeddings().await?;
+        sidecar.insert(
+            entry_id.to_string(),
+            StoredEmbedding {
+                model: model.to_string(),
+                vector: vector.to_vec(),
+            },
+        );
+        let content = serde_json::to_string(&sidecar).map_err(mem)?;
+        fs::write(self.embeddings_path(), content).await?;
+        Ok(())
+    }
+
+    /// The most recently updated entries that carry an embedding, paired with their vector. Reads file
+    /// bodies only for the (bounded) candidates, ranked by the in-memory index's `updated_at`.
+    pub async fn embedded_candidates(&self, limit: usize) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+        let sidecar = self.load_embeddings().await?;
+        if sidecar.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut ids: Vec<(String, String)> = {
+            let index = self.index.read().await;
+            sidecar
+                .keys()
+                .filter_map(|id| {
+                    index
+                        .entries
+                        .get(id)
+                        .map(|e| (id.clone(), e.updated_at.clone()))
+                })
+                .collect()
+        };
+        ids.sort_by(|a, b| b.1.cmp(&a.1));
+        ids.truncate(limit);
+        let mut out = Vec::new();
+        for (id, _) in ids {
+            if let (Some(entry), Some(embedding)) = (self.load(&id).await?, sidecar.get(&id)) {
+                out.push((entry, embedding.vector.clone()));
+            }
+        }
+        Ok(out)
+    }
+
     fn entry_path(&self, kind: MemoryKind, id: &str) -> PathBuf {
-        let filename = format!("{}-{}.md", kind.as_str(), &id[..8.min(id.len())]);
+        // Use the full id: a UUID v7 prefix is a millisecond timestamp, so two entries of the same kind
+        // saved in the same millisecond share their leading chars — a truncated name would collide and
+        // one would silently overwrite the other (data loss).
+        let filename = format!("{}-{}.md", kind.as_str(), id);
         match kind {
             MemoryKind::Decision => self.root.join("decisions").join(filename),
             _ => self.root.join(filename),

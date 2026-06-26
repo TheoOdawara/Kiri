@@ -22,6 +22,18 @@ pub trait ProjectStore: Send + Sync {
     #[allow(dead_code)]
     async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
 
+    /// Persist the embedding vector for an entry (for semantic recall). Default no-op so a store without
+    /// embedding support — and the test doubles — need not implement it.
+    async fn save_embedding(&self, _entry_id: &str, _model: &str, _vector: &[f32]) -> Result<()> {
+        Ok(())
+    }
+
+    /// Entries that carry a stored embedding, paired with their vector, up to `limit`. Default empty so a
+    /// non-embedding store transparently falls back to keyword recall.
+    async fn embedded_candidates(&self, _limit: usize) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+        Ok(Vec::new())
+    }
+
     /// Whether the store is available (initialized, reachable).
     fn is_available(&self) -> bool;
 }

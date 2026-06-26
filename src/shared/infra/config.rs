@@ -231,6 +231,8 @@ struct RawConfig {
     sandbox: RawSandbox,
     #[serde(default, skip_serializing_if = "RawPaths::is_empty")]
     paths: RawPaths,
+    #[serde(default, skip_serializing_if = "RawEmbeddings::is_empty")]
+    embeddings: RawEmbeddings,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -252,6 +254,13 @@ struct RawSandbox {
 struct RawPaths {
     docs: Option<String>,
 }
+/// `[embeddings]`: an existing provider id to reuse (its base_url + credential) and the embeddings model.
+/// Global (trusted) layer only — semantic recall must not be redirected by an untrusted workspace.
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct RawEmbeddings {
+    provider: Option<String>,
+    model: Option<String>,
+}
 
 impl RawHttp {
     fn is_empty(&self) -> bool {
@@ -271,6 +280,11 @@ impl RawSandbox {
 impl RawPaths {
     fn is_empty(&self) -> bool {
         self.docs.is_none()
+    }
+}
+impl RawEmbeddings {
+    fn is_empty(&self) -> bool {
+        self.provider.is_none() && self.model.is_none()
     }
 }
 
@@ -559,6 +573,17 @@ pub struct Settings {
     pub active_provider: String,
     /// The reasoning/output effort dial, mapped per provider by its adapter.
     pub effort: Effort,
+    /// Optional embeddings config for semantic recall: which configured provider to reuse and the model.
+    /// `None` keeps recall keyword-only. Trusted (global) layer only.
+    pub embeddings: Option<EmbeddingSettings>,
+}
+
+/// Resolved `[embeddings]` config: an existing provider id whose endpoint/credential to reuse, and the
+/// embeddings model id.
+#[derive(Debug, Clone)]
+pub struct EmbeddingSettings {
+    pub provider_id: String,
+    pub model: String,
 }
 
 impl Settings {
@@ -647,6 +672,17 @@ impl Settings {
             providers,
             active_provider: active,
             effort,
+            embeddings: match (config.embeddings.provider, config.embeddings.model) {
+                (Some(provider), Some(model))
+                    if !provider.trim().is_empty() && !model.trim().is_empty() =>
+                {
+                    Some(EmbeddingSettings {
+                        provider_id: provider,
+                        model,
+                    })
+                }
+                _ => None,
+            },
         })
     }
 
