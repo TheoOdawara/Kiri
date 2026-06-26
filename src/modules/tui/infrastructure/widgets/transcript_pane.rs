@@ -74,6 +74,15 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
         render_item(item, width, model.expand_tools, active, reveal, &mut lines);
     }
 
+    // Rack focus: while a confirmation is up, the whole transcript recedes one ramp step so the
+    // borderless stanza pulls focus by depth, not by a drawn box. One static restyle — never animated,
+    // so it stays a single diff and does not fight the markdown memoization.
+    if model.has_modal() {
+        for line in &mut lines {
+            recede(line);
+        }
+    }
+
     let total = lines.len() as u16;
     let max_offset = total.saturating_sub(area.height);
     let scrollback = model.scroll.scrollback.min(max_offset);
@@ -327,6 +336,14 @@ fn cooling_fg(age: Duration) -> Color {
     theme::ramp(&theme::COOLING_RAMP, t)
 }
 
+/// Recede a line one ramp step: every span drops to the dim steel step so the transcript sinks behind a
+/// confirmation. A single restyle of the foreground, leaving glyphs and layout untouched.
+fn recede(line: &mut Line<'static>) {
+    for span in &mut line.spans {
+        span.style = span.style.fg(theme::STEEL_RAMP[3]);
+    }
+}
+
 /// Render an assistant/reasoning body. While it is the actively streaming item, emit plain wrapped text
 /// so the per-frame markdown parse is skipped (cheap at ~30 fps); a finalized item goes through the
 /// memoized markdown renderer, so bold/lists/code render once the turn ends.
@@ -413,6 +430,18 @@ mod tests {
         };
         assert_eq!(line_fg(0, false, reduced), theme::STEEL);
         assert_eq!(line_fg(0, true, reduced), theme::STEEL);
+    }
+
+    #[test]
+    fn recede_drops_every_span_to_dim_steel() {
+        let mut line = Line::from(vec![
+            Span::styled("você", Style::default().fg(theme::HIGHLIGHT)),
+            Span::styled(" oi", Style::default().fg(theme::STEEL)),
+        ]);
+        recede(&mut line);
+        for span in &line.spans {
+            assert_eq!(span.style.fg, Some(theme::STEEL_RAMP[3]));
+        }
     }
 
     #[test]

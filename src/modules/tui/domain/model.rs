@@ -99,6 +99,12 @@ pub struct Model {
 }
 
 impl Model {
+    /// Whether a confirmation (a tool approval or a finished plan) is awaiting the user. While true the
+    /// transcript and header recede so the decision pulls focus by depth.
+    pub fn has_modal(&self) -> bool {
+        self.pending_approval.is_some() || self.pending_plan.is_some()
+    }
+
     pub fn new(model: String, workspace: String) -> Self {
         Self {
             status: Status {
