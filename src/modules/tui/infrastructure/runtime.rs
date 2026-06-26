@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{EnableBracketedPaste, EnableMouseCapture, EventStream};
-use ratatui::DefaultTerminal;
+use ratatui::backend::Backend;
+use ratatui::layout::Rect;
+use ratatui::{DefaultTerminal, Terminal};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{self, Interval};
 use tokio_stream::StreamExt;
@@ -29,8 +31,8 @@ use crate::modules::tui::infrastructure::input;
 use crate::modules::tui::infrastructure::terminal_guard::TerminalGuard;
 use crate::modules::tui::infrastructure::text;
 use crate::modules::tui::infrastructure::theme;
-use crate::modules::tui::infrastructure::view::view;
-use crate::modules::tui::infrastructure::widgets::selection_overlay;
+use crate::modules::tui::infrastructure::view::{frame_regions, view};
+use crate::modules::tui::infrastructure::widgets::{editor, selection_overlay};
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::error::AgentError;
 
@@ -196,6 +198,9 @@ impl Tui {
                     }
                     Effect::CopyToClipboard(text) => copy_to_clipboard(&mut model, &text),
                     Effect::PasteClipboard => paste_from_clipboard(&mut model),
+                    Effect::PlaceCursor { col, row } => {
+                        place_cursor(&mut model, &terminal, col, row)
+                    }
                     Effect::Quit => model.should_quit = true,
                     Effect::NewSession => {
                         conversation = Conversation::new(system_prompt.clone());
@@ -296,6 +301,21 @@ fn copy_to_clipboard(model: &mut Model, text: &str) {
             NoticeLevel::Error,
             format!("falha ao copiar para a área de transferência: {error}"),
         ));
+    }
+}
+
+/// Resolve a composer click to a logical cursor move, against the freshly rendered geometry. The runtime
+/// owns the only honest source of the editor's rect — it recomputes it from the current terminal size and
+/// model, exactly as the last frame did. A click outside the box, or a wrapped/scrolled layout the widget
+/// renders ambiguously, resolves to `None` and leaves the cursor put (never mis-placed).
+fn place_cursor<B: Backend>(model: &mut Model, terminal: &Terminal<B>, col: u16, row: u16) {
+    // Without the terminal size the geometry is unknown, so the click cannot be mapped — a safe no-op
+    // (the user can still navigate by key); nothing actionable is dropped silently.
+    let Ok(size) = terminal.size() else { return };
+    let area = Rect::new(0, 0, size.width, size.height);
+    let editor_area = editor::content_rect(frame_regions(area, model).input);
+    if let Some((r, c)) = editor::click_to_cursor(&model.input, editor_area, col, row) {
+        model.input.set_cursor(r, c);
     }
 }
 
@@ -429,6 +449,9 @@ async fn drive_turn(
                             // Clipboard chords stay live during a turn (composing the next prompt).
                             Effect::CopyToClipboard(text) => copy_to_clipboard(model, &text),
                             Effect::PasteClipboard => paste_from_clipboard(model),
+                            Effect::PlaceCursor { col, row } => {
+                                place_cursor(model, terminal, col, row)
+                            }
                             Effect::SubmitPrompt { .. }
                             | Effect::NewSession
                             | Effect::ChangeWorkspace(_)
@@ -691,6 +714,29 @@ mod tests {
         assert_eq!(spinner_frame(FRAME_INTERVAL - Duration::from_millis(1)), 0);
         assert_eq!(spinner_frame(FRAME_INTERVAL), 1);
         assert_eq!(spinner_frame(FRAME_INTERVAL * 5), 5);
+    }
+
+    #[test]
+    fn place_cursor_moves_the_edit_cursor() {
+        use super::{frame_regions, place_cursor};
+        use crate::modules::tui::infrastructure::widgets::editor;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.input.set("hello world".to_string()); // one short line — the unambiguous regime
+        let terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+
+        // Resolve the editor rect the same way the runtime will, then click two cells into the text.
+        let editor_area =
+            editor::content_rect(frame_regions(Rect::new(0, 0, 40, 10), &model).input);
+        place_cursor(&mut model, &terminal, editor_area.x + 2, editor_area.y);
+        assert_eq!(
+            model.input.cursor(),
+            (0, 2),
+            "a click two cells into the line lands at char index 2"
+        );
     }
 
     #[test]

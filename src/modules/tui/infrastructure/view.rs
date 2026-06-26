@@ -4,7 +4,7 @@ use ratatui::widgets::Block;
 
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::view_state::APPROVAL_OPTIONS;
-use crate::modules::tui::infrastructure::layout::{frame_layout, h_pad};
+use crate::modules::tui::infrastructure::layout::{Regions, frame_layout, h_pad};
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
     approval, command_menu, editor, header, hint_line, meta_rule, selection_overlay,
@@ -16,36 +16,13 @@ use crate::modules::tui::infrastructure::widgets::{
 /// with the Tamahagane Void base so every cell inherits steel-on-void.
 pub fn view(model: &Model, frame: &mut Frame) {
     frame.render_widget(Block::default().style(theme::base()), frame.area());
-    // Match the editor's real content width: the side gutters reduce it by `2 * h_pad`, and the prompt
-    // gutter takes `PROMPT_COLS` more, so the wrapped-line count stays in step with what is rendered.
-    let wrap_w = frame
-        .area()
-        .width
-        .saturating_sub(2 * h_pad(frame.area()))
-        .saturating_sub(editor::PROMPT_COLS)
-        .max(1) as usize;
-    let input_lines = editor::wrapped_line_count(&model.input, wrap_w) as u16;
-    // A pending plan/approval stanza owns a dedicated region directly above the input, so it is always
-    // anchored to the bottom — never carved out of the scrolling transcript. Size it against the same
-    // gutter-inset content width the stanza actually renders at, so a long action never under-reserves.
-    let content = Rect {
-        width: frame.area().width.saturating_sub(2 * h_pad(frame.area())),
-        ..frame.area()
-    };
-    let box_h = if model.pending_plan.is_some() {
-        approval::box_dims(content, approval::PLAN_ACTION, approval::plan_options_len()).1
-    } else if let Some(pending) = &model.pending_approval {
-        approval::box_dims(content, pending.action(), APPROVAL_OPTIONS.len()).1
-    } else {
-        0
-    };
+    let area = frame.area();
     // Fold per-frame geometry into the session motion preference: a short or narrow terminal freezes
     // motion (the layout stays identical, just steady).
-    let area = frame.area();
     let motion = model
         .motion
         .and_reduce_if(area.height < 8 || area.width < 60);
-    let regions = frame_layout(frame.area(), input_lines, box_h);
+    let regions = frame_regions(area, model);
     header::render(model, frame, regions.header);
     transcript_pane::render(model, frame, regions.transcript, motion);
     if let Some(plan) = &model.pending_plan {
@@ -66,6 +43,36 @@ pub fn view(model: &Model, frame: &mut Frame) {
         let area = frame.area();
         selection_overlay::paint(frame.buffer_mut(), area, &sel, theme::selection());
     }
+}
+
+/// Resolve the frame's stacked regions for the current model: the input height grows with the wrapped
+/// buffer, and a pending plan/approval box reserves its slot directly above the input. Shared by `view`
+/// (to render) and the runtime (to map a composer click back to a cursor position), so both agree on the
+/// geometry byte-for-byte.
+pub fn frame_regions(area: Rect, model: &Model) -> Regions {
+    // Match the editor's real content width: the side gutters reduce it by `2 * h_pad`, and the prompt
+    // gutter takes `PROMPT_COLS` more, so the wrapped-line count stays in step with what is rendered.
+    let wrap_w = area
+        .width
+        .saturating_sub(2 * h_pad(area))
+        .saturating_sub(editor::PROMPT_COLS)
+        .max(1) as usize;
+    let input_lines = editor::wrapped_line_count(&model.input, wrap_w) as u16;
+    // A pending plan/approval stanza owns a dedicated region directly above the input, so it is always
+    // anchored to the bottom — never carved out of the scrolling transcript. Size it against the same
+    // gutter-inset content width the stanza actually renders at, so a long action never under-reserves.
+    let content = Rect {
+        width: area.width.saturating_sub(2 * h_pad(area)),
+        ..area
+    };
+    let box_h = if model.pending_plan.is_some() {
+        approval::box_dims(content, approval::PLAN_ACTION, approval::plan_options_len()).1
+    } else if let Some(pending) = &model.pending_approval {
+        approval::box_dims(content, pending.action(), APPROVAL_OPTIONS.len()).1
+    } else {
+        0
+    };
+    frame_layout(area, input_lines, box_h)
 }
 
 #[cfg(test)]

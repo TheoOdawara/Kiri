@@ -6,9 +6,12 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::modules::tui::domain::model::{Model, Motion};
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::modules::tui::domain::view_state::InputBuffer;
+use crate::modules::tui::infrastructure::text::display_width;
 use crate::modules::tui::infrastructure::theme::{self, GateState};
 
 /// How long the gate's temper quench lasts after a turn settles.
@@ -54,11 +57,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
     ]);
     frame.render_widget(Paragraph::new(prompt).style(theme::base()), gutter);
 
-    let editor_area = Rect {
-        x: area.x + gutter_cols,
-        width: area.width.saturating_sub(gutter_cols),
-        ..area
-    };
+    let editor_area = content_rect(area);
     let focused = model.pending_approval.is_none() && model.pending_plan.is_none();
     if focused {
         frame.render_widget(model.input.widget(), editor_area);
@@ -161,6 +160,62 @@ fn logical_rows(line: &str, w: usize) -> usize {
     rows.max(1)
 }
 
+/// The editor's text sub-rect inside the input region: the prompt gutter (`PROMPT_COLS`) is carved off
+/// the left, exactly as `render` draws the `tui-textarea` widget. Shared so a mouse click can be mapped
+/// against the same cells the widget rendered into.
+pub fn content_rect(input_area: Rect) -> Rect {
+    let gutter = PROMPT_COLS.min(input_area.width);
+    Rect {
+        x: input_area.x + gutter,
+        width: input_area.width.saturating_sub(gutter),
+        ..input_area
+    }
+}
+
+/// Map a click at absolute screen `(col, row)` to a logical `(row, col)` cursor position in `buffer`,
+/// but only where the rendered layout is unambiguous: every logical line fits `editor`'s width (no
+/// soft-wrap, so screen rows equal logical rows) and they all fit its height (no internal scroll we
+/// cannot read). Returns `None` outside the text rect or when the layout is ambiguous — the caller then
+/// leaves the cursor put rather than mis-place it, because `tui-textarea` exposes no public
+/// screen→cursor mapping to reconcile its wrap/scroll against.
+pub fn click_to_cursor(
+    buffer: &InputBuffer,
+    editor: Rect,
+    col: u16,
+    row: u16,
+) -> Option<(usize, usize)> {
+    if col < editor.x || col >= editor.right() || row < editor.y || row >= editor.bottom() {
+        return None;
+    }
+    let wrap_w = editor.width as usize;
+    let text = buffer.text();
+    let lines: Vec<&str> = text.split('\n').collect();
+    if lines.iter().any(|line| display_width(line) > wrap_w) {
+        return None; // a line soft-wraps → screen rows no longer match logical rows
+    }
+    if lines.len() > editor.height as usize {
+        return None; // content taller than the box → internal vertical scroll we cannot read
+    }
+    let logical_row = ((row - editor.y) as usize).min(lines.len().saturating_sub(1));
+    let target = (col - editor.x) as usize;
+    let logical_col = col_at_width(lines[logical_row], target);
+    Some((logical_row, logical_col))
+}
+
+/// The char index in `line` at the greatest cell boundary `<= target`. Walks by display width so a
+/// click lands on a glyph boundary (never inside a wide glyph); a click past the line end clamps to it.
+fn col_at_width(line: &str, target: usize) -> usize {
+    let mut acc = 0usize;
+    for (i, ch) in line.chars().enumerate() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if acc + w > target {
+            return i;
+        }
+        acc += w;
+    }
+    line.chars().count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +279,94 @@ mod tests {
     fn greedy_word_wrap_counts_rows() {
         // "aa bb cc" at width 4 wraps to ["aa", "bb", "cc"] — each pair plus a space overflows.
         assert_eq!(wrapped_line_count(&buffer("aa bb cc"), 4), 3);
+    }
+
+    #[test]
+    fn content_rect_carves_the_prompt_gutter() {
+        let editor = content_rect(Rect::new(0, 7, 40, 1));
+        assert_eq!(editor.x, PROMPT_COLS);
+        assert_eq!(editor.width, 40 - PROMPT_COLS);
+        assert_eq!((editor.y, editor.height), (7, 1));
+    }
+
+    #[test]
+    fn content_rect_clamps_when_narrower_than_gutter() {
+        // The gutter never exceeds the region width; the text rect then has zero width, not an underflow.
+        let editor = content_rect(Rect::new(2, 0, 3, 1));
+        assert_eq!((editor.x, editor.width), (5, 0));
+    }
+
+    /// A canonical editor text rect: left at column 5 (past the gutter), row 10, 30 wide, 3 tall.
+    fn editor_rect() -> Rect {
+        Rect::new(5, 10, 30, 3)
+    }
+
+    #[test]
+    fn click_to_cursor_maps_a_simple_single_line() {
+        let b = buffer("hello");
+        // Two cells into the text on the first row → logical (0, 2).
+        assert_eq!(click_to_cursor(&b, editor_rect(), 5 + 2, 10), Some((0, 2)));
+    }
+
+    #[test]
+    fn click_to_cursor_maps_multiline_rows() {
+        let b = buffer("ab\ncd\nef");
+        assert_eq!(click_to_cursor(&b, editor_rect(), 5 + 1, 12), Some((2, 1)));
+    }
+
+    #[test]
+    fn click_to_cursor_walks_display_width_for_wide_glyphs() {
+        // "世a": 世 spans cols 0-1, 'a' is at col 2. A click on the 'a' resolves to char index 1.
+        let b = buffer("世a");
+        assert_eq!(click_to_cursor(&b, editor_rect(), 5 + 2, 10), Some((0, 1)));
+        // A click inside 世 (its second cell) snaps back to its boundary — char index 0.
+        assert_eq!(click_to_cursor(&b, editor_rect(), 5 + 1, 10), Some((0, 0)));
+    }
+
+    #[test]
+    fn click_to_cursor_clamps_past_line_end() {
+        let b = buffer("hi");
+        // Far to the right but still inside the rect → clamps to the line end (char index 2).
+        assert_eq!(click_to_cursor(&b, editor_rect(), 5 + 20, 10), Some((0, 2)));
+    }
+
+    #[test]
+    fn click_to_cursor_returns_none_in_the_gutter() {
+        let b = buffer("hi");
+        // A column left of the text rect (in the prompt gutter) is not editor text.
+        assert_eq!(click_to_cursor(&b, editor_rect(), 4, 10), None);
+    }
+
+    #[test]
+    fn click_to_cursor_returns_none_outside_right_edge() {
+        let b = buffer("hi");
+        assert_eq!(click_to_cursor(&b, editor_rect(), 5 + 30, 10), None); // == right(), exclusive
+    }
+
+    #[test]
+    fn click_below_the_box_returns_none() {
+        let b = buffer("hi");
+        assert_eq!(click_to_cursor(&b, editor_rect(), 5, 13), None); // == bottom(), exclusive
+    }
+
+    #[test]
+    fn click_below_text_but_inside_box_clamps_to_last_row() {
+        // One line of text in a 3-tall box: a click on the empty third row clamps to the last logical row.
+        let b = buffer("hi");
+        assert_eq!(click_to_cursor(&b, editor_rect(), 5 + 1, 12), Some((0, 1)));
+    }
+
+    #[test]
+    fn click_to_cursor_returns_none_when_a_line_wraps() {
+        // A 5-wide rect with a 6-char line: the widget soft-wraps it, so screen rows lie about logic.
+        let narrow = Rect::new(5, 10, 5, 3);
+        assert_eq!(click_to_cursor(&buffer("abcdef"), narrow, 6, 10), None);
+    }
+
+    #[test]
+    fn click_to_cursor_returns_none_when_scrolled() {
+        // Three lines in a 2-tall box: the widget scrolls internally, an offset we cannot read.
+        let short = Rect::new(5, 10, 30, 2);
+        assert_eq!(click_to_cursor(&buffer("a\nb\nc"), short, 5, 10), None);
     }
 }

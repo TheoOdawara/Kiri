@@ -146,6 +146,10 @@ composer — to select it; release (or `Ctrl+C`) copies it to the system clipboa
 word, triple-click a line. Selection covers one screenful at a time; scroll, then select again for more.
 The wheel still scrolls, and a key or scroll clears the highlight.
 
+**Click to place the cursor.** A plain click inside the composer drops the edit cursor where you clicked,
+on short prompts that fit without wrapping. Once a line soft-wraps or the box scrolls, a click is ignored
+and the cursor stays put — rather than risk landing in the wrong spot (use the arrow keys there).
+
 **macOS terminal note.** `Cmd` combinations never reach a terminal app, so line/word navigation lives on
 `Ctrl`/`Option` (above), not `Cmd`. `Option+←/→` and `Option+⌫` require your terminal to send Option as
 Meta — *iTerm2:* **Left Option key → Esc+**; *Terminal.app:* **Use Option as Meta Key**. Enabling that

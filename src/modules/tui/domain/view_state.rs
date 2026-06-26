@@ -1,5 +1,5 @@
 use ratatui::style::Style;
-use tui_textarea::{Input, TextArea, WrapMode};
+use tui_textarea::{CursorMove, Input, TextArea, WrapMode};
 
 /// A pasted image staged for the next prompt: its data URL (base64 PNG, ready for the provider's
 /// multimodal content) and pixel dimensions for the "attached" chip. Pure data — the clipboard read and
@@ -39,14 +39,26 @@ impl InputBuffer {
         self.area.is_empty()
     }
 
-    /// The cursor's logical row and the index of the last row — used to decide whether Up/Down should
-    /// recall history (at the first/last row) or move the cursor within a multi-line buffer.
+    /// The cursor's logical `(row, col)` position in the buffer.
+    pub fn cursor(&self) -> (usize, usize) {
+        self.area.cursor()
+    }
+
+    /// The cursor's logical row — used to decide whether Up/Down should recall history (at the
+    /// first/last row) or move the cursor within a multi-line buffer.
     pub fn cursor_row(&self) -> usize {
-        self.area.cursor().0
+        self.cursor().0
     }
 
     pub fn last_row(&self) -> usize {
         self.area.lines().len().saturating_sub(1)
+    }
+
+    /// Move the cursor to a logical `(row, col)` position — e.g. a mouse click the renderer resolved
+    /// to text coordinates. `tui-textarea` clamps out-of-range values to the buffer, so it never panics.
+    pub fn set_cursor(&mut self, row: usize, col: usize) {
+        self.area
+            .move_cursor(CursorMove::Jump(row as u16, col as u16));
     }
 
     /// Insert a string at the cursor (bracketed paste of text).
@@ -353,6 +365,22 @@ mod tests {
         assert_eq!(b.text(), "ab\ncd");
         assert_eq!(b.last_row(), 1);
         assert_eq!(b.cursor_row(), 1); // set places the cursor at the end (second line)
+    }
+
+    #[test]
+    fn set_cursor_jumps_to_a_logical_position() {
+        let mut b = InputBuffer::default();
+        b.set("abc\nde".to_string());
+        b.set_cursor(1, 1);
+        assert_eq!(b.cursor(), (1, 1));
+    }
+
+    #[test]
+    fn set_cursor_clamps_beyond_the_buffer() {
+        let mut b = InputBuffer::default();
+        b.set("ab".to_string());
+        b.set_cursor(9, 9); // both out of range — clamped to the only row and its end
+        assert_eq!(b.cursor(), (0, 2));
     }
 
     #[test]

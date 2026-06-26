@@ -221,16 +221,25 @@ pub fn on_mouse(model: &mut Model, kind: MouseKind, col: u16, row: u16) -> Vec<E
             }
         }
         MouseKind::Up => {
-            if let Some(sel) = model.selection.as_mut() {
-                if sel.granularity == Granularity::Char {
-                    sel.extend(col, row);
+            let bare = match model.selection.as_mut() {
+                Some(sel) => {
+                    if sel.granularity == Granularity::Char {
+                        sel.extend(col, row);
+                    }
+                    sel.is_empty()
                 }
-                if sel.is_empty() {
-                    // A bare click (down+up on one cell) selects nothing — leave no stray highlight.
-                    model.selection = None;
-                } else {
-                    sel.state = SelectionState::CopyAndKeep;
+                None => false,
+            };
+            if bare {
+                // A bare click (down+up on one cell) selects nothing — leave no stray highlight, and in
+                // the focused composer ask the runtime to drop the edit cursor where it landed (the
+                // runtime owns the render geometry; under a modal the editor is read-only, so do nothing).
+                model.selection = None;
+                if model.pending_approval.is_none() && model.pending_plan.is_none() {
+                    return vec![Effect::PlaceCursor { col, row }];
                 }
+            } else if let Some(sel) = model.selection.as_mut() {
+                sel.state = SelectionState::CopyAndKeep;
             }
         }
     }
@@ -1435,5 +1444,42 @@ mod tests {
             m.selection.is_some(),
             "mouse selection must work under a modal (to copy its text)"
         );
+    }
+
+    #[test]
+    fn bare_click_in_the_focused_composer_emits_place_cursor() {
+        let mut m = with_clock(Instant::now());
+        on_mouse(&mut m, MouseKind::Down, 12, 4);
+        let effects = on_mouse(&mut m, MouseKind::Up, 12, 4);
+        assert_eq!(effects, vec![Effect::PlaceCursor { col: 12, row: 4 }]);
+        assert!(m.selection.is_none(), "a bare click leaves no highlight");
+    }
+
+    #[test]
+    fn a_drag_selects_and_does_not_place_the_cursor() {
+        let mut m = with_clock(Instant::now());
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        on_mouse(&mut m, MouseKind::Drag, 7, 2);
+        let effects = on_mouse(&mut m, MouseKind::Up, 7, 2);
+        assert!(
+            effects.is_empty(),
+            "a drag is a selection, not a cursor placement"
+        );
+        assert_eq!(m.selection.unwrap().state, SelectionState::CopyAndKeep);
+    }
+
+    #[test]
+    fn bare_click_during_a_modal_does_not_place_the_cursor() {
+        // Under a modal the editor is read-only; a bare click clears any highlight but must not try to
+        // move the (hidden) edit cursor.
+        let mut m = Model {
+            pending_approval: Some(PendingApproval::new("ler a.txt".to_string(), true)),
+            last_event_at: Some(Instant::now()),
+            ..Model::default()
+        };
+        on_mouse(&mut m, MouseKind::Down, 12, 4);
+        let effects = on_mouse(&mut m, MouseKind::Up, 12, 4);
+        assert!(effects.is_empty(), "no cursor placement under a modal");
+        assert!(m.selection.is_none());
     }
 }

@@ -24,4 +24,8 @@ pub enum Effect {
     /// Approve the proposed plan: leave plan mode and run a turn that executes it under the given
     /// mode (`Default` confirms each step, `Auto` runs the whole plan unattended).
     ApprovePlan(ApprovalMode),
+    /// Place the edit cursor at the composer click (absolute screen cell). The runtime resolves it
+    /// against the rendered editor geometry — a no-op when the click is outside the box or the layout
+    /// is ambiguous (wrapped/scrolled), since the reducer has no render geometry to map it itself.
+    PlaceCursor { col: u16, row: u16 },
 }
