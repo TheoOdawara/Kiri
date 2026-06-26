@@ -20,4 +20,8 @@ pub enum AgentError {
     /// harness's own knowledge store is auxiliary, so callers degrade gracefully rather than abort.
     #[error("memory error: {0}")]
     Memory(String),
+    /// A credential-store failure (OS keyring or the 0600 fallback file): reading, writing, or
+    /// (de)serializing a provider's secret material. Never carries the secret itself.
+    #[error("credential store error: {0}")]
+    Secret(String),
 }

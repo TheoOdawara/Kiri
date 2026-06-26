@@ -9,6 +9,7 @@ use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::provider::Effort;
 
 /// Cap a provider error body before it reaches the transcript. The body can reflect the request we
 /// sent (which may include file contents the agent read), so it is bounded to a short preview rather
@@ -30,8 +31,13 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
-    /// Whether to send `chat_template_kwargs.thinking`; off for a model that rejects/stalls on it.
+    /// Whether the model accepts `chat_template_kwargs.thinking` at all; off for one that rejects/stalls
+    /// on it. Gated further by `effort` — `Effort::Off` suppresses reasoning even when this is true.
     thinking: bool,
+    /// The reasoning effort dial. This OpenAI-compatible adapter maps it to the on/off `thinking` kwarg
+    /// (the only reasoning control NVIDIA's nemotron template exposes); richer per-vendor mapping lives
+    /// in the vendor-specific adapters.
+    effort: Effort,
 }
 
 impl OpenAiProvider {
@@ -40,13 +46,21 @@ impl OpenAiProvider {
         base_url: impl Into<String>,
         api_key: impl Into<String>,
         thinking: bool,
+        effort: Effort,
     ) -> Self {
         Self {
             client,
             base_url: base_url.into(),
             api_key: api_key.into(),
             thinking,
+            effort,
         }
+    }
+
+    /// Whether to ask the model to reason this turn: the model must accept the kwarg and effort must not
+    /// be `Off`.
+    fn reasoning_enabled(&self) -> bool {
+        self.thinking && self.effort != Effort::Off
     }
 }
 
@@ -62,7 +76,7 @@ impl CompletionProvider for OpenAiProvider {
             messages: request.messages.iter().map(MessageDto::from).collect(),
             stream: true,
             chat_template_kwargs: self
-                .thinking
+                .reasoning_enabled()
                 .then_some(ChatTemplateKwargs { thinking: true }),
             tools: request.tools,
         };
@@ -167,7 +181,13 @@ mod tests {
             .read_timeout(Duration::from_millis(300))
             .build()
             .unwrap();
-        let provider = OpenAiProvider::new(client, format!("http://{addr}/v1"), "k", false);
+        let provider = OpenAiProvider::new(
+            client,
+            format!("http://{addr}/v1"),
+            "k",
+            false,
+            crate::shared::kernel::provider::Effort::Off,
+        );
 
         let messages = vec![Message::user("hi")];
         let request = TurnRequest {
@@ -214,7 +234,13 @@ mod tests {
         });
 
         let client = reqwest::Client::builder().build().unwrap();
-        let provider = OpenAiProvider::new(client, format!("http://{addr}/v1"), "k", false);
+        let provider = OpenAiProvider::new(
+            client,
+            format!("http://{addr}/v1"),
+            "k",
+            false,
+            crate::shared::kernel::provider::Effort::Off,
+        );
         let messages = vec![Message::user("hi")];
         let request = TurnRequest {
             messages: &messages,

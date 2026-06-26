@@ -84,12 +84,11 @@ mod tests {
 
     #[test]
     fn chat_request_serializes_expected_shape() {
-        dotenvy::dotenv().ok();
-        let model = std::env::var("NVIDIA_MODEL").expect("NVIDIA_MODEL must be set in .env");
+        let model = "test-model";
 
         let message = Message::user("hi");
         let request = ChatRequest {
-            model: &model,
+            model,
             messages: vec![MessageDto::from(&message)],
             stream: true,
             chat_template_kwargs: None,

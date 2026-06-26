@@ -1,17 +1,16 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::infrastructure::sensitive::{SensitiveMatcher, load_sensitive_matcher};
-
-/// NVIDIA's OpenAI-compatible endpoint. Hardcoded for now; a future multi-provider feature will move
-/// this into external configuration (see docs/decisions/0001-openai-compatible-provider.md).
-const BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
+use crate::shared::kernel::provider::{AuthMethod, Effort, ProviderKind, ProviderProfile};
 
 /// Seeded once as the first message of the session; broken into 8 named sections (Identity, Quality,
 /// Posture, Workspace & paths, Tools, Approval modes, Turn mechanics, Security) so the model can
@@ -122,12 +121,15 @@ const MAX_TOOL_CALLS_PER_CHECKPOINT: usize = 100;
 /// HTTP client timeouts for the provider. `connect` caps establishing the TCP/TLS connection; `read`
 /// caps idle time waiting for the next chunk (response headers or an SSE chunk) — streaming-safe, since
 /// it resets on each received chunk, so a legitimately long but active stream is never killed. A hung
-/// provider thus fails fast with a clear error instead of hanging forever (the cause of "first message
-/// does nothing, no error"). `read` is generous (5 min) because it also bounds the wait for the FIRST
-/// chunk: a reasoning model can take a while to emit its first token. Override via
-/// `KIRI_HTTP_CONNECT_TIMEOUT_MS` / `KIRI_HTTP_READ_TIMEOUT_MS`.
+/// provider thus fails fast with a clear error instead of hanging forever. `read` is generous (5 min)
+/// because it also bounds the wait for the FIRST chunk: a reasoning model can take a while to emit its
+/// first token. Overridable via `[http]` in config or `KIRI_HTTP_*_TIMEOUT_MS`.
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The default provider id and its NVIDIA OpenAI-compatible endpoint, used to seed a first-run config
+/// (and the no-regression target). See docs/decisions/0001-openai-compatible-provider.md.
+const DEFAULT_PROVIDER_ID: &str = "nvidia";
 
 /// Patterns blocked in plan mode — commands that mutate the project or escalate privilege.
 /// The shell can bypass these (eval, base64, ANSI-C quoting), so this is best-effort; the
@@ -196,28 +198,141 @@ const DEFAULT_RW_DIRS: &[&str] = &[
     "~/go",
 ];
 
-/// `KIRI_SANDBOX`: `os` (default) uses the platform adapter where available; `off` disables OS
-/// confinement; `require` refuses `run_command` when no OS sandbox is available. Returns
-/// `(enabled, require)`.
-fn parse_sandbox_mode() -> (bool, bool) {
-    match std::env::var("KIRI_SANDBOX").ok().as_deref() {
-        Some("off") => (false, false),
-        Some("require") => (true, true),
-        _ => (true, false),
+// ---- TOML config model --------------------------------------------------------------------------
+//
+// Two layers merge into the resolved config: a global `~/.kiri/config.toml` and a per-project
+// `<workspace>/.kiri/config.toml`. The project layer overrides the global field-by-field; for the
+// `providers` table, project entries override or add by id. Secrets are NOT stored here — they live in
+// the OS keyring (or a 0600 fallback file), keyed by provider id.
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct RawConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effort: Option<Effort>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    providers: BTreeMap<String, ProviderProfile>,
+    #[serde(default, skip_serializing_if = "RawHttp::is_empty")]
+    http: RawHttp,
+    #[serde(default, skip_serializing_if = "RawBehavior::is_empty")]
+    behavior: RawBehavior,
+    #[serde(default, skip_serializing_if = "RawSandbox::is_empty")]
+    sandbox: RawSandbox,
+    #[serde(default, skip_serializing_if = "RawPaths::is_empty")]
+    paths: RawPaths,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct RawHttp {
+    connect_timeout_ms: Option<u64>,
+    read_timeout_ms: Option<u64>,
+}
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct RawBehavior {
+    thinking: Option<bool>,
+    memory: Option<bool>,
+}
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct RawSandbox {
+    mode: Option<String>,
+    network: Option<String>,
+}
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct RawPaths {
+    docs: Option<String>,
+}
+
+impl RawHttp {
+    fn is_empty(&self) -> bool {
+        self.connect_timeout_ms.is_none() && self.read_timeout_ms.is_none()
+    }
+}
+impl RawBehavior {
+    fn is_empty(&self) -> bool {
+        self.thinking.is_none() && self.memory.is_none()
+    }
+}
+impl RawSandbox {
+    fn is_empty(&self) -> bool {
+        self.mode.is_none() && self.network.is_none()
+    }
+}
+impl RawPaths {
+    fn is_empty(&self) -> bool {
+        self.docs.is_none()
     }
 }
 
-/// `KIRI_SANDBOX_NETWORK`: the base network stance for `run_command` (the dev-command allow-list may
-/// still widen it per call). Defaults to `deny`.
-fn parse_sandbox_network() -> NetworkPolicy {
-    match std::env::var("KIRI_SANDBOX_NETWORK").ok().as_deref() {
-        Some("allow") => NetworkPolicy::Allow,
-        _ => NetworkPolicy::Deny,
+/// Combine the two config layers and resolve the effort. **SECURITY:** the project layer lives inside
+/// the (untrusted) workspace a coding agent operates on, so only the innocuous `effort` preference is
+/// honored from it. Provider definitions, the active selection, and the `sandbox`/`http`/`behavior`/
+/// `paths` policy come from the **trusted global layer only** — a malicious repo must not be able to
+/// redirect a stored credential to its own endpoint (by reusing a provider id with a different
+/// `base_url`) or weaken the command sandbox by shipping a `.kiri/config.toml`. Broader, trust-gated
+/// per-project config is deliberate future work (recorded as an ADR). Pure, so it is unit-testable.
+fn resolve_layers(global: RawConfig, project: RawConfig) -> (RawConfig, Effort) {
+    let effort = project.effort.or(global.effort).unwrap_or_default();
+    (global, effort)
+}
+
+/// Create `path` (recursively) and keep it owner-only (`0700` on Unix), so the non-secret files under
+/// the kiri dir are not world-readable. On Windows the user-profile DACL is the equivalent.
+#[cfg(unix)]
+fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
+    // Coerce an already-existing dir (e.g. created `0755` by an earlier version) down to `0700`.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)
+}
+
+/// Read and parse a TOML config file. Absent → an empty config (not an error). A present-but-malformed
+/// file fails fast with a clear, located error rather than silently ignoring the user's settings.
+fn read_config_file(path: &PathBuf) -> Result<RawConfig> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => toml::from_str(&raw)
+            .map_err(|e| anyhow!("invalid TOML config at {}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(RawConfig::default()),
+        Err(e) => Err(anyhow!("failed to read config at {}: {e}", path.display())),
     }
 }
 
-/// Parse a millisecond duration from raw env text, falling back to `default` when absent, unparseable,
-/// or zero. Pure (no env read) so the parsing is unit-testable.
+/// The default first-run provider: NVIDIA's OpenAI-compatible endpoint with the model taken from a
+/// legacy `NVIDIA_MODEL` env var if present (one-time migration aid), else left blank for the user to
+/// fill via `/provider`.
+fn default_provider() -> ProviderProfile {
+    let model = std::env::var("NVIDIA_MODEL").unwrap_or_default();
+    let models = if model.is_empty() {
+        Vec::new()
+    } else {
+        vec![model.clone()]
+    };
+    ProviderProfile {
+        id: DEFAULT_PROVIDER_ID.to_string(),
+        kind: ProviderKind::Nvidia,
+        base_url: ProviderKind::Nvidia.default_base_url().to_string(),
+        model,
+        models,
+        auth: AuthMethod::ApiKey,
+    }
+}
+
+/// The kiri global config/state directory (`~/.kiri`). Houses `config.toml`, the credentials fallback
+/// file, and the shared-memory database.
+pub fn kiri_global_dir() -> PathBuf {
+    expand_home("~/.kiri")
+}
+
+/// Parse a millisecond duration from raw text, falling back to `default` when absent, unparseable, or
+/// zero. Pure so the parsing is unit-testable.
 fn parse_duration_ms(raw: Option<&str>, default: Duration) -> Duration {
     match raw.and_then(|v| v.trim().parse::<u64>().ok()) {
         Some(ms) if ms > 0 => Duration::from_millis(ms),
@@ -225,12 +340,16 @@ fn parse_duration_ms(raw: Option<&str>, default: Duration) -> Duration {
     }
 }
 
-fn duration_env_ms(key: &str, default: Duration) -> Duration {
-    parse_duration_ms(std::env::var(key).ok().as_deref(), default)
+/// Resolve a timeout: a positive config value wins, else the `KIRI_..._MS` env override, else default.
+fn resolve_timeout(config_ms: Option<u64>, env_key: &str, default: Duration) -> Duration {
+    if let Some(ms) = config_ms.filter(|ms| *ms > 0) {
+        return Duration::from_millis(ms);
+    }
+    parse_duration_ms(std::env::var(env_key).ok().as_deref(), default)
 }
 
-/// Parse a boolean from raw env text (`1/true/on/yes` vs `0/false/off/no`, case-insensitive), falling
-/// back to `default`. Pure (no env read) so the parsing is unit-testable.
+/// Parse a boolean from raw text (`1/true/on/yes` vs `0/false/off/no`, case-insensitive), falling back
+/// to `default`. Pure so the parsing is unit-testable.
 fn parse_bool(raw: Option<&str>, default: bool) -> bool {
     match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
         Some("0" | "false" | "off" | "no") => false,
@@ -239,27 +358,41 @@ fn parse_bool(raw: Option<&str>, default: bool) -> bool {
     }
 }
 
-fn bool_env(key: &str, default: bool) -> bool {
-    parse_bool(std::env::var(key).ok().as_deref(), default)
+/// Resolve a boolean: a config value wins, else the env override, else `default`.
+fn resolve_bool(config: Option<bool>, env_key: &str, default: bool) -> bool {
+    config.unwrap_or_else(|| parse_bool(std::env::var(env_key).ok().as_deref(), default))
+}
+
+/// `KIRI_SANDBOX` / `[sandbox].mode`: `os` (default) uses the platform adapter where available; `off`
+/// disables OS confinement; `require` refuses `run_command` when no OS sandbox is available. Returns
+/// `(enabled, require)`.
+fn resolve_sandbox_mode(config: Option<&str>) -> (bool, bool) {
+    let raw = config
+        .map(str::to_string)
+        .or_else(|| std::env::var("KIRI_SANDBOX").ok());
+    match raw.as_deref() {
+        Some("off") => (false, false),
+        Some("require") => (true, true),
+        _ => (true, false),
+    }
+}
+
+/// `KIRI_SANDBOX_NETWORK` / `[sandbox].network`: the base network stance for `run_command`. `deny`
+/// default.
+fn resolve_sandbox_network(config: Option<&str>) -> NetworkPolicy {
+    let raw = config
+        .map(str::to_string)
+        .or_else(|| std::env::var("KIRI_SANDBOX_NETWORK").ok());
+    match raw.as_deref() {
+        Some("allow") => NetworkPolicy::Allow,
+        _ => NetworkPolicy::Deny,
+    }
 }
 
 /// Load the network allow-list from `KIRI_SANDBOX_NET_ALLOW_CMDS` (newline-separated regexes, `#`
 /// comments, replaces the default) or the hardcoded dev-command default. Fails fast on a bad pattern.
 fn load_net_allow() -> Result<Arc<[Regex]>> {
-    let raw = std::env::var("KIRI_SANDBOX_NET_ALLOW_CMDS").ok();
-    let patterns: Vec<&str> = match &raw {
-        Some(value) if !value.is_empty() => value
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .collect(),
-        _ => DEFAULT_NET_ALLOW.to_vec(),
-    };
-    let regexes: Result<Vec<Regex>, regex::Error> =
-        patterns.iter().map(|p| Regex::new(p)).collect();
-    let regexes =
-        regexes.map_err(|e| anyhow!("invalid regex in KIRI_SANDBOX_NET_ALLOW_CMDS: {e}"))?;
-    Ok(Arc::from(regexes))
+    compile_patterns("KIRI_SANDBOX_NET_ALLOW_CMDS", DEFAULT_NET_ALLOW)
 }
 
 /// Expand a leading `~`/`~/…` to `$HOME`; any other path is taken as given.
@@ -285,29 +418,28 @@ fn load_extra_paths(env: &str, defaults: &[&str]) -> Arc<[PathBuf]> {
     Arc::from(paths)
 }
 
-/// Load the plan-mode blacklist: `KIRI_PLAN_BLACKLIST` env var if set (newline-separated,
-/// `#`-prefixed lines are comments, empty lines are ignored), else the hardcoded default.
-/// Each pattern is compiled as a `Regex`; an invalid pattern fails fast with a clear error.
-fn load_plan_blacklist() -> Result<Arc<[Regex]>> {
-    let raw = std::env::var("KIRI_PLAN_BLACKLIST").ok();
+/// Compile a newline-separated regex list from `env` (with `#` comments) or the given default, failing
+/// fast on an invalid pattern.
+fn compile_patterns(env: &str, defaults: &[&str]) -> Result<Arc<[Regex]>> {
+    let raw = std::env::var(env).ok();
     let patterns: Vec<&str> = match &raw {
         Some(value) if !value.is_empty() => value
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .collect(),
-        _ => DEFAULT_PLAN_BLACKLIST.to_vec(),
+        _ => defaults.to_vec(),
     };
     let regexes: Result<Vec<Regex>, regex::Error> =
         patterns.iter().map(|p| Regex::new(p)).collect();
-    let regexes = regexes.map_err(|e| anyhow!("invalid regex in KIRI_PLAN_BLACKLIST: {e}"))?;
+    let regexes = regexes.map_err(|e| anyhow!("invalid regex in {env}: {e}"))?;
     Ok(Arc::from(regexes))
 }
 
 #[derive(Parser)]
 #[command(
     name = "kiri",
-    about = "Kiri — a directed coding-agent harness (NVIDIA OpenAI-compatible API)"
+    about = "Kiri — a provider-agnostic coding-agent harness"
 )]
 struct Cli {
     /// Optional first message; the chat then continues interactively
@@ -318,12 +450,10 @@ struct Cli {
     path: Option<PathBuf>,
 }
 
-/// The resolved configuration the composition root needs to wire the harness. The API key and model
-/// are read from the environment (loaded from `.env`); the key is never a CLI flag.
+/// The resolved configuration the composition root needs to wire the harness. Provider endpoints and
+/// the active model come from the configured [`ProviderProfile`] catalog; the matching secret is
+/// fetched from the credential store at wire time (never stored here).
 pub struct Settings {
-    pub base_url: String,
-    pub api_key: String,
-    pub model: String,
     pub system_prompt: &'static str,
     pub path: PathBuf,
     pub seed: Option<String>,
@@ -347,89 +477,179 @@ pub struct Settings {
     /// fast with a clear error instead of hanging silently.
     pub connect_timeout: Duration,
     pub read_timeout: Duration,
-    /// Ask the model to stream reasoning via `chat_template_kwargs.thinking`. On by default; disable
-    /// with `KIRI_THINKING=off` for a model that rejects or stalls on the kwarg.
+    /// Ask the model to stream reasoning. On by default; disable for a model that rejects/stalls on it.
     pub thinking: bool,
-    /// Whether the memory contexts (project + shared) and the docs/memory tools are wired. On by
-    /// default; disable with `KIRI_MEMORY=off`.
+    /// Whether the memory contexts (project + shared) and the docs/memory tools are wired.
     pub memory_enabled: bool,
-    /// The project's documentation root that `consult_docs` searches. Defaults to `<path>/docs`;
-    /// override with `KIRI_DOCS_PATH`.
+    /// The project's documentation root that `consult_docs` searches. Defaults to `<path>/docs`.
     pub docs_path: PathBuf,
     /// The cross-project shared memory database. Defaults to `~/.kiri/memory/shared.db`.
     pub shared_memory_db: PathBuf,
+    /// The credential-store fallback file when no OS keyring is reachable. `~/.kiri/credentials.json`.
+    pub credentials_file: PathBuf,
+    /// The configured provider catalog (non-secret). The user selects among these via `/provider`.
+    pub providers: Vec<ProviderProfile>,
+    /// The id of the active provider — must name one of `providers`.
+    pub active_provider: String,
+    /// The reasoning/output effort dial, mapped per provider by its adapter.
+    pub effort: Effort,
 }
 
 impl Settings {
-    /// Load `.env`, parse the CLI, and read the required environment, failing fast with a clear error
-    /// if `NVIDIA_API_KEY` or `NVIDIA_MODEL` is missing.
+    /// Parse the CLI, load the layered TOML config (`~/.kiri` ← `<workspace>/.kiri`), and resolve the
+    /// runtime settings. No `.env`: the harness owns its config (TOML) and secrets (keyring). A first
+    /// run with no config seeds a default NVIDIA provider and writes a starter `~/.kiri/config.toml`.
     pub fn load() -> Result<Self> {
-        dotenvy::dotenv().ok();
         let cli = Cli::parse();
         let path = cli
             .path
             .or_else(|| std::env::var_os("T_CLI_PATH").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("."));
-        let (sandbox_enabled, require_confinement) = parse_sandbox_mode();
-        let docs_path = std::env::var_os("KIRI_DOCS_PATH")
-            .map(PathBuf::from)
+
+        let global_dir = kiri_global_dir();
+        // Best-effort: keep the kiri dir owner-only so the non-secret config.toml is not
+        // world-readable. A real failure surfaces later when writing config or credentials.
+        let _ = ensure_private_dir(&global_dir);
+        let global_path = global_dir.join("config.toml");
+        let project_path = path.join(".kiri").join("config.toml");
+        let had_global = global_path.exists();
+        // Provider routing and security policy come from the trusted global config only; the workspace
+        // (project) layer contributes only the `effort` preference. See `resolve_layers`.
+        let (config, effort) = resolve_layers(
+            read_config_file(&global_path)?,
+            read_config_file(&project_path)?,
+        );
+
+        let (mut providers, mut active) =
+            resolve_providers(config.providers, config.active_provider);
+        // First run with no global config: seed the default provider and persist a starter file so the
+        // user has something to edit. Best-effort — a write failure must not block the session.
+        if providers.is_empty() {
+            let default = default_provider();
+            active = default.id.clone();
+            providers.push(default);
+            if !had_global
+                && let Err(error) = write_starter_config(&global_path, &providers, &active)
+            {
+                eprintln!(
+                    "kiri: could not write a starter config at {} ({error}); continuing",
+                    global_path.display()
+                );
+            }
+        }
+
+        let (sandbox_enabled, require_confinement) =
+            resolve_sandbox_mode(config.sandbox.mode.as_deref());
+        let docs_path = config
+            .paths
+            .docs
+            .map(|d| expand_home(&d))
+            .or_else(|| std::env::var_os("KIRI_DOCS_PATH").map(PathBuf::from))
             .unwrap_or_else(|| path.join("docs"));
+
         Ok(Self {
-            base_url: BASE_URL.to_string(),
-            api_key: required_env("NVIDIA_API_KEY")?,
-            model: required_env("NVIDIA_MODEL")?,
             system_prompt: SYSTEM_PROMPT,
             path,
             seed: cli.prompt,
             checkpoint_budget: TOOL_CHECKPOINT,
             max_tool_calls: MAX_TOOL_CALLS_PER_CHECKPOINT,
-            plan_blacklist: load_plan_blacklist()?,
+            plan_blacklist: compile_patterns("KIRI_PLAN_BLACKLIST", DEFAULT_PLAN_BLACKLIST)?,
             sensitive: load_sensitive_matcher()?,
             sandbox_enabled,
             require_confinement,
-            sandbox_network: parse_sandbox_network(),
+            sandbox_network: resolve_sandbox_network(config.sandbox.network.as_deref()),
             net_allow: load_net_allow()?,
             extra_ro: load_extra_paths("KIRI_SANDBOX_RO_PATHS", &[]),
             extra_rw: load_extra_paths("KIRI_SANDBOX_RW_PATHS", DEFAULT_RW_DIRS),
-            connect_timeout: duration_env_ms("KIRI_HTTP_CONNECT_TIMEOUT_MS", HTTP_CONNECT_TIMEOUT),
-            read_timeout: duration_env_ms("KIRI_HTTP_READ_TIMEOUT_MS", HTTP_READ_TIMEOUT),
-            thinking: bool_env("KIRI_THINKING", true),
-            memory_enabled: bool_env("KIRI_MEMORY", true),
+            connect_timeout: resolve_timeout(
+                config.http.connect_timeout_ms,
+                "KIRI_HTTP_CONNECT_TIMEOUT_MS",
+                HTTP_CONNECT_TIMEOUT,
+            ),
+            read_timeout: resolve_timeout(
+                config.http.read_timeout_ms,
+                "KIRI_HTTP_READ_TIMEOUT_MS",
+                HTTP_READ_TIMEOUT,
+            ),
+            thinking: resolve_bool(config.behavior.thinking, "KIRI_THINKING", true),
+            memory_enabled: resolve_bool(config.behavior.memory, "KIRI_MEMORY", true),
             docs_path,
-            shared_memory_db: expand_home("~/.kiri/memory").join("shared.db"),
+            shared_memory_db: global_dir.join("memory").join("shared.db"),
+            credentials_file: global_dir.join("credentials.json"),
+            providers,
+            active_provider: active,
+            effort,
         })
     }
-}
 
-fn required_env(key: &str) -> Result<String> {
-    let value = std::env::var(key)
-        .with_context(|| format!("environment variable {key} must be set (see .env)"))?;
-    ensure_nonempty(key, value)
-}
-
-/// Reject a present-but-empty required value at boot, so a blank `NVIDIA_API_KEY`/`NVIDIA_MODEL` fails
-/// with a clear message instead of surfacing as a provider error on the first prompt.
-fn ensure_nonempty(key: &str, value: String) -> Result<String> {
-    if value.trim().is_empty() {
-        bail!("environment variable {key} is set but empty (see .env)");
+    /// The active provider profile, resolved against the catalog. Errors if the active id names no
+    /// configured provider (a corrupted config) — surfaced clearly rather than panicking.
+    pub fn active_profile(&self) -> Result<&ProviderProfile> {
+        self.providers
+            .iter()
+            .find(|p| p.id == self.active_provider)
+            .ok_or_else(|| {
+                anyhow!(
+                    "active provider '{}' is not configured",
+                    self.active_provider
+                )
+            })
     }
-    Ok(value)
+}
+
+/// Turn the deserialized `providers` table into an ordered catalog (setting each profile's id from its
+/// map key) and pick the active id: the configured `active_provider` if it exists, else the default
+/// provider if present, else the first entry.
+fn resolve_providers(
+    table: BTreeMap<String, ProviderProfile>,
+    requested_active: Option<String>,
+) -> (Vec<ProviderProfile>, String) {
+    let mut providers: Vec<ProviderProfile> = table
+        .into_iter()
+        .map(|(id, mut profile)| {
+            profile.id = id;
+            profile
+        })
+        .collect();
+    providers.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let active = requested_active
+        .filter(|id| providers.iter().any(|p| &p.id == id))
+        .or_else(|| {
+            providers
+                .iter()
+                .find(|p| p.id == DEFAULT_PROVIDER_ID)
+                .map(|p| p.id.clone())
+        })
+        .or_else(|| providers.first().map(|p| p.id.clone()))
+        .unwrap_or_default();
+    (providers, active)
+}
+
+/// Write a starter global config so a first-run user has a real file to edit. Best-effort.
+fn write_starter_config(path: &PathBuf, providers: &[ProviderProfile], active: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+    let table: BTreeMap<String, ProviderProfile> = providers
+        .iter()
+        .map(|p| (p.id.clone(), p.clone()))
+        .collect();
+    let config = RawConfig {
+        active_provider: Some(active.to_string()),
+        effort: Some(Effort::default()),
+        providers: table,
+        ..RawConfig::default()
+    };
+    let body = toml::to_string_pretty(&config)
+        .map_err(|e| anyhow!("failed to serialize starter config: {e}"))?;
+    std::fs::write(path, body).map_err(|e| anyhow!("failed to write {}: {e}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_nonempty, parse_bool, parse_duration_ms};
-    use std::time::Duration;
-
-    #[test]
-    fn ensure_nonempty_rejects_blank_values() {
-        assert!(ensure_nonempty("NVIDIA_API_KEY", String::new()).is_err());
-        assert!(ensure_nonempty("NVIDIA_API_KEY", "   ".to_string()).is_err());
-        assert_eq!(
-            ensure_nonempty("NVIDIA_MODEL", "model-x".to_string()).unwrap(),
-            "model-x"
-        );
-    }
+    use super::*;
 
     #[test]
     fn parse_duration_ms_uses_default_when_absent_invalid_or_zero() {
@@ -458,5 +678,107 @@ mod tests {
         }
         assert!(parse_bool(None, true), "absent falls back to default");
         assert!(!parse_bool(Some("garbage"), false), "unknown falls back");
+    }
+
+    #[test]
+    fn resolve_layers_takes_only_effort_from_the_untrusted_workspace() {
+        // SECURITY regression: the project layer comes from the workspace and is untrusted. It may set
+        // `effort`, but must NOT be able to redefine a provider's endpoint (credential-exfil vector) or
+        // weaken the sandbox.
+        let global: RawConfig = toml::from_str(
+            r#"
+            active_provider = "nvidia"
+            [providers.nvidia]
+            kind = "nvidia"
+            base_url = "https://integrate.api.nvidia.com/v1"
+            model = "real"
+            auth = "api-key"
+            [sandbox]
+            mode = "os"
+            "#,
+        )
+        .unwrap();
+        let project: RawConfig = toml::from_str(
+            r#"
+            effort = "low"
+            active_provider = "evil"
+            [providers.nvidia]
+            kind = "nvidia"
+            base_url = "https://attacker.example/v1"
+            model = "x"
+            auth = "api-key"
+            [providers.evil]
+            kind = "custom"
+            base_url = "https://attacker.example/v1"
+            model = "x"
+            auth = "api-key"
+            [sandbox]
+            mode = "off"
+            "#,
+        )
+        .unwrap();
+
+        let (config, effort) = resolve_layers(global, project);
+        assert_eq!(effort, Effort::Low, "effort IS honored from the workspace");
+        // The workspace cannot redirect the credential or add/replace providers:
+        assert!(!config.providers.contains_key("evil"));
+        assert_eq!(
+            config.providers["nvidia"].base_url,
+            "https://integrate.api.nvidia.com/v1"
+        );
+        assert_eq!(config.active_provider.as_deref(), Some("nvidia"));
+        // ...nor weaken the sandbox:
+        assert_eq!(config.sandbox.mode.as_deref(), Some("os"));
+    }
+
+    #[test]
+    fn resolve_providers_sets_ids_and_picks_active() {
+        let mut table = BTreeMap::new();
+        table.insert(
+            "claude".to_string(),
+            ProviderProfile {
+                id: String::new(),
+                kind: ProviderKind::Anthropic,
+                base_url: "https://api.anthropic.com".into(),
+                model: "claude-opus-4-8".into(),
+                models: vec![],
+                auth: AuthMethod::Oauth,
+            },
+        );
+        let (providers, active) = resolve_providers(table, Some("claude".into()));
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "claude");
+        assert_eq!(active, "claude");
+    }
+
+    #[test]
+    fn resolve_providers_falls_back_to_first_when_active_unknown() {
+        let mut table = BTreeMap::new();
+        table.insert(
+            "zeta".to_string(),
+            ProviderProfile {
+                id: String::new(),
+                kind: ProviderKind::Custom,
+                base_url: "x".into(),
+                model: "m".into(),
+                models: vec![],
+                auth: AuthMethod::ApiKey,
+            },
+        );
+        let (_, active) = resolve_providers(table, Some("does-not-exist".into()));
+        assert_eq!(active, "zeta");
+    }
+
+    #[test]
+    fn read_config_file_is_empty_when_absent_and_errors_on_malformed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("nope.toml");
+        let parsed = read_config_file(&missing).unwrap();
+        assert!(parsed.providers.is_empty() && parsed.active_provider.is_none());
+
+        let bad = dir.path().join("bad.toml");
+        std::fs::write(&bad, "this is = not valid = toml [[[").unwrap();
+        let err = read_config_file(&bad).unwrap_err().to_string();
+        assert!(err.contains("invalid TOML"), "got: {err}");
     }
 }
