@@ -18,11 +18,9 @@ pub enum ProviderKind {
     Nvidia,
     /// Any other OpenAI-compatible chat-completions endpoint.
     OpenAiCompatible,
-    /// OpenAI proper: `api-key` → chat-completions at `api.openai.com`; `oauth` → the ChatGPT/Codex
-    /// Responses API at the ChatGPT backend.
+    /// OpenAI proper: chat-completions at `api.openai.com` with an API key.
     Openai,
-    /// Anthropic Messages API: `api-key` → `x-api-key`; `oauth` → `Authorization: Bearer` + the
-    /// `oauth-2025-04-20` beta.
+    /// Anthropic Messages API, authenticated with `x-api-key`.
     Anthropic,
     /// A user-defined OpenAI-compatible endpoint (arbitrary base URL).
     Custom,
@@ -41,8 +39,10 @@ impl ProviderKind {
     }
 }
 
-/// How a provider authenticates. Selected per profile; for vendor kinds it also influences the wire
-/// shape (OpenAI OAuth uses the Responses API, not chat-completions).
+/// How a provider authenticates. `ApiKey` is the only wired method. `Oauth` is a modeled extension
+/// point, not implemented: subscription OAuth (Claude Pro/Max, ChatGPT Plus/Pro) is intentionally
+/// unsupported because the vendors restrict those tokens to their own clients (see the provider-auth
+/// ADR); it is kept in the type so a future sanctioned flow can slot in without a schema change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AuthMethod {

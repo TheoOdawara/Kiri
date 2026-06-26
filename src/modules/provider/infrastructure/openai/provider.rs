@@ -8,21 +8,9 @@ use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
+use crate::modules::provider::infrastructure::http_error::error_from_status;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::Effort;
-
-/// Cap a provider error body before it reaches the transcript. The body can reflect the request we
-/// sent (which may include file contents the agent read), so it is bounded to a short preview rather
-/// than surfaced in full.
-const MAX_ERROR_BODY_CHARS: usize = 600;
-
-fn truncate_body(body: String) -> String {
-    if body.chars().count() <= MAX_ERROR_BODY_CHARS {
-        return body;
-    }
-    let head: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
-    format!("{head}… (truncated)")
-}
 
 /// OpenAI-compatible chat provider (NVIDIA today). Holds the HTTP client and endpoint/credentials;
 /// translates a domain `TurnRequest` into the wire `ChatRequest`, streams the response forwarding
@@ -99,20 +87,7 @@ impl CompletionProvider for OpenAiProvider {
                 .text()
                 .await
                 .unwrap_or_else(|error| format!("<error body unavailable: {error}>"));
-            // A 4xx means the body we sent is unacceptable; resending it unchanged fails identically,
-            // so it is surfaced distinctly to let the frontend drop the offending turn. 5xx/other stay
-            // a plain (transient) provider error.
-            return Err(if status.is_client_error() {
-                AgentError::ProviderRejected {
-                    status: status.as_u16(),
-                    body: truncate_body(body),
-                }
-            } else {
-                AgentError::Provider(format!(
-                    "provider returned {status}: {}",
-                    truncate_body(body)
-                ))
-            });
+            return Err(error_from_status(status, body));
         }
 
         let mut accumulator = TurnAccumulator::default();
@@ -130,7 +105,7 @@ impl CompletionProvider for OpenAiProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_ERROR_BODY_CHARS, OpenAiProvider, truncate_body};
+    use super::OpenAiProvider;
     use crate::modules::agent::domain::message::Message;
     use crate::modules::agent::domain::stream_event::StreamEvent;
     use crate::modules::provider::application::completion_provider::{
@@ -138,19 +113,6 @@ mod tests {
     };
     use crate::shared::kernel::error::AgentError;
     use std::time::Duration;
-
-    #[test]
-    fn truncate_body_keeps_short_bodies_verbatim() {
-        let short = "invalid model".to_string();
-        assert_eq!(truncate_body(short.clone()), short);
-    }
-
-    #[test]
-    fn truncate_body_caps_long_bodies() {
-        let out = truncate_body("x".repeat(5_000));
-        assert!(out.ends_with("… (truncated)"));
-        assert!(out.chars().count() <= MAX_ERROR_BODY_CHARS + 16);
-    }
 
     struct NullSink;
     impl EventSink for NullSink {

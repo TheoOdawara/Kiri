@@ -17,6 +17,7 @@ use crate::modules::memory::infrastructure::sqlite_shared_store::SqliteSharedSto
 use crate::modules::memory::infrastructure::tools::default_memory_tools;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::application::secret_store::SecretStore;
+use crate::modules::provider::infrastructure::anthropic::provider::AnthropicProvider;
 use crate::modules::provider::infrastructure::openai::provider::OpenAiProvider;
 use crate::modules::provider::infrastructure::secrets::default_secret_store;
 use crate::modules::tools::application::registry::ToolRegistry;
@@ -287,10 +288,13 @@ fn env_hint(profile: &ProviderProfile) -> String {
     }
 }
 
-/// Select and construct the provider adapter from the profile's (kind, auth) and credential. The
-/// OpenAI-compatible chat-completions adapter covers NVIDIA, generic compatible endpoints, custom
-/// endpoints, and OpenAI with an API key. The Anthropic and OpenAI-OAuth (Responses API) adapters land
-/// in later phases; until then they fail with a clear, actionable message.
+/// Select and construct the provider adapter from the profile's (kind, auth) and credential. Two
+/// adapters cover every supported provider, all by API key: the Anthropic Messages API adapter for
+/// `Anthropic`, and the OpenAI-compatible chat-completions adapter for NVIDIA, generic compatible
+/// endpoints, custom endpoints, and OpenAI proper. Subscription OAuth (Claude Pro/Max, ChatGPT
+/// Plus/Pro) is intentionally unsupported — the providers restrict those tokens to their own clients,
+/// so it would require impersonation that risks the user's account (see the provider-auth ADR); an
+/// `Oauth` profile fails fast with that rationale.
 fn build_provider(
     client: reqwest::Client,
     profile: &ProviderProfile,
@@ -306,22 +310,26 @@ fn build_provider(
         );
     }
     match (profile.kind, profile.auth) {
-        (ProviderKind::Anthropic, _) => bail!(
-            "provider '{}' uses the Anthropic adapter, which is not wired yet",
+        (ProviderKind::Anthropic, AuthMethod::Oauth) => bail!(
+            "provider '{}' uses Anthropic subscription OAuth, which Kiri does not support — Anthropic restricts Pro/Max OAuth tokens to its own clients. Configure an Anthropic Console API key instead.",
             profile.id
         ),
         (ProviderKind::Openai, AuthMethod::Oauth) => bail!(
-            "provider '{}' uses OpenAI OAuth (Responses API), which is not wired yet",
+            "provider '{}' uses ChatGPT subscription OAuth, which Kiri does not support — a ChatGPT subscription does not include API access. Configure a platform.openai.com API key instead.",
             profile.id
         ),
+        (ProviderKind::Anthropic, AuthMethod::ApiKey) => {
+            // The Anthropic adapter does not consume `thinking`/`effort` yet — extended thinking is
+            // deferred (see the note on `AnthropicProvider`); both still drive the OpenAI-compatible arm.
+            let key = api_key_of(credential, profile)?;
+            Ok(Arc::new(AnthropicProvider::new(
+                client,
+                profile.base_url.clone(),
+                key.expose().to_string(),
+            )))
+        }
         _ => {
-            let key = match credential {
-                Credential::ApiKey { key } => key,
-                Credential::Oauth(_) => bail!(
-                    "provider '{}' is configured for OAuth, but its kind only supports API keys",
-                    profile.id
-                ),
-            };
+            let key = api_key_of(credential, profile)?;
             Ok(Arc::new(OpenAiProvider::new(
                 client,
                 profile.base_url.clone(),
@@ -330,6 +338,18 @@ fn build_provider(
                 effort,
             )))
         }
+    }
+}
+
+/// Extract the API key from a credential, failing if the profile somehow carries an OAuth credential
+/// (Kiri only supports API-key auth). Shared by every adapter branch.
+fn api_key_of(credential: Credential, profile: &ProviderProfile) -> Result<Secret> {
+    match credential {
+        Credential::ApiKey { key } => Ok(key),
+        Credential::Oauth(_) => bail!(
+            "provider '{}' has an OAuth credential, but Kiri only supports API-key credentials",
+            profile.id
+        ),
     }
 }
 
@@ -413,11 +433,29 @@ mod tests {
     }
 
     #[test]
-    fn build_provider_bails_for_unwired_kinds() {
+    fn build_provider_selects_anthropic_for_api_key() {
         let client = reqwest::Client::new();
-        let anthropic = profile("c", ProviderKind::Anthropic, AuthMethod::ApiKey, "m");
-        assert!(build_provider(client.clone(), &anthropic, api_key(), true, Effort::High).is_err());
-        let openai_oauth = profile("g", ProviderKind::Openai, AuthMethod::Oauth, "m");
+        let p = profile("claude", ProviderKind::Anthropic, AuthMethod::ApiKey, "m");
+        assert!(build_provider(client, &p, api_key(), true, Effort::High).is_ok());
+    }
+
+    #[test]
+    fn build_provider_bails_for_subscription_oauth() {
+        // Subscription OAuth is intentionally unsupported for both vendors; it must fail fast, not
+        // silently fall through to an adapter.
+        let client = reqwest::Client::new();
+        let anthropic_oauth = profile("claude", ProviderKind::Anthropic, AuthMethod::Oauth, "m");
+        assert!(
+            build_provider(
+                client.clone(),
+                &anthropic_oauth,
+                oauth(),
+                true,
+                Effort::High
+            )
+            .is_err()
+        );
+        let openai_oauth = profile("gpt", ProviderKind::Openai, AuthMethod::Oauth, "m");
         assert!(build_provider(client, &openai_oauth, oauth(), true, Effort::High).is_err());
     }
 
