@@ -62,7 +62,7 @@ borderless prompt whose gate glyph changes color with its state.
 
 ◈─ moonshotai/kimi-k2-instruct · ~/dev/Kiri · DEFAULT ─────◈
 ⬡ ›_
-  Enter envia · ⇧Tab modo · Alt+Enter nova linha · ↑↓ histórico · ^C/^D sai · /help
+  Enter envia · ⇧Tab modo · Alt+Enter nova linha · ↑↓ histórico · arraste copia · ^C/^D sai · /help
 ```
 
 ## Features
@@ -122,15 +122,35 @@ to accept; absolute or `~/` paths outside it default to decline.
 
 **Key bindings (TUI)**
 
+The composer follows the **macOS text-editing standard** — the Cocoa control bindings that work in
+every native text field — so editing the prompt feels like editing anywhere on the Mac.
+
 | Key | Action |
 |---|---|
 | `Enter` | Submit the prompt |
 | `Alt+Enter` / `Shift+Enter` | Insert a newline |
-| `↑` / `↓` | Recall input history |
-| `PgUp` / `PgDn` | Scroll the transcript |
+| `Ctrl+A` / `Ctrl+E` | Move to line start / end |
+| `Ctrl+B` / `Ctrl+F` | Move back / forward one character |
+| `Option+←` / `Option+→` | Move by word |
+| `Option+⌫` / `Ctrl+⌫` | Delete the previous word (`Option+⌦` / `Ctrl+⌦` the next) |
+| `Ctrl+K` | Cut to end of line |
+| `↑` / `↓` | Recall input history (at the first / last line) |
+| `Shift`+motion · drag · double / triple click | Select text; `Ctrl+C` copies it (paste with `Cmd+V`) |
+| `PgUp` / `PgDn` · `Ctrl+Home` / `Ctrl+End` · wheel | Scroll the transcript |
 | `Shift+Tab` | Cycle the approval mode (default → auto → plan) |
-| `Ctrl+C` | Cancel the running turn, or quit when idle |
+| `Ctrl+C` | Copy the selection · else cancel the running turn · else quit (double-tap when idle) |
 | `Ctrl+D` | Quit (empty input) |
+
+**Copy from anywhere.** Drag the mouse over *any* region — the transcript, a tool's output, or the
+composer — to select it; release (or `Ctrl+C`) copies it to the system clipboard. Double-click selects a
+word, triple-click a line. Selection covers one screenful at a time; scroll, then select again for more.
+The wheel still scrolls, and a key or scroll clears the highlight.
+
+**macOS terminal note.** `Cmd` combinations never reach a terminal app, so line/word navigation lives on
+`Ctrl`/`Option` (above), not `Cmd`. `Option+←/→` and `Option+⌫` require your terminal to send Option as
+Meta — *iTerm2:* **Left Option key → Esc+**; *Terminal.app:* **Use Option as Meta Key**. Enabling that
+disables dead-key accent composition (`Option+e` → `é`) on a US-International layout (an ABNT layout is
+unaffected, since it has dedicated accent keys).
 
 **Commands.** `/exit` (`/sair`, `/quit`) ends the session · `/new` (`/novo`) starts a fresh session ·
 `/plan`, `/auto`, `/default` switch the approval mode · `/cd [path]` shows or changes the workspace ·
