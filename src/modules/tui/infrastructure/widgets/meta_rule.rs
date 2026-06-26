@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -111,18 +111,8 @@ fn fit_context(
 fn mode_badge(mode: ApprovalMode) -> (&'static str, Style) {
     match mode {
         ApprovalMode::Default => ("DEFAULT", theme::dim()),
-        ApprovalMode::Auto => (
-            "AUTO",
-            theme::base()
-                .fg(theme::WARNING)
-                .add_modifier(Modifier::BOLD),
-        ),
-        ApprovalMode::Plan => (
-            "PLAN",
-            theme::base()
-                .fg(theme::HIGHLIGHT)
-                .add_modifier(Modifier::BOLD),
-        ),
+        ApprovalMode::Auto => ("AUTO", theme::base().fg(theme::WARNING)),
+        ApprovalMode::Plan => ("PLAN", theme::base().fg(theme::HIGHLIGHT)),
     }
 }
 

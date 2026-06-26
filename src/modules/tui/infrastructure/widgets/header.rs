@@ -1,6 +1,5 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -19,11 +18,11 @@ pub fn render(_model: &Model, frame: &mut Frame, area: Rect) {
     // terminals that render the brand glyph wider than its nominal width.
     let line = if display_width(&full) < area.width as usize {
         Line::from(vec![
-            Span::styled(seal, theme::dim().add_modifier(Modifier::BOLD)),
+            Span::styled(seal, theme::dim()),
             Span::styled(tagline, theme::dim()),
         ])
     } else {
-        Line::styled(seal, theme::dim().add_modifier(Modifier::BOLD))
+        Line::styled(seal, theme::dim())
     };
     frame.render_widget(Paragraph::new(line).style(theme::base()), area);
 }

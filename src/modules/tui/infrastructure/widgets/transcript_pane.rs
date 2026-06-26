@@ -74,9 +74,7 @@ fn render_item(
         TranscriptItem::User(text) => push_wrapped(
             &format!("você › {text}"),
             width,
-            Style::default()
-                .fg(theme::HIGHLIGHT)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::HIGHLIGHT),
             out,
         ),
         TranscriptItem::Reasoning(text) => {
@@ -86,12 +84,7 @@ fn render_item(
             render_body(text, style, width, active, out);
         }
         TranscriptItem::Assistant(text) => {
-            out.push(Line::styled(
-                "◆ kiri",
-                Style::default()
-                    .fg(theme::HEADING)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            out.push(Line::styled("◆ kiri", Style::default().fg(theme::HEADING)));
             render_body(text, Style::default().fg(theme::STEEL), width, active, out);
         }
         TranscriptItem::Tool(activity) => render_tool(activity, width, expanded, out),
@@ -122,10 +115,7 @@ fn render_tool(
     };
     out.push(Line::from(vec![
         Span::styled("⏺ ", Style::default().fg(cmd_color)),
-        Span::styled(
-            activity.command.clone(),
-            Style::default().fg(cmd_color).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(activity.command.clone(), Style::default().fg(cmd_color)),
     ]));
 
     if let Some(diff) = &activity.diff {

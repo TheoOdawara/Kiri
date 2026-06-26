@@ -1,6 +1,5 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -45,18 +44,10 @@ pub fn render(frame: &mut Frame, area: Rect) {
         }
         lines.push(Line::default());
     }
-    lines.push(Line::styled(
-        "[ KIRI ]",
-        theme::base().add_modifier(Modifier::BOLD),
-    ));
+    lines.push(Line::styled("[ KIRI ]", theme::strong()));
     lines.push(Line::from(vec![
         Span::styled("KIRI harness system: Protecting codebase... ", theme::dim()),
-        Span::styled(
-            "[OK]",
-            theme::base()
-                .fg(theme::SUCCESS)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("[OK]", theme::base().fg(theme::SUCCESS)),
     ]));
     lines.push(Line::default());
     lines.push(Line::styled(
