@@ -98,6 +98,13 @@ pub fn accent() -> Style {
     Style::default().fg(HIGHLIGHT)
 }
 
+/// The highlight for an in-app screen text selection — void-on-brand, the same inversion the editor uses
+/// for its own selection, so a dragged highlight reads consistently across the whole UI without claiming
+/// the single live accent (cyan).
+pub fn selection() -> Style {
+    Style::default().fg(VOID).bg(BRAND)
+}
+
 /// The input prompt is a live Quality Gate: its glyph and color encode the editor's state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateState {

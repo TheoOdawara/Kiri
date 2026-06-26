@@ -186,6 +186,16 @@ impl ScreenSelection {
     pub fn is_empty(&self) -> bool {
         self.granularity == Granularity::Char && self.anchor == self.head
     }
+
+    /// `(start, end)` ordered by row then column, so the overlay never special-cases drag direction.
+    pub fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        let key = |(c, r): (u16, u16)| (r, c);
+        if key(self.anchor) <= key(self.head) {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
 }
 
 /// Submitted-prompt history with shell-style up/down recall. The in-progress line is saved as a draft

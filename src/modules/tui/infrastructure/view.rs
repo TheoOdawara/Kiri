@@ -7,7 +7,8 @@ use crate::modules::tui::domain::view_state::APPROVAL_OPTIONS;
 use crate::modules::tui::infrastructure::layout::{frame_layout, h_pad};
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
-    approval, command_menu, editor, header, hint_line, meta_rule, transcript_pane,
+    approval, command_menu, editor, header, hint_line, meta_rule, selection_overlay,
+    transcript_pane,
 };
 
 /// The sole ratatui render entry point: project the model onto the frame's regions. Pure with respect
@@ -58,6 +59,12 @@ pub fn view(model: &Model, frame: &mut Frame) {
     // The slash-command preview floats just above the editor while the buffer is a `/`-prefixed token.
     if let Some(menu) = &model.command_menu {
         command_menu::render(menu, frame, regions.input);
+    }
+    // The screen text selection paints last, over everything, so a drag can highlight any region of the
+    // rendered UI. It restyles cells without touching their symbols, so the runtime can scrape the copy.
+    if let Some(sel) = model.selection {
+        let area = frame.area();
+        selection_overlay::paint(frame.buffer_mut(), area, &sel, theme::selection());
     }
 }
 
@@ -340,5 +347,55 @@ mod tests {
         assert!(out.contains("kiri"), "brand seal missing:\n{out}");
         assert!(out.contains("›▏"), "prompt glyph missing:\n{out}");
         assert!(out.contains("/help"), "short hint missing:\n{out}");
+    }
+
+    // --- screen selection overlay -------------------------------------------------
+
+    fn render_buffer(model: &Model, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|frame| view(model, frame)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn a_screen_selection_highlights_buffer_cells() {
+        use crate::modules::tui::domain::view_state::{Granularity, ScreenSelection};
+        use crate::modules::tui::infrastructure::theme;
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model
+            .transcript
+            .push(TranscriptItem::Assistant("hello".to_string()));
+        let mut sel = ScreenSelection::new(0, 0, Granularity::Char);
+        sel.extend(3, 0);
+        model.selection = Some(sel);
+        let buffer = render_buffer(&model, 40, 12);
+        for x in 0..=3u16 {
+            assert_eq!(
+                buffer[(x, 0)].style().bg,
+                Some(theme::BRAND),
+                "selected cell {x} must carry the selection highlight"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stable_selection_keeps_the_frame_byte_identical_across_time() {
+        use crate::modules::tui::domain::model::Motion;
+        use crate::modules::tui::domain::view_state::{Granularity, ScreenSelection};
+        use std::time::{Duration, Instant};
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model
+            .transcript
+            .push(TranscriptItem::Assistant("olá".to_string()));
+        model.motion = Motion::Reduced;
+        let mut sel = ScreenSelection::new(0, 0, Granularity::Char);
+        sel.extend(5, 0);
+        model.selection = Some(sel);
+        let now = Instant::now();
+        model.render_at = Some(now);
+        let a = render_buffer(&model, 80, 20);
+        model.render_at = Some(now + Duration::from_secs(5));
+        let b = render_buffer(&model, 80, 20);
+        assert_eq!(a, b, "a stable selection must not change a cell over time");
     }
 }
