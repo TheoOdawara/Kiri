@@ -3,11 +3,13 @@ use std::time::{Duration, Instant};
 use crate::modules::agent::application::approval_policy::Approval;
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
-use crate::modules::tui::application::msg::{Key, KeyPress};
+use crate::modules::tui::application::msg::{Key, KeyPress, MouseKind};
 use crate::modules::tui::domain::command_menu::CommandMenu;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
-use crate::modules::tui::domain::view_state::{APPROVAL_OPTIONS, PLAN_OPTIONS};
+use crate::modules::tui::domain::view_state::{
+    APPROVAL_OPTIONS, Granularity, PLAN_OPTIONS, ScreenSelection, SelectionState,
+};
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use tui_textarea::{Input, Key as TaKey};
 
@@ -18,6 +20,9 @@ const SCROLL_PAGE: u16 = 20;
 /// Double-tap window for Ctrl+C (quit) and Esc (cancel): two presses within this interval count as
 /// a double. Tuned to feel deliberate without being sluggish.
 const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(500);
+/// Multi-click window: presses on the same cell within this interval escalate the selection granularity
+/// (char → word → line), the way a notepad's double/triple click does.
+const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
 /// Interpret a key press against the current model, mutating it and returning any effects. Pure: no
 /// I/O, so it is fully unit-testable. While an approval is pending, keys answer it; otherwise they
@@ -29,6 +34,24 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     if model.pending_plan.is_some() {
         return on_plan_key(model, key);
     }
+
+    // A live screen selection takes Ctrl+C first: request a copy (the runtime scrapes the buffer) and
+    // clear afterward, so a second Ctrl+C resumes cancel/quit. This precedes both the composer's own
+    // Ctrl+C copy and the generic clear-on-key below; `last_ctrl_c` is left untouched so it cannot
+    // interfere with the quit double-tap.
+    if key.ctrl
+        && !key.alt
+        && key.code == Key::Char('c')
+        && model.selection.is_some_and(|s| !s.is_empty())
+    {
+        if let Some(sel) = model.selection.as_mut() {
+            sel.state = SelectionState::CopyAndClear;
+        }
+        return vec![];
+    }
+    // Any other key means the user is editing or navigating — drop the screen highlight now (the copy
+    // path above already returned).
+    model.selection = None;
 
     // Before anything else: the menu intercepts navigation and completion keys, but lets ordinary
     // typing fall through to the editor (which keeps the filter in sync after each mutation).
@@ -177,6 +200,61 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
             sync_menu(model);
             vec![]
         }
+    }
+}
+
+/// Interpret a left mouse gesture, mutating the screen selection. Pure: the clock comes from
+/// `model.last_event_at` (stamped by the runtime when the event arrived), and word/line ranges are
+/// derived later from the rendered buffer — here we only set anchor/head and the granularity intent.
+/// Not gated by a pending modal: selecting and copying the text of an approval/plan box is allowed.
+pub fn on_mouse(model: &mut Model, kind: MouseKind, col: u16, row: u16) -> Vec<Effect> {
+    match kind {
+        MouseKind::Down => {
+            let granularity = click_granularity(model, col, row);
+            model.selection = Some(ScreenSelection::new(col, row, granularity));
+        }
+        MouseKind::Drag => {
+            // A drag is always a character-range gesture, even if it began as a double-click.
+            if let Some(sel) = model.selection.as_mut() {
+                sel.granularity = Granularity::Char;
+                sel.extend(col, row);
+            }
+        }
+        MouseKind::Up => {
+            if let Some(sel) = model.selection.as_mut() {
+                if sel.granularity == Granularity::Char {
+                    sel.extend(col, row);
+                }
+                if sel.is_empty() {
+                    // A bare click (down+up on one cell) selects nothing — leave no stray highlight.
+                    model.selection = None;
+                } else {
+                    sel.state = SelectionState::CopyAndKeep;
+                }
+            }
+        }
+    }
+    vec![]
+}
+
+/// Classify a mouse-down as a single/double/triple click, escalating the granularity when the same cell
+/// is pressed again within `MULTI_CLICK_WINDOW`. The running count lives in `last_click` (not in the
+/// selection, which a bare click clears between presses).
+fn click_granularity(model: &mut Model, col: u16, row: u16) -> Granularity {
+    let now = model.last_event_at;
+    let count = match (now, model.last_click) {
+        (Some(now), Some((prev, pos, n)))
+            if pos == (col, row) && now.duration_since(prev) < MULTI_CLICK_WINDOW =>
+        {
+            n.saturating_add(1)
+        }
+        _ => 1,
+    };
+    model.last_click = now.map(|t| (t, (col, row), count));
+    match count {
+        1 => Granularity::Char,
+        2 => Granularity::Word,
+        _ => Granularity::Line,
     }
 }
 
@@ -1184,5 +1262,178 @@ mod tests {
         // The widget binds Alt+z to nothing destructive here; the key is consumed by feed without error.
         // The guarantee under test is "no panic / no swallow into a dead chord" — the buffer stays valid.
         assert!(m.input.text().is_empty() || m.input.text() == "z");
+    }
+
+    // --- screen selection (mouse) -------------------------------------------------
+
+    /// A model whose event clock is stamped, ready for mouse-gesture tests.
+    fn with_clock(now: Instant) -> Model {
+        Model {
+            last_event_at: Some(now),
+            ..Model::default()
+        }
+    }
+
+    #[test]
+    fn mouse_down_starts_a_char_selection() {
+        let mut m = with_clock(Instant::now());
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        let sel = m.selection.expect("down starts a selection");
+        assert_eq!(sel.anchor, (3, 2));
+        assert_eq!(sel.head, (3, 2));
+        assert_eq!(sel.granularity, Granularity::Char);
+        assert_eq!(sel.state, SelectionState::Idle);
+    }
+
+    #[test]
+    fn mouse_drag_extends_head_and_keeps_anchor() {
+        let mut m = with_clock(Instant::now());
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        on_mouse(&mut m, MouseKind::Drag, 7, 2);
+        let sel = m.selection.unwrap();
+        assert_eq!(sel.anchor, (3, 2));
+        assert_eq!(sel.head, (7, 2));
+    }
+
+    #[test]
+    fn mouse_up_on_a_real_drag_requests_copy_and_keeps_highlight() {
+        let mut m = with_clock(Instant::now());
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        on_mouse(&mut m, MouseKind::Drag, 7, 2);
+        on_mouse(&mut m, MouseKind::Up, 7, 2);
+        let sel = m
+            .selection
+            .expect("a non-empty selection stays after release");
+        assert_eq!(sel.state, SelectionState::CopyAndKeep);
+        assert!(!sel.is_empty());
+    }
+
+    #[test]
+    fn bare_click_clears_the_selection() {
+        let mut m = with_clock(Instant::now());
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        on_mouse(&mut m, MouseKind::Up, 3, 2);
+        assert!(
+            m.selection.is_none(),
+            "a click with no drag selects nothing"
+        );
+    }
+
+    #[test]
+    fn single_cell_selection_needs_a_one_cell_drag() {
+        let mut m = with_clock(Instant::now());
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        on_mouse(&mut m, MouseKind::Drag, 4, 2);
+        on_mouse(&mut m, MouseKind::Up, 4, 2);
+        let sel = m.selection.expect("a one-cell drag is a real selection");
+        assert!(!sel.is_empty());
+        assert_eq!(sel.state, SelectionState::CopyAndKeep);
+    }
+
+    #[test]
+    fn double_click_within_window_selects_a_word() {
+        let t0 = Instant::now();
+        let mut m = with_clock(t0);
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        on_mouse(&mut m, MouseKind::Up, 3, 2); // bare click clears the highlight...
+        m.last_event_at = Some(t0 + Duration::from_millis(50));
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        let sel = m.selection.expect("the second click reselects");
+        assert_eq!(sel.granularity, Granularity::Word);
+        assert!(!sel.is_empty(), "a word selection is never empty");
+    }
+
+    #[test]
+    fn triple_click_within_window_selects_a_line() {
+        let t0 = Instant::now();
+        let mut m = with_clock(t0);
+        for i in 0..3u64 {
+            m.last_event_at = Some(t0 + Duration::from_millis(i * 50));
+            on_mouse(&mut m, MouseKind::Down, 3, 2);
+            on_mouse(&mut m, MouseKind::Up, 3, 2);
+        }
+        let sel = m
+            .selection
+            .expect("a line selection stays after the third release");
+        assert_eq!(sel.granularity, Granularity::Line);
+    }
+
+    #[test]
+    fn second_click_after_the_window_is_a_fresh_single() {
+        let t0 = Instant::now();
+        let mut m = with_clock(t0);
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        on_mouse(&mut m, MouseKind::Up, 3, 2);
+        m.last_event_at = Some(t0 + Duration::from_millis(600)); // > MULTI_CLICK_WINDOW
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        assert_eq!(m.selection.unwrap().granularity, Granularity::Char);
+    }
+
+    #[test]
+    fn double_click_far_away_is_two_singles() {
+        let t0 = Instant::now();
+        let mut m = with_clock(t0);
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        on_mouse(&mut m, MouseKind::Up, 3, 2);
+        m.last_event_at = Some(t0 + Duration::from_millis(50));
+        on_mouse(&mut m, MouseKind::Down, 9, 9); // a different cell — not a double-click
+        assert_eq!(m.selection.unwrap().granularity, Granularity::Char);
+    }
+
+    #[test]
+    fn keystroke_clears_the_screen_selection() {
+        let mut m = with_clock(Instant::now());
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        on_mouse(&mut m, MouseKind::Drag, 7, 2);
+        on_mouse(&mut m, MouseKind::Up, 7, 2);
+        assert!(m.selection.is_some());
+        on_key(&mut m, press(Key::Char('a')));
+        assert!(m.selection.is_none(), "typing drops the screen selection");
+    }
+
+    #[test]
+    fn esc_clears_the_screen_selection_when_idle() {
+        let mut m = with_clock(Instant::now());
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        on_mouse(&mut m, MouseKind::Drag, 7, 2);
+        on_mouse(&mut m, MouseKind::Up, 7, 2);
+        on_key(&mut m, press(Key::Esc));
+        assert!(m.selection.is_none());
+    }
+
+    #[test]
+    fn ctrl_c_prefers_the_screen_selection_and_requests_clearing_copy() {
+        let mut m = with_clock(Instant::now());
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        on_mouse(&mut m, MouseKind::Drag, 7, 2);
+        on_mouse(&mut m, MouseKind::Up, 7, 2);
+        let effects = on_key(&mut m, ctrl(Key::Char('c')));
+        assert!(
+            effects.is_empty(),
+            "screen copy goes through selection state, not an Effect"
+        );
+        assert_eq!(
+            m.selection
+                .expect("selection survives until the runtime scrapes it")
+                .state,
+            SelectionState::CopyAndClear
+        );
+        assert!(!m.should_quit, "Ctrl+C on a selection must not quit");
+    }
+
+    #[test]
+    fn mouse_selection_works_while_a_modal_is_pending() {
+        let mut m = Model {
+            pending_approval: Some(PendingApproval::new("ler a.txt".to_string(), true)),
+            last_event_at: Some(Instant::now()),
+            ..Model::default()
+        };
+        on_mouse(&mut m, MouseKind::Down, 3, 2);
+        on_mouse(&mut m, MouseKind::Drag, 7, 2);
+        on_mouse(&mut m, MouseKind::Up, 7, 2);
+        assert!(
+            m.selection.is_some(),
+            "mouse selection must work under a modal (to copy its text)"
+        );
     }
 }

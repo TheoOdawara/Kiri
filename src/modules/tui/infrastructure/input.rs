@@ -1,6 +1,8 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 
-use crate::modules::tui::application::msg::{Key, KeyPress, Msg};
+use crate::modules::tui::application::msg::{Key, KeyPress, MouseKind, Msg};
 
 /// Translate a crossterm event into a `Msg`, or `None` for events the TUI ignores. Only key *press*
 /// events are forwarded (key-release events, reported by some terminals, would double every keystroke).
@@ -10,9 +12,27 @@ pub fn to_msg(event: Event) -> Option<Msg> {
         Event::Key(key) if key.kind == KeyEventKind::Press => key_to_msg(key),
         Event::Paste(text) => Some(Msg::Paste(text)),
         Event::Resize(..) => Some(Msg::Resize),
+        // Wheel scroll moves the transcript; a left-button down/drag/up drives screen text selection.
+        // crossterm reports cell coordinates 0-based from the top-left as `column`/`row`. `Moved` (no
+        // button) floods on every motion and carries no gesture, so it is dropped.
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollUp => Some(Msg::ScrollUp),
             MouseEventKind::ScrollDown => Some(Msg::ScrollDown),
+            MouseEventKind::Down(MouseButton::Left) => Some(Msg::Mouse {
+                kind: MouseKind::Down,
+                col: mouse.column,
+                row: mouse.row,
+            }),
+            MouseEventKind::Drag(MouseButton::Left) => Some(Msg::Mouse {
+                kind: MouseKind::Drag,
+                col: mouse.column,
+                row: mouse.row,
+            }),
+            MouseEventKind::Up(MouseButton::Left) => Some(Msg::Mouse {
+                kind: MouseKind::Up,
+                col: mouse.column,
+                row: mouse.row,
+            }),
             _ => None,
         },
         _ => None,

@@ -5,7 +5,7 @@ use crate::shared::kernel::approval_mode::ApprovalMode;
 use super::command_menu::CommandMenu;
 use super::transcript::Transcript;
 use super::view_state::{
-    History, ImageAttachment, InputBuffer, PendingApproval, PendingPlan, Scroll,
+    History, ImageAttachment, InputBuffer, PendingApproval, PendingPlan, ScreenSelection, Scroll,
 };
 
 /// Whether motion is fully expressed or frozen to its final frame. The session preference is resolved
@@ -99,6 +99,16 @@ pub struct Model {
     /// When the shell opened, stamped by the runtime at startup. Drives the splash breath-in and the
     /// living-cursor pulse; a keypress backdates it to fast-forward the splash for frequent users.
     pub opened_at: Option<Instant>,
+    /// The active screen text selection (mouse drag / multi-click), or `None`. The overlay paints it and
+    /// the runtime scrapes the rendered cells to copy; `None` by default keeps every idle frame identical.
+    pub selection: Option<ScreenSelection>,
+    /// Instant + cell of the last mouse-down and its running multiplicity (1=char, 2=word, 3+=line), for
+    /// double/triple-click detection.
+    pub last_click: Option<(Instant, (u16, u16), u8)>,
+    /// The instant the current input event arrived, stamped by the runtime right after reading it. Used
+    /// as the clock for multi-click detection — `render_at` is stamped before the event await and would
+    /// be stale, so it cannot time clicks.
+    pub last_event_at: Option<Instant>,
 }
 
 impl Model {
@@ -117,6 +127,12 @@ impl Model {
             },
             ..Self::default()
         }
+    }
+
+    /// Drop any active screen selection — the user navigated away (typed, scrolled, resized, or started a
+    /// new session). Cheap and idempotent.
+    pub fn clear_screen_selection(&mut self) {
+        self.selection = None;
     }
 }
 

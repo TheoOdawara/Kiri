@@ -19,6 +19,14 @@ pub struct KeyPress {
     pub shift: bool,
 }
 
+/// Which phase of a left-button mouse gesture a `Msg::Mouse` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseKind {
+    Down,
+    Drag,
+    Up,
+}
+
 /// The subset of keys the TUI acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -45,6 +53,12 @@ pub enum Key {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
     Key(KeyPress),
+    /// A left mouse-button gesture at a terminal cell — drives in-app screen text selection.
+    Mouse {
+        kind: MouseKind,
+        col: u16,
+        row: u16,
+    },
     Paste(String),
     /// An image read from the OS clipboard, staged as an attachment for the next prompt.
     ImageAttached(ImageAttachment),
