@@ -15,6 +15,9 @@ use crate::modules::tui::infrastructure::text::{chunk_by_width, display_width};
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::splash;
 
+/// Max display width of the conversation column. Beyond this the body floats left against the void
+/// (rather than stretching edge-to-edge on an ultrawide terminal), keeping comfortable line lengths.
+const BODY_MAX_WIDTH: usize = 88;
 /// Lines of tool output (or edit-diff old/new block) shown before eliding, unless expanded (Ctrl+O).
 const PREVIEW_LINES: usize = 6;
 /// Per side (old/new) diff lines shown before eliding, unless expanded.
@@ -35,13 +38,17 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let width = area.width.max(1) as usize;
+    let width = (area.width as usize).clamp(1, BODY_MAX_WIDTH);
     let items = model.transcript.items();
     let last = items.len().saturating_sub(1);
     let mut lines: Vec<Line> = Vec::new();
     for (idx, item) in items.iter().enumerate() {
         if !lines.is_empty() {
+            // Two blank rows open a new turn (a user prompt); one separates items within a turn.
             lines.push(Line::default());
+            if matches!(item, TranscriptItem::User(_)) {
+                lines.push(Line::default());
+            }
         }
         // The still-streaming item (the trailing assistant/reasoning while a turn streams) renders as
         // plain text — skipping the per-frame markdown parse keeps the ~30 fps stream cheap; once the

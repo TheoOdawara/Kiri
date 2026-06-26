@@ -13,15 +13,15 @@ use crate::shared::kernel::approval_mode::ApprovalMode;
 /// (the ambiguous-width brand caps) nudges into the slack instead of pushing the closing cap off-screen.
 const SAFETY: usize = 1;
 
-/// The forged rule directly above the input: tsuba node caps (`◈`) frame a steel rule that carries the
-/// model, workspace, and active approval mode, with the spinner and elapsed seconds pinned right while a
-/// turn runs. This is the "régua forjada" that seats the input cluster next to where the user types.
-/// The line is responsive: on narrow terminals the context is abbreviated (workspace first, then model)
-/// and the fill dashes shrink, so the caps never overflow the width.
+/// The quiet status spine directly above the input — the retired dash-rail. No rule, no caps strung on
+/// dashes: the context (`model · workspace`) sits dim at the left, the approval mode is ghosted right
+/// behind a single `◈` tsuba anchor, and only void breathes between them. While a turn runs the spinner
+/// and elapsed seconds take the one accent just left of the mode. Responsive: as width shrinks the
+/// workspace is abbreviated then dropped, but the mode anchor always survives.
 pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     let width = area.width as usize;
     let (mode_label, mode_style) = mode_badge(model.approval_mode);
-    let right = if model.busy {
+    let busy = if model.busy {
         let glyph = theme::SPINNER[model.status.spinner_frame % theme::SPINNER.len()];
         format!("{glyph} {}", model.status.elapsed_label())
     } else {
@@ -35,46 +35,40 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         &full,
         &model.status.workspace,
         width,
-        display_width(&right),
+        display_width(&busy),
         mode_label,
     );
 
-    // Layout: "◈─ " context " · " MODE " " ──fill── [right " "] "─◈". The dashes run continuously into
-    // the closing tsuba cap; when a turn runs, the spinner + elapsed sit just left of the cap. Widths
-    // are measured in display cells (not chars) so wide glyphs do not push the closing cap off-screen.
-    let head = display_width("◈─ ")
-        + display_width(&context)
-        + display_width(" · ")
-        + display_width(mode_label)
-        + 1; // trailing space after the mode badge
-    let tail = if right.is_empty() {
-        display_width("─◈")
+    // Layout: context …void fill… [busy ]MODE ◈ . The right cluster is the only thing pinned to the
+    // edge; the space between is the negative space (間) that kills the old boxed rule. Widths are
+    // measured in display cells so a wide glyph never pushes the anchor off-screen.
+    let right_text = if busy.is_empty() {
+        String::new()
     } else {
-        display_width(&right) + 1 + display_width("─◈") // right + space + cap
+        format!("{busy} ")
     };
-    let fill = width.saturating_sub(head + tail + SAFETY);
+    let head = display_width(&context);
+    let tail = display_width(&right_text) + display_width(mode_label) + display_width(" ◈");
+    let fill = width.saturating_sub(head + tail + SAFETY).max(1);
 
     let mut spans = vec![
-        Span::styled("◈─ ", theme::dim()),
         Span::styled(context, theme::dim()),
-        Span::styled(" · ", theme::dim()),
-        Span::styled(mode_label, mode_style),
-        Span::styled(" ", theme::dim()),
-        Span::styled("─".repeat(fill), theme::dim()),
+        Span::styled(" ".repeat(fill), theme::base()),
     ];
-    if !right.is_empty() {
-        spans.push(Span::styled(right, theme::accent()));
-        spans.push(Span::styled(" ", theme::dim()));
+    if !right_text.is_empty() {
+        spans.push(Span::styled(right_text, theme::accent()));
     }
-    spans.push(Span::styled("─◈", theme::dim()));
+    spans.push(Span::styled(mode_label, mode_style));
+    spans.push(Span::styled(" ◈", theme::dim()));
 
     frame.render_widget(Paragraph::new(Line::from(spans)).style(theme::base()), area);
 }
 
-/// Pick the context string that fits the available width. The fixed overhead is the caps, separators,
-/// mode badge, the right-aligned spinner block, and a one-cell safety margin; whatever remains is the
-/// context budget. Falls back to the workspace alone, then to its tail (the actual folder, prefixed
-/// with `…`), and finally to an empty string. Widths are measured in display cells.
+/// Pick the context string that fits the available width. The fixed overhead is the minimum void fill,
+/// the right cluster (optional spinner block + mode label), the `◈` anchor, and a one-cell safety
+/// margin; whatever remains is the context budget. Falls back to the workspace alone, then to its tail
+/// (the actual folder, prefixed with `…`), and finally to an empty string — the mode anchor always
+/// survives. Widths are measured in display cells.
 fn fit_context(
     full: &str,
     workspace: &str,
@@ -82,12 +76,10 @@ fn fit_context(
     right_len: usize,
     mode_label: &str,
 ) -> String {
-    const HEAD: usize = 3; // "◈─ "
-    const SEP: usize = 3; // " · "
-    const MODE_PAD: usize = 1; // trailing space after mode badge
-    const TAIL: usize = 2; // "─◈"
-    let right_block = if right_len > 0 { right_len + 1 } else { 0 }; // right text + its trailing space
-    let overhead = HEAD + SEP + display_width(mode_label) + MODE_PAD + right_block + TAIL + SAFETY;
+    const MIN_FILL: usize = 1; // at least one cell of void between context and the right cluster
+    const ANCHOR: usize = 2; // " ◈"
+    let right_block = if right_len > 0 { right_len + 1 } else { 0 }; // spinner block + its trailing space
+    let overhead = MIN_FILL + right_block + display_width(mode_label) + ANCHOR + SAFETY;
     let budget = width.saturating_sub(overhead);
     if display_width(full) <= budget {
         return full.to_string();

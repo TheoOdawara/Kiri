@@ -1,4 +1,5 @@
 use ratatui::Frame;
+use ratatui::layout::Rect;
 use ratatui::widgets::Block;
 
 use crate::modules::tui::domain::model::Model;
@@ -23,18 +24,17 @@ pub fn view(model: &Model, frame: &mut Frame) {
         .saturating_sub(editor::PROMPT_COLS)
         .max(1) as usize;
     let input_lines = editor::wrapped_line_count(&model.input, wrap_w) as u16;
-    // A pending plan/approval box owns a dedicated region directly above the input, so it is always
-    // anchored to the bottom — never carved out of the scrolling transcript. Size it here so the layout
-    // can reserve exactly the rows it needs.
+    // A pending plan/approval stanza owns a dedicated region directly above the input, so it is always
+    // anchored to the bottom — never carved out of the scrolling transcript. Size it against the same
+    // gutter-inset content width the stanza actually renders at, so a long action never under-reserves.
+    let content = Rect {
+        width: frame.area().width.saturating_sub(2 * h_pad(frame.area())),
+        ..frame.area()
+    };
     let box_h = if model.pending_plan.is_some() {
-        approval::box_dims(
-            frame.area(),
-            approval::PLAN_ACTION,
-            approval::plan_options_len(),
-        )
-        .1
+        approval::box_dims(content, approval::PLAN_ACTION, approval::plan_options_len()).1
     } else if let Some(pending) = &model.pending_approval {
-        approval::box_dims(frame.area(), pending.action(), APPROVAL_OPTIONS.len()).1
+        approval::box_dims(content, pending.action(), APPROVAL_OPTIONS.len()).1
     } else {
         0
     };

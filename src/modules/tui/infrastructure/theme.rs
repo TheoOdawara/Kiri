@@ -17,6 +17,7 @@ pub const HIGHLIGHT: Color = Color::Rgb(0x58, 0xA6, 0xFF); // #58A6FF — cyan a
 pub const CODE_FG: Color = Color::Rgb(0xF0, 0x88, 0x3E); // #F0883E — orange — inline code / fresh-struck line
 pub const CODE_BG: Color = Color::Rgb(0x1C, 0x22, 0x2B); // #1C222B — code block background
 pub const HEADING: Color = Color::Rgb(0x6F, 0xB0, 0xCC); // #6FB0CC — soft cyan — headings / `◆ kiri` label (whispered)
+pub const GUILLOCHE: Color = Color::Rgb(0x30, 0x36, 0x3D); // #30363D — etched hairline above the approval stanza
 
 /// The steel brightness ramp — emphasis is a brighter step, recession a darker one; this replaces every
 /// chrome `Modifier::BOLD`. Index 0 is full weight ("bold"), 4 is the most receded (vignette / hairline).

@@ -1,15 +1,15 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 
 use crate::modules::tui::domain::command_menu::CommandMenu;
 use crate::modules::tui::infrastructure::text::{chunk_by_width, display_width};
 use crate::modules::tui::infrastructure::theme;
 
-/// Render the live slash-command preview as an overlay anchored just above the input editor. Each row
-/// pairs the canonical name with its short blurb; the highlighted row uses the cyan accent.
+/// Render the live slash-command preview as a borderless floating list just above the input editor: a
+/// dim `comandos` label, then one row per command pairing its canonical name with a short blurb. The
+/// selected row carries the single accent through its `❯` caret in the gutter; the rest stay dim.
 pub fn render(menu: &CommandMenu, frame: &mut Frame, anchor: Rect) {
     if menu.is_empty() {
         return;
@@ -17,21 +17,16 @@ pub fn render(menu: &CommandMenu, frame: &mut Frame, anchor: Rect) {
     let region = box_rect(anchor, menu.filtered().len());
     frame.render_widget(Clear, region);
 
-    let mut lines: Vec<Line> = Vec::new();
+    let inner_w = region.width as usize;
+    let mut lines: Vec<Line> = vec![Line::styled(" comandos", theme::dim())];
     for (row, &cmd_index) in menu.filtered().iter().enumerate() {
         let spec = &crate::modules::tui::domain::command_menu::COMMANDS[cmd_index];
         let (marker, style) = if row == menu.selected() {
-            (
-                "❯ ",
-                theme::base()
-                    .fg(theme::HIGHLIGHT)
-                    .add_modifier(Modifier::BOLD),
-            )
+            ("❯ ", theme::accent())
         } else {
             ("  ", theme::dim())
         };
-        // Truncate the blurb so the row never overflows the box's inner width.
-        let inner_w = region.width.saturating_sub(2) as usize;
+        // Truncate the blurb so the row never overflows the list width.
         let name_cols = display_width(spec.name);
         let prefix_cols = 2 + name_cols + 2; // marker + name + gap
         let blurb_budget = inner_w.saturating_sub(prefix_cols);
@@ -44,20 +39,15 @@ pub fn render(menu: &CommandMenu, frame: &mut Frame, anchor: Rect) {
         ]));
     }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::base().fg(theme::HIGHLIGHT))
-        .title(" comandos ".to_string())
-        .style(theme::base());
-    frame.render_widget(Paragraph::new(lines).block(block), region);
+    frame.render_widget(Paragraph::new(lines).style(theme::base()), region);
 }
 
-/// Anchor the box to the top edge of `anchor` (the input region), so the popup floats just above the
-/// editor. The available height is the vertical space *above* the editor (`anchor.y`); height is the
-/// smaller of the desired rows+2 and that space. Width is the smaller of `anchor.width` and 64,
-/// left-aligned with the editor column.
+/// Anchor the list to the top edge of `anchor` (the input region), so it floats just above the editor.
+/// The available height is the vertical space *above* the editor (`anchor.y`); height is the smaller of
+/// the desired rows (one label + one per command) and that space. Width is the smaller of `anchor.width`
+/// and 64, left-aligned with the editor column.
 fn box_rect(anchor: Rect, row_count: usize) -> Rect {
-    let desired = row_count as u16 + 2;
+    let desired = row_count as u16 + 1; // one label row above the commands
     let height = desired.min(anchor.y.max(1));
     let width = anchor.width.min(64);
     let y = anchor.y.saturating_sub(height);

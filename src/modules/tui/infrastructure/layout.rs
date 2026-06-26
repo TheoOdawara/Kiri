@@ -1,7 +1,8 @@
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 
 /// Columns of side gutter (per edge) reserved on a roomy terminal so content never touches the edges.
-const SIDE_GUTTER: u16 = 4;
+/// Generous (asymmetric-feeling) so the column floats off the wall — part of killing the boxed look.
+const SIDE_GUTTER: u16 = 6;
 /// Minimum width/height for the terminal to be considered "roomy" enough for decorative padding.
 const MIN_ROOMY_WIDTH: u16 = 60;
 const MIN_ROOMY_HEIGHT: u16 = 12;
@@ -96,8 +97,8 @@ mod tests {
     #[test]
     fn roomy_terminal_gets_gutters_top_margin_and_a_gap() {
         let r = frame_layout(Rect::new(0, 0, 100, 30), 1, 0);
-        assert_eq!(r.header.x, 4, "left gutter expected");
-        assert_eq!(r.header.width, 92, "side gutters of 4 each expected");
+        assert_eq!(r.header.x, 6, "left gutter expected");
+        assert_eq!(r.header.width, 88, "side gutters of 6 each expected");
         assert_eq!(r.header.y, 1, "top margin expected");
         // A two-row gap separates the transcript from the meta rule (the input cluster).
         let transcript_end = r.transcript.y + r.transcript.height;
@@ -123,6 +124,6 @@ mod tests {
     fn h_pad_is_zero_when_not_roomy() {
         assert_eq!(h_pad(Rect::new(0, 0, 50, 20)), 0);
         assert_eq!(h_pad(Rect::new(0, 0, 100, 10)), 0);
-        assert_eq!(h_pad(Rect::new(0, 0, 100, 30)), 4);
+        assert_eq!(h_pad(Rect::new(0, 0, 100, 30)), 6);
     }
 }
