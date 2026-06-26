@@ -8,7 +8,7 @@ use crate::modules::tui::infrastructure::layout::{Regions, frame_layout, h_pad};
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
     approval, command_menu, editor, header, hint_line, meta_rule, selection_overlay,
-    transcript_pane,
+    transcript_pane, wizard,
 };
 
 /// The sole ratatui render entry point: project the model onto the frame's regions. Pure with respect
@@ -31,6 +31,8 @@ pub fn view(model: &Model, frame: &mut Frame) {
         approval::render(pending, frame, regions.prompt_box);
     } else if let Some(picker) = &model.picker {
         approval::render_picker(picker, frame, regions.prompt_box);
+    } else if let Some(provider_wizard) = &model.wizard {
+        wizard::render(provider_wizard, frame, regions.prompt_box);
     }
     meta_rule::render(model, frame, regions.meta);
     editor::render(model, frame, regions.input, motion);
@@ -73,6 +75,8 @@ pub fn frame_regions(area: Rect, model: &Model) -> Regions {
         approval::box_dims(content, pending.action(), APPROVAL_OPTIONS.len()).1
     } else if let Some(picker) = &model.picker {
         approval::box_dims(content, &picker.action, picker.options.len()).1
+    } else if let Some(provider_wizard) = &model.wizard {
+        wizard::box_dims(content, provider_wizard).1
     } else {
         0
     };

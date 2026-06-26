@@ -1,13 +1,13 @@
 use std::time::Instant;
 
 use crate::shared::kernel::approval_mode::ApprovalMode;
-use crate::shared::kernel::provider::Effort;
+use crate::shared::kernel::provider::{Effort, Secret};
 
 use super::command_menu::CommandMenu;
 use super::transcript::Transcript;
 use super::view_state::{
-    History, ImageAttachment, InputBuffer, PendingApproval, PendingPlan, Picker, ScreenSelection,
-    Scroll,
+    History, ImageAttachment, InputBuffer, PendingApproval, PendingPlan, Picker, ProviderWizard,
+    ScreenSelection, Scroll,
 };
 
 /// Whether motion is fully expressed or frozen to its final frame. The session preference is resolved
@@ -81,6 +81,12 @@ pub struct Model {
     pub models: Vec<String>,
     /// The configured provider ids, offered by the `/provider` picker.
     pub providers: Vec<String>,
+    /// The open add-provider wizard, or `None`. While set, keys drive its steps.
+    pub wizard: Option<ProviderWizard>,
+    /// The API key typed in the wizard, staged for the runtime to store in the keyring. Held as a
+    /// `Secret` (redacted in `Debug`) and taken on `SaveProvider`, so the key never rides in an effect
+    /// or the transcript.
+    pub pending_credential: Option<Secret>,
     /// The live slash-command preview, open while the input starts with `/` and has no whitespace yet.
     pub command_menu: Option<CommandMenu>,
     /// Images pasted from the clipboard, staged for the next prompt and drained on submit.
@@ -128,7 +134,10 @@ impl Model {
     /// Whether a modal (a tool approval, a finished plan, or an open picker) is awaiting the user. While
     /// true the transcript and header recede so the decision pulls focus by depth.
     pub fn has_modal(&self) -> bool {
-        self.pending_approval.is_some() || self.pending_plan.is_some() || self.picker.is_some()
+        self.pending_approval.is_some()
+            || self.pending_plan.is_some()
+            || self.picker.is_some()
+            || self.wizard.is_some()
     }
 
     pub fn new(model: String, workspace: String) -> Self {

@@ -41,7 +41,9 @@ use crate::modules::tui::infrastructure::widgets::{editor, selection_overlay};
 use crate::shared::infra::config;
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::error::AgentError;
-use crate::shared::kernel::provider::{Credential, Effort, ProviderKind, ProviderProfile};
+use crate::shared::kernel::provider::{
+    AuthMethod, Credential, Effort, ProviderKind, ProviderProfile,
+};
 
 /// The agent-turn future, boxed and `!Send`. Driven as a `select!` arm — never spawned — so no
 /// `Send`/`'static` bound is needed and the engine borrows stay plain references.
@@ -153,6 +155,25 @@ impl ProviderSwap {
         self.active = id.to_string();
         self.credential = credential;
         Ok((provider, profile.model))
+    }
+
+    /// Store a new provider's credential, build its adapter, add-or-replace it in the catalog, and make
+    /// it active — all committed only if the credential stores and the adapter builds. Returns the new
+    /// adapter and its model.
+    fn add_and_activate(
+        &mut self,
+        profile: ProviderProfile,
+        credential: Credential,
+    ) -> Result<(Arc<dyn CompletionProvider>, String), AgentError> {
+        self.secrets.set(&profile.id, &credential)?;
+        let provider = self.build(&profile, &credential, self.effort)?;
+        let id = profile.id.clone();
+        let model = profile.model.clone();
+        self.providers.retain(|p| p.id != id);
+        self.providers.push(profile);
+        self.active = id;
+        self.credential = credential;
+        Ok((provider, model))
     }
 }
 
@@ -474,6 +495,63 @@ impl Tui {
                             )),
                         }
                     }
+                    Effect::SaveProvider {
+                        id,
+                        kind,
+                        base_url,
+                        model: model_id,
+                        models,
+                    } => {
+                        // The wizard staged the typed key as a Secret out of the effect; take it here.
+                        let Some(key) = model.pending_credential.take() else {
+                            model.transcript.push(TranscriptItem::Notice(
+                                NoticeLevel::Error,
+                                "chave ausente; provider não foi salvo".to_string(),
+                            ));
+                            continue;
+                        };
+                        let credential = Credential::ApiKey { key };
+                        let profile = ProviderProfile {
+                            id: id.clone(),
+                            kind,
+                            base_url,
+                            model: model_id.clone(),
+                            models: models.clone(),
+                            auth: AuthMethod::ApiKey,
+                        };
+                        match provider_swap.add_and_activate(profile.clone(), credential) {
+                            Ok((provider, target_model)) => {
+                                agent_loop.set_provider(provider);
+                                agent_loop.set_model(target_model.clone());
+                                model.status.model = target_model;
+                                model.status.provider = id.clone();
+                                model.models = models;
+                                model.providers = provider_swap.provider_ids();
+                                model.transcript.push(TranscriptItem::Notice(
+                                    NoticeLevel::Info,
+                                    format!("provider '{id}' adicionado e ativo"),
+                                ));
+                                // Persist the profile (config) and the active selection; the credential
+                                // already went to the keyring above.
+                                if let Err(error) = config::upsert_provider(&config_path, &profile)
+                                    .and_then(|()| {
+                                        config::persist_active_provider(&config_path, &id)
+                                    })
+                                {
+                                    model.transcript.push(TranscriptItem::Notice(
+                                        NoticeLevel::Error,
+                                        format!(
+                                            "provider ativo, mas não persistiu no config: {error:#}"
+                                        ),
+                                    ));
+                                }
+                            }
+                            Err(error) => model.transcript.push(TranscriptItem::Notice(
+                                NoticeLevel::Error,
+                                format!("não foi possível salvar o provider: {error:#}"),
+                            )),
+                        }
+                    }
                     Effect::AnswerApproval(_) | Effect::CancelTurn => {}
                 }
             }
@@ -670,14 +748,15 @@ async fn drive_turn(
                             Effect::PlaceCursor { col, row } => {
                                 place_cursor(model, terminal, col, row)
                             }
-                            // A picker cannot open mid-turn, so these never arrive here.
+                            // A picker/wizard cannot open mid-turn, so these never arrive here.
                             Effect::SubmitPrompt { .. }
                             | Effect::NewSession
                             | Effect::ChangeWorkspace(_)
                             | Effect::ApprovePlan(_)
                             | Effect::SetModel(_)
                             | Effect::SetEffort(_)
-                            | Effect::SetProvider(_) => {}
+                            | Effect::SetProvider(_)
+                            | Effect::SaveProvider { .. } => {}
                         }
                     }
                     // Coalesce a burst: drain every engine message already queued before drawing, so

@@ -7,3 +7,4 @@ pub mod meta_rule;
 pub mod selection_overlay;
 pub mod splash;
 pub mod transcript_pane;
+pub mod wizard;

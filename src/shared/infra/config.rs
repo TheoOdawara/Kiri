@@ -347,6 +347,15 @@ pub fn persist_active_provider(config_path: &Path, provider_id: &str) -> Result<
     })
 }
 
+/// Add or replace a provider profile in the global config (from the add wizard). The profile's `id`
+/// keys the table (and is itself `#[serde(skip)]` in the body); the secret material is stored separately
+/// in the keyring, never here.
+pub fn upsert_provider(config_path: &Path, profile: &ProviderProfile) -> Result<()> {
+    update_global_config(config_path, |config| {
+        config.providers.insert(profile.id.clone(), profile.clone());
+    })
+}
+
 /// The default first-run provider: NVIDIA's OpenAI-compatible endpoint with the model taken from a
 /// legacy `NVIDIA_MODEL` env var if present (one-time migration aid), else left blank for the user to
 /// fill via `/provider`.

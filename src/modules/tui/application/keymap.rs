@@ -8,11 +8,11 @@ use crate::modules::tui::domain::command_menu::CommandMenu;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::modules::tui::domain::view_state::{
-    APPROVAL_OPTIONS, Granularity, PLAN_OPTIONS, Picker, PickerKind, ScreenSelection,
-    SelectionState,
+    ADD_PROVIDER_LABEL, APPROVAL_OPTIONS, Granularity, PLAN_OPTIONS, Picker, PickerKind,
+    ProviderWizard, ScreenSelection, SelectionState, WizardStep,
 };
 use crate::shared::kernel::approval_mode::ApprovalMode;
-use crate::shared::kernel::provider::Effort;
+use crate::shared::kernel::provider::{Effort, Secret};
 use tui_textarea::{Input, Key as TaKey};
 
 const SCROLL_STEP: u16 = 5;
@@ -38,6 +38,9 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     }
     if model.picker.is_some() {
         return on_picker_key(model, key);
+    }
+    if model.wizard.is_some() {
+        return on_wizard_key(model, key);
     }
 
     // A live screen selection takes Ctrl+C first: request a copy (the runtime scrapes the buffer) and
@@ -348,6 +351,7 @@ pub fn sync_menu(model: &mut Model) {
         && model.pending_approval.is_none()
         && model.pending_plan.is_none()
         && model.picker.is_none()
+        && model.wizard.is_none()
         && text.starts_with('/')
         && !text.chars().any(char::is_whitespace);
     if !can_open {
@@ -488,11 +492,14 @@ fn submit(model: &mut Model) -> Vec<Effect> {
                     .iter()
                     .position(|p| *p == current)
                     .unwrap_or(0);
+                // The configured providers, plus the "+ adicionar" row that opens the add wizard.
+                let mut options = model.providers.clone();
+                options.push(ADD_PROVIDER_LABEL.to_string());
                 model.picker = Some(Picker::new(
                     PickerKind::Provider,
                     "provider",
-                    "Escolha o provider ativo:",
-                    model.providers.clone(),
+                    "Escolha o provider ativo (ou adicione um novo):",
+                    options,
                     selected,
                 ));
             }
@@ -715,10 +722,135 @@ fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
             let effort = Effort::ALL.get(index).copied().unwrap_or_default();
             vec![Effect::SetEffort(effort)]
         }
-        PickerKind::Provider => match picker.options.get(index) {
-            Some(id) => vec![Effect::SetProvider(id.clone())],
-            None => vec![],
-        },
+        PickerKind::Provider => {
+            // The configured ids come first; the last row (`index == providers.len()`) is the
+            // "+ adicionar" sentinel, which opens the add wizard instead of switching.
+            if index < model.providers.len() {
+                match picker.options.get(index) {
+                    Some(id) => vec![Effect::SetProvider(id.clone())],
+                    None => vec![],
+                }
+            } else {
+                model.wizard = Some(ProviderWizard::new());
+                vec![]
+            }
+        }
+    }
+}
+
+/// Drive the add-provider wizard. The `Kind` step uses arrows + Enter; the text steps take typed
+/// characters + Backspace, advance on Enter, and the final `ApiKey` step finalizes — staging the key in
+/// `Model::pending_credential` (a `Secret`) and emitting `SaveProvider` (no secret). Esc cancels any
+/// step, Ctrl+C quits.
+fn on_wizard_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
+    if key.ctrl && key.code == Key::Char('c') {
+        model.wizard = None;
+        model.should_quit = true;
+        return vec![Effect::Quit];
+    }
+    if key.code == Key::Esc {
+        model.wizard = None;
+        model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Info,
+            "wizard cancelado".to_string(),
+        ));
+        return vec![];
+    }
+
+    let Some(wizard) = model.wizard.as_mut() else {
+        return vec![];
+    };
+
+    // The Kind step is a chooser; the rest are text fields.
+    if wizard.step == WizardStep::Kind {
+        match key.code {
+            Key::Up => wizard.move_kind(-1),
+            Key::Down => wizard.move_kind(1),
+            Key::Enter => {
+                wizard.step = WizardStep::BaseUrl;
+                // Seed the base URL with the kind's default so the common case is one keystroke (Enter).
+                if wizard.base_url.is_empty() {
+                    wizard.base_url = wizard.kind().default_base_url().to_string();
+                }
+            }
+            _ => {}
+        }
+        return vec![];
+    }
+
+    match key.code {
+        Key::Char(c) => {
+            wizard.push_char(c);
+            vec![]
+        }
+        Key::Backspace => {
+            wizard.backspace();
+            vec![]
+        }
+        Key::Enter => advance_wizard(model),
+        _ => vec![],
+    }
+}
+
+/// Advance a text step on Enter: validate the required fields, move to the next step, or finalize. A
+/// blank required field (model, API key) keeps the wizard on the step rather than producing an invalid
+/// provider. Each arm re-borrows `model.wizard` freshly, so the finalize step can `take` it without a
+/// borrow conflict (and without an `expect`).
+fn advance_wizard(model: &mut Model) -> Vec<Effect> {
+    let Some(step) = model.wizard.as_ref().map(|w| w.step) else {
+        return vec![];
+    };
+    match step {
+        WizardStep::Kind => vec![],
+        WizardStep::BaseUrl => {
+            if let Some(wizard) = model.wizard.as_mut() {
+                // A custom/compatible endpoint needs a base URL; the vendor kinds default theirs.
+                if wizard.base_url.trim().is_empty() {
+                    wizard.base_url = wizard.kind().default_base_url().to_string();
+                }
+                wizard.step = WizardStep::Model;
+            }
+            vec![]
+        }
+        WizardStep::Model => {
+            let Some(wizard) = model.wizard.as_mut() else {
+                return vec![];
+            };
+            if wizard.model.trim().is_empty() {
+                return vec![]; // a model is required
+            }
+            wizard.step = WizardStep::ExtraModels;
+            vec![]
+        }
+        WizardStep::ExtraModels => {
+            if let Some(wizard) = model.wizard.as_mut() {
+                wizard.step = WizardStep::ApiKey;
+            }
+            vec![]
+        }
+        WizardStep::ApiKey => {
+            if model.wizard.as_ref().is_some_and(|w| w.api_key.is_empty()) {
+                return vec![]; // an API key is required
+            }
+            // Finalize: take the wizard, stage the key as a Secret (out of the effect), emit SaveProvider.
+            let Some(wizard) = model.wizard.take() else {
+                return vec![];
+            };
+            let base_url = if wizard.base_url.trim().is_empty() {
+                wizard.kind().default_base_url().to_string()
+            } else {
+                wizard.base_url.trim().to_string()
+            };
+            let effect = Effect::SaveProvider {
+                id: wizard.provider_id(),
+                kind: wizard.kind(),
+                base_url,
+                model: wizard.model.trim().to_string(),
+                models: wizard.models(),
+            };
+            model.pending_credential = Some(Secret::new(wizard.api_key));
+            vec![effect]
+        }
     }
 }
 
@@ -784,6 +916,86 @@ mod tests {
         // Digit 3 picks the third model.
         let effects = on_key(&mut m, press(Key::Char('3')));
         assert_eq!(effects, vec![Effect::SetModel("c".to_string())]);
+    }
+
+    #[test]
+    fn provider_picker_add_row_opens_the_wizard() {
+        let mut m =
+            Model::default().with_providers("nvidia".to_string(), vec!["nvidia".to_string()]);
+        submit_line(&mut m, "/provider");
+        // options = ["nvidia", "+ adicionar..."]; Down lands on the add row, Enter opens the wizard.
+        on_key(&mut m, press(Key::Down));
+        let effects = on_key(&mut m, press(Key::Enter));
+        assert!(effects.is_empty());
+        assert!(m.wizard.is_some(), "the add row opens the wizard");
+    }
+
+    #[test]
+    fn wizard_completes_with_staged_secret_out_of_the_effect() {
+        use crate::shared::kernel::provider::ProviderKind;
+        let mut m = Model {
+            wizard: Some(ProviderWizard::new()),
+            ..Default::default()
+        };
+        // Kind: Anthropic is index 0 -> Enter (seeds base_url). BaseUrl: accept default -> Enter.
+        on_key(&mut m, press(Key::Enter));
+        on_key(&mut m, press(Key::Enter));
+        // Model: required.
+        for c in "claude-opus-4-8".chars() {
+            on_key(&mut m, press(Key::Char(c)));
+        }
+        on_key(&mut m, press(Key::Enter));
+        // ExtraModels: skip.
+        on_key(&mut m, press(Key::Enter));
+        // ApiKey: type, then finalize.
+        for c in "sk-ant-secret".chars() {
+            on_key(&mut m, press(Key::Char(c)));
+        }
+        let effects = on_key(&mut m, press(Key::Enter));
+        assert!(m.wizard.is_none(), "the wizard closes on finalize");
+        match effects.as_slice() {
+            [
+                Effect::SaveProvider {
+                    id, kind, model, ..
+                },
+            ] => {
+                assert_eq!(id, "anthropic");
+                assert_eq!(*kind, ProviderKind::Anthropic);
+                assert_eq!(model, "claude-opus-4-8");
+            }
+            other => panic!("expected SaveProvider, got {other:?}"),
+        }
+        // The key is staged as a Secret, never carried in the effect.
+        let staged = m.pending_credential.as_ref().expect("the key is staged");
+        assert_eq!(staged.expose(), "sk-ant-secret");
+    }
+
+    #[test]
+    fn wizard_model_step_requires_a_value() {
+        let mut m = Model {
+            wizard: Some(ProviderWizard::new()),
+            ..Default::default()
+        };
+        on_key(&mut m, press(Key::Enter)); // Kind -> BaseUrl
+        on_key(&mut m, press(Key::Enter)); // BaseUrl -> Model
+        // Enter on an empty Model must not advance.
+        on_key(&mut m, press(Key::Enter));
+        assert_eq!(
+            m.wizard.as_ref().map(|w| w.step),
+            Some(WizardStep::Model),
+            "an empty model keeps the wizard on the Model step"
+        );
+    }
+
+    #[test]
+    fn wizard_esc_cancels() {
+        let mut m = Model {
+            wizard: Some(ProviderWizard::new()),
+            ..Default::default()
+        };
+        let effects = on_key(&mut m, press(Key::Esc));
+        assert!(effects.is_empty());
+        assert!(m.wizard.is_none());
     }
 
     #[test]

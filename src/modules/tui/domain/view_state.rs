@@ -1,6 +1,8 @@
 use ratatui::style::Style;
 use tui_textarea::{CursorMove, Input, TextArea, WrapMode};
 
+use crate::shared::kernel::provider::ProviderKind;
+
 /// A pasted image staged for the next prompt: its data URL (base64 PNG, ready for the provider's
 /// multimodal content) and pixel dimensions for the "attached" chip. Pure data — the clipboard read and
 /// PNG encoding happen in `tui::infrastructure::clipboard`.
@@ -356,6 +358,141 @@ pub enum PickerKind {
     Provider,
 }
 
+/// The last row of the `/provider` picker — selecting it opens the add-provider wizard instead of
+/// switching. A sentinel label, never a real provider id.
+pub const ADD_PROVIDER_LABEL: &str = "+ adicionar novo provider";
+
+/// The provider kinds the add wizard offers (NVIDIA is the seeded default, so the wizard adds the
+/// others). All are API-key only — subscription OAuth is intentionally unsupported.
+pub const WIZARD_KINDS: [ProviderKind; 4] = [
+    ProviderKind::Anthropic,
+    ProviderKind::Openai,
+    ProviderKind::OpenAiCompatible,
+    ProviderKind::Custom,
+];
+
+/// The steps of the add-provider wizard, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WizardStep {
+    Kind,
+    BaseUrl,
+    Model,
+    ExtraModels,
+    ApiKey,
+}
+
+/// The add-provider wizard's accumulated state. Each text step edits its own field directly; the `Kind`
+/// step moves `kind_selected`. The API key is redacted in `Debug` so it can never land in a log even
+/// though `Model` derives `Debug`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderWizard {
+    pub step: WizardStep,
+    pub kind_selected: usize,
+    pub base_url: String,
+    pub model: String,
+    pub extra_models: String,
+    pub api_key: String,
+}
+
+impl std::fmt::Debug for ProviderWizard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderWizard")
+            .field("step", &self.step)
+            .field("kind", &self.kind())
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("extra_models", &self.extra_models)
+            .field("api_key", &"***")
+            .finish()
+    }
+}
+
+impl ProviderWizard {
+    pub fn new() -> Self {
+        Self {
+            step: WizardStep::Kind,
+            kind_selected: 0,
+            base_url: String::new(),
+            model: String::new(),
+            extra_models: String::new(),
+            api_key: String::new(),
+        }
+    }
+
+    /// The selected provider kind.
+    pub fn kind(&self) -> ProviderKind {
+        WIZARD_KINDS[self.kind_selected.min(WIZARD_KINDS.len() - 1)]
+    }
+
+    /// The id a finished wizard gives its provider — the kind's canonical token. Re-adding a kind thus
+    /// reconfigures it (one configured provider per kind via the wizard; the TOML allows more).
+    pub fn provider_id(&self) -> String {
+        match self.kind() {
+            ProviderKind::Nvidia => "nvidia",
+            ProviderKind::Openai => "openai",
+            ProviderKind::Anthropic => "anthropic",
+            ProviderKind::OpenAiCompatible => "openai-compatible",
+            ProviderKind::Custom => "custom",
+        }
+        .to_string()
+    }
+
+    /// The model catalog: the default model first, then the comma-separated extras (trimmed, de-duped,
+    /// blanks dropped).
+    pub fn models(&self) -> Vec<String> {
+        let mut models = Vec::new();
+        let model = self.model.trim();
+        if !model.is_empty() {
+            models.push(model.to_string());
+        }
+        for extra in self.extra_models.split(',') {
+            let extra = extra.trim();
+            if !extra.is_empty() && !models.iter().any(|m| m == extra) {
+                models.push(extra.to_string());
+            }
+        }
+        models
+    }
+
+    /// The field the current step edits, or `None` on the `Kind` step.
+    fn field_mut(&mut self) -> Option<&mut String> {
+        match self.step {
+            WizardStep::Kind => None,
+            WizardStep::BaseUrl => Some(&mut self.base_url),
+            WizardStep::Model => Some(&mut self.model),
+            WizardStep::ExtraModels => Some(&mut self.extra_models),
+            WizardStep::ApiKey => Some(&mut self.api_key),
+        }
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        if let Some(field) = self.field_mut() {
+            field.push(c);
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if let Some(field) = self.field_mut() {
+            field.pop();
+        }
+    }
+
+    /// Move the kind highlight (only meaningful on the `Kind` step), wrapping.
+    pub fn move_kind(&mut self, delta: i32) {
+        if self.step != WizardStep::Kind {
+            return;
+        }
+        let len = WIZARD_KINDS.len() as i32;
+        self.kind_selected = (self.kind_selected as i32 + delta).rem_euclid(len) as usize;
+    }
+}
+
+impl Default for ProviderWizard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A generic single-choice picker modal (used by `/models` and `/effort`), rendered with the same
 /// borderless stanza as the approval/plan boxes. `options` are the selectable labels in display order;
 /// `selected` indexes them.
@@ -401,6 +538,34 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wizard_debug_redacts_the_api_key() {
+        let mut w = ProviderWizard::new();
+        w.step = WizardStep::ApiKey;
+        w.api_key = "sk-super-secret".to_string();
+        let rendered = format!("{w:?}");
+        assert!(
+            !rendered.contains("sk-super-secret"),
+            "the API key leaked in Debug: {rendered}"
+        );
+        assert!(rendered.contains("***"));
+    }
+
+    #[test]
+    fn wizard_models_puts_the_default_first_and_dedupes_extras() {
+        let mut w = ProviderWizard::new();
+        w.model = "  m1 ".to_string();
+        w.extra_models = "m2, m1 , ,m3".to_string();
+        assert_eq!(w.models(), vec!["m1", "m2", "m3"]);
+    }
+
+    #[test]
+    fn wizard_provider_id_is_the_kind_token() {
+        let w = ProviderWizard::new(); // kind index 0 = Anthropic
+        assert_eq!(w.provider_id(), "anthropic");
+        assert_eq!(w.kind(), ProviderKind::Anthropic);
+    }
 
     #[test]
     fn insert_set_and_take_round_trip_the_text() {
