@@ -1,6 +1,8 @@
 use std::future::Future;
 use std::io;
+use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -17,6 +19,8 @@ use crate::modules::agent::application::approval_policy::Approval;
 use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
 use crate::modules::agent::domain::role::Role;
+use crate::modules::provider::application::completion_provider::CompletionProvider;
+use crate::modules::provider::infrastructure::factory::build_provider;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
@@ -33,8 +37,10 @@ use crate::modules::tui::infrastructure::text;
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::view::{frame_regions, view};
 use crate::modules::tui::infrastructure::widgets::{editor, selection_overlay};
+use crate::shared::infra::config;
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::provider::{Credential, Effort, ProviderKind, ProviderProfile};
 
 /// The agent-turn future, boxed and `!Send`. Driven as a `select!` arm — never spawned — so no
 /// `Send`/`'static` bound is needed and the engine borrows stay plain references.
@@ -47,6 +53,48 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(120);
 /// being driven by incoming deltas, so an idle TUI still ticks at `FRAME_INTERVAL` and burns no extra CPU.
 const STREAM_FRAME: Duration = Duration::from_millis(33);
 
+/// The inputs to rebuild the active provider adapter for a live `/effort` (or future `/provider`) swap:
+/// effort is captured at construction, so changing it means rebuilding the `Arc`. The credential is
+/// cached from wire time so a rebuild needs no keyring round-trip. Only the active provider is held —
+/// `/provider` switching (a later phase) extends this with the full catalog + secret store.
+pub struct ProviderSwap {
+    client: reqwest::Client,
+    profile: ProviderProfile,
+    credential: Credential,
+    thinking: bool,
+    effort: Effort,
+}
+
+impl ProviderSwap {
+    pub fn new(
+        client: reqwest::Client,
+        profile: ProviderProfile,
+        credential: Credential,
+        thinking: bool,
+        effort: Effort,
+    ) -> Self {
+        Self {
+            client,
+            profile,
+            credential,
+            thinking,
+            effort,
+        }
+    }
+
+    /// Build the active provider adapter with the given `effort` (without committing it), so a failed
+    /// rebuild leaves the current effort/provider untouched.
+    fn build_with(&self, effort: Effort) -> Result<Arc<dyn CompletionProvider>, AgentError> {
+        build_provider(
+            self.client.clone(),
+            &self.profile,
+            self.credential.clone(),
+            self.thinking,
+            effort,
+        )
+    }
+}
+
 /// The full-screen TUI frontend: owns the engine handles and the UI model, runs the render/input loop,
 /// and drives one agent turn at a time. The sole frontend, assembled in `app::wire`.
 pub struct Tui {
@@ -58,6 +106,10 @@ pub struct Tui {
     /// Kept so `/new` can rebuild a fresh conversation with the same system prompt. Owned because it
     /// may carry a per-session memory digest composed at wire time, not just the static base prompt.
     system_prompt: String,
+    /// The inputs to rebuild the provider on a live `/effort` swap.
+    provider_swap: ProviderSwap,
+    /// The global config file, written on a live `/models`/`/effort` change.
+    config_path: PathBuf,
 }
 
 impl Tui {
@@ -66,27 +118,34 @@ impl Tui {
         sandbox: Sandbox,
         system_prompt: String,
         seed: Option<String>,
-        model: String,
+        provider_swap: ProviderSwap,
+        config_path: PathBuf,
     ) -> Self {
         let workspace = text::display_path(sandbox.root());
+        let model = Model::new(provider_swap.profile.model.clone(), workspace)
+            .with_provider_catalog(provider_swap.profile.models.clone(), provider_swap.effort);
         Self {
             agent_loop,
             sandbox,
             conversation: Conversation::new(system_prompt.clone()),
-            model: Model::new(model, workspace),
+            model,
             seed,
             system_prompt,
+            provider_swap,
+            config_path,
         }
     }
 
     pub async fn run(self) -> Result<()> {
         let Tui {
-            agent_loop,
+            mut agent_loop,
             mut sandbox,
             mut conversation,
             mut model,
             seed,
             system_prompt,
+            mut provider_swap,
+            config_path,
         } = self;
 
         let mut terminal = ratatui::init();
@@ -255,6 +314,64 @@ impl Tui {
                             &mut ticker,
                         )
                         .await?;
+                    }
+                    Effect::SetModel(model_id) => {
+                        // A model change is just the per-turn `model` field — no provider rebuild. Apply
+                        // it live, reflect it in the status line, and persist (best-effort) to the global
+                        // config; a write failure is surfaced but the live change stands.
+                        provider_swap.profile.model = model_id.clone();
+                        agent_loop.set_model(model_id.clone());
+                        model.status.model = model_id.clone();
+                        model.transcript.push(TranscriptItem::Notice(
+                            NoticeLevel::Info,
+                            format!("modelo: {model_id}"),
+                        ));
+                        if let Err(error) = config::persist_active_model(
+                            &config_path,
+                            &provider_swap.profile.id,
+                            &model_id,
+                        ) {
+                            model.transcript.push(TranscriptItem::Notice(
+                                NoticeLevel::Error,
+                                format!("não persistiu o modelo: {error:#}"),
+                            ));
+                        }
+                    }
+                    Effect::SetEffort(effort) => {
+                        // Effort is baked into the provider at construction, so rebuild and swap it in.
+                        // Build with the new effort first; commit (status + cached effort + persist) only
+                        // if the rebuild succeeds, so a failure leaves the current provider untouched.
+                        match provider_swap.build_with(effort) {
+                            Ok(provider) => {
+                                agent_loop.set_provider(provider);
+                                provider_swap.effort = effort;
+                                model.status.effort = effort;
+                                // The Anthropic adapter ignores effort today — surface that rather than
+                                // silently appearing to change nothing.
+                                let note = if provider_swap.profile.kind == ProviderKind::Anthropic
+                                {
+                                    format!(
+                                        "esforço: {} — nota: ainda não afeta modelos Claude",
+                                        effort.label()
+                                    )
+                                } else {
+                                    format!("esforço: {}", effort.label())
+                                };
+                                model
+                                    .transcript
+                                    .push(TranscriptItem::Notice(NoticeLevel::Info, note));
+                                if let Err(error) = config::persist_effort(&config_path, effort) {
+                                    model.transcript.push(TranscriptItem::Notice(
+                                        NoticeLevel::Error,
+                                        format!("não persistiu o esforço: {error:#}"),
+                                    ));
+                                }
+                            }
+                            Err(error) => model.transcript.push(TranscriptItem::Notice(
+                                NoticeLevel::Error,
+                                format!("não foi possível aplicar o esforço: {error:#}"),
+                            )),
+                        }
                     }
                     Effect::AnswerApproval(_) | Effect::CancelTurn => {}
                 }
@@ -452,10 +569,13 @@ async fn drive_turn(
                             Effect::PlaceCursor { col, row } => {
                                 place_cursor(model, terminal, col, row)
                             }
+                            // A picker cannot open mid-turn, so these never arrive here.
                             Effect::SubmitPrompt { .. }
                             | Effect::NewSession
                             | Effect::ChangeWorkspace(_)
-                            | Effect::ApprovePlan(_) => {}
+                            | Effect::ApprovePlan(_)
+                            | Effect::SetModel(_)
+                            | Effect::SetEffort(_) => {}
                         }
                     }
                     // Coalesce a burst: drain every engine message already queued before drawing, so

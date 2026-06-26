@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -296,13 +296,48 @@ fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
 
 /// Read and parse a TOML config file. Absent → an empty config (not an error). A present-but-malformed
 /// file fails fast with a clear, located error rather than silently ignoring the user's settings.
-fn read_config_file(path: &PathBuf) -> Result<RawConfig> {
+fn read_config_file(path: &Path) -> Result<RawConfig> {
     match std::fs::read_to_string(path) {
         Ok(raw) => toml::from_str(&raw)
             .map_err(|e| anyhow!("invalid TOML config at {}: {e}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(RawConfig::default()),
         Err(e) => Err(anyhow!("failed to read config at {}: {e}", path.display())),
     }
+}
+
+/// Apply `mutate` to the GLOBAL config (read-modify-write), preserving every other section. Backs the
+/// live `/models`/`/effort` swaps. Only the trusted global `~/.kiri/config.toml` is written — never the
+/// untrusted project layer (which would let a workspace change provider routing; see `resolve_layers`).
+/// Note: TOML comments in a hand-edited file are dropped on rewrite — the values are preserved.
+fn update_global_config(config_path: &Path, mutate: impl FnOnce(&mut RawConfig)) -> Result<()> {
+    let mut config = read_config_file(config_path)?;
+    mutate(&mut config);
+    let body =
+        toml::to_string_pretty(&config).map_err(|e| anyhow!("failed to encode config: {e}"))?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow!("failed to create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(config_path, body)
+        .map_err(|e| anyhow!("failed to write config at {}: {e}", config_path.display()))
+}
+
+/// Persist a live `/models` change: set the active model on its provider and add it to that provider's
+/// catalog if missing. A no-op if the provider id is not in the config (the live change still stands).
+pub fn persist_active_model(config_path: &Path, provider_id: &str, model: &str) -> Result<()> {
+    update_global_config(config_path, |config| {
+        if let Some(profile) = config.providers.get_mut(provider_id) {
+            profile.model = model.to_string();
+            if !profile.models.iter().any(|m| m == model) {
+                profile.models.push(model.to_string());
+            }
+        }
+    })
+}
+
+/// Persist a live `/effort` change to the global config.
+pub fn persist_effort(config_path: &Path, effort: Effort) -> Result<()> {
+    update_global_config(config_path, |config| config.effort = Some(effort))
 }
 
 /// The default first-run provider: NVIDIA's OpenAI-compatible endpoint with the model taken from a
@@ -487,6 +522,9 @@ pub struct Settings {
     pub shared_memory_db: PathBuf,
     /// The credential-store fallback file when no OS keyring is reachable. `~/.kiri/credentials.json`.
     pub credentials_file: PathBuf,
+    /// The global config file (`~/.kiri/config.toml`). The runtime writes live `/models`/`/effort`
+    /// changes back here (the trusted layer only).
+    pub config_path: PathBuf,
     /// The configured provider catalog (non-secret). The user selects among these via `/provider`.
     pub providers: Vec<ProviderProfile>,
     /// The id of the active provider — must name one of `providers`.
@@ -576,6 +614,7 @@ impl Settings {
             docs_path,
             shared_memory_db: global_dir.join("memory").join("shared.db"),
             credentials_file: global_dir.join("credentials.json"),
+            config_path: global_path,
             providers,
             active_provider: active,
             effort,

@@ -65,6 +65,31 @@ pub enum Effort {
     Max,
 }
 
+impl Effort {
+    /// Every level in ascending order — the catalog the `/effort` picker offers (its row index maps
+    /// back to the chosen level, so no string round-trip is needed).
+    pub const ALL: [Effort; 6] = [
+        Effort::Off,
+        Effort::Low,
+        Effort::Medium,
+        Effort::High,
+        Effort::Xhigh,
+        Effort::Max,
+    ];
+
+    /// The lowercase label (matching the serde form), shown in the picker and the status line.
+    pub fn label(self) -> &'static str {
+        match self {
+            Effort::Off => "off",
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::Xhigh => "xhigh",
+            Effort::Max => "max",
+        }
+    }
+}
+
 /// A configured provider — everything non-secret needed to talk to it. The catalog the user selects
 /// among; persisted in the TOML config. The secret material lives separately in a [`Credential`]
 /// (keyring / 0600 file), keyed by [`ProviderProfile::id`].

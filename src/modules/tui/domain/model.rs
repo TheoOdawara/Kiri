@@ -1,11 +1,13 @@
 use std::time::Instant;
 
 use crate::shared::kernel::approval_mode::ApprovalMode;
+use crate::shared::kernel::provider::Effort;
 
 use super::command_menu::CommandMenu;
 use super::transcript::Transcript;
 use super::view_state::{
-    History, ImageAttachment, InputBuffer, PendingApproval, PendingPlan, ScreenSelection, Scroll,
+    History, ImageAttachment, InputBuffer, PendingApproval, PendingPlan, Picker, ScreenSelection,
+    Scroll,
 };
 
 /// Whether motion is fully expressed or frozen to its final frame. The session preference is resolved
@@ -33,11 +35,14 @@ impl Motion {
     }
 }
 
-/// The status line's data: the model id, the active workspace, and the live turn indicators.
+/// The status line's data: the model id, the active workspace, the reasoning effort, and the live turn
+/// indicators.
 #[derive(Debug, Default)]
 pub struct Status {
     pub model: String,
     pub workspace: String,
+    /// The active reasoning effort; updated by a live `/effort` swap.
+    pub effort: Effort,
     pub streaming: bool,
     pub elapsed_secs: u64,
     pub spinner_frame: usize,
@@ -68,6 +73,10 @@ pub struct Model {
     pub pending_approval: Option<PendingApproval>,
     /// A finished plan awaiting the user's decision; while set, keys drive the plan box.
     pub pending_plan: Option<PendingPlan>,
+    /// An open single-choice picker (`/models` / `/effort`); while set, keys drive it.
+    pub picker: Option<Picker>,
+    /// The active provider's model catalog, offered by the `/models` picker.
+    pub models: Vec<String>,
     /// The live slash-command preview, open while the input starts with `/` and has no whitespace yet.
     pub command_menu: Option<CommandMenu>,
     /// Images pasted from the clipboard, staged for the next prompt and drained on submit.
@@ -112,10 +121,10 @@ pub struct Model {
 }
 
 impl Model {
-    /// Whether a confirmation (a tool approval or a finished plan) is awaiting the user. While true the
-    /// transcript and header recede so the decision pulls focus by depth.
+    /// Whether a modal (a tool approval, a finished plan, or an open picker) is awaiting the user. While
+    /// true the transcript and header recede so the decision pulls focus by depth.
     pub fn has_modal(&self) -> bool {
-        self.pending_approval.is_some() || self.pending_plan.is_some()
+        self.pending_approval.is_some() || self.pending_plan.is_some() || self.picker.is_some()
     }
 
     pub fn new(model: String, workspace: String) -> Self {
@@ -127,6 +136,14 @@ impl Model {
             },
             ..Self::default()
         }
+    }
+
+    /// Seed the provider-swap surface: the active provider's model catalog (offered by `/models`) and
+    /// the current reasoning effort (the `/effort` picker's starting point + the status display).
+    pub fn with_provider_catalog(mut self, models: Vec<String>, effort: Effort) -> Self {
+        self.models = models;
+        self.status.effort = effort;
+        self
     }
 
     /// Drop any active screen selection — the user navigated away (typed, scrolled, resized, or started a

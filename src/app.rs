@@ -24,7 +24,7 @@ use crate::modules::tools::infrastructure::confine;
 use crate::modules::tools::infrastructure::control::present_plan::PresentPlan;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
-use crate::modules::tui::infrastructure::runtime::Tui;
+use crate::modules::tui::infrastructure::runtime::{ProviderSwap, Tui};
 use crate::shared::infra::config::Settings;
 use crate::shared::kernel::provider::{
     AuthMethod, Credential, ProviderKind, ProviderProfile, Secret,
@@ -67,10 +67,12 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     let secrets = default_secret_store(settings.credentials_file.clone());
     let profile = settings.active_profile()?.clone();
     let credential = resolve_credential(&profile, secrets.as_ref())?;
+    // Build the initial adapter; the client + credential are cloned so the runtime keeps a `ProviderSwap`
+    // able to rebuild the adapter on a live `/effort` change without a keyring round-trip.
     let provider = build_provider(
-        client,
+        client.clone(),
         &profile,
-        credential,
+        credential.clone(),
         settings.thinking,
         settings.effort,
     )?;
@@ -84,11 +86,10 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     tools.push(Box::new(PresentPlan));
     tools.extend(memory_tools);
     let registry = ToolRegistry::new(tools);
-    let model = profile.model.clone();
     let agent_loop = AgentLoop::new(
         provider,
         registry,
-        model.clone(),
+        profile.model.clone(),
         settings.checkpoint_budget,
         settings.max_tool_calls,
     );
@@ -100,12 +101,20 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         format!("{}\n\n{}", settings.system_prompt, memory_digest)
     };
 
+    let provider_swap = ProviderSwap::new(
+        client,
+        profile,
+        credential,
+        settings.thinking,
+        settings.effort,
+    );
     Ok(Tui::new(
         agent_loop,
         sandbox,
         system_prompt,
         settings.seed,
-        model,
+        provider_swap,
+        settings.config_path,
     ))
 }
 

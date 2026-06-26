@@ -41,6 +41,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         blurb: "mostra ou muda o workspace ativo",
     },
     CommandSpec {
+        name: "/models",
+        aliases: &["/modelos"],
+        blurb: "troca o modelo ativo",
+    },
+    CommandSpec {
+        name: "/effort",
+        aliases: &["/esforco"],
+        blurb: "troca o nível de esforço (reasoning)",
+    },
+    CommandSpec {
         name: "/help",
         aliases: &["/ajuda"],
         blurb: "mostra esta ajuda",

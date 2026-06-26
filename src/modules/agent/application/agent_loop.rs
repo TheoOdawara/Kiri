@@ -66,6 +66,19 @@ impl AgentLoop {
         }
     }
 
+    /// Swap the provider adapter mid-session (a live `/provider` or `/effort` change rebuilds the Arc,
+    /// since effort is captured at provider construction). Called only between turns; `run` borrows
+    /// `&self`, so a swap cannot race an in-flight turn.
+    pub fn set_provider(&mut self, provider: Arc<dyn CompletionProvider>) {
+        self.provider = provider;
+    }
+
+    /// Swap the active model id mid-session (a live `/models` change). The model is read per turn from
+    /// `self.model`, so this alone takes effect on the next turn — no provider rebuild needed.
+    pub fn set_model(&mut self, model: String) {
+        self.model = model;
+    }
+
     /// Drive one user turn to completion. The conversation must already hold the user message. On a
     /// provider failure the error is returned (the caller renders it and rolls back a dangling user
     /// message); `Aborted` means the user ended the session at a prompt. `io` is the engine's single UI

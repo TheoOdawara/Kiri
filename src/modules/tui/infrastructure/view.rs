@@ -29,6 +29,8 @@ pub fn view(model: &Model, frame: &mut Frame) {
         approval::render_plan_into(plan, frame, regions.prompt_box);
     } else if let Some(pending) = &model.pending_approval {
         approval::render(pending, frame, regions.prompt_box);
+    } else if let Some(picker) = &model.picker {
+        approval::render_picker(picker, frame, regions.prompt_box);
     }
     meta_rule::render(model, frame, regions.meta);
     editor::render(model, frame, regions.input, motion);
@@ -69,6 +71,8 @@ pub fn frame_regions(area: Rect, model: &Model) -> Regions {
         approval::box_dims(content, approval::PLAN_ACTION, approval::plan_options_len()).1
     } else if let Some(pending) = &model.pending_approval {
         approval::box_dims(content, pending.action(), APPROVAL_OPTIONS.len()).1
+    } else if let Some(picker) = &model.picker {
+        approval::box_dims(content, &picker.action, picker.options.len()).1
     } else {
         0
     };

@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use crate::modules::tui::domain::view_state::{
-    APPROVAL_OPTIONS, PLAN_OPTIONS, PendingApproval, PendingPlan,
+    APPROVAL_OPTIONS, PLAN_OPTIONS, PendingApproval, PendingPlan, Picker,
 };
 use crate::modules::tui::infrastructure::markdown;
 use crate::modules::tui::infrastructure::theme;
@@ -97,6 +97,19 @@ pub fn render_plan_into(plan: &PendingPlan, frame: &mut Frame, area: Rect) {
         PLAN_ACTION,
         &PLAN_OPTIONS,
         plan.selected,
+        frame,
+        area,
+    );
+}
+
+/// Render a generic `/models` / `/effort` picker with the same stanza as the approval/plan boxes.
+pub fn render_picker(picker: &Picker, frame: &mut Frame, area: Rect) {
+    let options: Vec<&str> = picker.options.iter().map(String::as_str).collect();
+    render_stanza(
+        &picker.label,
+        &picker.action,
+        &options,
+        picker.selected,
         frame,
         area,
     );

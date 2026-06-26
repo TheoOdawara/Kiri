@@ -1,5 +1,6 @@
 use crate::modules::agent::application::approval_policy::Approval;
 use crate::shared::kernel::approval_mode::ApprovalMode;
+use crate::shared::kernel::provider::Effort;
 
 /// A side effect the pure reducer requests of the runtime, which owns the engine handles. The reducer
 /// itself performs no I/O.
@@ -24,6 +25,12 @@ pub enum Effect {
     /// Approve the proposed plan: leave plan mode and run a turn that executes it under the given
     /// mode (`Default` confirms each step, `Auto` runs the whole plan unattended).
     ApprovePlan(ApprovalMode),
+    /// Switch the active model (from the `/models` picker). The runtime applies it to the engine and
+    /// persists it on the active provider in the global config.
+    SetModel(String),
+    /// Switch the reasoning effort (from the `/effort` picker). The runtime rebuilds the provider with
+    /// the new effort, applies it, and persists it in the global config.
+    SetEffort(Effort),
     /// Place the edit cursor at the composer click (absolute screen cell). The runtime resolves it
     /// against the rendered editor geometry — a no-op when the click is outside the box or the layout
     /// is ambiguous (wrapped/scrolled), since the reducer has no render geometry to map it itself.

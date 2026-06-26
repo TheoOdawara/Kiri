@@ -15,6 +15,10 @@ pub enum Command {
     SetMode(ApprovalMode),
     /// `/cd`: show the active workspace (`None`) or move it to a path (`Some`).
     ChangeWorkspace(Option<String>),
+    /// `/models`: open the picker to switch the active model (from the active provider's catalog).
+    Models,
+    /// `/effort`: open the picker to switch the reasoning effort.
+    Effort,
     /// A `/`-prefixed token that is not a known command.
     Unknown,
 }
@@ -39,6 +43,8 @@ pub fn parse(line: &str) -> Option<Command> {
         "/auto" => Command::SetMode(ApprovalMode::Auto),
         "/default" | "/normal" => Command::SetMode(ApprovalMode::Default),
         "/cd" => Command::ChangeWorkspace((!arg.is_empty()).then(|| arg.to_string())),
+        "/models" | "/modelos" => Command::Models,
+        "/effort" | "/esforco" => Command::Effort,
         _ => Command::Unknown,
     };
     Some(command)
@@ -53,6 +59,8 @@ pub fn help_text() -> String {
         "  /auto          modo auto (executa tudo sem pedir aprovação)",
         "  /default       modo default (pede aprovação para cada ação)",
         "  /cd [caminho]  mostra ou muda o workspace ativo",
+        "  /models        troca o modelo ativo",
+        "  /effort        troca o nível de esforço (reasoning)",
         "  /help          mostra esta ajuda",
         "  /exit          encerra a sessão",
         "Shift+Tab alterna entre os modos (default → auto → plan).",
@@ -107,6 +115,14 @@ mod tests {
             parse("/default"),
             Some(Command::SetMode(ApprovalMode::Default))
         );
+    }
+
+    #[test]
+    fn models_and_effort_parse() {
+        assert_eq!(parse("/models"), Some(Command::Models));
+        assert_eq!(parse("/modelos"), Some(Command::Models));
+        assert_eq!(parse("/effort"), Some(Command::Effort));
+        assert_eq!(parse("/esforco"), Some(Command::Effort));
     }
 
     #[test]

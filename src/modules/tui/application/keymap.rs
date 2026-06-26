@@ -8,9 +8,11 @@ use crate::modules::tui::domain::command_menu::CommandMenu;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::modules::tui::domain::view_state::{
-    APPROVAL_OPTIONS, Granularity, PLAN_OPTIONS, ScreenSelection, SelectionState,
+    APPROVAL_OPTIONS, Granularity, PLAN_OPTIONS, Picker, PickerKind, ScreenSelection,
+    SelectionState,
 };
 use crate::shared::kernel::approval_mode::ApprovalMode;
+use crate::shared::kernel::provider::Effort;
 use tui_textarea::{Input, Key as TaKey};
 
 const SCROLL_STEP: u16 = 5;
@@ -33,6 +35,9 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     }
     if model.pending_plan.is_some() {
         return on_plan_key(model, key);
+    }
+    if model.picker.is_some() {
+        return on_picker_key(model, key);
     }
 
     // A live screen selection takes Ctrl+C first: request a copy (the runtime scrapes the buffer) and
@@ -342,6 +347,7 @@ pub fn sync_menu(model: &mut Model) {
     let can_open = !model.busy
         && model.pending_approval.is_none()
         && model.pending_plan.is_none()
+        && model.picker.is_none()
         && text.starts_with('/')
         && !text.chars().any(char::is_whitespace);
     if !can_open {
@@ -434,6 +440,41 @@ fn submit(model: &mut Model) -> Vec<Effect> {
             vec![]
         }
         Some(Command::ChangeWorkspace(Some(path))) => vec![Effect::ChangeWorkspace(path)],
+        Some(Command::Models) => {
+            if model.models.is_empty() {
+                model.transcript.push(TranscriptItem::Notice(
+                    NoticeLevel::Info,
+                    "este provider não tem catálogo de modelos; adicione em ~/.kiri/config.toml"
+                        .to_string(),
+                ));
+            } else {
+                let current = model.status.model.clone();
+                let selected = model.models.iter().position(|m| *m == current).unwrap_or(0);
+                model.picker = Some(Picker::new(
+                    PickerKind::Models,
+                    "modelo",
+                    "Escolha o modelo ativo:",
+                    model.models.clone(),
+                    selected,
+                ));
+            }
+            vec![]
+        }
+        Some(Command::Effort) => {
+            let options: Vec<String> = Effort::ALL.iter().map(|e| e.label().to_string()).collect();
+            let selected = Effort::ALL
+                .iter()
+                .position(|e| *e == model.status.effort)
+                .unwrap_or(0);
+            model.picker = Some(Picker::new(
+                PickerKind::Effort,
+                "esforço",
+                "Escolha o nível de esforço (reasoning):",
+                options,
+                selected,
+            ));
+            vec![]
+        }
         Some(Command::Unknown) => {
             model.transcript.push(TranscriptItem::Notice(
                 NoticeLevel::Error,
@@ -596,6 +637,64 @@ fn on_plan_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     }
 }
 
+/// Drive an open `/models` / `/effort` picker: arrows move the highlight, Enter/digits pick a row, Esc
+/// closes it, Ctrl+C quits. Enter on a `Models` picker emits `SetModel`; on `Effort`, the row index maps
+/// back to `Effort::ALL` for `SetEffort`. The runtime applies the swap and persists it.
+fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
+    if let Some(picker) = model.picker.as_mut() {
+        match key.code {
+            Key::Up => {
+                picker.move_cursor(-1);
+                return vec![];
+            }
+            Key::Down => {
+                picker.move_cursor(1);
+                return vec![];
+            }
+            _ => {}
+        }
+    }
+
+    if key.ctrl && key.code == Key::Char('c') {
+        model.picker = None;
+        model.should_quit = true;
+        return vec![Effect::Quit];
+    }
+
+    let selected = model.picker.as_ref().map_or(0, |p| p.selected);
+    let option_count = model.picker.as_ref().map_or(0, |p| p.options.len());
+    let index = match key.code {
+        Key::Enter => selected,
+        Key::Esc => {
+            model.picker = None;
+            return vec![];
+        }
+        Key::Char(c) if c.is_ascii_digit() => {
+            let digit = c.to_digit(10).unwrap_or(0) as usize;
+            if digit >= 1 && digit <= option_count {
+                digit - 1
+            } else {
+                return vec![];
+            }
+        }
+        _ => return vec![],
+    };
+
+    let Some(picker) = model.picker.take() else {
+        return vec![];
+    };
+    match picker.kind {
+        PickerKind::Models => match picker.options.get(index) {
+            Some(model_id) => vec![Effect::SetModel(model_id.clone())],
+            None => vec![],
+        },
+        PickerKind::Effort => {
+            let effort = Effort::ALL.get(index).copied().unwrap_or_default();
+            vec![Effect::SetEffort(effort)]
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,6 +707,74 @@ mod tests {
             alt: false,
             shift: false,
         }
+    }
+
+    /// Type a line and submit it (Enter), returning the submit effects.
+    fn submit_line(model: &mut Model, line: &str) -> Vec<Effect> {
+        for c in line.chars() {
+            on_key(model, press(Key::Char(c)));
+        }
+        on_key(model, press(Key::Enter))
+    }
+
+    #[test]
+    fn effort_command_opens_a_picker_at_the_current_level() {
+        let mut m = Model::default().with_provider_catalog(Vec::new(), Effort::Medium);
+        let effects = submit_line(&mut m, "/effort");
+        assert!(effects.is_empty(), "opening a picker emits no effect");
+        let picker = m.picker.as_ref().expect("the effort picker should open");
+        assert_eq!(picker.kind, PickerKind::Effort);
+        assert_eq!(picker.options.len(), Effort::ALL.len());
+        // The current effort (Medium) is pre-selected.
+        assert_eq!(picker.selected, 2);
+    }
+
+    #[test]
+    fn effort_picker_enter_emits_set_effort() {
+        let picker = Picker::new(
+            PickerKind::Effort,
+            "esforço",
+            "Escolha:",
+            Effort::ALL.iter().map(|e| e.label().to_string()).collect(),
+            0,
+        );
+        let mut m = Model {
+            picker: Some(picker),
+            ..Default::default()
+        };
+        // Down off -> low (index 1), then Enter.
+        assert!(on_key(&mut m, press(Key::Down)).is_empty());
+        let effects = on_key(&mut m, press(Key::Enter));
+        assert_eq!(effects, vec![Effect::SetEffort(Effort::Low)]);
+        assert!(m.picker.is_none(), "Enter closes the picker");
+    }
+
+    #[test]
+    fn picker_digit_selects_a_row() {
+        let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut m = Model::default().with_provider_catalog(models, Effort::default());
+        submit_line(&mut m, "/models");
+        // Digit 3 picks the third model.
+        let effects = on_key(&mut m, press(Key::Char('3')));
+        assert_eq!(effects, vec![Effect::SetModel("c".to_string())]);
+    }
+
+    #[test]
+    fn picker_esc_closes_without_an_effect() {
+        let mut m =
+            Model::default().with_provider_catalog(vec!["a".to_string()], Effort::default());
+        submit_line(&mut m, "/models");
+        assert!(m.picker.is_some());
+        let effects = on_key(&mut m, press(Key::Esc));
+        assert!(effects.is_empty());
+        assert!(m.picker.is_none());
+    }
+
+    #[test]
+    fn models_command_with_an_empty_catalog_notifies_and_opens_nothing() {
+        let mut m = Model::default(); // no models configured
+        submit_line(&mut m, "/models");
+        assert!(m.picker.is_none(), "no picker without a catalog");
     }
 
     #[test]
