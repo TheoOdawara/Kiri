@@ -46,7 +46,7 @@ const MS_PER_SECOND: u128 = 1000;
 /// conversation is empty, the brand splash takes the pane instead.
 pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
     if model.transcript.is_empty() {
-        splash::render(frame, area);
+        splash::render(frame, area, model.opened_at, model.render_at, motion);
         return;
     }
 

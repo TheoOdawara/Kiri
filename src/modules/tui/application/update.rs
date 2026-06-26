@@ -1,14 +1,26 @@
+use std::time::Duration;
+
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::keymap;
 use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 
+/// Backdating the open instant by more than the splash settle window instantly freezes the breath-in.
+const SPLASH_FAST_FORWARD: Duration = Duration::from_millis(700);
+
 /// The pure reducer: apply one message to the model and return the effects the runtime must perform.
 /// No I/O, no engine handles — fully unit-testable.
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     match msg {
-        Msg::Key(key) => keymap::on_key(model, key),
+        Msg::Key(key) => {
+            // Any keypress fast-forwards the splash breath-in so a user who opens Kiri dozens of times a
+            // day never waits on chrome. Backdating the open instant settles it on the next frame.
+            if let Some(now) = model.render_at {
+                model.opened_at = Some(now.checked_sub(SPLASH_FAST_FORWARD).unwrap_or(now));
+            }
+            keymap::on_key(model, key)
+        }
         Msg::Paste(text) => {
             if model.pending_approval.is_none() && model.pending_plan.is_none() {
                 model.input.insert(&text);

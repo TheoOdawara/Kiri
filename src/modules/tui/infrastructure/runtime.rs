@@ -103,6 +103,9 @@ impl Tui {
         // Resolve the motion preference once: reading the environment is infrastructure's job, kept out
         // of the pure domain. The view folds in per-frame geometry on top of this.
         model.motion = resolve_motion();
+        // Stamp the open instant for the splash breath-in and the cursor pulse (clock stays out of the
+        // domain constructor).
+        model.opened_at = Some(Instant::now());
 
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel::<EngineMsg>();
         let cancel = CancelToken::new();

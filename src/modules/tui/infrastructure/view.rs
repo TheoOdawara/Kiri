@@ -92,7 +92,7 @@ mod tests {
         assert!(out.contains("kiri"), "brand seal missing:\n{out}");
         assert!(out.contains("KIRI"), "splash mark missing:\n{out}");
         assert!(out.contains("model-x"), "model missing:\n{out}");
-        assert!(out.contains("›_"), "prompt glyph missing:\n{out}");
+        assert!(out.contains("›▏"), "prompt glyph missing:\n{out}");
         assert!(out.contains("Enter envia"), "hints missing:\n{out}");
     }
 
@@ -183,8 +183,8 @@ mod tests {
             "plan text should render above the box (plan_row={plan_row:?}, box_row={box_row:?}):\n{out}"
         );
         // ...and the box sits in its dedicated region just above the input prompt, anchored to the
-        // bottom — the box options render below the transcript but above the `›_` prompt row.
-        let prompt_row = rows.iter().position(|l| l.contains("›_"));
+        // bottom — the box options render below the transcript but above the `›▏` prompt row.
+        let prompt_row = rows.iter().position(|l| l.contains("›▏"));
         assert!(
             matches!((box_row, prompt_row), (Some(b), Some(p)) if b < p),
             "plan box should sit above the input (box_row={box_row:?}, prompt_row={prompt_row:?}):\n{out}"
@@ -304,7 +304,7 @@ mod tests {
         let out = render(&model, 20, 8);
         // The prompt glyph and the seal survive; the long hint collapses to the short form.
         assert!(out.contains("kiri"), "brand seal missing:\n{out}");
-        assert!(out.contains("›_"), "prompt glyph missing:\n{out}");
+        assert!(out.contains("›▏"), "prompt glyph missing:\n{out}");
         assert!(out.contains("/help"), "short hint missing:\n{out}");
     }
 }

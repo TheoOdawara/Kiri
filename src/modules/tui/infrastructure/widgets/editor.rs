@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
@@ -13,13 +13,15 @@ use crate::modules::tui::infrastructure::theme::{self, GateState};
 
 /// How long the gate's temper quench lasts after a turn settles.
 const QUENCH_MS: f32 = 400.0;
+/// The living cursor's full pulse period (dim → accent → dim).
+const PULSE_MS: u128 = 1280;
 
-/// Display columns of the prompt prefix `⬡ ›_ ` (gate glyph + space + `›` + `_` + space). The gate glyph
-/// and `›` are width-1 in the terminals we target, so the text column stays aligned. Public so the view
-/// can count wrapped input lines against the same column budget.
+/// Display columns of the prompt prefix `⬡ ›▏ ` (gate glyph + space + `›` + cursor bar + space). The gate
+/// glyph and `›` are width-1 in the terminals we target, so the text column stays aligned. Public so the
+/// view can count wrapped input lines against the same column budget.
 pub const PROMPT_COLS: u16 = 5;
 
-/// Render the borderless input editor. A left gutter carries the state-driven gate seal and the `›_`
+/// Render the borderless input editor. A left gutter carries the state-driven gate seal and the `›▏`
 /// prompt on the first row; the `tui-textarea` widget renders the buffer in the column to its right, so
 /// continuation rows align under the text. The widget owns editing, cursor, selection, and soft-wrap;
 /// the runtime sets its theme styles once at startup. While a plan/approval box is up, the buffer is
@@ -40,9 +42,15 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
         width: gutter_cols,
         ..area
     };
+    // The `_` placeholder becomes the living cursor: a thin bar that pulses between dim and the accent —
+    // the one sanctioned idle motion, a banked coal that says the harness is awake. The hexagon gate to
+    // its left stays perfectly still.
+    let cursor_style = Style::default().fg(cursor_fg(model.opened_at, model.render_at, motion));
     let prompt = Line::from(vec![
         Span::styled(format!("{glyph} "), glyph_style),
-        Span::styled("›_ ", theme::dim()),
+        Span::styled("›", theme::dim()),
+        Span::styled("▏", cursor_style),
+        Span::styled(" ", theme::dim()),
     ]);
     frame.render_widget(Paragraph::new(prompt).style(theme::base()), gutter);
 
@@ -74,6 +82,22 @@ fn quench_fg(settled: Option<Instant>, now: Option<Instant>, motion: Motion) -> 
     let age = now?.saturating_duration_since(settled?);
     let ms = age.as_millis() as f32;
     (ms < QUENCH_MS).then(|| theme::ramp(&theme::QUENCH_RAMP, ms / QUENCH_MS))
+}
+
+/// The living cursor's colour: a steady dim bar under reduced motion, otherwise a triangle pulse between
+/// dim steel and the accent over `PULSE_MS`, phased off the open instant. Pure, so the one idle motion is
+/// unit-testable; it is also the single exception to the idle zero-diff rule.
+fn cursor_fg(opened_at: Option<Instant>, now: Option<Instant>, motion: Motion) -> Color {
+    if motion.is_reduced() {
+        return theme::BRAND;
+    }
+    let phase = match (opened_at, now) {
+        (Some(o), Some(n)) => (n.saturating_duration_since(o).as_millis() % PULSE_MS) as f32,
+        _ => return theme::BRAND,
+    };
+    let t = phase / PULSE_MS as f32; // 0..1 across the period
+    let triangle = 1.0 - (2.0 * t - 1.0).abs(); // 0 → 1 → 0
+    theme::ramp(&[theme::BRAND, theme::HIGHLIGHT], triangle)
 }
 
 /// Resolve the editor's gate state, in priority order: a running turn, a pending approval, a trailing
@@ -141,6 +165,20 @@ fn logical_rows(line: &str, w: usize) -> usize {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn cursor_is_steady_dim_when_frozen_or_at_rest() {
+        let now = Instant::now();
+        // Reduced motion holds a steady dim bar.
+        assert_eq!(
+            cursor_fg(Some(now), Some(now), Motion::Reduced),
+            theme::BRAND
+        );
+        // No clock yet → steady dim.
+        assert_eq!(cursor_fg(None, None, Motion::Full), theme::BRAND);
+        // The pulse starts at the dim end of the ramp.
+        assert_eq!(cursor_fg(Some(now), Some(now), Motion::Full), theme::BRAND);
+    }
 
     #[test]
     fn quench_takes_the_accent_then_clears() {

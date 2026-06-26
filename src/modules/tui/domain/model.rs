@@ -96,6 +96,9 @@ pub struct Model {
     /// When the last turn settled (`TurnEnded`), stamped with `render_at`. Drives the one-shot temper
     /// quench on the idle gate; cleared when a new turn begins.
     pub turn_settled_at: Option<Instant>,
+    /// When the shell opened, stamped by the runtime at startup. Drives the splash breath-in and the
+    /// living-cursor pulse; a keypress backdates it to fast-forward the splash for frequent users.
+    pub opened_at: Option<Instant>,
 }
 
 impl Model {
