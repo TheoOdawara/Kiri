@@ -93,6 +93,9 @@ pub struct Model {
     /// Landing instants of the completed lines of the active streaming answer (one per `\n`), stamped
     /// with `render_at`. Drives the cooling-steel reveal; cleared at each turn and answer boundary.
     pub stream_landings: Vec<Instant>,
+    /// When the last turn settled (`TurnEnded`), stamped with `render_at`. Drives the one-shot temper
+    /// quench on the idle gate; cleared when a new turn begins.
+    pub turn_settled_at: Option<Instant>,
 }
 
 impl Model {

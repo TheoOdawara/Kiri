@@ -1,12 +1,18 @@
+use std::time::Instant;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::modules::tui::domain::model::Model;
+use crate::modules::tui::domain::model::{Model, Motion};
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::modules::tui::domain::view_state::InputBuffer;
 use crate::modules::tui::infrastructure::theme::{self, GateState};
+
+/// How long the gate's temper quench lasts after a turn settles.
+const QUENCH_MS: f32 = 400.0;
 
 /// Display columns of the prompt prefix `⬡ ›_ ` (gate glyph + space + `›` + `_` + space). The gate glyph
 /// and `›` are width-1 in the terminals we target, so the text column stays aligned. Public so the view
@@ -18,8 +24,16 @@ pub const PROMPT_COLS: u16 = 5;
 /// continuation rows align under the text. The widget owns editing, cursor, selection, and soft-wrap;
 /// the runtime sets its theme styles once at startup. While a plan/approval box is up, the buffer is
 /// drawn as plain text (no cursor) so its block cursor does not compete with the box's own highlight.
-pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
-    let (glyph, glyph_style) = theme::gate(gate_state(model));
+pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
+    let state = gate_state(model);
+    let (glyph, mut glyph_style) = theme::gate(state);
+    // The reward beat: when a turn has just settled, the idle gate quenches from the busy cyan through
+    // temper-blue into its resting colour — a "strike connected" before the UI goes silent.
+    if matches!(state, GateState::Idle)
+        && let Some(fg) = quench_fg(model.turn_settled_at, model.render_at, motion)
+    {
+        glyph_style = glyph_style.fg(fg);
+    }
     let gutter_cols = PROMPT_COLS.min(area.width);
 
     let gutter = Rect {
@@ -48,6 +62,18 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
             editor_area,
         );
     }
+}
+
+/// The gate's quench colour after a turn settles: `None` once the window has passed (the gate returns to
+/// its resting idle colour) or when motion is reduced; otherwise the temper ramp applied to the settle
+/// age. Pure, so the reward beat is unit-testable.
+fn quench_fg(settled: Option<Instant>, now: Option<Instant>, motion: Motion) -> Option<Color> {
+    if motion.is_reduced() {
+        return None;
+    }
+    let age = now?.saturating_duration_since(settled?);
+    let ms = age.as_millis() as f32;
+    (ms < QUENCH_MS).then(|| theme::ramp(&theme::QUENCH_RAMP, ms / QUENCH_MS))
 }
 
 /// Resolve the editor's gate state, in priority order: a running turn, a pending approval, a trailing
@@ -114,6 +140,24 @@ fn logical_rows(line: &str, w: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn quench_takes_the_accent_then_clears() {
+        let now = Instant::now();
+        // At the moment of settle the gate takes the busy cyan, then ramps toward its resting colour.
+        assert_eq!(
+            quench_fg(Some(now), Some(now), Motion::Full),
+            Some(theme::HIGHLIGHT)
+        );
+        // Reduced motion never quenches.
+        assert_eq!(quench_fg(Some(now), Some(now), Motion::Reduced), None);
+        // Past the window the gate is back to its resting idle colour (no override).
+        let later = now + Duration::from_millis(500);
+        assert_eq!(quench_fg(Some(now), Some(later), Motion::Full), None);
+        // With no settle recorded there is nothing to quench.
+        assert_eq!(quench_fg(None, Some(now), Motion::Full), None);
+    }
 
     fn buffer(text: &str) -> InputBuffer {
         let mut b = InputBuffer::default();

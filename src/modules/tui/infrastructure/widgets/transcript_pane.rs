@@ -154,7 +154,11 @@ fn render_tool(
     }
 
     match &activity.result {
-        None => out.push(Line::styled("  ⎿ …", theme::dim())),
+        None => out.push(Line::from(vec![
+            Span::styled("  ⎿ ", theme::dim()),
+            Span::styled("● ", Style::default().fg(theme::WARNING)),
+            Span::styled("…", theme::dim()),
+        ])),
         Some((status, output, elapsed)) => render_result(
             *status,
             output,
@@ -197,7 +201,8 @@ fn render_result(
 
     let head = format!("{} · {}", lines[0], fmt_dur(elapsed));
     out.push(Line::from(vec![
-        Span::styled("  ⎿ ", Style::default().fg(marker_color)),
+        Span::styled("  ⎿ ", theme::dim()),
+        Span::styled("● ", Style::default().fg(marker_color)),
         Span::styled(head, text_style),
     ]));
 

@@ -35,6 +35,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::TurnBegan => {
             model.status.streaming = true;
             model.stream_landings.clear();
+            model.turn_settled_at = None;
             Vec::new()
         }
         Msg::StreamDelta(StreamKind::Reasoning, text) => {
@@ -89,6 +90,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.status.streaming = false;
             model.pending_approval = None;
             model.stream_landings.clear();
+            model.turn_settled_at = model.render_at;
             Vec::new()
         }
     }

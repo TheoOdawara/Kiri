@@ -18,6 +18,7 @@ pub const CODE_FG: Color = Color::Rgb(0xF0, 0x88, 0x3E); // #F0883E — orange �
 pub const CODE_BG: Color = Color::Rgb(0x1C, 0x22, 0x2B); // #1C222B — code block background
 pub const HEADING: Color = Color::Rgb(0x6F, 0xB0, 0xCC); // #6FB0CC — soft cyan — headings / `◆ kiri` label (whispered)
 pub const GUILLOCHE: Color = Color::Rgb(0x30, 0x36, 0x3D); // #30363D — etched hairline above the approval stanza
+pub const TEMPER_BLUE: Color = Color::Rgb(0x6C, 0xB6, 0xFF); // #6CB6FF — one-shot gate quench on turn-settle only
 
 /// The steel brightness ramp — emphasis is a brighter step, recession a darker one; this replaces every
 /// chrome `Modifier::BOLD`. Index 0 is full weight ("bold"), 4 is the most receded (vignette / hairline).
@@ -36,6 +37,11 @@ pub const COOLING_RAMP: [Color; 3] = [
     Color::Rgb(0xC9, 0x9A, 0x6E), // cooling
     STEEL,                        // polished steel
 ];
+
+/// The temper-quench ramp — the one-shot reward beat the gate gives when a turn settles: the busy cyan
+/// quenches through temper-blue and cools into the resting idle colour, so it lands seamlessly on the
+/// idle gate with no jump.
+pub const QUENCH_RAMP: [Color; 3] = [HIGHLIGHT, TEMPER_BLUE, BRAND];
 
 /// The 10-frame braille spinner.
 pub const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -93,6 +99,7 @@ pub fn accent() -> Style {
 }
 
 /// The input prompt is a live Quality Gate: its glyph and color encode the editor's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateState {
     /// Active, empty buffer — the gate is open and waiting.
     Idle,

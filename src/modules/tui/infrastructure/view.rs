@@ -53,7 +53,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
         approval::render(pending, frame, regions.prompt_box);
     }
     meta_rule::render(model, frame, regions.meta);
-    editor::render(model, frame, regions.input);
+    editor::render(model, frame, regions.input, motion);
     hint_line::render(model, frame, regions.hint);
     // The slash-command preview floats just above the editor while the buffer is a `/`-prefixed token.
     if let Some(menu) = &model.command_menu {
