@@ -46,7 +46,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         bail!("Kiri requires an interactive terminal (stdout is not a TTY)");
     }
     // Memory & docs first: a degraded store (init failure) is surfaced and left inert, never fatal.
-    let (memory_tools, memory_digest) = build_memory(&settings).await?;
+    let (memory_tools, memory_digest, memory) = build_memory(&settings).await?;
     // Session persistence shares the same degrade-never-abort contract as memory.
     let project_id = project_id_from_path(&settings.path);
     let session_store = build_session(&settings).await?;
@@ -137,6 +137,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         settings.config_path,
         needs_onboarding,
         session_store,
+        memory,
         project_id,
     ))
 }
@@ -146,9 +147,11 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
 /// `init` fails is surfaced on stderr and left inert (`is_available() == false`) rather than aborting:
 /// memory is auxiliary, so the harness must still start. Returns no tools and an empty digest when
 /// memory is disabled (`KIRI_MEMORY=off`).
-async fn build_memory(settings: &Settings) -> Result<(Vec<Box<dyn Tool>>, String)> {
+async fn build_memory(
+    settings: &Settings,
+) -> Result<(Vec<Box<dyn Tool>>, String, Arc<dyn MemoryPort>)> {
     if !settings.memory_enabled {
-        return Ok((Vec::new(), String::new()));
+        return Ok((Vec::new(), String::new(), inert_memory_port(settings)?));
     }
     let project_id = project_id_from_path(&settings.path);
 
@@ -204,9 +207,22 @@ async fn build_memory(settings: &Settings) -> Result<(Vec<Box<dyn Tool>>, String
     ));
     let docs = Arc::new(DocsLibrary::new(settings.docs_path.clone()));
 
-    let tools = default_memory_tools(memory, docs, project_id);
+    // Clone the port out before it is moved into the tools: the runtime also needs it to drive the
+    // end-of-session distillation.
+    let tools = default_memory_tools(memory.clone(), docs, project_id);
     let digest = render_digest(&project_entries, &shared_entries);
-    Ok((tools, digest))
+    Ok((tools, digest, memory))
+}
+
+/// Build an inert memory port (both scopes unavailable) for the memory-disabled boot, so the runtime can
+/// hold a non-optional `Arc<dyn MemoryPort>` whose every write is a graceful no-op.
+fn inert_memory_port(settings: &Settings) -> Result<Arc<dyn MemoryPort>> {
+    let project = FileProjectMemory::new(settings.path.join(".kiri").join("memory"));
+    let shared = SqliteSharedMemory::in_memory()?;
+    Ok(Arc::new(MemoryPortImpl::new(
+        FileProjectStore::new(project, false),
+        SqliteSharedStore::new(shared, false),
+    )))
 }
 
 /// Wire the session store (SQLite at `~/.kiri/sessions.db`). Mirrors the memory contract: a store whose

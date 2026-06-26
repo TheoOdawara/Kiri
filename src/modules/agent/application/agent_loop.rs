@@ -79,6 +79,18 @@ impl AgentLoop {
         self.model = model;
     }
 
+    /// The current provider adapter, for an out-of-turn call like the end-of-session distillation. Clones
+    /// the `Arc` so the caller drives `complete` without borrowing the loop, and always sees the latest
+    /// adapter after a live `/provider`/`/effort` swap.
+    pub fn provider(&self) -> Arc<dyn CompletionProvider> {
+        self.provider.clone()
+    }
+
+    /// The active model id (for the same out-of-turn calls).
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     /// Drive one user turn to completion. The conversation must already hold the user message. On a
     /// provider failure the error is returned (the caller renders it and rolls back a dangling user
     /// message); `Aborted` means the user ended the session at a prompt. `io` is the engine's single UI

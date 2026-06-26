@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{EnableBracketedPaste, EnableMouseCapture, EventStream};
+use crossterm::event::{
+    EnableBracketedPaste, EnableMouseCapture, Event, EventStream, KeyCode, KeyModifiers,
+};
 use ratatui::backend::Backend;
 use ratatui::layout::Rect;
 use ratatui::{DefaultTerminal, Terminal};
@@ -19,6 +21,8 @@ use crate::modules::agent::application::approval_policy::Approval;
 use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
 use crate::modules::agent::domain::role::Role;
+use crate::modules::memory::application::distill::Distiller;
+use crate::modules::memory::application::memory_port::MemoryPort;
 use crate::modules::memory::domain::project_memory::project_id_from_path;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::application::secret_store::SecretStore;
@@ -226,6 +230,8 @@ pub struct Tui {
     /// Persists the conversation across runs. Inert (`is_available() == false`) when sessions are
     /// disabled or the store failed to initialize — every call is then a graceful no-op.
     session_store: Arc<dyn SessionStore>,
+    /// The durable memory, used to drive the end-of-session distillation. Inert scopes make it a no-op.
+    memory: Arc<dyn MemoryPort>,
     /// The workspace id sessions are keyed by; recomputed on `/cd`.
     project_id: String,
 }
@@ -241,6 +247,7 @@ impl Tui {
         config_path: PathBuf,
         needs_onboarding: bool,
         session_store: Arc<dyn SessionStore>,
+        memory: Arc<dyn MemoryPort>,
         project_id: String,
     ) -> Self {
         let workspace = text::display_path(sandbox.root());
@@ -266,6 +273,7 @@ impl Tui {
             provider_swap,
             config_path,
             session_store,
+            memory,
             project_id,
         }
     }
@@ -281,6 +289,7 @@ impl Tui {
             mut provider_swap,
             config_path,
             session_store,
+            memory,
             mut project_id,
         } = self;
 
@@ -431,6 +440,18 @@ impl Tui {
                     }
                     Effect::Quit => model.should_quit = true,
                     Effect::NewSession => {
+                        // Learn from the session being discarded before it is gone.
+                        drive_distillation(
+                            &agent_loop,
+                            &memory,
+                            &project_id,
+                            &conversation,
+                            &mut model,
+                            &mut terminal,
+                            &mut events,
+                            &mut ticker,
+                        )
+                        .await;
                         conversation = Conversation::new(system_prompt.clone());
                         // Detach from the persisted row: the next turn lazily creates a fresh session.
                         session_id = None;
@@ -449,6 +470,18 @@ impl Tui {
                     Effect::ResumeLast => {
                         match session_store.latest_for_project(&project_id).await {
                             Ok(Some(summary)) => {
+                                // Learn from the current session before switching away from it.
+                                drive_distillation(
+                                    &agent_loop,
+                                    &memory,
+                                    &project_id,
+                                    &conversation,
+                                    &mut model,
+                                    &mut terminal,
+                                    &mut events,
+                                    &mut ticker,
+                                )
+                                .await;
                                 open_session(
                                     session_store.as_ref(),
                                     &system_prompt,
@@ -472,6 +505,18 @@ impl Tui {
                         }
                     }
                     Effect::OpenSession(id) => {
+                        // Learn from the current session before switching away from it.
+                        drive_distillation(
+                            &agent_loop,
+                            &memory,
+                            &project_id,
+                            &conversation,
+                            &mut model,
+                            &mut terminal,
+                            &mut events,
+                            &mut ticker,
+                        )
+                        .await;
                         open_session(
                             session_store.as_ref(),
                             &system_prompt,
@@ -486,6 +531,18 @@ impl Tui {
                     }
                     Effect::ChangeWorkspace(path) => match sandbox.relocated(&path) {
                         Ok(new_sandbox) => {
+                            // Learn from the old project's session before re-keying to the new workspace.
+                            drive_distillation(
+                                &agent_loop,
+                                &memory,
+                                &project_id,
+                                &conversation,
+                                &mut model,
+                                &mut terminal,
+                                &mut events,
+                                &mut ticker,
+                            )
+                            .await;
                             model.status.workspace = text::display_path(new_sandbox.root());
                             // Sessions are keyed by workspace: the current one belongs to the old
                             // project, so detach and re-key. The next turn starts a fresh session under
@@ -700,6 +757,20 @@ impl Tui {
                 }
             }
         }
+
+        // Distill the final session before tearing down, so the last conversation also teaches the
+        // memory. Best-effort, bounded, and Ctrl+C-skippable — quit is never held hostage.
+        drive_distillation(
+            &agent_loop,
+            &memory,
+            &project_id,
+            &conversation,
+            &mut model,
+            &mut terminal,
+            &mut events,
+            &mut ticker,
+        )
+        .await;
 
         Ok(())
     }
@@ -1159,6 +1230,125 @@ fn rebuild_transcript(messages: &[Message]) -> Transcript {
         }
     }
     transcript
+}
+
+/// Whether a session is worth distilling: it must hold at least one user message and one non-empty
+/// assistant reply, so an empty or aborted session never spends an LLM call on noise.
+fn should_distill(conversation: &Conversation) -> bool {
+    let mut has_user = false;
+    let mut has_assistant = false;
+    for message in conversation.messages() {
+        match message.role {
+            Role::User => has_user = true,
+            Role::Assistant
+                if message
+                    .content
+                    .as_deref()
+                    .is_some_and(|c| !c.trim().is_empty()) =>
+            {
+                has_assistant = true
+            }
+            _ => {}
+        }
+    }
+    has_user && has_assistant
+}
+
+/// Whether a crossterm event is Ctrl+C — the skip key during distillation.
+fn is_ctrl_c(event: &Event) -> bool {
+    matches!(event, Event::Key(key)
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+/// One step the distillation `select!` produced.
+enum DistillStep {
+    Done(Result<crate::modules::memory::application::distill::DistillReport, AgentError>),
+    Skip,
+    Tick,
+}
+
+/// Run the end-of-session distillation while keeping the UI responsive: a spinner ticks and Ctrl+C skips.
+/// Best-effort and bounded — the distiller's own timeout caps the wait, a skip or failure surfaces a
+/// Notice and never blocks the caller (a `/new`, a session switch, or quit). The conversation is read
+/// only and already persisted, so distillation never risks the session's data.
+#[allow(clippy::too_many_arguments)]
+async fn drive_distillation(
+    agent_loop: &AgentLoop,
+    memory: &Arc<dyn MemoryPort>,
+    project_id: &str,
+    conversation: &Conversation,
+    model: &mut Model,
+    terminal: &mut DefaultTerminal,
+    events: &mut EventStream,
+    ticker: &mut Interval,
+) {
+    if !should_distill(conversation) {
+        return;
+    }
+    // Both scopes inert (memory disabled or failed): there is nothing to write to, so skip the LLM call.
+    if !memory.project_memory_available() && !memory.shared_memory_available() {
+        return;
+    }
+
+    let provider = agent_loop.provider();
+    let model_id = agent_loop.model().to_string();
+    let distiller = Distiller::new(memory.clone(), project_id.to_string());
+    let messages: Vec<Message> = conversation.messages().to_vec();
+
+    model.transcript.push(TranscriptItem::Notice(
+        NoticeLevel::Info,
+        "destilando memórias da sessão… (^C pula)".to_string(),
+    ));
+    model.busy = true;
+    let started = Instant::now();
+    model.render_at = Some(started);
+    let _ = draw_and_copy(terminal, model);
+
+    let outcome = {
+        let mut distillation = Box::pin(distiller.distill(provider.as_ref(), &model_id, &messages));
+        loop {
+            let step = tokio::select! {
+                biased;
+                maybe = events.next() => match maybe {
+                    Some(Ok(event)) if is_ctrl_c(&event) => DistillStep::Skip,
+                    // Other input is ignored during the (brief) distillation.
+                    _ => DistillStep::Tick,
+                },
+                _ = ticker.tick() => DistillStep::Tick,
+                done = &mut distillation => DistillStep::Done(done),
+            };
+            match step {
+                DistillStep::Done(result) => break Some(result),
+                DistillStep::Skip => break None,
+                DistillStep::Tick => {
+                    model.status.spinner_frame = spinner_frame(started.elapsed());
+                    model.render_at = Some(Instant::now());
+                    // A draw failure ends the best-effort distillation rather than looping blind.
+                    if draw_and_copy(terminal, model).is_err() {
+                        break None;
+                    }
+                }
+            }
+        }
+    };
+
+    model.busy = false;
+    match outcome {
+        None => model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Info,
+            "destilação pulada".to_string(),
+        )),
+        Some(Ok(report)) if report.written > 0 => model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Info,
+            format!("memória atualizada: {} aprendizado(s)", report.written),
+        )),
+        // Nothing worth keeping: stay quiet rather than add noise on every /new.
+        Some(Ok(_)) => {}
+        Some(Err(error)) => model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Info,
+            format!("destilação não concluída: {error}"),
+        )),
+    }
 }
 
 /// Translate an engine message into a UI message, capturing an approval's reply channel on the way.

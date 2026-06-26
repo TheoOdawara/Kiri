@@ -1,0 +1,394 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde::Deserialize;
+
+use crate::modules::agent::domain::message::Message;
+use crate::modules::agent::domain::role::Role;
+use crate::modules::agent::domain::stream_event::StreamEvent;
+use crate::modules::memory::application::memory_port::MemoryPort;
+use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
+use crate::modules::provider::application::completion_provider::{
+    CompletionProvider, EventSink, TurnRequest,
+};
+use crate::shared::kernel::error::AgentError;
+
+type Result<T> = std::result::Result<T, AgentError>;
+
+/// An `EventSink` that discards every streamed delta. The distillation runs headless: its only output is
+/// the final assembled content, so there is no UI to feed.
+struct NullSink;
+
+impl EventSink for NullSink {
+    fn on_event(&mut self, _event: StreamEvent) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// One entry the model proposes to remember, parsed from its JSON output.
+#[derive(Deserialize)]
+struct DistilledEntry {
+    kind: String,
+    content: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    scope: String,
+}
+
+/// What a distillation pass wrote and skipped, for a user-facing summary.
+pub struct DistillReport {
+    pub written: usize,
+    pub skipped: usize,
+}
+
+impl DistillReport {
+    fn empty() -> Self {
+        Self {
+            written: 0,
+            skipped: 0,
+        }
+    }
+}
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_MAX_ENTRIES: usize = 12;
+const DEFAULT_MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
+
+const DISTILL_SYSTEM_PROMPT: &str = concat!(
+    "You distill durable knowledge from a coding session for a long-term memory. Read the transcript ",
+    "and extract only knowledge that is reusable in future, unrelated sessions: architectural or design ",
+    "decisions, recommended patterns, anti-patterns to avoid, reusable snippets, learned heuristics, ",
+    "verifiable technical facts, and explicit user preferences ('always use X', 'I prefer Y', 'never ",
+    "do Z'). Ignore everything ephemeral or task-specific (file paths edited this turn, one-off bug ",
+    "fixes, transient state, pleasantries).\n\n",
+    "Output ONLY a JSON array (no prose, no code fences) of objects with exactly these fields:\n",
+    "  - kind: one of \"decision\", \"pattern\", \"anti-pattern\", \"snippet\", \"heuristic\", \"fact\", ",
+    "\"preference\"\n",
+    "  - content: a concise, self-contained statement of the knowledge (no transcript references)\n",
+    "  - tags: an array of short lowercase tags (may be empty)\n",
+    "  - scope: \"shared\" for cross-project truths and ALL user preferences, else \"project\"\n\n",
+    "Return [] when nothing is worth keeping. Never invent knowledge that the transcript does not ",
+    "support. Output the JSON array and nothing else."
+);
+
+/// The end-of-session learning pass: feed the conversation to the model, ask it to extract durable
+/// knowledge, and persist what it returns to memory. Depends on the `MemoryPort` (to write) and is handed
+/// a `CompletionProvider` at call time (so it always uses the live adapter after a `/provider` swap).
+pub struct Distiller {
+    memory: Arc<dyn MemoryPort>,
+    project_id: String,
+    timeout: Duration,
+    max_entries: usize,
+    max_transcript_bytes: usize,
+}
+
+impl Distiller {
+    pub fn new(memory: Arc<dyn MemoryPort>, project_id: String) -> Self {
+        Self {
+            memory,
+            project_id,
+            timeout: DEFAULT_TIMEOUT,
+            max_entries: DEFAULT_MAX_ENTRIES,
+            max_transcript_bytes: DEFAULT_MAX_TRANSCRIPT_BYTES,
+        }
+    }
+
+    /// Distill `conversation` and write the extracted entries. Bounded by an internal timeout so a slow
+    /// provider never hangs the caller; a provider failure, a timeout, or invalid model output all return
+    /// `Err` (the caller surfaces it as a Notice). The conversation is read-only and persisted
+    /// independently, so a failed distillation never loses data.
+    pub async fn distill(
+        &self,
+        provider: &dyn CompletionProvider,
+        model: &str,
+        conversation: &[Message],
+    ) -> Result<DistillReport> {
+        let transcript = render_transcript(conversation, self.max_transcript_bytes);
+        if transcript.trim().is_empty() {
+            return Ok(DistillReport::empty());
+        }
+
+        let messages = vec![
+            Message::system(DISTILL_SYSTEM_PROMPT),
+            Message::user(transcript),
+        ];
+        let request = TurnRequest {
+            messages: &messages,
+            model,
+            tools: &[],
+        };
+        let mut sink = NullSink;
+        let completed = tokio::time::timeout(self.timeout, provider.complete(request, &mut sink))
+            .await
+            .map_err(|_| AgentError::Memory("distillation timed out".to_string()))??;
+
+        let entries = parse_entries(&completed.content)?;
+        let mut report = DistillReport::empty();
+        for raw in entries.into_iter().take(self.max_entries) {
+            if self.persist(raw).await {
+                report.written += 1;
+            } else {
+                report.skipped += 1;
+            }
+        }
+        Ok(report)
+    }
+
+    /// Validate, dedup, and persist one proposed entry. Returns whether it was written.
+    async fn persist(&self, raw: DistilledEntry) -> bool {
+        let Some(kind) = MemoryKind::from_str(&raw.kind) else {
+            return false;
+        };
+        let scope = raw.scope.as_str();
+        if scope != "project" && scope != "shared" {
+            return false;
+        }
+        let available = match scope {
+            "shared" => self.memory.shared_memory_available(),
+            _ => self.memory.project_memory_available(),
+        };
+        if !available {
+            return false;
+        }
+        if self.is_duplicate(&raw.content, scope).await {
+            return false;
+        }
+        let entry = MemoryEntry::new(
+            kind,
+            raw.content,
+            raw.tags.into_iter().collect(),
+            Some(self.project_id.clone()),
+        );
+        let result = match scope {
+            "shared" => self.memory.remember_shared(entry).await,
+            _ => self.memory.remember_project(entry).await,
+        };
+        result.is_ok()
+    }
+
+    /// Whether an equivalent entry already exists in the target scope, so re-learning the same fact each
+    /// session does not balloon the store. Recalls candidates by the content's leading words (keyword
+    /// search), then compares normalized text for equality or containment.
+    async fn is_duplicate(&self, content: &str, scope: &str) -> bool {
+        let query = leading_words(content, 6);
+        if query.is_empty() {
+            return false;
+        }
+        let hits = match scope {
+            "shared" => self.memory.recall_shared(&query, 5).await,
+            _ => self.memory.recall_project(&query, 5).await,
+        };
+        let Ok(hits) = hits else {
+            // A recall failure must not block learning — treat as "not a duplicate" and let the write
+            // proceed (the worst case is one redundant entry, never lost knowledge).
+            return false;
+        };
+        let target = normalize(content);
+        hits.iter().any(|hit| {
+            let existing = normalize(&hit.content);
+            existing == target || existing.contains(&target) || target.contains(&existing)
+        })
+    }
+}
+
+/// Render a bounded transcript: user and assistant text only (system and tool noise dropped), keeping the
+/// most recent tail within `max_bytes` so a long session still fits the distiller's context.
+fn render_transcript(messages: &[Message], max_bytes: usize) -> String {
+    let mut lines = Vec::new();
+    for message in messages {
+        let label = match message.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            Role::System | Role::Tool => continue,
+        };
+        if let Some(content) = message.content.as_deref().filter(|c| !c.trim().is_empty()) {
+            lines.push(format!("{label}: {}", content.trim()));
+        }
+    }
+    let joined = lines.join("\n\n");
+    if joined.len() <= max_bytes {
+        return joined;
+    }
+    let mut start = joined.len() - max_bytes;
+    while !joined.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", &joined[start..])
+}
+
+/// Extract the JSON array from the model's output (tolerating code fences or stray prose around it) and
+/// parse it. No array at all means "nothing to learn" (an empty result); a malformed array is an error.
+fn parse_entries(content: &str) -> Result<Vec<DistilledEntry>> {
+    let (Some(start), Some(end)) = (content.find('['), content.rfind(']')) else {
+        return Ok(Vec::new());
+    };
+    if end < start {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(&content[start..=end])
+        .map_err(|error| AgentError::Memory(format!("distillation: invalid model output: {error}")))
+}
+
+/// Lowercase and collapse all whitespace, for order-insensitive duplicate comparison.
+fn normalize(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// The first `n` whitespace-separated words of `text`, used as a recall query for dedup.
+fn leading_words(text: &str, n: usize) -> String {
+    text.split_whitespace()
+        .take(n)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::agent::domain::completed_turn::CompletedTurn;
+    use crate::modules::memory::infrastructure::test_support::temp_port;
+    use async_trait::async_trait;
+    use tempfile::TempDir;
+
+    /// A provider that returns a fixed `content` once, ignoring the request.
+    struct ScriptedProvider {
+        content: String,
+    }
+
+    #[async_trait(?Send)]
+    impl CompletionProvider for ScriptedProvider {
+        async fn complete(
+            &self,
+            _request: TurnRequest<'_>,
+            _sink: &mut dyn EventSink,
+        ) -> Result<CompletedTurn> {
+            Ok(CompletedTurn {
+                content: self.content.clone(),
+                tool_calls: Vec::new(),
+            })
+        }
+    }
+
+    fn conversation() -> Vec<Message> {
+        vec![
+            Message::system("sys"),
+            Message::user("sempre use tabs"),
+            Message::assistant_text("entendido, vou usar tabs"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn writes_entries_from_a_json_array() {
+        let dir = TempDir::new().unwrap();
+        let memory = temp_port(&dir).await;
+        let distiller = Distiller::new(memory.clone(), "proj-a".into());
+        let provider = ScriptedProvider {
+            content: r#"[
+                {"kind":"preference","content":"always use tabs","tags":["style"],"scope":"shared"},
+                {"kind":"fact","content":"edition 2024 ships in 1.85","tags":[],"scope":"project"}
+            ]"#
+            .into(),
+        };
+
+        let report = distiller
+            .distill(&provider, "m", &conversation())
+            .await
+            .unwrap();
+        assert_eq!(report.written, 2);
+        assert_eq!(memory.recall_shared("tabs", 10).await.unwrap().len(), 1);
+        assert_eq!(memory.recall_project("edition", 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_array_writes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let memory = temp_port(&dir).await;
+        let distiller = Distiller::new(memory, "proj-a".into());
+        let provider = ScriptedProvider {
+            content: "[]".into(),
+        };
+        let report = distiller
+            .distill(&provider, "m", &conversation())
+            .await
+            .unwrap();
+        assert_eq!(report.written, 0);
+        assert_eq!(report.skipped, 0);
+    }
+
+    #[tokio::test]
+    async fn tolerates_fenced_json() {
+        let dir = TempDir::new().unwrap();
+        let memory = temp_port(&dir).await;
+        let distiller = Distiller::new(memory.clone(), "proj-a".into());
+        let provider = ScriptedProvider {
+            content: "Here is what I learned:\n```json\n[{\"kind\":\"heuristic\",\"content\":\"fail fast\",\"scope\":\"shared\"}]\n```"
+                .into(),
+        };
+        let report = distiller
+            .distill(&provider, "m", &conversation())
+            .await
+            .unwrap();
+        assert_eq!(report.written, 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_json_is_an_error() {
+        let dir = TempDir::new().unwrap();
+        let memory = temp_port(&dir).await;
+        let distiller = Distiller::new(memory, "proj-a".into());
+        let provider = ScriptedProvider {
+            content: r#"[{"kind": broken, "content"}]"#.into(),
+        };
+        assert!(
+            distiller
+                .distill(&provider, "m", &conversation())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_invalid_kind_and_scope() {
+        let dir = TempDir::new().unwrap();
+        let memory = temp_port(&dir).await;
+        let distiller = Distiller::new(memory, "proj-a".into());
+        let provider = ScriptedProvider {
+            content: r#"[
+                {"kind":"bogus","content":"x","scope":"shared"},
+                {"kind":"fact","content":"y","scope":"galaxy"}
+            ]"#
+            .into(),
+        };
+        let report = distiller
+            .distill(&provider, "m", &conversation())
+            .await
+            .unwrap();
+        assert_eq!(report.written, 0);
+        assert_eq!(report.skipped, 2);
+    }
+
+    #[tokio::test]
+    async fn dedups_an_already_known_entry() {
+        let dir = TempDir::new().unwrap();
+        let memory = temp_port(&dir).await;
+        let distiller = Distiller::new(memory.clone(), "proj-a".into());
+        let provider = ScriptedProvider {
+            content: r#"[{"kind":"fact","content":"the sky is blue","scope":"shared"}]"#.into(),
+        };
+        // First pass writes it; second pass with the same content must skip it.
+        let first = distiller
+            .distill(&provider, "m", &conversation())
+            .await
+            .unwrap();
+        assert_eq!(first.written, 1);
+        let second = distiller
+            .distill(&provider, "m", &conversation())
+            .await
+            .unwrap();
+        assert_eq!(second.written, 0);
+        assert_eq!(second.skipped, 1);
+    }
+}
