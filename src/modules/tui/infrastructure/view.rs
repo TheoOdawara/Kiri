@@ -118,6 +118,40 @@ mod tests {
     }
 
     #[test]
+    fn the_view_is_a_pure_function_of_the_frame_instant() {
+        use std::time::Instant;
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model
+            .transcript
+            .push(TranscriptItem::Assistant("olá".to_string()));
+        model.render_at = Some(Instant::now());
+        // Same model, same frame instant → byte-identical buffer (the view reads no clock of its own).
+        assert_eq!(render(&model, 80, 20), render(&model, 80, 20));
+    }
+
+    #[test]
+    fn reduced_motion_idle_frame_is_byte_identical_across_time() {
+        use crate::modules::tui::domain::model::Motion;
+        use std::time::{Duration, Instant};
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model
+            .transcript
+            .push(TranscriptItem::User("oi".to_string()));
+        model
+            .transcript
+            .push(TranscriptItem::Assistant("olá".to_string()));
+        model.motion = Motion::Reduced;
+        let now = Instant::now();
+        model.render_at = Some(now);
+        let a = render(&model, 80, 20);
+        // Advance the clock five seconds: a frozen, idle frame must not change a single cell (the idle
+        // zero-diff invariant — under reduced motion not even the cursor pulses).
+        model.render_at = Some(now + Duration::from_secs(5));
+        let b = render(&model, 80, 20);
+        assert_eq!(a, b, "a reduced-motion idle frame must be stable over time");
+    }
+
+    #[test]
     fn streaming_answer_shows_the_wet_ink_caret() {
         let mut model = Model::new("m".to_string(), "/w".to_string());
         model
