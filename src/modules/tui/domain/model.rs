@@ -81,6 +81,10 @@ pub struct Model {
     pub models: Vec<String>,
     /// The configured provider ids, offered by the `/provider` picker.
     pub providers: Vec<String>,
+    /// The ids of the workspace's recent sessions, parallel to the `/sessions` picker rows, so the
+    /// keymap maps a highlighted row back to a session id without coupling the domain to the session
+    /// store. Filled by the runtime just before opening the picker.
+    pub session_ids: Vec<String>,
     /// The open add-provider wizard, or `None`. While set, keys drive its steps.
     pub wizard: Option<ProviderWizard>,
     /// The API key typed in the wizard, staged for the runtime to store in the keyring. Held as a

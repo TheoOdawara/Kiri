@@ -425,6 +425,8 @@ fn submit(model: &mut Model) -> Vec<Effect> {
             vec![Effect::Quit]
         }
         Some(Command::NewSession) => vec![Effect::NewSession],
+        Some(Command::Resume) => vec![Effect::ResumeLast],
+        Some(Command::Sessions) => vec![Effect::ListSessions],
         Some(Command::Help) => {
             model.transcript.push(TranscriptItem::Notice(
                 NoticeLevel::Info,
@@ -747,6 +749,12 @@ fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                 vec![]
             }
         }
+        PickerKind::Sessions => match model.session_ids.get(index) {
+            // The labels are display titles; the id comes from the parallel `session_ids`, filled by
+            // the runtime when it opened the picker.
+            Some(id) => vec![Effect::OpenSession(id.clone())],
+            None => vec![],
+        },
     }
 }
 

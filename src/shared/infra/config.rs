@@ -546,6 +546,8 @@ pub struct Settings {
     pub docs_path: PathBuf,
     /// The cross-project shared memory database. Defaults to `~/.kiri/memory/shared.db`.
     pub shared_memory_db: PathBuf,
+    /// The persisted-conversations database. Defaults to `~/.kiri/sessions.db`. Gated by `memory_enabled`.
+    pub sessions_db: PathBuf,
     /// The credential-store fallback file when no OS keyring is reachable. `~/.kiri/credentials.json`.
     pub credentials_file: PathBuf,
     /// The global config file (`~/.kiri/config.toml`). The runtime writes live `/models`/`/effort`
@@ -639,6 +641,7 @@ impl Settings {
             memory_enabled: resolve_bool(config.behavior.memory, "KIRI_MEMORY", true),
             docs_path,
             shared_memory_db: global_dir.join("memory").join("shared.db"),
+            sessions_db: global_dir.join("sessions.db"),
             credentials_file: global_dir.join("credentials.json"),
             config_path: global_path,
             providers,

@@ -21,6 +21,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         blurb: "descarta a conversa e começa uma nova sessão",
     },
     CommandSpec {
+        name: "/resume",
+        aliases: &["/retomar"],
+        blurb: "retoma a sessão mais recente deste workspace",
+    },
+    CommandSpec {
+        name: "/sessions",
+        aliases: &["/sessoes"],
+        blurb: "escolhe uma sessão anterior para retomar",
+    },
+    CommandSpec {
         name: "/plan",
         aliases: &[],
         blurb: "modo plan (planeja e executa após aprovação)",

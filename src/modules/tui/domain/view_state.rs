@@ -357,6 +357,7 @@ pub enum PickerKind {
     Models,
     Effort,
     Provider,
+    Sessions,
 }
 
 /// The last row of the `/provider` picker — selecting it opens the add-provider wizard instead of

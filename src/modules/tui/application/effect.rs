@@ -20,6 +20,15 @@ pub enum Effect {
     Quit,
     /// Discard the conversation and start a fresh session.
     NewSession,
+    /// Reopen the most recent session for the active workspace (`/resume`). The runtime queries the
+    /// store, then behaves like `OpenSession`, or surfaces a notice when there is none.
+    ResumeLast,
+    /// Query the workspace's past sessions and open the `/sessions` picker. The runtime owns the I/O,
+    /// fills the model's session list, and opens the picker (or notices when the list is empty).
+    ListSessions,
+    /// Reopen a specific session by id (the `/sessions` picker's choice). The runtime finalizes the
+    /// current session, loads the target, and rebuilds the conversation and transcript.
+    OpenSession(String),
     /// Move the active workspace (sandbox root) to the given `/cd` path argument.
     ChangeWorkspace(String),
     /// Approve the proposed plan: leave plan mode and run a turn that executes it under the given

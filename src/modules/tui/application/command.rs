@@ -21,6 +21,10 @@ pub enum Command {
     Effort,
     /// `/provider`: open the picker to switch the active provider.
     Provider,
+    /// `/resume`: reopen the most recent session for this workspace.
+    Resume,
+    /// `/sessions`: open the picker to choose a past session to reopen.
+    Sessions,
     /// A `/`-prefixed token that is not a known command.
     Unknown,
 }
@@ -48,6 +52,8 @@ pub fn parse(line: &str) -> Option<Command> {
         "/models" | "/modelos" => Command::Models,
         "/effort" | "/esforco" => Command::Effort,
         "/provider" | "/providers" => Command::Provider,
+        "/resume" | "/retomar" => Command::Resume,
+        "/sessions" | "/sessoes" => Command::Sessions,
         _ => Command::Unknown,
     };
     Some(command)
@@ -58,6 +64,8 @@ pub fn help_text() -> String {
     [
         "Comandos:",
         "  /new           descarta a conversa e começa uma nova sessão",
+        "  /resume        retoma a sessão mais recente deste workspace",
+        "  /sessions      escolhe uma sessão anterior para retomar",
         "  /plan          modo plan (só leitura; planeja e executa após aprovação)",
         "  /auto          modo auto (executa tudo sem pedir aprovação)",
         "  /default       modo default (pede aprovação para cada ação)",
@@ -103,6 +111,14 @@ mod tests {
         assert_eq!(parse("/new"), Some(Command::NewSession));
         assert_eq!(parse("/novo"), Some(Command::NewSession));
         assert_eq!(parse("/help"), Some(Command::Help));
+    }
+
+    #[test]
+    fn resume_and_sessions_aliases_parse() {
+        assert_eq!(parse("/resume"), Some(Command::Resume));
+        assert_eq!(parse("/retomar"), Some(Command::Resume));
+        assert_eq!(parse("/sessions"), Some(Command::Sessions));
+        assert_eq!(parse("/sessoes"), Some(Command::Sessions));
     }
 
     #[test]

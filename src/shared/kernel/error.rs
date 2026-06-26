@@ -20,6 +20,10 @@ pub enum AgentError {
     /// harness's own knowledge store is auxiliary, so callers degrade gracefully rather than abort.
     #[error("memory error: {0}")]
     Memory(String),
+    /// A session-store failure (SQLite persistence, serialization) in the `session` context. Conversation
+    /// persistence is auxiliary, so callers degrade gracefully (an inert store) rather than abort.
+    #[error("session error: {0}")]
+    Session(String),
     /// A credential-store failure (OS keyring or the 0600 fallback file): reading, writing, or
     /// (de)serializing a provider's secret material. Never carries the secret itself.
     #[error("credential store error: {0}")]

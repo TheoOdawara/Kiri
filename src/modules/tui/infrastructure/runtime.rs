@@ -19,9 +19,12 @@ use crate::modules::agent::application::approval_policy::Approval;
 use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
 use crate::modules::agent::domain::role::Role;
+use crate::modules::memory::domain::project_memory::project_id_from_path;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::application::secret_store::SecretStore;
 use crate::modules::provider::infrastructure::factory::{api_key_from_env, build_provider};
+use crate::modules::session::application::session_store::SessionStore;
+use crate::modules::session::domain::session::derive_title;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
@@ -29,7 +32,7 @@ use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::application::update::update;
 use crate::modules::tui::domain::model::{Model, Motion};
 use crate::modules::tui::domain::transcript::{NoticeLevel, Transcript, TranscriptItem};
-use crate::modules::tui::domain::view_state::{PendingPlan, SelectionState};
+use crate::modules::tui::domain::view_state::{PendingPlan, Picker, PickerKind, SelectionState};
 use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
 use crate::modules::tui::infrastructure::clipboard::{self, ClipboardContent};
 use crate::modules::tui::infrastructure::input;
@@ -220,9 +223,15 @@ pub struct Tui {
     provider_swap: ProviderSwap,
     /// The global config file, written on a live `/models`/`/effort` change.
     config_path: PathBuf,
+    /// Persists the conversation across runs. Inert (`is_available() == false`) when sessions are
+    /// disabled or the store failed to initialize — every call is then a graceful no-op.
+    session_store: Arc<dyn SessionStore>,
+    /// The workspace id sessions are keyed by; recomputed on `/cd`.
+    project_id: String,
 }
 
 impl Tui {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent_loop: AgentLoop,
         sandbox: Sandbox,
@@ -231,6 +240,8 @@ impl Tui {
         provider_swap: ProviderSwap,
         config_path: PathBuf,
         needs_onboarding: bool,
+        session_store: Arc<dyn SessionStore>,
+        project_id: String,
     ) -> Self {
         let workspace = text::display_path(sandbox.root());
         let (model_id, models) = provider_swap
@@ -254,6 +265,8 @@ impl Tui {
             system_prompt,
             provider_swap,
             config_path,
+            session_store,
+            project_id,
         }
     }
 
@@ -267,7 +280,15 @@ impl Tui {
             system_prompt,
             mut provider_swap,
             config_path,
+            session_store,
+            mut project_id,
         } = self;
+
+        // Session persistence cursor: the id of the row backing the current conversation (lazily created
+        // on the first flush, so an empty session never hits the DB) and how many non-system messages
+        // have already been written, so each flush appends only the new tail.
+        let mut session_id: Option<String> = None;
+        let mut persisted_len: usize = 0;
 
         let mut terminal = ratatui::init();
         let _guard = TerminalGuard;
@@ -331,6 +352,15 @@ impl Tui {
                         &mut ticker,
                     )
                     .await?;
+                    flush_session(
+                        session_store.as_ref(),
+                        &mut session_id,
+                        &mut persisted_len,
+                        &project_id,
+                        &conversation,
+                        &mut model,
+                    )
+                    .await;
                 }
             }
         }
@@ -384,6 +414,15 @@ impl Tui {
                             &mut ticker,
                         )
                         .await?;
+                        flush_session(
+                            session_store.as_ref(),
+                            &mut session_id,
+                            &mut persisted_len,
+                            &project_id,
+                            &conversation,
+                            &mut model,
+                        )
+                        .await;
                     }
                     Effect::CopyToClipboard(text) => copy_to_clipboard(&mut model, &text),
                     Effect::PasteClipboard => paste_from_clipboard(&mut model),
@@ -393,6 +432,9 @@ impl Tui {
                     Effect::Quit => model.should_quit = true,
                     Effect::NewSession => {
                         conversation = Conversation::new(system_prompt.clone());
+                        // Detach from the persisted row: the next turn lazily creates a fresh session.
+                        session_id = None;
+                        persisted_len = 0;
                         model.transcript = Transcript::default();
                         model.attachments.clear();
                         model.scroll.pin();
@@ -401,9 +443,56 @@ impl Tui {
                             "nova sessão".to_string(),
                         ));
                     }
+                    Effect::ListSessions => {
+                        list_sessions(session_store.as_ref(), &project_id, &mut model).await;
+                    }
+                    Effect::ResumeLast => {
+                        match session_store.latest_for_project(&project_id).await {
+                            Ok(Some(summary)) => {
+                                open_session(
+                                    session_store.as_ref(),
+                                    &system_prompt,
+                                    &mut conversation,
+                                    &mut model,
+                                    &mut session_id,
+                                    &mut persisted_len,
+                                    &project_id,
+                                    &summary.id,
+                                )
+                                .await;
+                            }
+                            Ok(None) => model.transcript.push(TranscriptItem::Notice(
+                                NoticeLevel::Info,
+                                "nenhuma sessão anterior neste workspace".to_string(),
+                            )),
+                            Err(error) => model.transcript.push(TranscriptItem::Notice(
+                                NoticeLevel::Error,
+                                format!("não foi possível ler as sessões: {error}"),
+                            )),
+                        }
+                    }
+                    Effect::OpenSession(id) => {
+                        open_session(
+                            session_store.as_ref(),
+                            &system_prompt,
+                            &mut conversation,
+                            &mut model,
+                            &mut session_id,
+                            &mut persisted_len,
+                            &project_id,
+                            &id,
+                        )
+                        .await;
+                    }
                     Effect::ChangeWorkspace(path) => match sandbox.relocated(&path) {
                         Ok(new_sandbox) => {
                             model.status.workspace = text::display_path(new_sandbox.root());
+                            // Sessions are keyed by workspace: the current one belongs to the old
+                            // project, so detach and re-key. The next turn starts a fresh session under
+                            // the new project_id.
+                            project_id = project_id_from_path(new_sandbox.root());
+                            session_id = None;
+                            persisted_len = 0;
                             sandbox = new_sandbox;
                             model.transcript.push(TranscriptItem::Notice(
                                 NoticeLevel::Info,
@@ -444,6 +533,15 @@ impl Tui {
                             &mut ticker,
                         )
                         .await?;
+                        flush_session(
+                            session_store.as_ref(),
+                            &mut session_id,
+                            &mut persisted_len,
+                            &project_id,
+                            &conversation,
+                            &mut model,
+                        )
+                        .await;
                     }
                     Effect::SetModel(model_id) => {
                         // A model change is just the per-turn `model` field — no provider rebuild. Apply
@@ -797,6 +895,9 @@ async fn drive_turn(
                             // A picker/wizard cannot open mid-turn, so these never arrive here.
                             Effect::SubmitPrompt { .. }
                             | Effect::NewSession
+                            | Effect::ResumeLast
+                            | Effect::ListSessions
+                            | Effect::OpenSession(_)
                             | Effect::ChangeWorkspace(_)
                             | Effect::ApprovePlan(_)
                             | Effect::SetModel(_)
@@ -852,6 +953,212 @@ async fn drive_turn(
     cancel.reset();
     *pending_reply = None;
     Ok(())
+}
+
+/// Persist the conversation's new tail to the session store, lazily creating the session row on the first
+/// non-empty flush (so an empty session never touches the DB). The system message (index 0) is never
+/// stored — it is regenerated per run from the current memory digest. Best-effort: an unavailable store is
+/// a silent no-op, and a write failure surfaces a Notice without ever losing the in-memory conversation.
+/// Called after a turn settles (post-rollback), so the DB mirrors the resumable in-memory state.
+async fn flush_session(
+    store: &dyn SessionStore,
+    session_id: &mut Option<String>,
+    persisted_len: &mut usize,
+    project_id: &str,
+    conversation: &Conversation,
+    model: &mut Model,
+) {
+    if !store.is_available() {
+        return;
+    }
+    let messages = conversation.messages();
+    // The body excludes the system seed at index 0.
+    let body = &messages[1..];
+    // Clamp the cursor: a rollback can shrink the body below it. In practice the rolled-back messages
+    // were never persisted (we only flush after a turn settles), so this only guards against a panic.
+    let cursor = (*persisted_len).min(body.len());
+    if body.len() <= cursor {
+        return;
+    }
+    let delta = &body[cursor..];
+
+    let id = match session_id {
+        Some(id) => id.clone(),
+        None => match store.create(project_id).await {
+            Ok(session) => {
+                *session_id = Some(session.id.clone());
+                session.id
+            }
+            Err(error) => {
+                model.transcript.push(TranscriptItem::Notice(
+                    NoticeLevel::Error,
+                    format!("não persistiu a sessão: {error}"),
+                ));
+                return;
+            }
+        },
+    };
+
+    let first_flush = cursor == 0;
+    if let Err(error) = store.append_messages(&id, delta).await {
+        model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Error,
+            format!("não persistiu a sessão: {error}"),
+        ));
+        return;
+    }
+    if first_flush
+        && let Some(title_source) = body
+            .iter()
+            .find(|m| m.role == Role::User)
+            .and_then(|m| m.content.as_deref())
+    {
+        // Title is cosmetic (the `/sessions` label); a failure must not fail the flush, and the messages
+        // are already saved, so a derive/store failure is safely ignored.
+        let _ = store.set_title(&id, &derive_title(title_source)).await;
+    }
+    *persisted_len = body.len();
+}
+
+/// How many recent sessions the `/sessions` picker lists.
+const SESSION_LIST_LIMIT: usize = 20;
+
+/// Trim an RFC3339 timestamp to `YYYY-MM-DD HH:MM` for the compact session-list label.
+fn short_timestamp(raw: &str) -> String {
+    raw.get(..16).unwrap_or(raw).replace('T', " ")
+}
+
+/// Query the workspace's recent sessions and open the `/sessions` picker, recording the parallel id list
+/// the keymap resolves against. An unavailable store or an empty list surfaces a Notice and opens nothing.
+async fn list_sessions(store: &dyn SessionStore, project_id: &str, model: &mut Model) {
+    if !store.is_available() {
+        model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Info,
+            "persistência de sessão indisponível".to_string(),
+        ));
+        return;
+    }
+    match store.list_for_project(project_id, SESSION_LIST_LIMIT).await {
+        Ok(sessions) if !sessions.is_empty() => {
+            model.session_ids = sessions.iter().map(|s| s.id.clone()).collect();
+            let options = sessions
+                .iter()
+                .map(|s| {
+                    let title = if s.title.trim().is_empty() {
+                        "(sem título)"
+                    } else {
+                        s.title.trim()
+                    };
+                    format!(
+                        "{title} · {} · {} msgs",
+                        short_timestamp(&s.updated_at),
+                        s.message_count
+                    )
+                })
+                .collect();
+            model.picker = Some(Picker::new(
+                PickerKind::Sessions,
+                "sessão",
+                "Escolha uma sessão para retomar:",
+                options,
+                0,
+            ));
+        }
+        Ok(_) => model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Info,
+            "nenhuma sessão anterior neste workspace".to_string(),
+        )),
+        Err(error) => model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Error,
+            format!("não foi possível listar as sessões: {error}"),
+        )),
+    }
+}
+
+/// Finalize the current session, then load `target_id` and rebuild the conversation and transcript from
+/// it. The system prompt is the current one (a fresh memory digest), correct because stored messages
+/// exclude the system seed. A missing/failed load surfaces a Notice and leaves the current state intact.
+#[allow(clippy::too_many_arguments)]
+async fn open_session(
+    store: &dyn SessionStore,
+    system_prompt: &str,
+    conversation: &mut Conversation,
+    model: &mut Model,
+    session_id: &mut Option<String>,
+    persisted_len: &mut usize,
+    project_id: &str,
+    target_id: &str,
+) {
+    // Persist the current session's tail before switching away, so nothing is lost.
+    flush_session(
+        store,
+        session_id,
+        persisted_len,
+        project_id,
+        conversation,
+        model,
+    )
+    .await;
+    match store.load(target_id).await {
+        Ok(Some(session)) => {
+            let mut fresh = Conversation::new(system_prompt.to_string());
+            for message in &session.messages {
+                fresh.push(message.clone());
+            }
+            model.transcript = rebuild_transcript(&session.messages);
+            model.attachments.clear();
+            model.scroll.pin();
+            let title = if session.title.trim().is_empty() {
+                "(sem título)".to_string()
+            } else {
+                session.title.clone()
+            };
+            model.transcript.push(TranscriptItem::Notice(
+                NoticeLevel::Info,
+                format!("sessão retomada: {title}"),
+            ));
+            *conversation = fresh;
+            *session_id = Some(session.id);
+            *persisted_len = session.messages.len();
+        }
+        Ok(None) => model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Error,
+            "sessão não encontrada".to_string(),
+        )),
+        Err(error) => model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Error,
+            format!("não foi possível abrir a sessão: {error}"),
+        )),
+    }
+}
+
+/// Project a loaded conversation back into a display transcript: user and assistant text become their
+/// items; an assistant turn that only called tools becomes a compact notice; tool results and the system
+/// seed are omitted (verbose / never stored). A render-only projection — the conversation stays the
+/// source of truth.
+fn rebuild_transcript(messages: &[Message]) -> Transcript {
+    let mut transcript = Transcript::default();
+    for message in messages {
+        match message.role {
+            Role::User => {
+                if let Some(content) = message.content.as_deref().filter(|c| !c.trim().is_empty()) {
+                    transcript.push(TranscriptItem::User(content.to_string()));
+                }
+            }
+            Role::Assistant => {
+                if let Some(content) = message.content.as_deref().filter(|c| !c.trim().is_empty()) {
+                    transcript.push(TranscriptItem::Assistant(content.to_string()));
+                } else if !message.tool_calls.is_empty() {
+                    transcript.push(TranscriptItem::Notice(
+                        NoticeLevel::Info,
+                        format!("· {} ferramenta(s) executada(s)", message.tool_calls.len()),
+                    ));
+                }
+            }
+            Role::Tool | Role::System => {}
+        }
+    }
+    transcript
 }
 
 /// Translate an engine message into a UI message, capturing an approval's reply channel on the way.

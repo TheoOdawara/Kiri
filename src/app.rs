@@ -20,6 +20,8 @@ use crate::modules::provider::application::secret_store::SecretStore;
 use crate::modules::provider::infrastructure::factory::{api_key_from_env, build_provider};
 use crate::modules::provider::infrastructure::secrets::default_secret_store;
 use crate::modules::provider::infrastructure::unconfigured::UnconfiguredProvider;
+use crate::modules::session::application::session_store::SessionStore;
+use crate::modules::session::infrastructure::sqlite_session_store::SqliteSessionStore;
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::Tool;
 use crate::modules::tools::infrastructure::confine;
@@ -45,6 +47,9 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     }
     // Memory & docs first: a degraded store (init failure) is surfaced and left inert, never fatal.
     let (memory_tools, memory_digest) = build_memory(&settings).await?;
+    // Session persistence shares the same degrade-never-abort contract as memory.
+    let project_id = project_id_from_path(&settings.path);
+    let session_store = build_session(&settings).await?;
     let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
     let sandbox = Sandbox::with_confinement(
         &settings.path,
@@ -131,6 +136,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         provider_swap,
         settings.config_path,
         needs_onboarding,
+        session_store,
+        project_id,
     ))
 }
 
@@ -200,6 +207,34 @@ async fn build_memory(settings: &Settings) -> Result<(Vec<Box<dyn Tool>>, String
     let tools = default_memory_tools(memory, docs, project_id);
     let digest = render_digest(&project_entries, &shared_entries);
     Ok((tools, digest))
+}
+
+/// Wire the session store (SQLite at `~/.kiri/sessions.db`). Mirrors the memory contract: a store whose
+/// `init` fails (or whose file cannot be opened) is surfaced on stderr and left inert
+/// (`is_available() == false`) rather than aborting — conversation persistence is auxiliary. Returns an
+/// inert in-memory store when memory is disabled (`KIRI_MEMORY=off`).
+async fn build_session(settings: &Settings) -> Result<Arc<dyn SessionStore>> {
+    // The inert fallback mirrors `build_memory`'s `SqliteSharedMemory::in_memory()?`: its only failure
+    // is an in-memory SQLite open, which means the process genuinely cannot run, so it propagates.
+    let inert = || -> Result<Arc<dyn SessionStore>> {
+        Ok(Arc::new(SqliteSessionStore::in_memory_inert()?))
+    };
+    if !settings.memory_enabled {
+        return inert();
+    }
+    match SqliteSessionStore::new(settings.sessions_db.clone()) {
+        Ok(store) => match store.init().await {
+            Ok(()) => Ok(Arc::new(store)),
+            Err(error) => {
+                eprintln!("kiri: session store unavailable ({error}); continuing without it");
+                inert()
+            }
+        },
+        Err(error) => {
+            eprintln!("kiri: session store unavailable ({error}); continuing without it");
+            inert()
+        }
+    }
 }
 
 /// Render the start-of-session memory digest: a bounded "# Relevant memory" section listing the most
