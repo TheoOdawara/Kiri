@@ -28,6 +28,36 @@ pub fn paint(buf: &mut Buffer, area: Rect, sel: &ScreenSelection, style: Style) 
     }
 }
 
+/// Scrape the selected text out of the rendered buffer. Reads `Cell::symbol()` left-to-right, advancing
+/// by each cell's display width so a wide glyph's blank continuation cell is skipped (never a stray
+/// space). Trailing blanks are trimmed per row; rows join with `\n`. Same geometry as `paint`, so what
+/// is highlighted is exactly what is copied. Out-of-bounds cells stop the row — never a panic.
+pub fn scrape(buf: &Buffer, sel: &ScreenSelection, area: Rect) -> String {
+    let (start, end) = resolve(buf, sel, area);
+    let y0 = start.1.max(area.y);
+    let y1 = end.1.min(area.bottom().saturating_sub(1));
+    let mut out = String::new();
+    let mut first = true;
+    for y in y0..=y1 {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        let (x0, x1) = row_span(start, end, y, area);
+        let x0 = x0.max(area.x);
+        let x1 = x1.min(area.right().saturating_sub(1));
+        let mut line = String::new();
+        let mut x = x0;
+        while x <= x1 {
+            let Some(cell) = buf.cell((x, y)) else { break };
+            line.push_str(cell.symbol());
+            x = x.saturating_add(cell.cell_width().max(1));
+        }
+        out.push_str(line.trim_end());
+    }
+    out
+}
+
 /// Resolve a selection to ordered, granularity-expanded, glyph-snapped endpoints (both inclusive) in
 /// absolute cells. Shared by `paint` and `scrape` so the highlight and the copied text always match.
 pub(super) fn resolve(buf: &Buffer, sel: &ScreenSelection, area: Rect) -> ((u16, u16), (u16, u16)) {
@@ -207,5 +237,67 @@ mod tests {
         );
         // Reached here without panicking; the in-bounds cells are still valid.
         assert_eq!(b[(0, 0)].style().bg, Some(theme::BRAND));
+    }
+
+    #[test]
+    fn scrape_single_row_right_trims() {
+        let b = buf(&["hi   "]);
+        assert_eq!(scrape(&b, &char_sel((0, 0), (4, 0)), b.area), "hi");
+    }
+
+    #[test]
+    fn scrape_multi_row_joins_with_newline() {
+        let b = buf(&["ab", "cd"]);
+        assert_eq!(scrape(&b, &char_sel((0, 0), (1, 1)), b.area), "ab\ncd");
+    }
+
+    #[test]
+    fn scrape_partial_columns_is_a_substring() {
+        let b = buf(&["abcdef"]);
+        assert_eq!(scrape(&b, &char_sel((1, 0), (3, 0)), b.area), "bcd");
+    }
+
+    #[test]
+    fn scrape_wide_glyph_no_duplication() {
+        // The continuation cell of a wide glyph reads as a space; advancing by cell width skips it, so a
+        // CJK run is copied verbatim with no spurious spaces.
+        let b = buf(&["世界"]);
+        assert_eq!(scrape(&b, &char_sel((0, 0), (3, 0)), b.area), "世界");
+    }
+
+    #[test]
+    fn scrape_boundary_on_wide_continuation_includes_whole_glyph() {
+        // A selection that lands on the blank continuation half of "世" still copies the whole glyph.
+        let b = buf(&["世界"]);
+        assert_eq!(scrape(&b, &char_sel((1, 0), (1, 0)), b.area), "世");
+    }
+
+    #[test]
+    fn scrape_preserves_a_blank_middle_row() {
+        let b = buf(&["xy", "  ", "zw"]);
+        assert_eq!(scrape(&b, &char_sel((0, 0), (1, 2)), b.area), "xy\n\nzw");
+    }
+
+    #[test]
+    fn scrape_word_selection_returns_the_word() {
+        let b = buf(&["foo bar"]);
+        let sel = ScreenSelection::new(0, 0, Granularity::Word);
+        assert_eq!(scrape(&b, &sel, b.area), "foo");
+    }
+
+    #[test]
+    fn scrape_line_selection_returns_the_whole_row() {
+        let b = buf(&["foo bar"]);
+        let sel = ScreenSelection::new(2, 0, Granularity::Line);
+        assert_eq!(scrape(&b, &sel, b.area), "foo bar");
+    }
+
+    #[test]
+    fn scrape_is_panic_safe_and_bounded_with_out_of_bounds_selection() {
+        let b = buf(&["abc", "def"]); // 3x2
+        // A whole-screen selection is bounded by the buffer height; stale coords never panic.
+        let text = scrape(&b, &char_sel((0, 0), (40, 40)), b.area);
+        assert_eq!(text.lines().count(), 2);
+        assert_eq!(text, "abc\ndef");
     }
 }

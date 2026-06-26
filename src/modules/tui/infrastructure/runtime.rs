@@ -22,7 +22,7 @@ use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::application::update::update;
 use crate::modules::tui::domain::model::{Model, Motion};
 use crate::modules::tui::domain::transcript::{NoticeLevel, Transcript, TranscriptItem};
-use crate::modules::tui::domain::view_state::PendingPlan;
+use crate::modules::tui::domain::view_state::{PendingPlan, SelectionState};
 use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
 use crate::modules::tui::infrastructure::clipboard::{self, ClipboardContent};
 use crate::modules::tui::infrastructure::input;
@@ -30,6 +30,7 @@ use crate::modules::tui::infrastructure::terminal_guard::TerminalGuard;
 use crate::modules::tui::infrastructure::text;
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::view::view;
+use crate::modules::tui::infrastructure::widgets::selection_overlay;
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::error::AgentError;
 
@@ -92,14 +93,14 @@ impl Tui {
         // rejects them still runs fully. The TerminalGuard disables them symmetrically on exit.
         let _ = crossterm::execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture);
 
-        // The editor widget owns its own styling; paint it with the brand theme once at startup.
+        // The editor widget owns its own styling; paint it with the brand theme once at startup. The
+        // editor's own selection shares the screen-selection highlight, so the two read identically.
         let cursor = ratatui::style::Style::default()
             .fg(theme::VOID)
             .bg(theme::HIGHLIGHT);
-        let selection = ratatui::style::Style::default()
-            .fg(theme::VOID)
-            .bg(theme::BRAND);
-        model.input.set_styles(theme::base(), cursor, selection);
+        model
+            .input
+            .set_styles(theme::base(), cursor, theme::selection());
         // Resolve the motion preference once: reading the environment is infrastructure's job, kept out
         // of the pure domain. The view folds in per-frame geometry on top of this.
         model.motion = resolve_motion();
@@ -145,14 +146,18 @@ impl Tui {
 
         while !model.should_quit {
             model.render_at = Some(Instant::now());
-            terminal.draw(|frame| view(&model, frame))?;
+            draw_and_copy(&mut terminal, &mut model)?;
 
             // Resolve one input into a message, then handle it outside the select so the engine
             // handles are unambiguously free when a turn is armed.
             let msg = tokio::select! {
                 biased;
                 maybe = events.next() => match maybe {
-                    Some(Ok(event)) => input::to_msg(event),
+                    Some(Ok(event)) => {
+                        // Stamp arrival time for multi-click detection (before the reducer reads it).
+                        model.last_event_at = Some(Instant::now());
+                        input::to_msg(event)
+                    }
                     Some(Err(_)) => None,
                     None => {
                         model.should_quit = true;
@@ -255,6 +260,34 @@ impl Tui {
     }
 }
 
+/// Draw a frame and, if a copy was requested, scrape the just-rendered selection to the OS clipboard.
+/// The caller stamps `model.render_at` first (so line landings share the frame instant). Returns the
+/// draw error so each caller chooses how to handle it (the main loop propagates; the turn loop must
+/// break, never `?`, so its cleanup still runs).
+fn draw_and_copy(terminal: &mut DefaultTerminal, model: &mut Model) -> io::Result<()> {
+    // Lift the pending copy out first (ScreenSelection is `Copy`), so no `&model` borrow is held across
+    // the draw and the post-draw mutation below type-checks.
+    let pending = model.selection.filter(|s| s.state != SelectionState::Idle);
+    let completed = terminal.draw(|frame| view(model, frame))?;
+    if let Some(sel) = pending {
+        // `completed` borrows the terminal, not the model, so scraping it and then mutating the model
+        // below is disjoint — no explicit drop needed.
+        let text = selection_overlay::scrape(completed.buffer, &sel, completed.area);
+        copy_to_clipboard(model, &text);
+        // Mouse-release keeps the highlight (just settle the state); Ctrl+C drops it so the next Ctrl+C
+        // is free to cancel/quit. Either way the request is consumed exactly once.
+        match sel.state {
+            SelectionState::CopyAndClear => model.selection = None,
+            _ => {
+                if let Some(s) = model.selection.as_mut() {
+                    s.state = SelectionState::Idle;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Copy text to the OS clipboard, surfacing a failure as a transcript notice — copy is a direct user
 /// intent, so it must never fail silently. An empty text is a no-op (the clipboard is left untouched).
 fn copy_to_clipboard(model: &mut Model, text: &str) {
@@ -344,7 +377,10 @@ async fn drive_turn(
             let step = tokio::select! {
                 biased;
                 maybe = events.next() => match maybe {
-                    Some(Ok(event)) => input::to_msg(event).map(Step::Apply).unwrap_or(Step::Idle),
+                    Some(Ok(event)) => {
+                        model.last_event_at = Some(Instant::now());
+                        input::to_msg(event).map(Step::Apply).unwrap_or(Step::Idle)
+                    }
                     _ => Step::Idle,
                 },
                 Some(engine) = engine_rx.recv() => Step::Apply(engine_msg(engine, pending_reply)),
@@ -423,7 +459,8 @@ async fn drive_turn(
             // leave `model.busy` stuck true, silently deadening every future submit. End the turn with
             // the error instead, so cleanup always runs.
             if force || last_draw.elapsed() >= STREAM_FRAME {
-                if let Err(error) = terminal.draw(|frame| view(model, frame)) {
+                // break-not-`?`: a draw failure must still run `on_turn_end` so `busy` resets.
+                if let Err(error) = draw_and_copy(terminal, model) {
                     break Err(AgentError::Io(error));
                 }
                 last_draw = Instant::now();

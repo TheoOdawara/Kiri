@@ -26,7 +26,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     } else {
         // Pick the longest hint variant that fits the width, so nothing is cut on narrow terminals.
         let variants = [
-            "  Enter envia · ⇧Tab modo · Alt+Enter nova linha · ↑↓ histórico · ⇧↑↓/PgUp/PgDn rola · ^O expande · ^Home/^End topo/fundo · ^C 2×/^D sai · /help",
+            "  Enter envia · ⇧Tab modo · Alt+Enter nova linha · ↑↓ histórico · ⇧↑↓/PgUp/PgDn rola · arraste copia · ^O expande · ^Home/^End topo/fundo · ^C 2×/^D sai · /help",
             "  Enter envia · ⇧Tab modo · ↑↓ histórico · PgUp/PgDn rola · ^O expande · ^C 2×/^D sai · /help",
             "  Enter envia · ^C 2× sai · /help",
             "  Enter · ^C 2× · /help",
