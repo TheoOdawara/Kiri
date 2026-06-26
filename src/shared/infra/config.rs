@@ -836,4 +836,57 @@ mod tests {
         let err = read_config_file(&bad).unwrap_err().to_string();
         assert!(err.contains("invalid TOML"), "got: {err}");
     }
+
+    #[test]
+    fn global_config_writers_preserve_every_other_section() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+active_provider = "nvidia"
+effort = "high"
+
+[providers.nvidia]
+kind = "nvidia"
+base_url = "https://integrate.api.nvidia.com/v1"
+model = "m1"
+models = ["m1"]
+auth = "api-key"
+
+[sandbox]
+mode = "require"
+
+[http]
+read_timeout_ms = 99000
+"#,
+        )
+        .unwrap();
+
+        persist_effort(&path, Effort::Max).unwrap();
+        persist_active_model(&path, "nvidia", "m2").unwrap();
+        let claude = ProviderProfile {
+            id: "claude".into(),
+            kind: ProviderKind::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            model: "claude-opus-4-8".into(),
+            models: vec!["claude-opus-4-8".into()],
+            auth: AuthMethod::ApiKey,
+        };
+        upsert_provider(&path, &claude).unwrap();
+        persist_active_provider(&path, "claude").unwrap();
+
+        let config = read_config_file(&path).unwrap();
+        assert_eq!(config.effort, Some(Effort::Max));
+        assert_eq!(config.active_provider.as_deref(), Some("claude"));
+        // The model write updated the active model AND extended the catalog.
+        let nvidia = config.providers.get("nvidia").expect("nvidia preserved");
+        assert_eq!(nvidia.model, "m2");
+        assert!(nvidia.models.iter().any(|m| m == "m2"));
+        // The upserted provider is present and keyed by id (its `id` field is `#[serde(skip)]`).
+        assert!(config.providers.contains_key("claude"));
+        // Non-targeted sections survived the read-modify-write (not lossy).
+        assert_eq!(config.sandbox.mode.as_deref(), Some("require"));
+        assert_eq!(config.http.read_timeout_ms, Some(99000));
+    }
 }

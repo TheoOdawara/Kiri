@@ -21,7 +21,7 @@ use crate::modules::agent::domain::message::Message;
 use crate::modules::agent::domain::role::Role;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::application::secret_store::SecretStore;
-use crate::modules::provider::infrastructure::factory::build_provider;
+use crate::modules::provider::infrastructure::factory::{api_key_from_env, build_provider};
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
@@ -42,7 +42,7 @@ use crate::shared::infra::config;
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::{
-    AuthMethod, Credential, Effort, ProviderKind, ProviderProfile,
+    AuthMethod, Credential, Effort, ProviderKind, ProviderProfile, Secret,
 };
 
 /// The agent-turn future, boxed and `!Send`. Driven as a `select!` arm — never spawned — so no
@@ -123,6 +123,28 @@ impl ProviderSwap {
         )
     }
 
+    /// Resolve a provider's credential: the stored one if present, else an env-var key (the same
+    /// migration/CI path as startup, e.g. `NVIDIA_API_KEY` / `ANTHROPIC_API_KEY` / `KIRI_<ID>_API_KEY`).
+    /// Without this fallback a provider whose key lives only in an env var could not be switched to live.
+    fn resolve_credential(&self, profile: &ProviderProfile) -> Result<Credential, AgentError> {
+        if let Some(credential) = self.secrets.get(&profile.id)? {
+            return Ok(credential);
+        }
+        if let Some(key) = api_key_from_env(profile) {
+            let credential = Credential::ApiKey {
+                key: Secret::new(key),
+            };
+            // Best-effort persist so a later switch needs no env var; a store failure is non-fatal —
+            // the credential still works for this swap.
+            let _ = self.secrets.set(&profile.id, &credential);
+            return Ok(credential);
+        }
+        Err(AgentError::Provider(format!(
+            "no credential for provider '{}'. Configure it via /provider or set its API-key env var.",
+            profile.id
+        )))
+    }
+
     /// Rebuild the active provider with a new `effort`, committing the effort only on success.
     fn rebuild_with_effort(
         &mut self,
@@ -146,11 +168,7 @@ impl ProviderSwap {
             .find(|p| p.id == id)
             .ok_or_else(|| AgentError::Provider(format!("provider '{id}' is not configured")))?
             .clone();
-        let credential = self.secrets.get(id)?.ok_or_else(|| {
-            AgentError::Provider(format!(
-                "no credential for provider '{id}'. Set it via /provider or its API-key env var."
-            ))
-        })?;
+        let credential = self.resolve_credential(&profile)?;
         let provider = self.build(&profile, &credential, self.effort)?;
         self.active = id.to_string();
         self.credential = credential;
@@ -165,8 +183,10 @@ impl ProviderSwap {
         profile: ProviderProfile,
         credential: Credential,
     ) -> Result<(Arc<dyn CompletionProvider>, String), AgentError> {
-        self.secrets.set(&profile.id, &credential)?;
+        // Build first (validates the profile/credential), then store the secret — so a build failure
+        // never leaves an orphaned credential in the keyring for a provider that was not added.
         let provider = self.build(&profile, &credential, self.effort)?;
+        self.secrets.set(&profile.id, &credential)?;
         let id = profile.id.clone();
         let model = profile.model.clone();
         self.providers.retain(|p| p.id != id);
@@ -919,6 +939,141 @@ mod tests {
             .items()
             .iter()
             .any(|item| matches!(item, TranscriptItem::Notice(NoticeLevel::Error, _)))
+    }
+
+    /// Tests for the live provider swap. The nested module can reach `ProviderSwap`'s private fields and
+    /// methods (privacy is visible to descendant modules). Building an adapter does no I/O, so these run
+    /// hermetically against a fake credential store.
+    mod provider_swap {
+        use super::super::ProviderSwap;
+        use crate::modules::provider::application::secret_store::SecretStore;
+        use crate::shared::kernel::error::AgentError;
+        use crate::shared::kernel::provider::{
+            AuthMethod, Credential, Effort, ProviderKind, ProviderProfile, Secret,
+        };
+        use std::collections::HashMap;
+
+        struct FakeStore {
+            creds: HashMap<String, Credential>,
+        }
+        impl SecretStore for FakeStore {
+            fn get(&self, id: &str) -> Result<Option<Credential>, AgentError> {
+                Ok(self.creds.get(id).cloned())
+            }
+            fn set(&self, _id: &str, _credential: &Credential) -> Result<(), AgentError> {
+                Ok(())
+            }
+            fn delete(&self, _id: &str) -> Result<(), AgentError> {
+                Ok(())
+            }
+        }
+
+        fn profile(id: &str, kind: ProviderKind, model: &str) -> ProviderProfile {
+            ProviderProfile {
+                id: id.into(),
+                kind,
+                base_url: "https://example.test/v1".into(),
+                model: model.into(),
+                models: vec![model.into()],
+                auth: AuthMethod::ApiKey,
+            }
+        }
+
+        fn api_key() -> Credential {
+            Credential::ApiKey {
+                key: Secret::new("k"),
+            }
+        }
+
+        fn swap(
+            providers: Vec<ProviderProfile>,
+            active: &str,
+            stored: &[(&str, Credential)],
+        ) -> ProviderSwap {
+            let mut creds = HashMap::new();
+            for (id, credential) in stored {
+                creds.insert((*id).to_string(), credential.clone());
+            }
+            let active_cred = creds.get(active).cloned().unwrap_or_else(api_key);
+            ProviderSwap::new(
+                reqwest::Client::new(),
+                Box::new(FakeStore { creds }),
+                providers,
+                active.into(),
+                active_cred,
+                true,
+                Effort::High,
+            )
+        }
+
+        #[test]
+        fn switch_to_swaps_active_and_adopts_the_target_model() {
+            let mut s = swap(
+                vec![
+                    profile("nvidia", ProviderKind::Nvidia, "m1"),
+                    profile("claude", ProviderKind::Anthropic, "claude-opus-4-8"),
+                ],
+                "nvidia",
+                &[("claude", api_key())],
+            );
+            let (_, model) = s.switch_to("claude").unwrap();
+            assert_eq!(model, "claude-opus-4-8");
+            assert_eq!(s.active, "claude");
+        }
+
+        #[test]
+        fn switch_to_unknown_provider_errors() {
+            let mut s = swap(
+                vec![profile("nvidia", ProviderKind::Nvidia, "m1")],
+                "nvidia",
+                &[("nvidia", api_key())],
+            );
+            assert!(s.switch_to("ghost").is_err());
+        }
+
+        #[test]
+        fn switch_to_without_a_credential_or_env_errors() {
+            // A Custom kind with a unique id: no vendor env var and `KIRI_<ID>_API_KEY` is unset, so
+            // there is neither a stored credential nor an env fallback.
+            let mut s = swap(
+                vec![
+                    profile("nvidia", ProviderKind::Nvidia, "m1"),
+                    profile("unit-test-custom-xyz", ProviderKind::Custom, "m2"),
+                ],
+                "nvidia",
+                &[("nvidia", api_key())],
+            );
+            assert!(s.switch_to("unit-test-custom-xyz").is_err());
+        }
+
+        #[test]
+        fn rebuild_with_effort_commits_the_effort_on_success() {
+            let mut s = swap(
+                vec![profile("nvidia", ProviderKind::Nvidia, "m1")],
+                "nvidia",
+                &[("nvidia", api_key())],
+            );
+            s.rebuild_with_effort(Effort::Max).unwrap();
+            assert_eq!(s.effort, Effort::Max);
+        }
+
+        #[test]
+        fn add_and_activate_adds_the_provider_and_selects_it() {
+            let mut s = swap(
+                vec![profile("nvidia", ProviderKind::Nvidia, "m1")],
+                "nvidia",
+                &[("nvidia", api_key())],
+            );
+            let (_, model) = s
+                .add_and_activate(
+                    profile("claude", ProviderKind::Anthropic, "claude-opus-4-8"),
+                    api_key(),
+                )
+                .unwrap();
+            assert_eq!(model, "claude-opus-4-8");
+            assert_eq!(s.active, "claude");
+            assert!(s.provider_ids().iter().any(|p| p == "claude"));
+        }
     }
 
     #[test]

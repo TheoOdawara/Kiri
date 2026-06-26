@@ -64,6 +64,35 @@ pub fn build_provider(
     }
 }
 
+/// The legacy/CI env var an API-key provider can be primed from, by vendor plus a generic per-id form.
+/// A migration aid (and the live-`/provider`-switch fallback) so a provider whose key lives in an env
+/// var works without first storing it in the keyring. Filters empties per candidate so a set-but-blank
+/// generic var does not shadow a real vendor var.
+pub fn api_key_from_env(profile: &ProviderProfile) -> Option<String> {
+    let generic = generic_env_key(profile);
+    let vendor: &[&str] = match profile.kind {
+        ProviderKind::Nvidia => &["NVIDIA_API_KEY"],
+        ProviderKind::Openai => &["OPENAI_API_KEY"],
+        ProviderKind::Anthropic => &["ANTHROPIC_API_KEY"],
+        ProviderKind::OpenAiCompatible | ProviderKind::Custom => &[],
+    };
+    std::iter::once(generic.as_str())
+        .chain(vendor.iter().copied())
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+}
+
+/// The generic per-provider env var name (`KIRI_<ID>_API_KEY`).
+pub fn generic_env_key(profile: &ProviderProfile) -> String {
+    format!(
+        "KIRI_{}_API_KEY",
+        profile.id.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
 /// Extract the API key from a credential, failing if the profile somehow carries an OAuth credential
 /// (Kiri only supports API-key auth). Shared by every adapter branch.
 fn api_key_of(credential: Credential, profile: &ProviderProfile) -> Result<Secret, AgentError> {

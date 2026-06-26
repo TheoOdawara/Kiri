@@ -23,7 +23,15 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::Mouse { kind, col, row } => keymap::on_mouse(model, kind, col, row),
         Msg::Paste(text) => {
-            if model.pending_approval.is_none() && model.pending_plan.is_none() {
+            if let Some(wizard) = model.wizard.as_mut() {
+                // Route a paste into the wizard's active field — the common way an API key is entered.
+                // It must NEVER fall through to the plaintext composer, where a pasted key would be
+                // unmasked, survive the modal, and could be sent to the provider as a prompt.
+                wizard.push_str(&text);
+            } else if model.pending_approval.is_none()
+                && model.pending_plan.is_none()
+                && model.picker.is_none()
+            {
                 model.input.insert(&text);
                 keymap::sync_menu(model);
             }
@@ -199,6 +207,27 @@ mod tests {
         m.selection = Some(a_selection());
         update(&mut m, Msg::ScrollDown);
         assert!(m.selection.is_none());
+    }
+
+    #[test]
+    fn paste_into_an_open_wizard_fills_the_field_not_the_composer() {
+        // Regression: a pasted API key (the common way keys are entered) must land in the wizard's
+        // masked, Secret-staged field — never in the plaintext composer, where it would be unmasked,
+        // survive the modal, and could be sent to the provider as a prompt.
+        use crate::modules::tui::domain::view_state::{ProviderWizard, WizardStep};
+        let mut wizard = ProviderWizard::new();
+        wizard.step = WizardStep::ApiKey;
+        let mut m = Model {
+            wizard: Some(wizard),
+            ..Model::default()
+        };
+        update(&mut m, Msg::Paste("sk-ant-pasted\n".to_string()));
+        assert_eq!(
+            m.wizard.as_ref().unwrap().api_key,
+            "sk-ant-pasted",
+            "the key fills the wizard field (control chars filtered)"
+        );
+        assert!(m.input.is_empty(), "the plaintext composer must stay empty");
     }
 
     #[test]

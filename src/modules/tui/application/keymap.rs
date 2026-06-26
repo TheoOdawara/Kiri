@@ -243,7 +243,7 @@ pub fn on_mouse(model: &mut Model, kind: MouseKind, col: u16, row: u16) -> Vec<E
                 // the focused composer ask the runtime to drop the edit cursor where it landed (the
                 // runtime owns the render geometry; under a modal the editor is read-only, so do nothing).
                 model.selection = None;
-                if model.pending_approval.is_none() && model.pending_plan.is_none() {
+                if !model.has_modal() {
                     return vec![Effect::PlaceCursor { col, row }];
                 }
             } else if let Some(sel) = model.selection.as_mut() {
@@ -833,7 +833,9 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
                 return vec![]; // an API key is required
             }
             // Finalize: take the wizard, stage the key as a Secret (out of the effect), emit SaveProvider.
-            let Some(wizard) = model.wizard.take() else {
+            // `mem::take` extracts the key without moving the field out of the `Drop` type; the emptied
+            // buffer is then zeroized when `wizard` drops at the end of this scope.
+            let Some(mut wizard) = model.wizard.take() else {
                 return vec![];
             };
             let base_url = if wizard.base_url.trim().is_empty() {
@@ -848,7 +850,7 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
                 model: wizard.model.trim().to_string(),
                 models: wizard.models(),
             };
-            model.pending_credential = Some(Secret::new(wizard.api_key));
+            model.pending_credential = Some(Secret::new(std::mem::take(&mut wizard.api_key)));
             vec![effect]
         }
     }

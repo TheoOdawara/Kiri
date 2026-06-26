@@ -16,7 +16,9 @@ use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMe
 use crate::modules::memory::infrastructure::sqlite_shared_store::SqliteSharedStore;
 use crate::modules::memory::infrastructure::tools::default_memory_tools;
 use crate::modules::provider::application::secret_store::SecretStore;
-use crate::modules::provider::infrastructure::factory::build_provider;
+use crate::modules::provider::infrastructure::factory::{
+    api_key_from_env, build_provider, generic_env_key,
+};
 use crate::modules::provider::infrastructure::secrets::default_secret_store;
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::Tool;
@@ -258,33 +260,6 @@ fn resolve_credential(profile: &ProviderProfile, secrets: &dyn SecretStore) -> R
         "no credential for provider '{}'. Set {} (one-time import) or configure it via /provider",
         profile.id,
         env_hint(profile)
-    )
-}
-
-/// The legacy/CI env var an API-key provider can be primed from, by kind plus a generic per-id form.
-fn api_key_from_env(profile: &ProviderProfile) -> Option<String> {
-    let generic = generic_env_key(profile);
-    let vendor: &[&str] = match profile.kind {
-        ProviderKind::Nvidia => &["NVIDIA_API_KEY"],
-        ProviderKind::Openai => &["OPENAI_API_KEY"],
-        ProviderKind::Anthropic => &["ANTHROPIC_API_KEY"],
-        ProviderKind::OpenAiCompatible | ProviderKind::Custom => &[],
-    };
-    // Filter empties per candidate, so a set-but-blank `KIRI_<ID>_API_KEY` does not shadow a real
-    // vendor var.
-    std::iter::once(generic.as_str())
-        .chain(vendor.iter().copied())
-        .find_map(|key| {
-            std::env::var(key)
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-}
-
-fn generic_env_key(profile: &ProviderProfile) -> String {
-    format!(
-        "KIRI_{}_API_KEY",
-        profile.id.to_ascii_uppercase().replace('-', "_")
     )
 }
 

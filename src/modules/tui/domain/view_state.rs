@@ -1,5 +1,6 @@
 use ratatui::style::Style;
 use tui_textarea::{CursorMove, Input, TextArea, WrapMode};
+use zeroize::Zeroize;
 
 use crate::shared::kernel::provider::ProviderKind;
 
@@ -471,6 +472,15 @@ impl ProviderWizard {
         }
     }
 
+    /// Append pasted text to the current field, dropping control characters (a pasted key often carries
+    /// a trailing newline). A no-op on the `Kind` step. This is how an API key is pasted into the masked
+    /// field instead of leaking into the plaintext composer.
+    pub fn push_str(&mut self, text: &str) {
+        if let Some(field) = self.field_mut() {
+            field.extend(text.chars().filter(|c| !c.is_control()));
+        }
+    }
+
     pub fn backspace(&mut self) {
         if let Some(field) = self.field_mut() {
             field.pop();
@@ -490,6 +500,17 @@ impl ProviderWizard {
 impl Default for ProviderWizard {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Zeroize the API-key buffer when the wizard is dropped (cancel, reopen, or after finalize), so a key
+/// the user typed but never submitted does not linger in freed memory. Matches the project's `Secret`/
+/// `Zeroizing` discipline. (Reallocations during editing can still leave residue — inherent to a growable
+/// buffer; the staged `Secret` zeroizes the submitted value.) `Drop` is compatible with the finalize
+/// path, which extracts the key via `mem::take` rather than moving the field out.
+impl Drop for ProviderWizard {
+    fn drop(&mut self) {
+        self.api_key.zeroize();
     }
 }
 
