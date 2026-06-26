@@ -34,6 +34,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Tick => Vec::new(),
         Msg::TurnBegan => {
             model.status.streaming = true;
+            model.stream_landings.clear();
             Vec::new()
         }
         Msg::StreamDelta(StreamKind::Reasoning, text) => {
@@ -41,6 +42,17 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             Vec::new()
         }
         Msg::StreamDelta(StreamKind::Content, text) => {
+            // Keep the line-landing buffer aligned to the current answer: a content delta that starts a
+            // fresh assistant item (e.g. after a tool ran) resets the cooling state. Each completed line
+            // (a `\n`) lands at the current frame's instant, driving its cooling-steel reveal.
+            if !model.transcript.last_is_assistant() {
+                model.stream_landings.clear();
+            }
+            if let Some(now) = model.render_at {
+                for _ in 0..text.matches('\n').count() {
+                    model.stream_landings.push(now);
+                }
+            }
             model.transcript.push_content_delta(&text);
             Vec::new()
         }
@@ -76,6 +88,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.busy = false;
             model.status.streaming = false;
             model.pending_approval = None;
+            model.stream_landings.clear();
             Vec::new()
         }
     }

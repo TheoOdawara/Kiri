@@ -38,9 +38,15 @@ pub fn view(model: &Model, frame: &mut Frame) {
     } else {
         0
     };
+    // Fold per-frame geometry into the session motion preference: a short or narrow terminal freezes
+    // motion (the layout stays identical, just steady).
+    let area = frame.area();
+    let motion = model
+        .motion
+        .and_reduce_if(area.height < 8 || area.width < 60);
     let regions = frame_layout(frame.area(), input_lines, box_h);
     header::render(model, frame, regions.header);
-    transcript_pane::render(model, frame, regions.transcript);
+    transcript_pane::render(model, frame, regions.transcript, motion);
     if let Some(plan) = &model.pending_plan {
         approval::render_plan_into(plan, frame, regions.prompt_box);
     } else if let Some(pending) = &model.pending_approval {
@@ -109,6 +115,17 @@ mod tests {
         );
         assert!(out.contains("ler a.txt"), "approval action missing:\n{out}");
         assert!(out.contains("Sim"), "approval option missing:\n{out}");
+    }
+
+    #[test]
+    fn streaming_answer_shows_the_wet_ink_caret() {
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model
+            .transcript
+            .push(TranscriptItem::Assistant("escrevendo".to_string()));
+        model.status.streaming = true;
+        let out = render(&model, 80, 20);
+        assert!(out.contains('▌'), "wet-ink caret missing:\n{out}");
     }
 
     #[test]

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::shared::kernel::approval_mode::ApprovalMode;
 
 use super::command_menu::CommandMenu;
@@ -5,6 +7,31 @@ use super::transcript::Transcript;
 use super::view_state::{
     History, ImageAttachment, InputBuffer, PendingApproval, PendingPlan, Scroll,
 };
+
+/// Whether motion is fully expressed or frozen to its final frame. The session preference is resolved
+/// once from the environment by the runtime (the I/O stays out of the domain); the view additionally
+/// folds in per-frame geometry (a short/narrow terminal degrades to `Reduced`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Motion {
+    #[default]
+    Full,
+    Reduced,
+}
+
+impl Motion {
+    /// Fold in a per-frame reason to reduce (e.g. a cramped terminal): once reduced, always reduced.
+    pub fn and_reduce_if(self, reduce: bool) -> Motion {
+        if reduce || self == Motion::Reduced {
+            Motion::Reduced
+        } else {
+            Motion::Full
+        }
+    }
+
+    pub fn is_reduced(self) -> bool {
+        self == Motion::Reduced
+    }
+}
 
 /// The status line's data: the model id, the active workspace, and the live turn indicators.
 #[derive(Debug, Default)]
@@ -54,9 +81,18 @@ pub struct Model {
     /// How tool calls are gated; cycled with Shift+Tab, read at the start of each turn.
     pub approval_mode: ApprovalMode,
     /// Timestamp of the last Ctrl+C press, for double-tap-to-quit detection.
-    pub last_ctrl_c: Option<std::time::Instant>,
+    pub last_ctrl_c: Option<Instant>,
     /// Timestamp of the last Esc press, for double-tap-to-cancel detection while busy.
-    pub last_esc: Option<std::time::Instant>,
+    pub last_esc: Option<Instant>,
+    /// Whether motion is expressed or frozen; resolved once from the environment at startup.
+    pub motion: Motion,
+    /// The wall-clock instant of the current frame, stamped by the runtime before each update/draw.
+    /// All time-derived rendering (the cooling reveal, the cursor pulse) reads this rather than calling
+    /// the clock in the pure view, so a frame is a deterministic function of the model.
+    pub render_at: Option<Instant>,
+    /// Landing instants of the completed lines of the active streaming answer (one per `\n`), stamped
+    /// with `render_at`. Drives the cooling-steel reveal; cleared at each turn and answer boundary.
+    pub stream_landings: Vec<Instant>,
 }
 
 impl Model {

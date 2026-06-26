@@ -64,6 +64,13 @@ impl Transcript {
         self.items.is_empty()
     }
 
+    /// Whether the trailing item is an assistant answer — i.e. a content delta would coalesce into it
+    /// rather than start a fresh one. Lets the reducer keep the streaming line-landing buffer aligned
+    /// with the current answer.
+    pub fn last_is_assistant(&self) -> bool {
+        matches!(self.items.last(), Some(TranscriptItem::Assistant(_)))
+    }
+
     pub fn push(&mut self, item: TranscriptItem) {
         self.items.push(item);
     }

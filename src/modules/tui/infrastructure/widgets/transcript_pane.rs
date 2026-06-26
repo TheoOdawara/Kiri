@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::modules::tui::domain::model::Model;
+use crate::modules::tui::domain::model::{Model, Motion};
 use crate::modules::tui::domain::transcript::{
     NoticeLevel, ToolActivity, ToolDiff, ToolStatus, TranscriptItem,
 };
@@ -18,6 +18,18 @@ use crate::modules::tui::infrastructure::widgets::splash;
 /// Max display width of the conversation column. Beyond this the body floats left against the void
 /// (rather than stretching edge-to-edge on an ultrawide terminal), keeping comfortable line lengths.
 const BODY_MAX_WIDTH: usize = 88;
+/// How long a freshly-landed answer line takes to cool from forge-warm to polished steel.
+const COOLING_MS: f32 = 150.0;
+
+/// The cooling-reveal context for the active streaming answer: the motion preference, the current
+/// frame's instant, and the landing instants of the completed lines. Borrowed for the render pass; all
+/// derived colours are owned, so nothing leaks into the produced `'static` lines.
+#[derive(Clone, Copy)]
+struct Reveal<'a> {
+    motion: Motion,
+    now: Option<Instant>,
+    landings: &'a [Instant],
+}
 /// Lines of tool output (or edit-diff old/new block) shown before eliding, unless expanded (Ctrl+O).
 const PREVIEW_LINES: usize = 6;
 /// Per side (old/new) diff lines shown before eliding, unless expanded.
@@ -32,7 +44,7 @@ const MS_PER_SECOND: u128 = 1000;
 /// scrolled up (`scrollback`). Assistant and reasoning items are parsed as markdown so bold, italics,
 /// code spans, lists, and headings render with styled spans instead of raw `**`/`*`. When the
 /// conversation is empty, the brand splash takes the pane instead.
-pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
+pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
     if model.transcript.is_empty() {
         splash::render(frame, area);
         return;
@@ -41,6 +53,11 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     let width = (area.width as usize).clamp(1, BODY_MAX_WIDTH);
     let items = model.transcript.items();
     let last = items.len().saturating_sub(1);
+    let reveal = Reveal {
+        motion,
+        now: model.render_at,
+        landings: &model.stream_landings,
+    };
     let mut lines: Vec<Line> = Vec::new();
     for (idx, item) in items.iter().enumerate() {
         if !lines.is_empty() {
@@ -54,7 +71,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         // plain text — skipping the per-frame markdown parse keeps the ~30 fps stream cheap; once the
         // turn finishes it re-renders formatted (and is then memoized).
         let active = model.status.streaming && idx == last;
-        render_item(item, width, model.expand_tools, active, &mut lines);
+        render_item(item, width, model.expand_tools, active, reveal, &mut lines);
     }
 
     let total = lines.len() as u16;
@@ -75,6 +92,7 @@ fn render_item(
     width: usize,
     expanded: bool,
     active: bool,
+    reveal: Reveal,
     out: &mut Vec<Line<'static>>,
 ) {
     match item {
@@ -92,7 +110,13 @@ fn render_item(
         }
         TranscriptItem::Assistant(text) => {
             out.push(Line::styled("◆ kiri", Style::default().fg(theme::HEADING)));
-            render_body(text, Style::default().fg(theme::STEEL), width, active, out);
+            if active {
+                // The signature: the answer materializes line by line, each settling from forge-warm
+                // to polished steel as it lands, with a wet-ink caret on the line being written.
+                render_streaming_answer(text, width, reveal, out);
+            } else {
+                render_body(text, Style::default().fg(theme::STEEL), width, false, out);
+            }
         }
         TranscriptItem::Tool(activity) => render_tool(activity, width, expanded, out),
         TranscriptItem::Notice(level, text) => {
@@ -247,6 +271,57 @@ fn fmt_dur(elapsed: Duration) -> String {
     }
 }
 
+/// Render the actively streaming answer with the cooling-steel reveal: split into logical lines, colour
+/// each completed line by its age along the cooling ramp (forge-warm → steel over ~150 ms), keep the
+/// in-flight last line forge-warm, and mark the live writing edge with a `▌` caret. Only the newest one
+/// or two lines have a non-settled age, so the per-frame diff is intrinsically tiny; once every line has
+/// cooled the frame is byte-identical and the runtime relaxes to the idle cadence. Reduced motion freezes
+/// the whole answer to steel with no caret — the layout is unchanged, just steady.
+fn render_streaming_answer(text: &str, width: usize, reveal: Reveal, out: &mut Vec<Line<'static>>) {
+    let logical: Vec<&str> = text.split('\n').collect();
+    let last_idx = logical.len().saturating_sub(1);
+    let caret = !reveal.motion.is_reduced();
+    for (i, logical_line) in logical.iter().enumerate() {
+        let in_flight = i == last_idx;
+        let style = Style::default().fg(line_fg(i, in_flight, reveal));
+        let rows = hard_wrap(logical_line, width);
+        let last_row = rows.len().saturating_sub(1);
+        for (r, row) in rows.into_iter().enumerate() {
+            if in_flight && caret && r == last_row {
+                out.push(Line::from(vec![
+                    Span::styled(row, style),
+                    Span::styled("▌", theme::accent()),
+                ]));
+            } else {
+                out.push(Line::styled(row, style));
+            }
+        }
+    }
+}
+
+/// The foreground of one streamed line: steel when motion is reduced; forge-warm while the line is still
+/// being written (in-flight); otherwise the cooling ramp applied to its age. A completed line with no
+/// recorded landing falls back to steel (already settled).
+fn line_fg(index: usize, in_flight: bool, reveal: Reveal) -> Color {
+    if reveal.motion.is_reduced() {
+        return theme::STEEL;
+    }
+    if in_flight {
+        return theme::COOLING_RAMP[0];
+    }
+    match (reveal.now, reveal.landings.get(index)) {
+        (Some(now), Some(&landed)) => cooling_fg(now.saturating_duration_since(landed)),
+        _ => theme::STEEL,
+    }
+}
+
+/// Map a line's age to its cooling colour: forge-warm at age zero, polished steel at and beyond
+/// `COOLING_MS`. Pure, so the reveal's colour curve is unit-testable like `spinner_frame`.
+fn cooling_fg(age: Duration) -> Color {
+    let t = (age.as_millis() as f32 / COOLING_MS).clamp(0.0, 1.0);
+    theme::ramp(&theme::COOLING_RAMP, t)
+}
+
 /// Render an assistant/reasoning body. While it is the actively streaming item, emit plain wrapped text
 /// so the per-frame markdown parse is skipped (cheap at ~30 fps); a finalized item goes through the
 /// memoized markdown renderer, so bold/lists/code render once the turn ends.
@@ -313,7 +388,37 @@ fn wrap_line(line: &str, width: usize, rows: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::hard_wrap;
+    use super::*;
+
+    #[test]
+    fn cooling_fg_starts_warm_and_settles_to_steel() {
+        // Age zero is forge-warm; at and beyond the cooling window it is polished steel.
+        assert_eq!(cooling_fg(Duration::ZERO), theme::CODE_FG);
+        assert_eq!(cooling_fg(Duration::from_millis(150)), theme::STEEL);
+        assert_eq!(cooling_fg(Duration::from_secs(1)), theme::STEEL);
+    }
+
+    #[test]
+    fn line_fg_freezes_to_steel_under_reduced_motion() {
+        let landings = [Instant::now()];
+        let reduced = Reveal {
+            motion: Motion::Reduced,
+            now: Some(Instant::now()),
+            landings: &landings,
+        };
+        assert_eq!(line_fg(0, false, reduced), theme::STEEL);
+        assert_eq!(line_fg(0, true, reduced), theme::STEEL);
+    }
+
+    #[test]
+    fn line_fg_in_flight_line_is_forge_warm() {
+        let reveal = Reveal {
+            motion: Motion::Full,
+            now: None,
+            landings: &[],
+        };
+        assert_eq!(line_fg(0, true, reveal), theme::CODE_FG);
+    }
 
     #[test]
     fn wraps_long_lines_and_preserves_blank_lines() {

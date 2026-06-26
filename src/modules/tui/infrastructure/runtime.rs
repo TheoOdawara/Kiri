@@ -20,7 +20,7 @@ use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::application::update::update;
-use crate::modules::tui::domain::model::Model;
+use crate::modules::tui::domain::model::{Model, Motion};
 use crate::modules::tui::domain::transcript::{NoticeLevel, Transcript, TranscriptItem};
 use crate::modules::tui::domain::view_state::PendingPlan;
 use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
@@ -100,6 +100,9 @@ impl Tui {
             .fg(theme::VOID)
             .bg(theme::BRAND);
         model.input.set_styles(theme::base(), cursor, selection);
+        // Resolve the motion preference once: reading the environment is infrastructure's job, kept out
+        // of the pure domain. The view folds in per-frame geometry on top of this.
+        model.motion = resolve_motion();
 
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel::<EngineMsg>();
         let cancel = CancelToken::new();
@@ -138,6 +141,7 @@ impl Tui {
         }
 
         while !model.should_quit {
+            model.render_at = Some(Instant::now());
             terminal.draw(|frame| view(&model, frame))?;
 
             // Resolve one input into a message, then handle it outside the select so the engine
@@ -286,6 +290,17 @@ fn spinner_frame(elapsed: Duration) -> usize {
     (elapsed.as_millis() / FRAME_INTERVAL.as_millis()) as usize
 }
 
+/// Resolve the session-wide motion preference from the environment: any non-empty `KIRI_REDUCED_MOTION`
+/// or `NO_COLOR` freezes motion to a steady, layout-identical UI; otherwise it is fully expressed.
+fn resolve_motion() -> Motion {
+    let set = |key: &str| std::env::var_os(key).is_some_and(|v| !v.is_empty());
+    if set("KIRI_REDUCED_MOTION") || set("NO_COLOR") {
+        Motion::Reduced
+    } else {
+        Motion::Full
+    }
+}
+
 /// Drive one agent turn to completion while keeping the UI live: stream deltas render, approvals show
 /// a prompt, and ^C cancels cooperatively. The agent future borrows `conversation`/`sandbox`/`bridge`
 /// only inside the inner block, so the caller may start another turn afterward.
@@ -322,6 +337,10 @@ async fn drive_turn(
                 _ = ticker.tick() => Step::Apply(Msg::Tick),
                 outcome = &mut turn => Step::Done(outcome),
             };
+
+            // Stamp the frame before applying the step, so line landings (in `update`) and the draw that
+            // shows them share one instant — a freshly landed line starts at age zero (forge-warm).
+            model.render_at = Some(Instant::now());
 
             let mut done: Option<_> = None;
             // Forced steps redraw immediately; throttled ones (stream deltas, ticks) wait for the frame.

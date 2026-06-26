@@ -29,8 +29,47 @@ pub const STEEL_RAMP: [Color; 5] = [
     Color::Rgb(0x5A, 0x63, 0x6D), // 4 — receded / vignette
 ];
 
+/// The cooling ramp — a freshly-landed answer line settles from forge-warm down to polished steel. The
+/// signature reveal lerps a line's foreground along this over its first ~150 ms, then it is steel forever.
+pub const COOLING_RAMP: [Color; 3] = [
+    CODE_FG,                      // forge-warm, just struck
+    Color::Rgb(0xC9, 0x9A, 0x6E), // cooling
+    STEEL,                        // polished steel
+];
+
 /// The 10-frame braille spinner.
 pub const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Linearly interpolate a colour along ordered `stops` by `t` in `[0, 1]`. Pure (no clock, no I/O) so it
+/// is unit-testable like `spinner_frame`; `t <= 0` returns the first stop, `t >= 1` the last. Stops must
+/// be `Color::Rgb` (the whole palette is); any other variant is treated as black.
+pub fn ramp(stops: &[Color], t: f32) -> Color {
+    match stops {
+        [] => STEEL,
+        [only] => *only,
+        _ => {
+            let t = t.clamp(0.0, 1.0);
+            let segments = (stops.len() - 1) as f32;
+            let scaled = t * segments;
+            let idx = (scaled.floor() as usize).min(stops.len() - 2);
+            lerp_rgb(stops[idx], stops[idx + 1], scaled - idx as f32)
+        }
+    }
+}
+
+fn rgb_parts(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0, 0, 0),
+    }
+}
+
+fn lerp_rgb(from: Color, to: Color, t: f32) -> Color {
+    let (fr, fg, fb) = rgb_parts(from);
+    let (tr, tg, tb) = rgb_parts(to);
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color::Rgb(mix(fr, tr), mix(fg, tg), mix(fb, tb))
+}
 
 /// The root style — steel on the void — painted across the whole frame so every cell inherits it.
 pub fn base() -> Style {
