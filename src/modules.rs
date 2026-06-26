@@ -2,5 +2,6 @@ pub mod agent;
 pub mod memory;
 pub mod provider;
 pub mod session;
+pub mod sync;
 pub mod tools;
 pub mod tui;

@@ -31,6 +31,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         blurb: "escolhe uma sessão anterior para retomar",
     },
     CommandSpec {
+        name: "/sync",
+        aliases: &[],
+        blurb: "envia config + memória ao seu repo privado (push)",
+    },
+    CommandSpec {
         name: "/plan",
         aliases: &[],
         blurb: "modo plan (planeja e executa após aprovação)",

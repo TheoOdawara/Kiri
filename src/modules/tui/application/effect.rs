@@ -29,6 +29,8 @@ pub enum Effect {
     /// Reopen a specific session by id (the `/sessions` picker's choice). The runtime finalizes the
     /// current session, loads the target, and rebuilds the conversation and transcript.
     OpenSession(String),
+    /// Push the portable profile (config + shared memory) to the configured private repo (`/sync`).
+    SyncPush,
     /// Move the active workspace (sandbox root) to the given `/cd` path argument.
     ChangeWorkspace(String),
     /// Approve the proposed plan: leave plan mode and run a turn that executes it under the given

@@ -25,6 +25,8 @@ pub enum Command {
     Resume,
     /// `/sessions`: open the picker to choose a past session to reopen.
     Sessions,
+    /// `/sync`: push the portable profile (config + memory) to the configured private repo.
+    Sync,
     /// A `/`-prefixed token that is not a known command.
     Unknown,
 }
@@ -54,6 +56,7 @@ pub fn parse(line: &str) -> Option<Command> {
         "/provider" | "/providers" => Command::Provider,
         "/resume" | "/retomar" => Command::Resume,
         "/sessions" | "/sessoes" => Command::Sessions,
+        "/sync" => Command::Sync,
         _ => Command::Unknown,
     };
     Some(command)
@@ -66,6 +69,7 @@ pub fn help_text() -> String {
         "  /new           descarta a conversa e começa uma nova sessão",
         "  /resume        retoma a sessão mais recente deste workspace",
         "  /sessions      escolhe uma sessão anterior para retomar",
+        "  /sync          envia config + memória ao seu repo privado (push)",
         "  /plan          modo plan (só leitura; planeja e executa após aprovação)",
         "  /auto          modo auto (executa tudo sem pedir aprovação)",
         "  /default       modo default (pede aprovação para cada ação)",
@@ -119,6 +123,11 @@ mod tests {
         assert_eq!(parse("/retomar"), Some(Command::Resume));
         assert_eq!(parse("/sessions"), Some(Command::Sessions));
         assert_eq!(parse("/sessoes"), Some(Command::Sessions));
+    }
+
+    #[test]
+    fn sync_parses() {
+        assert_eq!(parse("/sync"), Some(Command::Sync));
     }
 
     #[test]

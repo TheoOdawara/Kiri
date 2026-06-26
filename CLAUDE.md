@@ -45,20 +45,26 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
   `factory` that picks the adapter from `(kind, auth)`; see ADRs 0011/0012), `tools` (the `Tool` trait + `ToolRegistry`
   + the sandbox + one fs adapter per tool), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
   adapter + the ratatui runtime — the sole front-end), `memory` (durable knowledge: `MemoryEntry`/`MemoryKind`
-  domain + the `MemoryPort`/`ProjectStore`/`SharedStore` ports + adapters — `FileProjectMemory` for project
-  memory in `<workspace>/.kiri/memory/`, `SqliteSharedMemory` for shared memory in `~/.kiri/memory/shared.db`,
-  `DocsLibrary` over `docs/` — and the `recall_memory`/`remember`/`consult_docs` tools; see
-  `docs/decisions/0010-memory-and-docs-knowledge.md`). Planned: `session` (SQLite-persisted conversations),
-  and a memory-management GUI.
+  domain — kinds include `preference` — + the `MemoryPort`/`ProjectStore`/`SharedStore` ports + adapters —
+  `FileProjectMemory` for project memory in `<workspace>/.kiri/memory/`, `SqliteSharedMemory` for shared
+  memory in `~/.kiri/memory/shared.db`, `DocsLibrary` over `docs/` — the `recall_memory`/`remember`/
+  `consult_docs` tools, semantic recall via the `EmbeddingProvider` port with a keyword fallback (ADR 0014),
+  and the end-of-session `Distiller` that learns automatically (ADR 0013); see ADRs 0010/0013/0014),
+  `session` (SQLite-persisted conversations in `~/.kiri/sessions.db`, keyed by project: the `Session`
+  domain + `SessionStore` port + `SqliteSessionStore`, driving `/resume` and `/sessions`; ADR 0013),
+  `sync` (portable-profile sync to a private git repo: the `Git` port + `GitCli` + NDJSON export/merge +
+  `SyncService`, behind `kiri sync …` and `/sync`; ADR 0015). Planned: a memory-management GUI.
 - **shared/kernel:** cross-cutting primitives — `ToolCall`/`FunctionCall`, `AgentError` (thiserror), and
   `ApprovalMode`, and the provider primitives (`ProviderKind`/`AuthMethod`/`Effort`/`ProviderProfile`/
   `Credential`/`Secret`), shared by `provider`, `config`, and `tui`. **shared/infra:** `config` (layered
   TOML + env + CLI → `Settings`, plus the global-config writers).
 
-**Invariants:** network I/O only in `provider/infrastructure`; filesystem I/O only in `tools/infrastructure`
-(the sandbox is the single path chokepoint) — **except** the `memory` context, which owns its data dirs
-(`.kiri/memory`, `~/.kiri/memory`) and does its own file/SQLite I/O for harness-owned storage, never for
-agent-supplied paths (ref ADR 0010); `domain` has no I/O; the engine never touches stdin/stdout
+**Invariants:** network I/O only in `provider/infrastructure` — **except** `sync/infrastructure`, which
+shells out to `git` to reach the user's profile repo (ADR 0015); filesystem I/O only in
+`tools/infrastructure` (the sandbox is the single path chokepoint) — **except** the `memory`, `session`,
+and `sync` contexts, which own their data dirs (`.kiri/memory`, `~/.kiri/memory`, `~/.kiri/sessions.db`,
+`~/.kiri/sync`) and do their own file/SQLite I/O for harness-owned storage, never for agent-supplied
+paths (ref ADRs 0010/0013/0015); `domain` has no I/O; the engine never touches stdin/stdout
 directly (all UI via the engine ports). Ports return `AgentError`; `anyhow` only at the binary edge.
 
 **Extending:** a new tool = one file under `tools/infrastructure/fs/` implementing `Tool`, registered in

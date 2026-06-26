@@ -427,6 +427,7 @@ fn submit(model: &mut Model) -> Vec<Effect> {
         Some(Command::NewSession) => vec![Effect::NewSession],
         Some(Command::Resume) => vec![Effect::ResumeLast],
         Some(Command::Sessions) => vec![Effect::ListSessions],
+        Some(Command::Sync) => vec![Effect::SyncPush],
         Some(Command::Help) => {
             model.transcript.push(TranscriptItem::Notice(
                 NoticeLevel::Info,

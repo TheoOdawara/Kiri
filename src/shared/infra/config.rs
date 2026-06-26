@@ -514,15 +514,49 @@ fn compile_patterns(env: &str, defaults: &[&str]) -> Result<Arc<[Regex]>> {
 #[derive(Parser)]
 #[command(
     name = "kiri",
-    about = "Kiri — a provider-agnostic coding-agent harness"
+    about = "Kiri — a provider-agnostic coding-agent harness",
+    args_conflicts_with_subcommands = true
 )]
-struct Cli {
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
     /// Optional first message; the chat then continues interactively
-    prompt: Option<String>,
+    pub prompt: Option<String>,
     /// Sandbox root for file tools (also via KIRI_PATH; legacy T_CLI_PATH still honored).
     /// Defaults to the current directory.
     #[arg(long, env = "KIRI_PATH")]
-    path: Option<PathBuf>,
+    pub path: Option<PathBuf>,
+}
+
+/// The top-level subcommands. Absent → the interactive TUI; present → a headless command that runs
+/// without a TTY (so `kiri sync …` works over SSH / in scripts).
+#[derive(clap::Subcommand)]
+pub enum CliCommand {
+    /// Sync the portable profile (non-secret config + shared memory) with a private git repo.
+    Sync {
+        #[command(subcommand)]
+        action: SyncAction,
+    },
+}
+
+/// The `kiri sync` actions.
+#[derive(clap::Subcommand)]
+pub enum SyncAction {
+    /// Point sync at a private repo and set up the local work-tree.
+    Init {
+        /// The git remote URL (SSH or HTTPS) of your private profile repo.
+        url: String,
+    },
+    /// Export the profile, commit, and push to the remote.
+    Push,
+    /// Pull and merge the profile (memory last-write-wins; config under a trust check).
+    Pull {
+        /// Apply an incoming config even if it changes a provider base_url or weakens the sandbox.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show the sync work-tree's git status.
+    Status,
 }
 
 /// The resolved configuration the composition root needs to wire the harness. Provider endpoints and
@@ -590,10 +624,10 @@ impl Settings {
     /// Parse the CLI, load the layered TOML config (`~/.kiri` ← `<workspace>/.kiri`), and resolve the
     /// runtime settings. No `.env`: the harness owns its config (TOML) and secrets (keyring). A first
     /// run with no config seeds a default NVIDIA provider and writes a starter `~/.kiri/config.toml`.
-    pub fn load() -> Result<Self> {
-        let cli = Cli::parse();
-        let path = cli
-            .path
+    /// Resolve settings from the already-parsed CLI path/prompt. `main` parses the CLI (so it can
+    /// dispatch the headless `kiri sync` route before reaching the TUI) and hands the values here.
+    pub fn resolve(cli_path: Option<PathBuf>, cli_prompt: Option<String>) -> Result<Self> {
+        let path = cli_path
             .or_else(|| std::env::var_os("T_CLI_PATH").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("."));
 
@@ -641,7 +675,7 @@ impl Settings {
         Ok(Self {
             system_prompt: SYSTEM_PROMPT,
             path,
-            seed: cli.prompt,
+            seed: cli_prompt,
             checkpoint_budget: TOOL_CHECKPOINT,
             max_tool_calls: MAX_TOOL_CALLS_PER_CHECKPOINT,
             plan_blacklist: compile_patterns("KIRI_PLAN_BLACKLIST", DEFAULT_PLAN_BLACKLIST)?,

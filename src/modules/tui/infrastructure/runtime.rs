@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,6 +29,8 @@ use crate::modules::provider::application::secret_store::SecretStore;
 use crate::modules::provider::infrastructure::factory::{api_key_from_env, build_provider};
 use crate::modules::session::application::session_store::SessionStore;
 use crate::modules::session::domain::session::derive_title;
+use crate::modules::sync::application::sync_service::SyncService;
+use crate::modules::sync::infrastructure::git_cli::GitCli;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
@@ -466,6 +468,9 @@ impl Tui {
                     }
                     Effect::ListSessions => {
                         list_sessions(session_store.as_ref(), &project_id, &mut model).await;
+                    }
+                    Effect::SyncPush => {
+                        sync_push(&config_path, &mut model, &mut terminal).await;
                     }
                     Effect::ResumeLast => {
                         match session_store.latest_for_project(&project_id).await {
@@ -969,6 +974,7 @@ async fn drive_turn(
                             | Effect::ResumeLast
                             | Effect::ListSessions
                             | Effect::OpenSession(_)
+                            | Effect::SyncPush
                             | Effect::ChangeWorkspace(_)
                             | Effect::ApprovePlan(_)
                             | Effect::SetModel(_)
@@ -1230,6 +1236,39 @@ fn rebuild_transcript(messages: &[Message]) -> Transcript {
         }
     }
     transcript
+}
+
+/// Push the portable profile (config + shared memory) to the configured private repo via `/sync`. Shows
+/// a "syncing" notice and draws it before the (network-bound, timeout-bounded) push, then reports the
+/// result. The global dir is derived from the global config path (`~/.kiri/config.toml`).
+async fn sync_push(config_path: &Path, model: &mut Model, terminal: &mut DefaultTerminal) {
+    let Some(global_dir) = config_path.parent().map(Path::to_path_buf) else {
+        model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Error,
+            "caminho de config inválido para sync".to_string(),
+        ));
+        return;
+    };
+    model.transcript.push(TranscriptItem::Notice(
+        NoticeLevel::Info,
+        "sincronizando (push)…".to_string(),
+    ));
+    model.render_at = Some(Instant::now());
+    let _ = draw_and_copy(terminal, model);
+
+    let shared_db = global_dir.join("memory").join("shared.db");
+    let git = GitCli;
+    let service = SyncService::new(&git, global_dir, config_path.to_path_buf(), shared_db);
+    match service.push().await {
+        Ok(summary) => model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Info,
+            format!("sync: {summary}"),
+        )),
+        Err(error) => model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Error,
+            format!("sync falhou: {error}"),
+        )),
+    }
 }
 
 /// Whether a session is worth distilling: it must hold at least one user message and one non-empty
