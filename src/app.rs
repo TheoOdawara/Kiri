@@ -15,10 +15,8 @@ use crate::modules::memory::infrastructure::file_project_store::FileProjectStore
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::modules::memory::infrastructure::sqlite_shared_store::SqliteSharedStore;
 use crate::modules::memory::infrastructure::tools::default_memory_tools;
-use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::application::secret_store::SecretStore;
-use crate::modules::provider::infrastructure::anthropic::provider::AnthropicProvider;
-use crate::modules::provider::infrastructure::openai::provider::OpenAiProvider;
+use crate::modules::provider::infrastructure::factory::build_provider;
 use crate::modules::provider::infrastructure::secrets::default_secret_store;
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::Tool;
@@ -29,7 +27,7 @@ use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tui::infrastructure::runtime::Tui;
 use crate::shared::infra::config::Settings;
 use crate::shared::kernel::provider::{
-    AuthMethod, Credential, Effort, ProviderKind, ProviderProfile, Secret,
+    AuthMethod, Credential, ProviderKind, ProviderProfile, Secret,
 };
 
 /// Caps for the start-of-session memory digest injected into the system prompt: how many entries to
@@ -288,78 +286,13 @@ fn env_hint(profile: &ProviderProfile) -> String {
     }
 }
 
-/// Select and construct the provider adapter from the profile's (kind, auth) and credential. Two
-/// adapters cover every supported provider, all by API key: the Anthropic Messages API adapter for
-/// `Anthropic`, and the OpenAI-compatible chat-completions adapter for NVIDIA, generic compatible
-/// endpoints, custom endpoints, and OpenAI proper. Subscription OAuth (Claude Pro/Max, ChatGPT
-/// Plus/Pro) is intentionally unsupported — the providers restrict those tokens to their own clients,
-/// so it would require impersonation that risks the user's account (see the provider-auth ADR); an
-/// `Oauth` profile fails fast with that rationale.
-fn build_provider(
-    client: reqwest::Client,
-    profile: &ProviderProfile,
-    credential: Credential,
-    thinking: bool,
-    effort: Effort,
-) -> Result<Arc<dyn CompletionProvider>> {
-    // A blank model would otherwise surface as an opaque provider 400 on the first turn; fail fast.
-    if profile.model.trim().is_empty() {
-        bail!(
-            "provider '{}' has no model configured; set its `model` in ~/.kiri/config.toml (NVIDIA users can export NVIDIA_MODEL for the default provider)",
-            profile.id
-        );
-    }
-    match (profile.kind, profile.auth) {
-        (ProviderKind::Anthropic, AuthMethod::Oauth) => bail!(
-            "provider '{}' uses Anthropic subscription OAuth, which Kiri does not support — Anthropic restricts Pro/Max OAuth tokens to its own clients. Configure an Anthropic Console API key instead.",
-            profile.id
-        ),
-        (ProviderKind::Openai, AuthMethod::Oauth) => bail!(
-            "provider '{}' uses ChatGPT subscription OAuth, which Kiri does not support — a ChatGPT subscription does not include API access. Configure a platform.openai.com API key instead.",
-            profile.id
-        ),
-        (ProviderKind::Anthropic, AuthMethod::ApiKey) => {
-            // The Anthropic adapter does not consume `thinking`/`effort` yet — extended thinking is
-            // deferred (see the note on `AnthropicProvider`); both still drive the OpenAI-compatible arm.
-            let key = api_key_of(credential, profile)?;
-            Ok(Arc::new(AnthropicProvider::new(
-                client,
-                profile.base_url.clone(),
-                key.expose().to_string(),
-            )))
-        }
-        _ => {
-            let key = api_key_of(credential, profile)?;
-            Ok(Arc::new(OpenAiProvider::new(
-                client,
-                profile.base_url.clone(),
-                key.expose().to_string(),
-                thinking,
-                effort,
-            )))
-        }
-    }
-}
-
-/// Extract the API key from a credential, failing if the profile somehow carries an OAuth credential
-/// (Kiri only supports API-key auth). Shared by every adapter branch.
-fn api_key_of(credential: Credential, profile: &ProviderProfile) -> Result<Secret> {
-    match credential {
-        Credential::ApiKey { key } => Ok(key),
-        Credential::Oauth(_) => bail!(
-            "provider '{}' has an OAuth credential, but Kiri only supports API-key credentials",
-            profile.id
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{build_provider, resolve_credential};
+    use super::resolve_credential;
     use crate::modules::provider::application::secret_store::SecretStore;
     use crate::shared::kernel::error::AgentError;
     use crate::shared::kernel::provider::{
-        AuthMethod, Credential, Effort, OauthTokens, ProviderKind, ProviderProfile, Secret,
+        AuthMethod, Credential, ProviderKind, ProviderProfile, Secret,
     };
 
     /// A `SecretStore` double returning a fixed stored credential (or none).
@@ -393,15 +326,6 @@ mod tests {
         }
     }
 
-    fn oauth() -> Credential {
-        Credential::Oauth(OauthTokens {
-            access: Secret::new("a"),
-            refresh: Secret::new("r"),
-            expires_at_ms: 0,
-            account_id: None,
-        })
-    }
-
     #[test]
     fn resolve_credential_returns_the_stored_credential() {
         let store = FakeStore(Some(api_key()));
@@ -423,53 +347,5 @@ mod tests {
             "m",
         );
         assert!(resolve_credential(&p, &store).is_err());
-    }
-
-    #[test]
-    fn build_provider_selects_openai_compatible_for_api_key_kinds() {
-        let client = reqwest::Client::new();
-        let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
-        assert!(build_provider(client, &p, api_key(), true, Effort::High).is_ok());
-    }
-
-    #[test]
-    fn build_provider_selects_anthropic_for_api_key() {
-        let client = reqwest::Client::new();
-        let p = profile("claude", ProviderKind::Anthropic, AuthMethod::ApiKey, "m");
-        assert!(build_provider(client, &p, api_key(), true, Effort::High).is_ok());
-    }
-
-    #[test]
-    fn build_provider_bails_for_subscription_oauth() {
-        // Subscription OAuth is intentionally unsupported for both vendors; it must fail fast, not
-        // silently fall through to an adapter.
-        let client = reqwest::Client::new();
-        let anthropic_oauth = profile("claude", ProviderKind::Anthropic, AuthMethod::Oauth, "m");
-        assert!(
-            build_provider(
-                client.clone(),
-                &anthropic_oauth,
-                oauth(),
-                true,
-                Effort::High
-            )
-            .is_err()
-        );
-        let openai_oauth = profile("gpt", ProviderKind::Openai, AuthMethod::Oauth, "m");
-        assert!(build_provider(client, &openai_oauth, oauth(), true, Effort::High).is_err());
-    }
-
-    #[test]
-    fn build_provider_bails_on_oauth_credential_for_api_key_kind() {
-        let client = reqwest::Client::new();
-        let p = profile("x", ProviderKind::OpenAiCompatible, AuthMethod::ApiKey, "m");
-        assert!(build_provider(client, &p, oauth(), true, Effort::High).is_err());
-    }
-
-    #[test]
-    fn build_provider_bails_on_empty_model() {
-        let client = reqwest::Client::new();
-        let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "");
-        assert!(build_provider(client, &p, api_key(), true, Effort::High).is_err());
     }
 }
