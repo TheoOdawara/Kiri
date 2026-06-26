@@ -103,7 +103,9 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
 
     let provider_swap = ProviderSwap::new(
         client,
-        profile,
+        secrets,
+        settings.providers,
+        settings.active_provider,
         credential,
         settings.thinking,
         settings.effort,

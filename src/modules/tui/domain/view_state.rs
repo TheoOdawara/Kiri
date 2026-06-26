@@ -353,6 +353,7 @@ pub struct PendingPlan {
 pub enum PickerKind {
     Models,
     Effort,
+    Provider,
 }
 
 /// A generic single-choice picker modal (used by `/models` and `/effort`), rendered with the same

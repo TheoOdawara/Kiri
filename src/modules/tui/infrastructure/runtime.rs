@@ -20,6 +20,7 @@ use crate::modules::agent::domain::conversation::Conversation;
 use crate::modules::agent::domain::message::Message;
 use crate::modules::agent::domain::role::Role;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
+use crate::modules::provider::application::secret_store::SecretStore;
 use crate::modules::provider::infrastructure::factory::build_provider;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tui::application::command::{self, Command};
@@ -53,13 +54,16 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(120);
 /// being driven by incoming deltas, so an idle TUI still ticks at `FRAME_INTERVAL` and burns no extra CPU.
 const STREAM_FRAME: Duration = Duration::from_millis(33);
 
-/// The inputs to rebuild the active provider adapter for a live `/effort` (or future `/provider`) swap:
-/// effort is captured at construction, so changing it means rebuilding the `Arc`. The credential is
-/// cached from wire time so a rebuild needs no keyring round-trip. Only the active provider is held —
-/// `/provider` switching (a later phase) extends this with the full catalog + secret store.
+/// Everything the runtime needs to rebuild the provider adapter for a live `/models`/`/effort`/
+/// `/provider` change: the HTTP client, the secret store, the full provider catalog, the active id, the
+/// active provider's cached credential (so a rebuild needs no keyring round-trip), and the thinking/
+/// effort dials. Effort is captured at adapter construction, so changing effort — or the active
+/// provider — means rebuilding the `Arc`.
 pub struct ProviderSwap {
     client: reqwest::Client,
-    profile: ProviderProfile,
+    secrets: Box<dyn SecretStore>,
+    providers: Vec<ProviderProfile>,
+    active: String,
     credential: Credential,
     thinking: bool,
     effort: Effort,
@@ -68,30 +72,87 @@ pub struct ProviderSwap {
 impl ProviderSwap {
     pub fn new(
         client: reqwest::Client,
-        profile: ProviderProfile,
+        secrets: Box<dyn SecretStore>,
+        providers: Vec<ProviderProfile>,
+        active: String,
         credential: Credential,
         thinking: bool,
         effort: Effort,
     ) -> Self {
         Self {
             client,
-            profile,
+            secrets,
+            providers,
+            active,
             credential,
             thinking,
             effort,
         }
     }
 
-    /// Build the active provider adapter with the given `effort` (without committing it), so a failed
-    /// rebuild leaves the current effort/provider untouched.
-    fn build_with(&self, effort: Effort) -> Result<Arc<dyn CompletionProvider>, AgentError> {
+    fn active_profile(&self) -> Option<&ProviderProfile> {
+        self.providers.iter().find(|p| p.id == self.active)
+    }
+
+    fn active_profile_mut(&mut self) -> Option<&mut ProviderProfile> {
+        let active = self.active.clone();
+        self.providers.iter_mut().find(|p| p.id == active)
+    }
+
+    /// The configured provider ids, in catalog order — the `/provider` picker's options.
+    pub fn provider_ids(&self) -> Vec<String> {
+        self.providers.iter().map(|p| p.id.clone()).collect()
+    }
+
+    /// Build an adapter for a specific profile/credential/effort without committing any state, so a
+    /// failed rebuild leaves the current provider untouched.
+    fn build(
+        &self,
+        profile: &ProviderProfile,
+        credential: &Credential,
+        effort: Effort,
+    ) -> Result<Arc<dyn CompletionProvider>, AgentError> {
         build_provider(
             self.client.clone(),
-            &self.profile,
-            self.credential.clone(),
+            profile,
+            credential.clone(),
             self.thinking,
             effort,
         )
+    }
+
+    /// Rebuild the active provider with a new `effort`, committing the effort only on success.
+    fn rebuild_with_effort(
+        &mut self,
+        effort: Effort,
+    ) -> Result<Arc<dyn CompletionProvider>, AgentError> {
+        let profile = self
+            .active_profile()
+            .ok_or_else(|| AgentError::Provider("no active provider configured".to_string()))?;
+        let provider = self.build(profile, &self.credential, effort)?;
+        self.effort = effort;
+        Ok(provider)
+    }
+
+    /// Switch the active provider to `id`: look up its profile + stored credential, build the adapter,
+    /// and commit (active id + cached credential) only on success. Returns the new adapter and the
+    /// target model id. An unknown id or a missing credential is a clear error.
+    fn switch_to(&mut self, id: &str) -> Result<(Arc<dyn CompletionProvider>, String), AgentError> {
+        let profile = self
+            .providers
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| AgentError::Provider(format!("provider '{id}' is not configured")))?
+            .clone();
+        let credential = self.secrets.get(id)?.ok_or_else(|| {
+            AgentError::Provider(format!(
+                "no credential for provider '{id}'. Set it via /provider or its API-key env var."
+            ))
+        })?;
+        let provider = self.build(&profile, &credential, self.effort)?;
+        self.active = id.to_string();
+        self.credential = credential;
+        Ok((provider, profile.model))
     }
 }
 
@@ -122,8 +183,13 @@ impl Tui {
         config_path: PathBuf,
     ) -> Self {
         let workspace = text::display_path(sandbox.root());
-        let model = Model::new(provider_swap.profile.model.clone(), workspace)
-            .with_provider_catalog(provider_swap.profile.models.clone(), provider_swap.effort);
+        let (model_id, models) = provider_swap
+            .active_profile()
+            .map(|p| (p.model.clone(), p.models.clone()))
+            .unwrap_or_default();
+        let model = Model::new(model_id, workspace)
+            .with_provider_catalog(models, provider_swap.effort)
+            .with_providers(provider_swap.active.clone(), provider_swap.provider_ids());
         Self {
             agent_loop,
             sandbox,
@@ -319,7 +385,9 @@ impl Tui {
                         // A model change is just the per-turn `model` field — no provider rebuild. Apply
                         // it live, reflect it in the status line, and persist (best-effort) to the global
                         // config; a write failure is surfaced but the live change stands.
-                        provider_swap.profile.model = model_id.clone();
+                        if let Some(profile) = provider_swap.active_profile_mut() {
+                            profile.model = model_id.clone();
+                        }
                         agent_loop.set_model(model_id.clone());
                         model.status.model = model_id.clone();
                         model.transcript.push(TranscriptItem::Notice(
@@ -328,7 +396,7 @@ impl Tui {
                         ));
                         if let Err(error) = config::persist_active_model(
                             &config_path,
-                            &provider_swap.profile.id,
+                            &provider_swap.active,
                             &model_id,
                         ) {
                             model.transcript.push(TranscriptItem::Notice(
@@ -341,15 +409,15 @@ impl Tui {
                         // Effort is baked into the provider at construction, so rebuild and swap it in.
                         // Build with the new effort first; commit (status + cached effort + persist) only
                         // if the rebuild succeeds, so a failure leaves the current provider untouched.
-                        match provider_swap.build_with(effort) {
+                        let is_anthropic = provider_swap.active_profile().map(|p| p.kind)
+                            == Some(ProviderKind::Anthropic);
+                        match provider_swap.rebuild_with_effort(effort) {
                             Ok(provider) => {
                                 agent_loop.set_provider(provider);
-                                provider_swap.effort = effort;
                                 model.status.effort = effort;
                                 // The Anthropic adapter ignores effort today — surface that rather than
                                 // silently appearing to change nothing.
-                                let note = if provider_swap.profile.kind == ProviderKind::Anthropic
-                                {
+                                let note = if is_anthropic {
                                     format!(
                                         "esforço: {} — nota: ainda não afeta modelos Claude",
                                         effort.label()
@@ -370,6 +438,39 @@ impl Tui {
                             Err(error) => model.transcript.push(TranscriptItem::Notice(
                                 NoticeLevel::Error,
                                 format!("não foi possível aplicar o esforço: {error:#}"),
+                            )),
+                        }
+                    }
+                    Effect::SetProvider(id) => {
+                        // Switch the active provider: rebuild its adapter with its stored credential and
+                        // swap it in, also adopting its model. Commit + persist only on success; a missing
+                        // credential or unknown id is surfaced, never a silent no-op.
+                        match provider_swap.switch_to(&id) {
+                            Ok((provider, target_model)) => {
+                                agent_loop.set_provider(provider);
+                                agent_loop.set_model(target_model.clone());
+                                model.status.model = target_model.clone();
+                                model.status.provider = id.clone();
+                                model.models = provider_swap
+                                    .active_profile()
+                                    .map(|p| p.models.clone())
+                                    .unwrap_or_default();
+                                model.transcript.push(TranscriptItem::Notice(
+                                    NoticeLevel::Info,
+                                    format!("provider: {id} ({target_model})"),
+                                ));
+                                if let Err(error) =
+                                    config::persist_active_provider(&config_path, &id)
+                                {
+                                    model.transcript.push(TranscriptItem::Notice(
+                                        NoticeLevel::Error,
+                                        format!("não persistiu o provider ativo: {error:#}"),
+                                    ));
+                                }
+                            }
+                            Err(error) => model.transcript.push(TranscriptItem::Notice(
+                                NoticeLevel::Error,
+                                format!("não foi possível trocar de provider: {error:#}"),
                             )),
                         }
                     }
@@ -575,7 +676,8 @@ async fn drive_turn(
                             | Effect::ChangeWorkspace(_)
                             | Effect::ApprovePlan(_)
                             | Effect::SetModel(_)
-                            | Effect::SetEffort(_) => {}
+                            | Effect::SetEffort(_)
+                            | Effect::SetProvider(_) => {}
                         }
                     }
                     // Coalesce a burst: drain every engine message already queued before drawing, so

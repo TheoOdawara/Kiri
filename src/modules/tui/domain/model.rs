@@ -41,6 +41,8 @@ impl Motion {
 pub struct Status {
     pub model: String,
     pub workspace: String,
+    /// The active provider id; updated by a live `/provider` swap.
+    pub provider: String,
     /// The active reasoning effort; updated by a live `/effort` swap.
     pub effort: Effort,
     pub streaming: bool,
@@ -73,10 +75,12 @@ pub struct Model {
     pub pending_approval: Option<PendingApproval>,
     /// A finished plan awaiting the user's decision; while set, keys drive the plan box.
     pub pending_plan: Option<PendingPlan>,
-    /// An open single-choice picker (`/models` / `/effort`); while set, keys drive it.
+    /// An open single-choice picker (`/models` / `/effort` / `/provider`); while set, keys drive it.
     pub picker: Option<Picker>,
     /// The active provider's model catalog, offered by the `/models` picker.
     pub models: Vec<String>,
+    /// The configured provider ids, offered by the `/provider` picker.
+    pub providers: Vec<String>,
     /// The live slash-command preview, open while the input starts with `/` and has no whitespace yet.
     pub command_menu: Option<CommandMenu>,
     /// Images pasted from the clipboard, staged for the next prompt and drained on submit.
@@ -143,6 +147,13 @@ impl Model {
     pub fn with_provider_catalog(mut self, models: Vec<String>, effort: Effort) -> Self {
         self.models = models;
         self.status.effort = effort;
+        self
+    }
+
+    /// Seed the `/provider` picker: the active provider id (status display) and the configured catalog.
+    pub fn with_providers(mut self, active: String, providers: Vec<String>) -> Self {
+        self.status.provider = active;
+        self.providers = providers;
         self
     }
 

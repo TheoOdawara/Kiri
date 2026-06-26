@@ -475,6 +475,29 @@ fn submit(model: &mut Model) -> Vec<Effect> {
             ));
             vec![]
         }
+        Some(Command::Provider) => {
+            if model.providers.is_empty() {
+                model.transcript.push(TranscriptItem::Notice(
+                    NoticeLevel::Info,
+                    "nenhum provider configurado".to_string(),
+                ));
+            } else {
+                let current = model.status.provider.clone();
+                let selected = model
+                    .providers
+                    .iter()
+                    .position(|p| *p == current)
+                    .unwrap_or(0);
+                model.picker = Some(Picker::new(
+                    PickerKind::Provider,
+                    "provider",
+                    "Escolha o provider ativo:",
+                    model.providers.clone(),
+                    selected,
+                ));
+            }
+            vec![]
+        }
         Some(Command::Unknown) => {
             model.transcript.push(TranscriptItem::Notice(
                 NoticeLevel::Error,
@@ -692,6 +715,10 @@ fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
             let effort = Effort::ALL.get(index).copied().unwrap_or_default();
             vec![Effect::SetEffort(effort)]
         }
+        PickerKind::Provider => match picker.options.get(index) {
+            Some(id) => vec![Effect::SetProvider(id.clone())],
+            None => vec![],
+        },
     }
 }
 
@@ -757,6 +784,23 @@ mod tests {
         // Digit 3 picks the third model.
         let effects = on_key(&mut m, press(Key::Char('3')));
         assert_eq!(effects, vec![Effect::SetModel("c".to_string())]);
+    }
+
+    #[test]
+    fn provider_command_opens_a_picker_and_enter_emits_set_provider() {
+        let mut m = Model::default().with_providers(
+            "nvidia".to_string(),
+            vec!["nvidia".to_string(), "claude".to_string()],
+        );
+        let effects = submit_line(&mut m, "/provider");
+        assert!(effects.is_empty());
+        let picker = m.picker.as_ref().expect("the provider picker should open");
+        assert_eq!(picker.kind, PickerKind::Provider);
+        assert_eq!(picker.selected, 0); // the active provider (nvidia) is pre-selected
+        // Down to "claude", then Enter.
+        assert!(on_key(&mut m, press(Key::Down)).is_empty());
+        let effects = on_key(&mut m, press(Key::Enter));
+        assert_eq!(effects, vec![Effect::SetProvider("claude".to_string())]);
     }
 
     #[test]

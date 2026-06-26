@@ -41,6 +41,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         blurb: "mostra ou muda o workspace ativo",
     },
     CommandSpec {
+        name: "/provider",
+        aliases: &["/providers"],
+        blurb: "troca o provider ativo (ou adiciona um novo)",
+    },
+    CommandSpec {
         name: "/models",
         aliases: &["/modelos"],
         blurb: "troca o modelo ativo",

@@ -31,6 +31,9 @@ pub enum Effect {
     /// Switch the reasoning effort (from the `/effort` picker). The runtime rebuilds the provider with
     /// the new effort, applies it, and persists it in the global config.
     SetEffort(Effort),
+    /// Switch the active provider (from the `/provider` picker). The runtime rebuilds the adapter with
+    /// the target's stored credential, adopts its model, and persists the active selection.
+    SetProvider(String),
     /// Place the edit cursor at the composer click (absolute screen cell). The runtime resolves it
     /// against the rendered editor geometry — a no-op when the click is outside the box or the layout
     /// is ambiguous (wrapped/scrolled), since the reducer has no render geometry to map it itself.

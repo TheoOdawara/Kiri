@@ -340,6 +340,13 @@ pub fn persist_effort(config_path: &Path, effort: Effort) -> Result<()> {
     update_global_config(config_path, |config| config.effort = Some(effort))
 }
 
+/// Persist a live `/provider` switch (the active provider id) to the global config.
+pub fn persist_active_provider(config_path: &Path, provider_id: &str) -> Result<()> {
+    update_global_config(config_path, |config| {
+        config.active_provider = Some(provider_id.to_string())
+    })
+}
+
 /// The default first-run provider: NVIDIA's OpenAI-compatible endpoint with the model taken from a
 /// legacy `NVIDIA_MODEL` env var if present (one-time migration aid), else left blank for the user to
 /// fill via `/provider`.

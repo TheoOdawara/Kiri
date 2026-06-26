@@ -19,6 +19,8 @@ pub enum Command {
     Models,
     /// `/effort`: open the picker to switch the reasoning effort.
     Effort,
+    /// `/provider`: open the picker to switch the active provider.
+    Provider,
     /// A `/`-prefixed token that is not a known command.
     Unknown,
 }
@@ -45,6 +47,7 @@ pub fn parse(line: &str) -> Option<Command> {
         "/cd" => Command::ChangeWorkspace((!arg.is_empty()).then(|| arg.to_string())),
         "/models" | "/modelos" => Command::Models,
         "/effort" | "/esforco" => Command::Effort,
+        "/provider" | "/providers" => Command::Provider,
         _ => Command::Unknown,
     };
     Some(command)
@@ -59,6 +62,7 @@ pub fn help_text() -> String {
         "  /auto          modo auto (executa tudo sem pedir aprovação)",
         "  /default       modo default (pede aprovação para cada ação)",
         "  /cd [caminho]  mostra ou muda o workspace ativo",
+        "  /provider      troca o provider ativo (ou adiciona um novo)",
         "  /models        troca o modelo ativo",
         "  /effort        troca o nível de esforço (reasoning)",
         "  /help          mostra esta ajuda",
@@ -118,11 +122,13 @@ mod tests {
     }
 
     #[test]
-    fn models_and_effort_parse() {
+    fn models_effort_and_provider_parse() {
         assert_eq!(parse("/models"), Some(Command::Models));
         assert_eq!(parse("/modelos"), Some(Command::Models));
         assert_eq!(parse("/effort"), Some(Command::Effort));
         assert_eq!(parse("/esforco"), Some(Command::Effort));
+        assert_eq!(parse("/provider"), Some(Command::Provider));
+        assert_eq!(parse("/providers"), Some(Command::Provider));
     }
 
     #[test]
