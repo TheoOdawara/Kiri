@@ -75,6 +75,10 @@ provider id, never in TOML. **No `.env`.** The untrusted project layer contribut
 providers/sandbox/http/paths come from the trusted global layer (a malicious repo must not redirect a
 credential or weaken the sandbox). `/provider` (switch + add wizard), `/models`, `/effort` manage it live.
 A first run seeds NVIDIA and imports an API-key env var (`NVIDIA_API_KEY` / `KIRI_<ID>_API_KEY` …) once.
+With **no env key and no stored credential**, the harness does not abort: it boots into a first-run
+**onboarding** (a welcome wizard — provider list with NVIDIA preselected, then a masked API-key entry) and
+gates prompt submission until a provider is saved. The composition root injects a null `CompletionProvider`
+for that credential-less boot; the wizard's `SaveProvider` swaps in the real adapter.
 
 ## Error handling (production-ready, mandatory)
 

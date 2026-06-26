@@ -15,11 +15,11 @@ use crate::modules::memory::infrastructure::file_project_store::FileProjectStore
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::modules::memory::infrastructure::sqlite_shared_store::SqliteSharedStore;
 use crate::modules::memory::infrastructure::tools::default_memory_tools;
+use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::application::secret_store::SecretStore;
-use crate::modules::provider::infrastructure::factory::{
-    api_key_from_env, build_provider, generic_env_key,
-};
+use crate::modules::provider::infrastructure::factory::{api_key_from_env, build_provider};
 use crate::modules::provider::infrastructure::secrets::default_secret_store;
+use crate::modules::provider::infrastructure::unconfigured::UnconfiguredProvider;
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::Tool;
 use crate::modules::tools::infrastructure::confine;
@@ -28,9 +28,7 @@ use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::modules::tui::infrastructure::runtime::{ProviderSwap, Tui};
 use crate::shared::infra::config::Settings;
-use crate::shared::kernel::provider::{
-    AuthMethod, Credential, ProviderKind, ProviderProfile, Secret,
-};
+use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile, Secret};
 
 /// Caps for the start-of-session memory digest injected into the system prompt: how many entries to
 /// pull per scope and the total byte budget, so the prompt stays bounded regardless of memory size.
@@ -69,15 +67,28 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     let secrets = default_secret_store(settings.credentials_file.clone());
     let profile = settings.active_profile()?.clone();
     let credential = resolve_credential(&profile, secrets.as_ref())?;
-    // Build the initial adapter; the client + credential are cloned so the runtime keeps a `ProviderSwap`
-    // able to rebuild the adapter on a live `/effort` change without a keyring round-trip.
-    let provider = build_provider(
-        client.clone(),
-        &profile,
-        credential.clone(),
-        settings.thinking,
-        settings.effort,
-    )?;
+    // Pick the initial adapter without ever aborting the boot: with a usable credential AND a non-blank
+    // model, build the real adapter; otherwise fall back to the null provider and raise onboarding. This
+    // neutralizes both boot-crash paths — no credential, and credential-present-but-blank-model (which
+    // `build_provider` would reject). The client/credential are kept so the runtime's `ProviderSwap` can
+    // rebuild on a live `/effort` change without a keyring round-trip.
+    let (provider, needs_onboarding): (Arc<dyn CompletionProvider>, bool) =
+        match (&credential, !profile.model.trim().is_empty()) {
+            (Some(cred), true) => (
+                build_provider(
+                    client.clone(),
+                    &profile,
+                    cred.clone(),
+                    settings.thinking,
+                    settings.effort,
+                )?,
+                false,
+            ),
+            _ => (
+                Arc::new(UnconfiguredProvider::new()) as Arc<dyn CompletionProvider>,
+                true,
+            ),
+        };
     // The file tools plus the plan-mode control tool. `present_plan` is advertised only in plan mode
     // (it carries `plan_only`); the registry's `schemas()` withholds it everywhere else.
     let mut tools = default_fs_tools(
@@ -119,6 +130,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         settings.seed,
         provider_swap,
         settings.config_path,
+        needs_onboarding,
     ))
 }
 
@@ -230,11 +242,16 @@ fn append_digest_section(
 }
 
 /// Resolve the active provider's credential: the stored one if present, else a one-time import from a
-/// legacy env var (migration aid / CI escape hatch) for API-key providers, else a clear error telling
-/// the user how to supply it. Never logs the secret.
-fn resolve_credential(profile: &ProviderProfile, secrets: &dyn SecretStore) -> Result<Credential> {
+/// legacy env var (migration aid / CI escape hatch) for API-key providers, else `None` — the signal that
+/// this is a first run with nothing configured, which the caller routes to onboarding (never a fatal
+/// abort). A genuine store error (a broken keyring, distinct from "not logged in") still propagates.
+/// Never logs the secret.
+fn resolve_credential(
+    profile: &ProviderProfile,
+    secrets: &dyn SecretStore,
+) -> Result<Option<Credential>> {
     if let Some(credential) = secrets.get(&profile.id)? {
-        return Ok(credential);
+        return Ok(Some(credential));
     }
     if profile.auth == AuthMethod::ApiKey
         && let Some(key) = api_key_from_env(profile)
@@ -254,22 +271,9 @@ fn resolve_credential(profile: &ProviderProfile, secrets: &dyn SecretStore) -> R
                 profile.id
             ),
         }
-        return Ok(credential);
+        return Ok(Some(credential));
     }
-    bail!(
-        "no credential for provider '{}'. Set {} (one-time import) or configure it via /provider",
-        profile.id,
-        env_hint(profile)
-    )
-}
-
-fn env_hint(profile: &ProviderProfile) -> String {
-    match profile.kind {
-        ProviderKind::Nvidia => "NVIDIA_API_KEY".into(),
-        ProviderKind::Openai => "OPENAI_API_KEY".into(),
-        ProviderKind::Anthropic => "ANTHROPIC_API_KEY".into(),
-        ProviderKind::OpenAiCompatible | ProviderKind::Custom => generic_env_key(profile),
-    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -317,14 +321,15 @@ mod tests {
         let store = FakeStore(Some(api_key()));
         let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
         match resolve_credential(&p, &store).unwrap() {
-            Credential::ApiKey { key } => assert_eq!(key.expose(), "k"),
-            other => panic!("expected api-key, got {other:?}"),
+            Some(Credential::ApiKey { key }) => assert_eq!(key.expose(), "k"),
+            other => panic!("expected a stored api-key, got {other:?}"),
         }
     }
 
     #[test]
-    fn resolve_credential_bails_when_absent_and_no_env() {
+    fn resolve_credential_returns_none_when_absent_and_no_env() {
         // A Custom kind with a unique id: no vendor env var, and the generic KIRI_..._API_KEY is unset.
+        // First run with nothing configured resolves to None (onboarding), never an abort.
         let store = FakeStore(None);
         let p = profile(
             "unit-test-no-env",
@@ -332,6 +337,6 @@ mod tests {
             AuthMethod::ApiKey,
             "m",
         );
-        assert!(resolve_credential(&p, &store).is_err());
+        assert!(resolve_credential(&p, &store).unwrap().is_none());
     }
 }

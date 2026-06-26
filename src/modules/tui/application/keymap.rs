@@ -513,6 +513,18 @@ fn submit(model: &mut Model) -> Vec<Effect> {
             vec![]
         }
         None if line.trim().is_empty() && model.attachments.is_empty() => vec![],
+        None if model.unconfigured => {
+            // No usable provider yet: never send to the null provider silently. Drop the staged images,
+            // surface a clear notice, and re-open onboarding. `busy` is intentionally left false so no
+            // turn is armed and the UI is not stranded.
+            model.attachments.clear();
+            model.transcript.push(TranscriptItem::Notice(
+                NoticeLevel::Info,
+                "configure um provider primeiro — escolha um e informe a API key".to_string(),
+            ));
+            model.wizard = Some(ProviderWizard::onboarding());
+            vec![]
+        }
         None => {
             // Drain the staged images into the prompt; a turn can carry text, images, or both.
             let images: Vec<String> = std::mem::take(&mut model.attachments)
@@ -749,10 +761,18 @@ fn on_wizard_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         return vec![Effect::Quit];
     }
     if key.code == Key::Esc {
+        // Cancelling onboarding must not strand a credential-less app: keep the submit gate up and post a
+        // persistent hint. The next stray prompt re-opens onboarding (via the gate), and /provider works.
+        let onboarding = model.wizard.as_ref().is_some_and(|w| w.onboarding);
         model.wizard = None;
+        let message = if onboarding {
+            "configure um provider com /provider para começar"
+        } else {
+            "wizard cancelado"
+        };
         model.transcript.push(TranscriptItem::Notice(
             NoticeLevel::Info,
-            "wizard cancelado".to_string(),
+            message.to_string(),
         ));
         return vec![];
     }
@@ -939,7 +959,9 @@ mod tests {
             wizard: Some(ProviderWizard::new()),
             ..Default::default()
         };
-        // Kind: Anthropic is index 0 -> Enter (seeds base_url). BaseUrl: accept default -> Enter.
+        // Kind: NVIDIA is index 0; Down moves to Anthropic (index 1) -> Enter (seeds base_url).
+        // BaseUrl: accept default -> Enter.
+        on_key(&mut m, press(Key::Down));
         on_key(&mut m, press(Key::Enter));
         on_key(&mut m, press(Key::Enter));
         // Model: required.
@@ -998,6 +1020,126 @@ mod tests {
         let effects = on_key(&mut m, press(Key::Esc));
         assert!(effects.is_empty());
         assert!(m.wizard.is_none());
+    }
+
+    #[test]
+    fn nvidia_kind_confirm_seeds_base_url() {
+        use crate::shared::kernel::provider::ProviderKind;
+        let mut m = Model {
+            wizard: Some(ProviderWizard::onboarding()),
+            ..Default::default()
+        };
+        // NVIDIA is preselected; confirming the kind seeds its default endpoint.
+        on_key(&mut m, press(Key::Enter));
+        let wizard = m.wizard.as_ref().expect("the wizard advances to BaseUrl");
+        assert_eq!(wizard.step, WizardStep::BaseUrl);
+        assert_eq!(wizard.base_url, ProviderKind::Nvidia.default_base_url());
+    }
+
+    #[test]
+    fn onboarding_wizard_completes_to_nvidia_save_provider() {
+        use crate::shared::kernel::provider::ProviderKind;
+        let mut m = Model::default();
+        m.enter_onboarding();
+        // Kind (NVIDIA) -> Enter seeds base_url. BaseUrl -> Enter accepts default.
+        on_key(&mut m, press(Key::Enter));
+        on_key(&mut m, press(Key::Enter));
+        // Model is required and not prefilled — type it.
+        for c in "nvidia/some-model".chars() {
+            on_key(&mut m, press(Key::Char(c)));
+        }
+        on_key(&mut m, press(Key::Enter));
+        // ExtraModels: skip.
+        on_key(&mut m, press(Key::Enter));
+        // ApiKey: type, then finalize.
+        for c in "nvapi-secret".chars() {
+            on_key(&mut m, press(Key::Char(c)));
+        }
+        let effects = on_key(&mut m, press(Key::Enter));
+        assert!(m.wizard.is_none(), "the wizard closes on finalize");
+        match effects.as_slice() {
+            [
+                Effect::SaveProvider {
+                    id, kind, model, ..
+                },
+            ] => {
+                assert_eq!(id, "nvidia");
+                assert_eq!(*kind, ProviderKind::Nvidia);
+                assert_eq!(model, "nvidia/some-model");
+            }
+            other => panic!("expected SaveProvider, got {other:?}"),
+        }
+        let staged = m.pending_credential.as_ref().expect("the key is staged");
+        assert_eq!(staged.expose(), "nvapi-secret");
+    }
+
+    #[test]
+    fn esc_on_onboarding_wizard_keeps_gate_and_hint() {
+        let mut m = Model {
+            wizard: Some(ProviderWizard::onboarding()),
+            unconfigured: true,
+            ..Default::default()
+        };
+        let effects = on_key(&mut m, press(Key::Esc));
+        assert!(effects.is_empty());
+        assert!(m.wizard.is_none(), "Esc closes the wizard");
+        assert!(m.unconfigured, "the gate must persist after onboarding-Esc");
+        assert!(
+            m.transcript.items().iter().any(
+                |item| matches!(item, TranscriptItem::Notice(_, text) if text.contains("/provider"))
+            ),
+            "a /provider hint must be posted"
+        );
+    }
+
+    #[test]
+    fn esc_on_regular_wizard_says_cancelled() {
+        let mut m = Model {
+            wizard: Some(ProviderWizard::new()),
+            unconfigured: false,
+            ..Default::default()
+        };
+        on_key(&mut m, press(Key::Esc));
+        assert!(m.wizard.is_none());
+        assert!(!m.unconfigured, "a regular cancel does not touch the gate");
+        assert!(m.transcript.items().iter().any(
+            |item| matches!(item, TranscriptItem::Notice(_, text) if text == "wizard cancelado")
+        ),);
+    }
+
+    #[test]
+    fn submit_while_unconfigured_is_gated_and_reopens_wizard() {
+        let mut m = Model {
+            unconfigured: true,
+            ..Default::default()
+        };
+        let effects = submit_line(&mut m, "oi");
+        assert!(effects.is_empty(), "a gated prompt emits no SubmitPrompt");
+        assert!(!m.busy, "the gate must not arm a turn (no stuck busy)");
+        assert!(
+            m.wizard.as_ref().is_some_and(|w| w.onboarding),
+            "the gate re-opens the onboarding wizard"
+        );
+        assert!(
+            m.transcript
+                .items()
+                .iter()
+                .any(|item| matches!(item, TranscriptItem::Notice(..))),
+            "a gate notice must be posted"
+        );
+    }
+
+    #[test]
+    fn slash_provider_works_while_unconfigured() {
+        let mut m =
+            Model::default().with_providers("nvidia".to_string(), vec!["nvidia".to_string()]);
+        m.unconfigured = true;
+        let effects = submit_line(&mut m, "/provider");
+        assert!(effects.is_empty());
+        assert!(
+            m.picker.is_some(),
+            "slash commands are not gated — /provider still opens"
+        );
     }
 
     #[test]

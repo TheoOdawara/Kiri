@@ -4,7 +4,7 @@ use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::provider::{Effort, Secret};
 
 use super::command_menu::CommandMenu;
-use super::transcript::Transcript;
+use super::transcript::{NoticeLevel, Transcript, TranscriptItem};
 use super::view_state::{
     History, ImageAttachment, InputBuffer, PendingApproval, PendingPlan, Picker, ProviderWizard,
     ScreenSelection, Scroll,
@@ -128,6 +128,11 @@ pub struct Model {
     /// as the clock for multi-click detection — `render_at` is stamped before the event await and would
     /// be stale, so it cannot time clicks.
     pub last_event_at: Option<Instant>,
+    /// True until a usable provider credential exists. Raised at cold start when wiring fell back to the
+    /// null provider (no stored credential / no env key, or a blank active model); cleared when
+    /// onboarding saves a provider. Gates prompt submission and re-opens onboarding instead of stranding
+    /// the user against the null provider.
+    pub unconfigured: bool,
 }
 
 impl Model {
@@ -171,7 +176,23 @@ impl Model {
     pub fn clear_screen_selection(&mut self) {
         self.selection = None;
     }
+
+    /// Enter first-run onboarding: raise the submit gate, open the welcome wizard (NVIDIA preselected),
+    /// and post the welcome notice. A pure model mutation the runtime calls from `Tui::new` when wiring
+    /// fell back to the null provider.
+    pub fn enter_onboarding(&mut self) {
+        self.unconfigured = true;
+        self.wizard = Some(ProviderWizard::onboarding());
+        self.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Info,
+            ONBOARDING_WELCOME.to_string(),
+        ));
+    }
 }
+
+/// The welcome line shown when the harness boots with no provider configured.
+const ONBOARDING_WELCOME: &str = "Bem-vindo ao Kiri. Escolha um provider e informe sua API key para começar — \
+     nenhuma variável de ambiente é necessária.";
 
 #[cfg(test)]
 mod tests {
@@ -203,5 +224,26 @@ mod tests {
             ..Status::default()
         };
         assert_eq!(s.elapsed_label(), "2m 5s");
+    }
+
+    #[test]
+    fn enter_onboarding_opens_the_nvidia_wizard_and_raises_the_gate() {
+        use crate::modules::tui::domain::transcript::TranscriptItem;
+        use crate::shared::kernel::provider::ProviderKind;
+
+        let mut m = Model::default();
+        m.enter_onboarding();
+
+        assert!(m.unconfigured, "the submit gate must be raised");
+        assert!(m.has_modal(), "the onboarding wizard is a modal");
+        let wizard = m.wizard.as_ref().expect("onboarding opens the wizard");
+        assert!(wizard.onboarding);
+        assert_eq!(wizard.kind(), ProviderKind::Nvidia);
+        assert!(
+            m.transcript.items().iter().any(
+                |item| matches!(item, TranscriptItem::Notice(_, text) if text.contains("Bem-vindo"))
+            ),
+            "a welcome notice must be posted"
+        );
     }
 }

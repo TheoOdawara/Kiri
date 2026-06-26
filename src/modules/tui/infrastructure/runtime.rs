@@ -60,13 +60,14 @@ const STREAM_FRAME: Duration = Duration::from_millis(33);
 /// `/provider` change: the HTTP client, the secret store, the full provider catalog, the active id, the
 /// active provider's cached credential (so a rebuild needs no keyring round-trip), and the thinking/
 /// effort dials. Effort is captured at adapter construction, so changing effort — or the active
-/// provider — means rebuilding the `Arc`.
+/// provider — means rebuilding the `Arc`. The credential is `None` during first-run onboarding (the
+/// harness booted with no usable key); it is set the moment a provider is switched to or saved.
 pub struct ProviderSwap {
     client: reqwest::Client,
     secrets: Box<dyn SecretStore>,
     providers: Vec<ProviderProfile>,
     active: String,
-    credential: Credential,
+    credential: Option<Credential>,
     thinking: bool,
     effort: Effort,
 }
@@ -77,7 +78,7 @@ impl ProviderSwap {
         secrets: Box<dyn SecretStore>,
         providers: Vec<ProviderProfile>,
         active: String,
-        credential: Credential,
+        credential: Option<Credential>,
         thinking: bool,
         effort: Effort,
     ) -> Self {
@@ -145,15 +146,22 @@ impl ProviderSwap {
         )))
     }
 
-    /// Rebuild the active provider with a new `effort`, committing the effort only on success.
+    /// Rebuild the active provider with a new `effort`, committing the effort only on success. Without a
+    /// live credential (first-run onboarding) there is nothing to rebuild, so it surfaces a clear error
+    /// and leaves the effort dial untouched rather than panicking or silently diverging.
     fn rebuild_with_effort(
         &mut self,
         effort: Effort,
     ) -> Result<Arc<dyn CompletionProvider>, AgentError> {
+        let Some(credential) = self.credential.clone() else {
+            return Err(AgentError::Provider(
+                "configure um provider com /provider antes de mudar o esforço".to_string(),
+            ));
+        };
         let profile = self
             .active_profile()
             .ok_or_else(|| AgentError::Provider("no active provider configured".to_string()))?;
-        let provider = self.build(profile, &self.credential, effort)?;
+        let provider = self.build(profile, &credential, effort)?;
         self.effort = effort;
         Ok(provider)
     }
@@ -171,7 +179,7 @@ impl ProviderSwap {
         let credential = self.resolve_credential(&profile)?;
         let provider = self.build(&profile, &credential, self.effort)?;
         self.active = id.to_string();
-        self.credential = credential;
+        self.credential = Some(credential);
         Ok((provider, profile.model))
     }
 
@@ -192,7 +200,7 @@ impl ProviderSwap {
         self.providers.retain(|p| p.id != id);
         self.providers.push(profile);
         self.active = id;
-        self.credential = credential;
+        self.credential = Some(credential);
         Ok((provider, model))
     }
 }
@@ -222,15 +230,21 @@ impl Tui {
         seed: Option<String>,
         provider_swap: ProviderSwap,
         config_path: PathBuf,
+        needs_onboarding: bool,
     ) -> Self {
         let workspace = text::display_path(sandbox.root());
         let (model_id, models) = provider_swap
             .active_profile()
             .map(|p| (p.model.clone(), p.models.clone()))
             .unwrap_or_default();
-        let model = Model::new(model_id, workspace)
+        let mut model = Model::new(model_id, workspace)
             .with_provider_catalog(models, provider_swap.effort)
             .with_providers(provider_swap.active.clone(), provider_swap.provider_ids());
+        // No usable credential at boot: come up in onboarding (welcome wizard + submit gate) instead of
+        // crashing, so the user can configure a provider with zero env vars.
+        if needs_onboarding {
+            model.enter_onboarding();
+        }
         Self {
             agent_loop,
             sandbox,
@@ -289,6 +303,15 @@ impl Tui {
                 Some(Command::Quit) => model.should_quit = true,
                 // A non-quit command as the CLI seed is ignored; the seed is meant to be a prompt.
                 Some(_) => {}
+                // Onboarding: there is no usable provider yet, so the seed can't run against the null
+                // provider. Surface it and let the user configure a provider via the welcome wizard.
+                None if model.unconfigured => {
+                    model.transcript.push(TranscriptItem::Notice(
+                        NoticeLevel::Info,
+                        "configure um provider antes de enviar — a mensagem inicial foi ignorada"
+                            .to_string(),
+                    ));
+                }
                 None => {
                     model.history.record(&line);
                     model.transcript.push(TranscriptItem::User(line.clone()));
@@ -543,6 +566,9 @@ impl Tui {
                             Ok((provider, target_model)) => {
                                 agent_loop.set_provider(provider);
                                 agent_loop.set_model(target_model.clone());
+                                // Onboarding (or a re-add) succeeded: a real adapter is live, so drop the
+                                // submit gate and let the user into the normal chat.
+                                model.unconfigured = false;
                                 model.status.model = target_model;
                                 model.status.provider = id.clone();
                                 model.models = models;
@@ -1000,7 +1026,7 @@ mod tests {
                 Box::new(FakeStore { creds }),
                 providers,
                 active.into(),
-                active_cred,
+                Some(active_cred),
                 true,
                 Effort::High,
             )
@@ -1055,6 +1081,25 @@ mod tests {
             );
             s.rebuild_with_effort(Effort::Max).unwrap();
             assert_eq!(s.effort, Effort::Max);
+        }
+
+        #[test]
+        fn rebuild_with_effort_without_credential_errors() {
+            // Onboarding state: a seeded provider but no live credential. Changing effort must error
+            // clearly and leave the dial untouched, never panic.
+            let mut s = ProviderSwap::new(
+                reqwest::Client::new(),
+                Box::new(FakeStore {
+                    creds: HashMap::new(),
+                }),
+                vec![profile("nvidia", ProviderKind::Nvidia, "m1")],
+                "nvidia".into(),
+                None,
+                true,
+                Effort::High,
+            );
+            assert!(s.rebuild_with_effort(Effort::Max).is_err());
+            assert_eq!(s.effort, Effort::High, "the effort dial must not change");
         }
 
         #[test]

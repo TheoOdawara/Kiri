@@ -363,9 +363,11 @@ pub enum PickerKind {
 /// switching. A sentinel label, never a real provider id.
 pub const ADD_PROVIDER_LABEL: &str = "+ adicionar novo provider";
 
-/// The provider kinds the add wizard offers (NVIDIA is the seeded default, so the wizard adds the
-/// others). All are API-key only — subscription OAuth is intentionally unsupported.
-pub const WIZARD_KINDS: [ProviderKind; 4] = [
+/// The provider kinds the wizard offers, in display order. NVIDIA leads (the seeded default), so it is
+/// preselected at first-run onboarding; the rest follow. All are API-key only — subscription OAuth is
+/// intentionally unsupported.
+pub const WIZARD_KINDS: [ProviderKind; 5] = [
+    ProviderKind::Nvidia,
     ProviderKind::Anthropic,
     ProviderKind::Openai,
     ProviderKind::OpenAiCompatible,
@@ -393,6 +395,9 @@ pub struct ProviderWizard {
     pub model: String,
     pub extra_models: String,
     pub api_key: String,
+    /// True when the wizard is the first-run onboarding flow (welcome framing; cancelling keeps the
+    /// submit gate up instead of stranding a credential-less app).
+    pub onboarding: bool,
 }
 
 impl std::fmt::Debug for ProviderWizard {
@@ -404,6 +409,7 @@ impl std::fmt::Debug for ProviderWizard {
             .field("model", &self.model)
             .field("extra_models", &self.extra_models)
             .field("api_key", &"***")
+            .field("onboarding", &self.onboarding)
             .finish()
     }
 }
@@ -417,7 +423,17 @@ impl ProviderWizard {
             model: String::new(),
             extra_models: String::new(),
             api_key: String::new(),
+            onboarding: false,
         }
+    }
+
+    /// The wizard opened at first run with no credential: the welcome framing, NVIDIA preselected
+    /// (`kind_selected = 0`, the leading entry in [`WIZARD_KINDS`]). Built by mutating `new()` rather than
+    /// struct-update syntax, which cannot move fields out of a `Drop` type.
+    pub fn onboarding() -> Self {
+        let mut wizard = Self::new();
+        wizard.onboarding = true;
+        wizard
     }
 
     /// The selected provider kind.
@@ -583,9 +599,24 @@ mod tests {
 
     #[test]
     fn wizard_provider_id_is_the_kind_token() {
-        let w = ProviderWizard::new(); // kind index 0 = Anthropic
-        assert_eq!(w.provider_id(), "anthropic");
-        assert_eq!(w.kind(), ProviderKind::Anthropic);
+        let w = ProviderWizard::new(); // kind index 0 = NVIDIA (the leading, preselected entry)
+        assert_eq!(w.provider_id(), "nvidia");
+        assert_eq!(w.kind(), ProviderKind::Nvidia);
+    }
+
+    #[test]
+    fn wizard_kinds_lead_with_nvidia() {
+        assert_eq!(WIZARD_KINDS.len(), 5);
+        assert_eq!(WIZARD_KINDS[0], ProviderKind::Nvidia);
+    }
+
+    #[test]
+    fn onboarding_constructor_sets_flag_and_preselects_nvidia() {
+        let w = ProviderWizard::onboarding();
+        assert!(w.onboarding);
+        assert_eq!(w.kind_selected, 0);
+        assert_eq!(w.kind(), ProviderKind::Nvidia);
+        assert_eq!(w.step, WizardStep::Kind);
     }
 
     #[test]

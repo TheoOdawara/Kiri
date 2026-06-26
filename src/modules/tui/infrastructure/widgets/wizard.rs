@@ -28,17 +28,24 @@ pub fn render(wizard: &ProviderWizard, frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, area);
 
     let mut lines: Vec<Line> = Vec::new();
+    let title = if wizard.onboarding {
+        "Bem-vindo ao Kiri"
+    } else {
+        "novo provider"
+    };
     lines.push(Line::styled(
-        format!(" novo provider · {}", step_label(wizard.step)),
+        format!(" {} · {}", title, step_label(wizard.step)),
         theme::dim(),
     ));
     lines.push(Line::default());
 
     if wizard.step == WizardStep::Kind {
-        lines.push(Line::styled(
-            " Escolha o tipo de provider:",
-            theme::strong(),
-        ));
+        let prompt = if wizard.onboarding {
+            " Escolha seu provider para começar:"
+        } else {
+            " Escolha o tipo de provider:"
+        };
+        lines.push(Line::styled(prompt, theme::strong()));
         for (i, kind) in WIZARD_KINDS.iter().enumerate() {
             let (marker, style) = if i == wizard.kind_selected {
                 ("❯ ", theme::accent())
