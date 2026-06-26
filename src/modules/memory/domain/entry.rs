@@ -19,6 +19,8 @@ pub enum MemoryKind {
     Heuristic,
     /// A verifiable technical fact (version, limit, API behavior).
     Fact,
+    /// A durable user preference ("always use X", "I prefer Y") that should shape future work.
+    Preference,
 }
 
 impl MemoryKind {
@@ -32,6 +34,7 @@ impl MemoryKind {
             MemoryKind::Snippet,
             MemoryKind::Heuristic,
             MemoryKind::Fact,
+            MemoryKind::Preference,
         ]
     }
 
@@ -43,6 +46,7 @@ impl MemoryKind {
             MemoryKind::Snippet => "snippet",
             MemoryKind::Heuristic => "heuristic",
             MemoryKind::Fact => "fact",
+            MemoryKind::Preference => "preference",
         }
     }
 
@@ -54,6 +58,7 @@ impl MemoryKind {
             "snippet" => Some(MemoryKind::Snippet),
             "heuristic" => Some(MemoryKind::Heuristic),
             "fact" => Some(MemoryKind::Fact),
+            "preference" => Some(MemoryKind::Preference),
             _ => None,
         }
     }

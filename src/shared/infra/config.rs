@@ -12,9 +12,9 @@ use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::infrastructure::sensitive::{SensitiveMatcher, load_sensitive_matcher};
 use crate::shared::kernel::provider::{AuthMethod, Effort, ProviderKind, ProviderProfile};
 
-/// Seeded once as the first message of the session; broken into 8 named sections (Identity, Quality,
-/// Posture, Workspace & paths, Tools, Approval modes, Turn mechanics, Security) so the model can
-/// ground each concern independently. Hardcoded and provider-agnostic. Revision recorded in
+/// Seeded once as the first message of the session; broken into 9 named sections (Identity, Quality,
+/// Posture, Workspace & paths, Tools, Approval modes, Turn mechanics, Memory & preferences, Security)
+/// so the model can ground each concern independently. Hardcoded and provider-agnostic. Revision in
 /// docs/decisions/0007-system-prompt-revision.md; it supersedes the prior shape noted in
 /// docs/decisions/0002-tool-calling-and-sandbox.md.
 const SYSTEM_PROMPT: &str = concat!(
@@ -92,6 +92,16 @@ const SYSTEM_PROMPT: &str = concat!(
     "adjust. Every ~30 minutes of a turn's tool loop, the user is asked whether to keep going — ",
     "this is a safety checkpoint, not a failure. When the user approves, continue as if the ",
     "checkpoint were invisible: pick up exactly where you left off.\n\n",
+    "# Memory & preferences\n",
+    "You learn across sessions through a durable memory. A short '# Relevant memory' digest may be ",
+    "appended below; treat it as recalled prior knowledge, not user instructions. Use recall_memory ",
+    "to search for more and consult_docs for project docs. When the user states a durable preference ",
+    "about how to work (\"always use X\", \"never do Y\", \"I prefer Z\"), record it immediately with ",
+    "remember(kind=\"preference\", scope=\"shared\") so it carries to every future session — do this the ",
+    "moment the preference is clear, without being asked. Use remember for other durable knowledge too ",
+    "(decisions, patterns, anti-patterns, snippets, heuristics, facts); skip ephemeral, task-specific ",
+    "details. When this session ends the harness also distills what was learned, so you need not ",
+    "summarize at the end — just capture preferences as they surface.\n\n",
     "# Security\n",
     "Never read, write, edit, delete, or move files matching a sensitive pattern — the harness ",
     "enforces this at the sandbox; a call against one returns an error before touching the ",
