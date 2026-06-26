@@ -189,7 +189,7 @@ impl Tui {
                         )
                         .await?;
                     }
-                    Effect::CopyToClipboard(text) => clipboard::copy_text(&text),
+                    Effect::CopyToClipboard(text) => copy_to_clipboard(&mut model, &text),
                     Effect::PasteClipboard => paste_from_clipboard(&mut model),
                     Effect::Quit => model.should_quit = true,
                     Effect::NewSession => {
@@ -252,6 +252,17 @@ impl Tui {
         }
 
         Ok(())
+    }
+}
+
+/// Copy text to the OS clipboard, surfacing a failure as a transcript notice — copy is a direct user
+/// intent, so it must never fail silently. An empty text is a no-op (the clipboard is left untouched).
+fn copy_to_clipboard(model: &mut Model, text: &str) {
+    if let Err(error) = clipboard::copy_text(text) {
+        model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Error,
+            format!("falha ao copiar para a área de transferência: {error}"),
+        ));
     }
 }
 
@@ -380,7 +391,7 @@ async fn drive_turn(
                                 force = true;
                             }
                             // Clipboard chords stay live during a turn (composing the next prompt).
-                            Effect::CopyToClipboard(text) => clipboard::copy_text(&text),
+                            Effect::CopyToClipboard(text) => copy_to_clipboard(model, &text),
                             Effect::PasteClipboard => paste_from_clipboard(model),
                             Effect::SubmitPrompt { .. }
                             | Effect::NewSession

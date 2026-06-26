@@ -1,8 +1,11 @@
+use std::io;
+
 use arboard::Clipboard;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::modules::tui::domain::view_state::ImageAttachment;
+use crate::shared::kernel::error::AgentError;
 
 /// What the OS clipboard held when read: an image (encoded as a PNG data URL ready for the provider's
 /// multimodal content), plain text, or nothing usable.
@@ -29,12 +32,19 @@ pub fn read() -> ClipboardContent {
     }
 }
 
-/// Copy text to the OS clipboard, best-effort: clipboard access is device I/O that must never crash or
-/// block the TUI, and there is no recovery for a failed copy — so the error is deliberately ignored.
-pub fn copy_text(text: &str) {
-    if let Ok(mut clipboard) = Clipboard::new() {
-        let _ = clipboard.set_text(text.to_string());
+/// Copy text to the OS clipboard. Copy is a direct user intent (Ctrl+C, mouse-release), so a failure is
+/// surfaced by the caller as a transcript notice rather than swallowed. Empty text is a no-op that
+/// returns `Ok` WITHOUT writing — a selection over blank cells must never clobber the user's clipboard.
+pub fn copy_text(text: &str) -> Result<(), AgentError> {
+    if text.is_empty() {
+        return Ok(());
     }
+    let mut clipboard = Clipboard::new()
+        .map_err(|e| AgentError::Io(io::Error::other(format!("clipboard unavailable: {e}"))))?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|e| AgentError::Io(io::Error::other(format!("clipboard write failed: {e}"))))?;
+    Ok(())
 }
 
 /// Encode arboard's RGBA8 image (row-major, 4 bytes/pixel) as a `data:image/png;base64,...` URL.
@@ -56,4 +66,16 @@ fn encode_png_data_url(image: &arboard::ImageData<'_>) -> Option<ImageAttachment
         width,
         height,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_text_empty_is_ok_and_does_not_touch_the_clipboard() {
+        // Empty short-circuits before `Clipboard::new()`, so it is Ok in any (even headless) environment
+        // and — by never reaching `set_text` — cannot overwrite the user's existing clipboard contents.
+        assert!(copy_text("").is_ok());
+    }
 }
