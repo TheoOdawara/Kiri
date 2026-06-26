@@ -75,7 +75,8 @@ borderless prompt whose gate glyph changes color with its state.
 - **Three approval modes** — cycle with `Shift+Tab`: **default** confirms every call, **auto** runs them
   unattended, **plan** stays read-only and proposes a plan you approve before it executes.
 - **Runaway guard** — a 30-minute wall-clock checkpoint pauses long turns to ask whether to keep going.
-- **NVIDIA OpenAI-compatible provider** — talks to `integrate.api.nvidia.com`'s `/chat/completions`.
+- **Provider-agnostic, by API key** — NVIDIA (default), any OpenAI-compatible / custom endpoint,
+  OpenAI (GPT), and Anthropic (Claude). Switch or add providers live from the TUI; secrets in the OS keyring.
 - **Built to hold up** — modular-hexagonal, single binary, `unsafe` forbidden, green-gated.
 
 ## Getting started
@@ -83,14 +84,23 @@ borderless prompt whose gate glyph changes color with its state.
 **Prerequisites**
 
 - Rust **stable** (edition 2024; `rust-toolchain.toml` pins the toolchain with `rustfmt` + `clippy`).
-- An NVIDIA API key from [build.nvidia.com](https://build.nvidia.com).
+- An API key for at least one provider — e.g. NVIDIA from [build.nvidia.com](https://build.nvidia.com),
+  Anthropic from the Console, or OpenAI from the Platform. **API key, not a subscription** — Kiri bills
+  pay-per-token against your own account; subscription (Claude Pro/Max, ChatGPT Plus/Pro) is not supported.
 
-**Configure** — create a `.env` in the project root (it is git-ignored; the key is **never** a CLI flag):
+**Configure** — Kiri manages its own config (`~/.kiri/config.toml`) and secrets (the OS keyring, or a
+`0600` fallback file). There is **no `.env`**. The fastest start is to seed the default NVIDIA provider
+from an env var on the first run; it is imported once into the keyring (the key is **never** a CLI flag):
 
-```dotenv
-NVIDIA_API_KEY=nvapi-...
-NVIDIA_MODEL=moonshotai/kimi-k2-instruct   # any model from NVIDIA's catalog
+```bash
+export NVIDIA_API_KEY=nvapi-...
+export NVIDIA_MODEL=moonshotai/kimi-k2-instruct   # any model from NVIDIA's catalog
 ```
+
+Then add or switch providers from inside the TUI: **`/provider`** (switch, or run the add wizard for
+Claude / GPT / a custom endpoint — paste the API key, it is masked and stored in the keyring),
+**`/models`** (switch the model), **`/effort`** (reasoning effort). Generic keys also work via
+`KIRI_<ID>_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
 
 **Build & run**
 
@@ -158,7 +168,9 @@ unaffected, since it has dedicated accent keys).
 
 **Commands.** `/exit` (`/sair`, `/quit`) ends the session · `/new` (`/novo`) starts a fresh session ·
 `/plan`, `/auto`, `/default` switch the approval mode · `/cd [path]` shows or changes the workspace ·
-`/help` lists everything. An unknown `/command` is flagged instead of being sent to the model.
+`/provider` switches the active provider or adds a new one (wizard) · `/models` switches the model ·
+`/effort` switches the reasoning effort · `/help` lists everything. An unknown `/command` is flagged
+instead of being sent to the model.
 
 ## Tools
 

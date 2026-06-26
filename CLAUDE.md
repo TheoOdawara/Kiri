@@ -1,6 +1,7 @@
 # Kiri — Project Working Contract
 
-Async Rust CLI agent harness that talks to NVIDIA's OpenAI-compatible chat API (streaming TUI,
+Async Rust CLI agent harness, **provider-agnostic by API key** — NVIDIA (default), any OpenAI-compatible
+/ custom endpoint, OpenAI (GPT), and Anthropic (Claude), switchable live from the TUI (streaming TUI,
 tool-calling with a filesystem sandbox, approval modes: default/auto/plan).
 Layers on the global contract — only project-specific rules below; when they conflict, this file wins.
 
@@ -9,7 +10,8 @@ Layers on the global contract — only project-specific rules below; when they c
 - Rust **1.96 stable**, **edition 2024** (intentional — stabilized in 1.85, valid on this toolchain).
 - `tokio` (full) — async runtime. `reqwest` (json) — HTTP to the provider. `serde` + `serde_json` — payloads.
 - **clap** (derive) — CLI parsing. **async-trait** — dyn-compatible async ports. **thiserror** — the typed
-  `AgentError` kernel type. **anyhow** — error glue at the binary edge. **dotenvy** — `.env` loading.
+  `AgentError` kernel type. **anyhow** — error glue at the binary edge. **toml** — layered config.
+  **keyring** — OS credential store (Keychain / Cred Manager / Secret Service). **zeroize** — secret memory.
 - Single binary crate. No workspace, no lib target.
 
 ## Commands (verified on Rust 1.96)
@@ -38,7 +40,9 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
   implementing the ports.
 - **Modules (bounded contexts):** `agent` (conversation domain + the `AgentLoop` + the UI
   ports `Presenter`/`ApprovalPolicy`, plus the provider's `EventSink`), `provider` (the `CompletionProvider`
-  port + the OpenAI-compatible adapter: wire DTOs, SSE assembly), `tools` (the `Tool` trait + `ToolRegistry`
+  port + two API-key adapters — `openai` (chat-completions: NVIDIA / compatible / custom / OpenAI) and
+  `anthropic` (Messages API) — plus the `SecretStore` port with `keyring`/`0600`-file adapters and the
+  `factory` that picks the adapter from `(kind, auth)`; see ADRs 0011/0012), `tools` (the `Tool` trait + `ToolRegistry`
   + the sandbox + one fs adapter per tool), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
   adapter + the ratatui runtime — the sole front-end), `memory` (durable knowledge: `MemoryEntry`/`MemoryKind`
   domain + the `MemoryPort`/`ProjectStore`/`SharedStore` ports + adapters — `FileProjectMemory` for project
@@ -47,7 +51,9 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
   `docs/decisions/0010-memory-and-docs-knowledge.md`). Planned: `session` (SQLite-persisted conversations),
   and a memory-management GUI.
 - **shared/kernel:** cross-cutting primitives — `ToolCall`/`FunctionCall`, `AgentError` (thiserror), and
-  `ApprovalMode` (shared by `agent`, `tools`, and `tui`). **shared/infra:** `config` (CLI + env + `Settings`).
+  `ApprovalMode`, and the provider primitives (`ProviderKind`/`AuthMethod`/`Effort`/`ProviderProfile`/
+  `Credential`/`Secret`), shared by `provider`, `config`, and `tui`. **shared/infra:** `config` (layered
+  TOML + env + CLI → `Settings`, plus the global-config writers).
 
 **Invariants:** network I/O only in `provider/infrastructure`; filesystem I/O only in `tools/infrastructure`
 (the sandbox is the single path chokepoint) — **except** the `memory` context, which owns its data dirs
@@ -56,16 +62,19 @@ agent-supplied paths (ref ADR 0010); `domain` has no I/O; the engine never touch
 directly (all UI via the engine ports). Ports return `AgentError`; `anyhow` only at the binary edge.
 
 **Extending:** a new tool = one file under `tools/infrastructure/fs/` implementing `Tool`, registered in
-`default_fs_tools`; a new provider = one adapter implementing `CompletionProvider`, chosen in `app::wire`;
-a new memory/docs tool = one file under `memory/infrastructure/tools/`, registered in `default_memory_tools`.
+`default_fs_tools`; a new provider = one adapter implementing `CompletionProvider` + a `(kind, auth)` arm in
+`provider/infrastructure/factory`; a new memory/docs tool = one file under `memory/infrastructure/tools/`,
+registered in `default_memory_tools`.
 
-Provider target: **NVIDIA**'s OpenAI-compatible endpoint `<base-url>/chat/completions`. The base URL is
-injected via `Settings` into the provider adapter at `app::wire` (default
-`https://integrate.api.nvidia.com/v1`); a future multi-provider feature externalizes it to a config file
-(ref: `docs/decisions/0001-openai-compatible-provider.md`). The **model** and **API key** are read from the
-environment, both required — `NVIDIA_MODEL` and `NVIDIA_API_KEY` (loaded from `.env` via `dotenvy`); the key
-is **never** a CLI flag. The bearer header is always sent. See `docs/ollama.ps1` for the raw
-OpenAI-compatible protocol shape.
+**Providers & config (ADRs 0011/0012):** provider-agnostic, **API key only** — subscription OAuth (Claude
+Pro/Max, ChatGPT Plus/Pro) is intentionally **unsupported** (it requires impersonating the vendor's client,
+which is ToS-banned and bans the user's account; `AuthMethod::Oauth` is modeled but non-wired). The provider
+catalog, active selection, model lists, and effort live in **layered TOML** (`~/.kiri/config.toml` global ←
+`<workspace>/.kiri/config.toml` project); **secrets** live in the OS keyring (or a `0600` file), keyed by
+provider id, never in TOML. **No `.env`.** The untrusted project layer contributes **only `effort`** —
+providers/sandbox/http/paths come from the trusted global layer (a malicious repo must not redirect a
+credential or weaken the sandbox). `/provider` (switch + add wizard), `/models`, `/effort` manage it live.
+A first run seeds NVIDIA and imports an API-key env var (`NVIDIA_API_KEY` / `KIRI_<ID>_API_KEY` …) once.
 
 ## Error handling (production-ready, mandatory)
 
