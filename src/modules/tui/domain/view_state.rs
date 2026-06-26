@@ -64,10 +64,6 @@ impl InputBuffer {
         self.area.input(input)
     }
 
-    pub fn select_all(&mut self) {
-        self.area.select_all();
-    }
-
     pub fn is_selecting(&self) -> bool {
         self.area.is_selecting()
     }

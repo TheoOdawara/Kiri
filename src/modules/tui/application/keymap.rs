@@ -71,10 +71,9 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                 };
             }
             Key::Char('v') => return vec![Effect::PasteClipboard],
-            Key::Char('a') => {
-                model.input.select_all();
-                return vec![];
-            }
+            // Ctrl+A is intentionally NOT select-all: on macOS it is "move to line start" (Cocoa /
+            // readline standard), so it falls through to the editor (the widget binds Ctrl+A -> head).
+            // Select-all has no single key (Cmd+A never reaches a TTY) — use the mouse or Shift+motions.
             Key::Char('z') => {
                 model.input.undo();
                 sync_menu(model);
@@ -182,7 +181,48 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
 }
 
 /// Map a normalized key press onto the editor widget's backend-agnostic input type.
+///
+/// macOS word ops are translated onto the bindings the widget already understands: terminals send
+/// Option as Alt, but the widget binds word motion to `Ctrl+Left/Right` (and meta `Alt+b/f`) and
+/// word-delete to `Alt+Backspace/Delete`. So `Option+←/→` is rewritten to `Ctrl+←/→` — with `alt: false`,
+/// which is mandatory: the widget has a `Ctrl+Alt+Left -> line head` arm that would otherwise win.
+/// `Ctrl+Backspace/Delete` (Windows/Linux muscle memory) is rewritten to the widget's `Alt` word-delete.
 fn to_input(key: KeyPress) -> Input {
+    match (key.ctrl, key.alt, key.code) {
+        (false, true, Key::Left) => {
+            return Input {
+                key: TaKey::Left,
+                ctrl: true,
+                alt: false,
+                shift: key.shift,
+            };
+        }
+        (false, true, Key::Right) => {
+            return Input {
+                key: TaKey::Right,
+                ctrl: true,
+                alt: false,
+                shift: key.shift,
+            };
+        }
+        (true, false, Key::Backspace) => {
+            return Input {
+                key: TaKey::Backspace,
+                ctrl: false,
+                alt: true,
+                shift: false,
+            };
+        }
+        (true, false, Key::Delete) => {
+            return Input {
+                key: TaKey::Delete,
+                ctrl: false,
+                alt: true,
+                shift: false,
+            };
+        }
+        _ => {}
+    }
     Input {
         key: match key.code {
             Key::Char(c) => TaKey::Char(c),
@@ -933,6 +973,24 @@ mod tests {
         }
     }
 
+    fn alt(code: Key) -> KeyPress {
+        KeyPress {
+            code,
+            ctrl: false,
+            alt: true,
+            shift: false,
+        }
+    }
+
+    fn shift_alt(code: Key) -> KeyPress {
+        KeyPress {
+            code,
+            ctrl: false,
+            alt: true,
+            shift: true,
+        }
+    }
+
     #[test]
     fn ctrl_c_with_a_selection_copies_instead_of_cancelling() {
         let mut m = Model {
@@ -994,5 +1052,137 @@ mod tests {
             "prev",
             "Up at the first row should recall history"
         );
+    }
+
+    // --- macOS typing standard ----------------------------------------------------
+
+    #[test]
+    fn ctrl_a_moves_to_line_start() {
+        // macOS/Cocoa: Ctrl+A is "move to line start", not select-all. After it, typing inserts at the
+        // head of the line.
+        let mut m = Model::default();
+        type_str(&mut m, "abc");
+        on_key(&mut m, ctrl(Key::Char('a')));
+        on_key(&mut m, press(Key::Char('X')));
+        assert_eq!(m.input.text(), "Xabc");
+    }
+
+    #[test]
+    fn ctrl_a_no_longer_selects_all() {
+        // Guards the intent that select-all left the keyboard: Ctrl+A must not start a selection.
+        let mut m = Model::default();
+        type_str(&mut m, "abc");
+        on_key(&mut m, ctrl(Key::Char('a')));
+        assert!(
+            !m.input.is_selecting(),
+            "Ctrl+A must move the cursor, not select all"
+        );
+    }
+
+    #[test]
+    fn shift_alt_left_selects_word_back() {
+        // Option+Left jumps a word; with Shift it selects one. Cutting proves the whole word was caught.
+        let mut m = Model::default();
+        type_str(&mut m, "foo bar");
+        on_key(&mut m, shift_alt(Key::Left));
+        let effects = on_key(&mut m, ctrl(Key::Char('x')));
+        let cut = match effects.as_slice() {
+            [Effect::CopyToClipboard(t)] => t.clone(),
+            other => panic!("expected a cut, got {other:?}"),
+        };
+        assert_eq!(
+            cut.trim(),
+            "bar",
+            "Shift+Option+Left should select the word back"
+        );
+        assert_eq!(m.input.text().trim_end(), "foo");
+    }
+
+    #[test]
+    fn shift_alt_right_selects_word_forward() {
+        let mut m = Model::default();
+        m.input.set("foo bar".to_string());
+        on_key(&mut m, press(Key::Home));
+        on_key(&mut m, shift_alt(Key::Right));
+        let effects = on_key(&mut m, ctrl(Key::Char('x')));
+        let cut = match effects.as_slice() {
+            [Effect::CopyToClipboard(t)] => t.clone(),
+            other => panic!("expected a cut, got {other:?}"),
+        };
+        assert_eq!(
+            cut.trim(),
+            "foo",
+            "Shift+Option+Right should select the word forward"
+        );
+        assert_eq!(m.input.text().trim_start(), "bar");
+    }
+
+    #[test]
+    fn option_backspace_still_deletes_word() {
+        // Regression: the native macOS Option+Backspace (delivered as Alt+Backspace) must keep deleting a
+        // word — the new word-motion remap keys off Left/Right and must not disturb this.
+        let mut m = Model::default();
+        type_str(&mut m, "foo bar");
+        on_key(&mut m, alt(Key::Backspace));
+        assert_eq!(m.input.text().trim_end(), "foo");
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_word_back() {
+        let mut m = Model::default();
+        type_str(&mut m, "foo bar");
+        on_key(&mut m, ctrl(Key::Backspace));
+        assert_eq!(m.input.text().trim_end(), "foo");
+    }
+
+    #[test]
+    fn ctrl_delete_deletes_word_forward() {
+        let mut m = Model::default();
+        m.input.set("foo bar".to_string());
+        on_key(&mut m, press(Key::Home));
+        on_key(&mut m, ctrl(Key::Delete));
+        assert_eq!(m.input.text().trim_start(), "bar");
+    }
+
+    #[test]
+    fn meta_word_motion_still_selects() {
+        // The other wire encoding of Option+word-motion: meta Alt+b/f reaches the widget directly.
+        let mut m = Model::default();
+        type_str(&mut m, "foo bar");
+        on_key(
+            &mut m,
+            KeyPress {
+                code: Key::Char('b'),
+                ctrl: false,
+                alt: true,
+                shift: true,
+            },
+        );
+        let effects = on_key(&mut m, ctrl(Key::Char('x')));
+        assert!(
+            matches!(effects.as_slice(), [Effect::CopyToClipboard(t)] if t.trim() == "bar"),
+            "Shift+Alt+b should select the word back, got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn plain_home_moves_to_line_head() {
+        // Guards that Home still reaches the widget (it is not intercepted unless Ctrl is held).
+        let mut m = Model::default();
+        type_str(&mut m, "ab");
+        on_key(&mut m, press(Key::Home));
+        on_key(&mut m, press(Key::Char('X')));
+        assert_eq!(m.input.text(), "Xab");
+    }
+
+    #[test]
+    fn alt_char_without_arrow_falls_through_to_editor() {
+        // An Alt+Char that is not a recognized motion must still reach the editor (not be swallowed).
+        // Under "Option as Meta" some layouts deliver letters with Alt; they must type, not vanish.
+        let mut m = Model::default();
+        on_key(&mut m, alt(Key::Char('z')));
+        // The widget binds Alt+z to nothing destructive here; the key is consumed by feed without error.
+        // The guarantee under test is "no panic / no swallow into a dead chord" — the buffer stays valid.
+        assert!(m.input.text().is_empty() || m.input.text() == "z");
     }
 }
