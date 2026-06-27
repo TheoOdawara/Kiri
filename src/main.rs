@@ -11,7 +11,9 @@ use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::modules::sync::application::sync_service::SyncService;
 use crate::modules::sync::infrastructure::git_cli::GitCli;
-use crate::shared::infra::config::{Cli, CliCommand, Settings, SyncAction, kiri_global_dir};
+use crate::shared::infra::config::{
+    Cli, CliCommand, Settings, SyncAction, ensure_private_dir, kiri_global_dir,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -28,6 +30,10 @@ async fn main() -> anyhow::Result<()> {
 /// printing a one-line summary. Never needs a terminal, so it works over SSH and in scripts.
 async fn run_sync(action: SyncAction) -> anyhow::Result<()> {
     let global_dir = kiri_global_dir();
+    // Harden the harness home before any store opens it: the interactive boot hardens `~/.kiri` (0700)
+    // via `Settings::resolve`, but this headless route bypasses that, so the same owner-only guarantee
+    // must be applied here or `kiri sync` would create `~/.kiri` world-traversable (0755).
+    ensure_private_dir(&global_dir)?;
     let config_path = global_dir.join("config.toml");
     let shared_db = global_dir.join("memory").join("shared.db");
     let memory = SqliteSharedMemory::new(shared_db)?;

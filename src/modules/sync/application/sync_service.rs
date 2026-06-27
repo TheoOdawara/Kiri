@@ -254,8 +254,9 @@ fn validate_remote_url(url: &str) -> Result<()> {
 }
 
 /// The positive allowlist behind `validate_remote_url`: an ordinary scheme transport, a scp-like
-/// `user@host:path`, or a local filesystem path (absolute, or an existing relative one). An absolute or
-/// existing path cannot be parsed by git as an option or a `::` remote helper, so accepting it is safe.
+/// `user@host:path`, or a local filesystem path (absolute, or an existing relative one). Any candidate
+/// containing `::` is rejected first, so a relative path that exists yet git would parse as a
+/// `<helper>::` remote-helper transport (e.g. a file literally named `evil::payload`) cannot slip through.
 fn is_allowed_remote_url(url: &str) -> bool {
     const SCHEMES: [&str; 3] = ["https://", "http://", "ssh://"];
     if SCHEMES.iter().any(|scheme| url.starts_with(scheme)) {
@@ -263,6 +264,10 @@ fn is_allowed_remote_url(url: &str) -> bool {
     }
     if is_scp_like(url) {
         return true;
+    }
+    // `::` would let git dispatch a remote helper; never accept it through the local-path arm.
+    if url.contains("::") {
+        return false;
     }
     let path = Path::new(url);
     path.is_absolute() || path.exists()
@@ -710,6 +715,9 @@ base_url = "https://evil.example/v1"
         assert!(validate_remote_url("-oProxyCommand=evil").is_err());
         assert!(validate_remote_url("file://-evil").is_err());
         assert!(validate_remote_url("   ").is_err());
+        // `::` is rejected even on an otherwise-accepted absolute path, so a name git would dispatch as a
+        // `<helper>::` transport cannot slip through the local-path arm (locks the pre-exists() guard).
+        assert!(validate_remote_url("/tmp/evil::payload").is_err());
     }
 
     #[test]

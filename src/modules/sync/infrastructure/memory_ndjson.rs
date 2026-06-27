@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use tokio::fs;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::domain::entry::MemoryEntry;
@@ -93,13 +93,15 @@ pub async fn import(memory: &dyn SharedMemory, path: &Path) -> Result<MergeRepor
         )));
     }
 
-    let mut lines = BufReader::new(fs::File::open(path).await?).lines();
+    // `len()` is advisory, so bound the bytes actually read with `take`: a hard ceiling that even a single
+    // unterminated line cannot allocate past, no matter what the stat reported.
+    let file = fs::File::open(path).await?;
+    let mut lines = BufReader::new(file.take(MAX_IMPORT_BYTES)).lines();
     let mut report = MergeReport {
         merged: 0,
         skipped: 0,
     };
-    // Defense-in-depth: `len()` is advisory, so bound the bytes actually streamed too — no file can drive
-    // an unbounded read even if it slipped past the up-front cap.
+    // Belt-and-suspenders over the `take` ceiling: surface a clear over-cap error instead of a silent EOF.
     let mut bytes_read: u64 = 0;
     while let Some(line) = lines.next_line().await.map_err(ser)? {
         // `next_line` strips the terminator; count it back so the running total tracks the on-disk size.
@@ -141,6 +143,27 @@ pub async fn import(memory: &dyn SharedMemory, path: &Path) -> Result<MergeRepor
 async fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     use tokio::io::AsyncWriteExt;
+
+    // Refuse to follow a symlink/special file at the target: the sync work-tree is materialized by
+    // `git reset --hard` from an untrusted remote, so a committed symlink here would let this write follow
+    // it out of the tree (arbitrary truncate/overwrite). Mirrors `import`'s symlink_metadata guard; a
+    // missing path is fine (created fresh below).
+    match fs::symlink_metadata(path).await {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(AgentError::Memory(format!(
+                "refusing to write through a non-regular sync path (symlink or special file): {}",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(AgentError::Memory(format!(
+                "stat {}: {error}",
+                path.display()
+            )));
+        }
+    }
 
     // tokio's `OpenOptions::mode` is an inherent `cfg(unix)` method, so no `OpenOptionsExt` import.
     let mut file = fs::OpenOptions::new()
@@ -331,6 +354,34 @@ mod tests {
         assert_eq!(
             mode, 0o600,
             "re-export must coerce 0644 down to 0600, got {mode:o}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn export_refuses_a_symlinked_target() {
+        let dir = TempDir::new().unwrap();
+        let src = memory(&dir, "src.db").await;
+        src.save(&entry("a", "alpha", "2026-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+
+        // A hostile remote can materialize the export path as a symlink to an outside file (e.g. ~/.bashrc)
+        // via `git reset --hard`; export must refuse to follow it rather than truncate/overwrite the target.
+        let outside = dir.path().join("victim");
+        std::fs::write(&outside, b"do not clobber\n").unwrap();
+        let path = dir.path().join("memory.ndjson");
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+
+        let error = export(&src, &path).await.unwrap_err();
+        assert!(
+            matches!(&error, AgentError::Memory(message) if message.contains("non-regular")),
+            "export through a symlink must be refused, got {error:?}"
+        );
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"do not clobber\n",
+            "the symlink target must be untouched"
         );
     }
 }

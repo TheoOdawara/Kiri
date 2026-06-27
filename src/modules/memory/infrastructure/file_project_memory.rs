@@ -55,10 +55,16 @@ fn contained_join(root: &Path, rel: &str) -> Option<PathBuf> {
 /// components plus a hostile committed symlink to `~/.ssh/id_rsa` would otherwise be followed by the read.
 /// Mirrors the sandbox's `resolve_existing` (lexical join → canonicalize → assert within root).
 async fn resolve_contained(root: &Path, rel: &str) -> Option<PathBuf> {
-    let candidate = contained_join(root, rel)?;
     let real_root = fs::canonicalize(root).await.ok()?;
+    resolve_within(&real_root, root, rel).await
+}
+
+/// The inner resolve against an already-canonicalized `real_root`, so a caller iterating many entries
+/// (`search`) canonicalizes the root once for the whole loop instead of per entry.
+async fn resolve_within(real_root: &Path, root: &Path, rel: &str) -> Option<PathBuf> {
+    let candidate = contained_join(root, rel)?;
     let real = fs::canonicalize(&candidate).await.ok()?;
-    real.starts_with(&real_root).then_some(real)
+    real.starts_with(real_root).then_some(real)
 }
 
 /// Read at most `MAX_ENTRY_BYTES` of `path` as lossy UTF-8. The bounded read — not a post-hoc slice — is
@@ -332,6 +338,12 @@ impl ProjectMemory for FileProjectMemory {
             index.entries.values().map(|e| e.path.clone()).collect()
         };
 
+        // Canonicalize the root once for the whole loop; if the memory dir is unresolvable there is
+        // nothing to read.
+        let Ok(real_root) = fs::canonicalize(&self.root).await else {
+            return Ok(Vec::new());
+        };
+
         let mut results = Vec::new();
         for rel in rels {
             if results.len() >= limit {
@@ -339,7 +351,7 @@ impl ProjectMemory for FileProjectMemory {
             }
             // Skip an entry whose stored path escapes the memory root (corrupt/merged index or a hostile
             // symlink) rather than reading outside the dir; one bad entry must not blank out other matches.
-            let Some(path) = resolve_contained(&self.root, &rel).await else {
+            let Some(path) = resolve_within(&real_root, &self.root, &rel).await else {
                 continue;
             };
             // Deliberately skip an unreadable entry rather than fail the whole search: one corrupt or
@@ -666,8 +678,11 @@ mod tests {
 
     #[tokio::test]
     async fn write_atomic_writes_overwrites_and_leaves_no_temp() {
-        // Directly lock the temp-then-rename contract the body write depends on: reverting `write_atomic`
-        // to a plain non-atomic `fs::write` would break the overwrite/no-temp guarantees asserted here.
+        // Guard `write_atomic`'s observable happy-path contract: it writes new content, overwrites in
+        // place, and leaves no `.kiri-tmp` sibling. Crash-mid-write atomicity itself rests on the OS rename
+        // being atomic and is not hermetically testable here; this pins the temp-name/rename plumbing the
+        // body write routes through (a plain `fs::write` would also pass, so this is a plumbing lock, not an
+        // atomicity proof).
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("index.json");
 
