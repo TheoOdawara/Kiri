@@ -6,9 +6,7 @@ use crate::modules::sync::application::work_tree::SyncWorkTree;
 use crate::modules::sync::domain::config_trust::risky_config_changes;
 use crate::modules::sync::infrastructure::memory_ndjson;
 use crate::shared::infra::config;
-use crate::shared::kernel::error::AgentError;
-
-type Result<T> = std::result::Result<T, AgentError>;
+use crate::shared::kernel::error::{AgentError, AgentResult};
 
 /// The files the sync work-tree holds. Secrets (`credentials.json`, keyring) are NEVER among them — only
 /// the non-secret `config.toml` and the memory NDJSON are written into the tree.
@@ -60,7 +58,7 @@ impl<'a> SyncService<'a> {
     /// Initialize the sync work-tree and point it at `remote_url`. Idempotent: re-running updates the
     /// remote URL rather than failing. The URL is validated before it reaches `git remote add` (which
     /// has no `--` end-of-options marker), so a hostile transport cannot smuggle command execution.
-    pub async fn init(&self, remote_url: &str) -> Result<String> {
+    pub async fn init(&self, remote_url: &str) -> AgentResult<String> {
         self.validate_remote_url(remote_url).await?;
         let dir = self.sync_dir();
         self.work_tree.ensure_dir(&dir).await?;
@@ -84,7 +82,7 @@ impl<'a> SyncService<'a> {
     }
 
     /// Export the profile, commit, and push. A no-op commit (nothing changed) is not an error.
-    pub async fn push(&self) -> Result<String> {
+    pub async fn push(&self) -> AgentResult<String> {
         let dir = self.require_initialized().await?;
         let count = self.export_profile(&dir).await?;
         self.git_ok(&["add", "-A"], &dir).await?;
@@ -114,7 +112,7 @@ impl<'a> SyncService<'a> {
 
     /// Pull and merge: fetch the latest, merge memory last-write-wins, and apply config unless the change
     /// is risky (a provider base_url change or a sandbox downgrade) and `force` is not set.
-    pub async fn pull(&self, force: bool) -> Result<String> {
+    pub async fn pull(&self, force: bool) -> AgentResult<String> {
         let dir = self.require_initialized().await?;
         // Fetch then hard-reset the work-tree to the remote. The work-tree holds only export artifacts
         // (NDJSON + a config copy), so resetting is safe: the live memory database is outside the tree and
@@ -180,7 +178,7 @@ impl<'a> SyncService<'a> {
     }
 
     /// The git status of the sync work-tree.
-    pub async fn status(&self) -> Result<String> {
+    pub async fn status(&self) -> AgentResult<String> {
         let dir = self.require_initialized().await?;
         let output = self
             .git
@@ -206,7 +204,7 @@ impl<'a> SyncService<'a> {
     }
 
     /// Write the non-secret profile into the work-tree, returning the exported memory-entry count.
-    async fn export_profile(&self, dir: &Path) -> Result<usize> {
+    async fn export_profile(&self, dir: &Path) -> AgentResult<usize> {
         self.work_tree
             .write(&dir.join(".gitignore"), GITIGNORE)
             .await?;
@@ -218,7 +216,7 @@ impl<'a> SyncService<'a> {
         memory_ndjson::export(self.memory, &dir.join(MEMORY_FILE)).await
     }
 
-    async fn require_initialized(&self) -> Result<PathBuf> {
+    async fn require_initialized(&self) -> AgentResult<PathBuf> {
         let dir = self.sync_dir();
         if !self.work_tree.exists(&dir.join(".git")).await? {
             return Err(AgentError::Sync(
@@ -228,7 +226,7 @@ impl<'a> SyncService<'a> {
         Ok(dir)
     }
 
-    async fn git_ok(&self, args: &[&str], cwd: &Path) -> Result<()> {
+    async fn git_ok(&self, args: &[&str], cwd: &Path) -> AgentResult<()> {
         let output = self.git.run(args, cwd).await?;
         if output.success {
             Ok(())
@@ -248,7 +246,7 @@ impl<'a> SyncService<'a> {
     /// validation is the defense — a positive ALLOWLIST: accept only the ordinary transports
     /// (https/http/ssh, the scp-like `user@host:path`, and a local filesystem path) and reject everything
     /// else, so every `::` remote-helper transport (in any case) and every option-like input is rejected.
-    async fn validate_remote_url(&self, url: &str) -> Result<()> {
+    async fn validate_remote_url(&self, url: &str) -> AgentResult<()> {
         let url = url.trim();
         if url.is_empty() {
             return Err(AgentError::Sync("sync remote URL is empty".to_string()));
@@ -267,7 +265,7 @@ impl<'a> SyncService<'a> {
     /// branch that touches the filesystem, routed through the work-tree port). Any candidate containing
     /// `::` is rejected first, so a relative path that exists yet git would parse as a `<helper>::`
     /// remote-helper transport (e.g. a file literally named `evil::payload`) cannot slip through.
-    async fn is_allowed_remote_url(&self, url: &str) -> Result<bool> {
+    async fn is_allowed_remote_url(&self, url: &str) -> AgentResult<bool> {
         const SCHEMES: [&str; 3] = ["https://", "http://", "ssh://"];
         if SCHEMES.iter().any(|scheme| url.starts_with(scheme)) {
             return Ok(true);
@@ -376,7 +374,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Git for FakeGit {
-        async fn run(&self, args: &[&str], cwd: &Path) -> Result<GitOutput> {
+        async fn run(&self, args: &[&str], cwd: &Path) -> AgentResult<GitOutput> {
             self.calls.lock().unwrap().push(args.join(" "));
             if args.first() == Some(&"init") {
                 std::fs::create_dir_all(cwd.join(".git")).unwrap();

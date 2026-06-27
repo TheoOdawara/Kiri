@@ -2,9 +2,7 @@ use crate::modules::memory::application::project_memory::ProjectMemory;
 use crate::modules::memory::application::project_store::ProjectStore;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::modules::memory::infrastructure::file_project_memory::FileProjectMemory;
-use crate::shared::kernel::error::AgentError;
-
-type Result<T> = std::result::Result<T, AgentError>;
+use crate::shared::kernel::error::AgentResult;
 
 /// Application-level adapter exposing project memory as the reduced `ProjectStore` use-case surface,
 /// delegating to the file-backed `FileProjectMemory`. `available` records whether `init` succeeded, so
@@ -22,23 +20,23 @@ impl FileProjectStore {
 
 #[async_trait::async_trait]
 impl ProjectStore for FileProjectStore {
-    async fn save(&self, entry: MemoryEntry) -> Result<()> {
+    async fn save(&self, entry: MemoryEntry) -> AgentResult<()> {
         self.inner.save(&entry).await
     }
 
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         self.inner.search(query, limit).await
     }
 
-    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         self.inner.list_by_kind(kind, limit).await
     }
 
-    async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         self.inner.list_by_tag(tag, limit).await
     }
 
-    async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> Result<()> {
+    async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> AgentResult<()> {
         self.inner.save_embedding(entry_id, model, vector).await
     }
 
@@ -46,7 +44,7 @@ impl ProjectStore for FileProjectStore {
         &self,
         model: &str,
         limit: usize,
-    ) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+    ) -> AgentResult<Vec<(MemoryEntry, Vec<f32>)>> {
         self.inner.embedded_candidates(model, limit).await
     }
 

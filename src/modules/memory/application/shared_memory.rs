@@ -1,7 +1,5 @@
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
-use crate::shared::kernel::error::AgentError;
-
-type Result<T> = std::result::Result<T, AgentError>;
+use crate::shared::kernel::error::AgentResult;
 
 /// Persistence port for cross-project shared memory.
 /// Implemented by `SqliteSharedMemory` (SQLite at `~/.kiri/memory/shared.db`).
@@ -11,35 +9,39 @@ type Result<T> = std::result::Result<T, AgentError>;
 #[async_trait::async_trait]
 pub trait SharedMemory: Send + Sync {
     /// Initialize the storage (create DB, tables, indexes).
-    async fn init(&self) -> Result<()>;
+    async fn init(&self) -> AgentResult<()>;
 
     /// Save an entry (create or update by ID).
-    async fn save(&self, entry: &MemoryEntry) -> Result<()>;
+    async fn save(&self, entry: &MemoryEntry) -> AgentResult<()>;
 
     /// Load an entry by ID.
-    async fn load(&self, id: &str) -> Result<Option<MemoryEntry>>;
+    async fn load(&self, id: &str) -> AgentResult<Option<MemoryEntry>>;
 
     /// Delete an entry by ID.
-    async fn delete(&self, id: &str) -> Result<bool>;
+    async fn delete(&self, id: &str) -> AgentResult<bool>;
 
     /// Search entries by text query.
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
     /// List all entries (with pagination).
-    async fn list(&self, offset: usize, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn list(&self, offset: usize, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
     /// List entries by kind.
-    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
     /// List entries by tag.
-    async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
     /// List entries for a specific project (by project_id).
-    async fn list_by_project(&self, project_id: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn list_by_project(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<MemoryEntry>>;
 
     /// Count the total number of entries.
-    async fn count(&self) -> Result<usize>;
+    async fn count(&self) -> AgentResult<usize>;
 
     /// Count entries for a project.
-    async fn count_by_project(&self, project_id: &str) -> Result<usize>;
+    async fn count_by_project(&self, project_id: &str) -> AgentResult<usize>;
 }

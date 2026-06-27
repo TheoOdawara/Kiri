@@ -9,11 +9,9 @@ use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, NullSink, TurnRequest,
 };
-use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::error::{AgentError, AgentResult};
 use crate::shared::kernel::message::Message;
 use crate::shared::kernel::role::Role;
-
-type Result<T> = std::result::Result<T, AgentError>;
 
 /// One entry the model proposes to remember, parsed from its JSON output.
 #[derive(Deserialize)]
@@ -92,7 +90,7 @@ impl Distiller {
         provider: &dyn CompletionProvider,
         model: &str,
         conversation: &[Message],
-    ) -> Result<DistillReport> {
+    ) -> AgentResult<DistillReport> {
         let transcript = render_transcript(conversation, self.max_transcript_bytes);
         if transcript.trim().is_empty() {
             return Ok(DistillReport::empty());
@@ -232,7 +230,7 @@ fn render_transcript(messages: &[Message], max_bytes: usize) -> String {
 
 /// Extract the JSON array from the model's output (tolerating code fences or stray prose around it) and
 /// parse it. No array at all means "nothing to learn" (an empty result); a malformed array is an error.
-fn parse_entries(content: &str) -> Result<Vec<DistilledEntry>> {
+fn parse_entries(content: &str) -> AgentResult<Vec<DistilledEntry>> {
     let (Some(start), Some(end)) = (content.find('['), content.rfind(']')) else {
         return Ok(Vec::new());
     };
@@ -298,7 +296,7 @@ mod tests {
             &self,
             _request: TurnRequest<'_>,
             _sink: &mut dyn EventSink,
-        ) -> Result<CompletedTurn> {
+        ) -> AgentResult<CompletedTurn> {
             Ok(CompletedTurn {
                 content: self.content.clone(),
                 tool_calls: Vec::new(),

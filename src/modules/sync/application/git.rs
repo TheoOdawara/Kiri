@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::error::AgentResult;
 
 /// The captured result of a git invocation.
 pub struct GitOutput {
@@ -16,5 +16,5 @@ pub struct GitOutput {
 pub trait Git: Send + Sync {
     /// Run `git <args>` in `cwd`, returning its captured output. A non-zero exit is reported via
     /// `GitOutput.success`, not as an `Err` — only a failure to launch/await the process is `Err`.
-    async fn run(&self, args: &[&str], cwd: &Path) -> Result<GitOutput, AgentError>;
+    async fn run(&self, args: &[&str], cwd: &Path) -> AgentResult<GitOutput>;
 }

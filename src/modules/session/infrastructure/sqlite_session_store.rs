@@ -8,11 +8,9 @@ use crate::modules::session::application::session_store::SessionStore;
 use crate::modules::session::domain::session::{Session, SessionSummary};
 use crate::modules::session::infrastructure::message_dto::StoredMessage;
 use crate::shared::infra::sqlite::{DB_OP_TIMEOUT, lock, open_with_parent, run_blocking};
-use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::error::{AgentError, AgentResult};
 use crate::shared::kernel::message::Message;
 use crate::shared::kernel::time::now_rfc3339;
-
-type Result<T> = std::result::Result<T, AgentError>;
 
 /// Conversation persistence in a single SQLite database (`~/.kiri/sessions.db`). Mirrors
 /// `SqliteSharedMemory`: the blocking `rusqlite` connection lives behind `Arc<Mutex<_>>` and every query
@@ -25,7 +23,7 @@ pub struct SqliteSessionStore {
 impl SqliteSessionStore {
     /// Open (creating it and its parent directory if needed) the sessions database. Call `init` for the
     /// schema. A store opened this way reports available.
-    pub fn new(db_path: PathBuf) -> Result<Self> {
+    pub fn new(db_path: PathBuf) -> AgentResult<Self> {
         let conn = open_with_parent(&db_path, AgentError::session)?;
         // ~/.kiri/sessions.db is global across every workspace and terminal, so a second running Kiri
         // can contend for a write. SQLITE_BUSY returns instantly (the op timeout cannot wait it out), so
@@ -43,7 +41,7 @@ impl SqliteSessionStore {
     /// An ephemeral, inert in-memory store used as the degraded fallback when the on-disk database
     /// cannot be opened or initialized — the harness still wires a (unavailable) store instead of
     /// failing to start. Reports `is_available() == false`.
-    pub fn in_memory_inert() -> Result<Self> {
+    pub fn in_memory_inert() -> AgentResult<Self> {
         let conn = Connection::open_in_memory().map_err(AgentError::session)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -54,9 +52,9 @@ impl SqliteSessionStore {
 
 #[async_trait::async_trait]
 impl SessionStore for SqliteSessionStore {
-    async fn init(&self) -> Result<()> {
+    async fn init(&self) -> AgentResult<()> {
         let conn = self.conn.clone();
-        run_blocking(move || -> Result<()> {
+        run_blocking(move || -> AgentResult<()> {
             let conn = lock(&conn, AgentError::session)?;
             // foreign_keys is per-connection; set it so the messages cascade on session delete.
             conn.execute_batch(
@@ -94,11 +92,11 @@ impl SessionStore for SqliteSessionStore {
         .await
     }
 
-    async fn create(&self, project_id: &str) -> Result<Session> {
+    async fn create(&self, project_id: &str) -> AgentResult<Session> {
         let conn = self.conn.clone();
         let project_id = project_id.to_string();
         run_blocking(
-            move || -> Result<Session> {
+            move || -> AgentResult<Session> {
                 let id = Uuid::now_v7().to_string();
                 let now = now_rfc3339();
                 let conn = lock(&conn, AgentError::session)?;
@@ -122,7 +120,7 @@ impl SessionStore for SqliteSessionStore {
         .await
     }
 
-    async fn append_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
+    async fn append_messages(&self, session_id: &str, messages: &[Message]) -> AgentResult<()> {
         if messages.is_empty() {
             return Ok(());
         }
@@ -138,9 +136,9 @@ impl SessionStore for SqliteSessionStore {
                     serde_json::to_string(&dto.tool_calls).map_err(AgentError::session)?;
                 Ok((dto.role, dto.content, images, tool_calls, dto.tool_call_id))
             })
-            .collect::<Result<_>>()?;
+            .collect::<AgentResult<_>>()?;
         run_blocking(
-            move || -> Result<()> {
+            move || -> AgentResult<()> {
                 let now = now_rfc3339();
                 let mut guard = lock(&conn, AgentError::session)?;
                 // IMMEDIATE takes the write lock before the MAX(ordinal) read, so a second process cannot read
@@ -189,12 +187,12 @@ impl SessionStore for SqliteSessionStore {
         .await
     }
 
-    async fn set_title(&self, session_id: &str, title: &str) -> Result<()> {
+    async fn set_title(&self, session_id: &str, title: &str) -> AgentResult<()> {
         let conn = self.conn.clone();
         let session_id = session_id.to_string();
         let title = title.to_string();
         run_blocking(
-            move || -> Result<()> {
+            move || -> AgentResult<()> {
                 let conn = lock(&conn, AgentError::session)?;
                 conn.execute(
                     "UPDATE sessions SET title = ?2 WHERE id = ?1",
@@ -208,7 +206,7 @@ impl SessionStore for SqliteSessionStore {
         .await
     }
 
-    async fn latest_for_project(&self, project_id: &str) -> Result<Option<SessionSummary>> {
+    async fn latest_for_project(&self, project_id: &str) -> AgentResult<Option<SessionSummary>> {
         let mut summaries = self.list_for_project(project_id, 1).await?;
         Ok(summaries.drain(..).next())
     }
@@ -217,11 +215,11 @@ impl SessionStore for SqliteSessionStore {
         &self,
         project_id: &str,
         limit: usize,
-    ) -> Result<Vec<SessionSummary>> {
+    ) -> AgentResult<Vec<SessionSummary>> {
         let conn = self.conn.clone();
         let project_id = project_id.to_string();
         run_blocking(
-            move || -> Result<Vec<SessionSummary>> {
+            move || -> AgentResult<Vec<SessionSummary>> {
                 let conn = lock(&conn, AgentError::session)?;
                 let mut stmt = conn
                     .prepare(
@@ -254,11 +252,11 @@ impl SessionStore for SqliteSessionStore {
         .await
     }
 
-    async fn load(&self, session_id: &str) -> Result<Option<Session>> {
+    async fn load(&self, session_id: &str) -> AgentResult<Option<Session>> {
         let conn = self.conn.clone();
         let session_id = session_id.to_string();
         run_blocking(
-            move || -> Result<Option<Session>> {
+            move || -> AgentResult<Option<Session>> {
                 let conn = lock(&conn, AgentError::session)?;
                 let header = match conn.query_row(
                     "SELECT project_id, title, created_at, updated_at FROM sessions WHERE id = ?1",
@@ -334,11 +332,11 @@ impl SessionStore for SqliteSessionStore {
         .await
     }
 
-    async fn delete(&self, session_id: &str) -> Result<bool> {
+    async fn delete(&self, session_id: &str) -> AgentResult<bool> {
         let conn = self.conn.clone();
         let session_id = session_id.to_string();
         run_blocking(
-            move || -> Result<bool> {
+            move || -> AgentResult<bool> {
                 let conn = lock(&conn, AgentError::session)?;
                 // Delete child rows explicitly: ON DELETE CASCADE needs the per-connection PRAGMA, which is
                 // only guaranteed on the init connection — this is unconditionally correct.

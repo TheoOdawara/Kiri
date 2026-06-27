@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use tokio::fs;
 
-use crate::shared::kernel::error::AgentError;
-
-type Result<T> = std::result::Result<T, AgentError>;
+use crate::shared::kernel::error::AgentResult;
 
 /// Caps that keep `consult_docs` bounded: how many files to scan, how large a file to read, and how
 /// wide an excerpt to return around a match. The docs tree is a fallback knowledge source, not a
@@ -43,7 +41,7 @@ impl DocsLibrary {
 
     /// Search the docs tree for the query's terms, returning up to `limit` ranked excerpts. An absent
     /// or empty docs tree, or a blank query, yields an empty result rather than an error.
-    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<DocMatch>> {
+    pub async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<DocMatch>> {
         let terms: Vec<String> = query
             .split_whitespace()
             .map(|t| t.to_lowercase())
@@ -81,7 +79,7 @@ impl DocsLibrary {
 
     /// Collect Markdown files under the docs root (depth-first via a LIFO stack), capped at
     /// `MAX_FILES_SCANNED`.
-    async fn collect_markdown_files(&self) -> Result<Vec<PathBuf>> {
+    async fn collect_markdown_files(&self) -> AgentResult<Vec<PathBuf>> {
         let mut files = Vec::new();
         let mut dirs = vec![self.root.clone()];
         while let Some(dir) = dirs.pop() {

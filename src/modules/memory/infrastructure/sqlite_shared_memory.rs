@@ -6,9 +6,7 @@ use rusqlite::{Connection, Row, params};
 use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::shared::infra::sqlite::{lock, open_with_parent, run_blocking};
-use crate::shared::kernel::error::AgentError;
-
-type Result<T> = std::result::Result<T, AgentError>;
+use crate::shared::kernel::error::{AgentError, AgentResult};
 
 const SELECT_COLUMNS: &str =
     "id, kind, content, tags, project_id, created_at, updated_at FROM entries";
@@ -23,7 +21,7 @@ pub struct SqliteSharedMemory {
 impl SqliteSharedMemory {
     /// Open (creating it and its parent directory if needed) the shared database. Does not yet create
     /// the schema — call `init` for that.
-    pub fn new(db_path: PathBuf) -> Result<Self> {
+    pub fn new(db_path: PathBuf) -> AgentResult<Self> {
         let conn = open_with_parent(&db_path, AgentError::memory)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -32,7 +30,7 @@ impl SqliteSharedMemory {
 
     /// Open an ephemeral in-memory database. Used as an inert fallback when the on-disk store cannot
     /// be opened, so the harness still wires a (unavailable) store instead of failing to start.
-    pub fn in_memory() -> Result<Self> {
+    pub fn in_memory() -> AgentResult<Self> {
         let conn = Connection::open_in_memory().map_err(AgentError::memory)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -40,14 +38,19 @@ impl SqliteSharedMemory {
     }
 
     /// Persist (or replace) the embedding vector for an entry. Stored as little-endian f32 bytes.
-    pub async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> Result<()> {
+    pub async fn save_embedding(
+        &self,
+        entry_id: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> AgentResult<()> {
         let conn = self.conn.clone();
         let entry_id = entry_id.to_string();
         let model = model.to_string();
         let dim = vector.len() as i64;
         let blob = vec_to_blob(vector);
         run_blocking(
-            move || -> Result<()> {
+            move || -> AgentResult<()> {
                 let conn = lock(&conn, AgentError::memory)?;
                 conn.execute(
                     "INSERT INTO entry_embeddings (entry_id, model, dim, vector)
@@ -70,11 +73,11 @@ impl SqliteSharedMemory {
         &self,
         model: &str,
         limit: usize,
-    ) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+    ) -> AgentResult<Vec<(MemoryEntry, Vec<f32>)>> {
         let conn = self.conn.clone();
         let model = model.to_string();
         run_blocking(
-            move || -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+            move || -> AgentResult<Vec<(MemoryEntry, Vec<f32>)>> {
                 let conn = lock(&conn, AgentError::memory)?;
                 let mut stmt = conn
                     .prepare(
@@ -137,9 +140,9 @@ async fn query_entries(
     conn: Arc<Mutex<Connection>>,
     sql: String,
     bind: Vec<Box<dyn rusqlite::ToSql + Send>>,
-) -> Result<Vec<MemoryEntry>> {
+) -> AgentResult<Vec<MemoryEntry>> {
     run_blocking(
-        move || -> Result<Vec<MemoryEntry>> {
+        move || -> AgentResult<Vec<MemoryEntry>> {
             let conn = lock(&conn, AgentError::memory)?;
             let mut stmt = conn.prepare(&sql).map_err(AgentError::memory)?;
             let params = rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref()));
@@ -159,10 +162,10 @@ async fn query_entries(
 
 #[async_trait::async_trait]
 impl SharedMemory for SqliteSharedMemory {
-    async fn init(&self) -> Result<()> {
+    async fn init(&self) -> AgentResult<()> {
         let conn = self.conn.clone();
         run_blocking(
-            move || -> Result<()> {
+            move || -> AgentResult<()> {
                 let conn = lock(&conn, AgentError::memory)?;
                 conn.execute_batch(
                     "CREATE TABLE IF NOT EXISTS entries (
@@ -191,11 +194,11 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn save(&self, entry: &MemoryEntry) -> Result<()> {
+    async fn save(&self, entry: &MemoryEntry) -> AgentResult<()> {
         let conn = self.conn.clone();
         let entry = entry.clone();
         run_blocking(
-            move || -> Result<()> {
+            move || -> AgentResult<()> {
                 let tags = serde_json::to_string(&entry.tags).map_err(AgentError::memory)?;
                 let conn = lock(&conn, AgentError::memory)?;
                 conn.execute(
@@ -221,11 +224,11 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn load(&self, id: &str) -> Result<Option<MemoryEntry>> {
+    async fn load(&self, id: &str) -> AgentResult<Option<MemoryEntry>> {
         let conn = self.conn.clone();
         let id = id.to_string();
         run_blocking(
-            move || -> Result<Option<MemoryEntry>> {
+            move || -> AgentResult<Option<MemoryEntry>> {
                 let conn = lock(&conn, AgentError::memory)?;
                 let mut stmt = conn
                     .prepare(&format!("SELECT {SELECT_COLUMNS} WHERE id = ?1"))
@@ -243,11 +246,11 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn delete(&self, id: &str) -> Result<bool> {
+    async fn delete(&self, id: &str) -> AgentResult<bool> {
         let conn = self.conn.clone();
         let id = id.to_string();
         run_blocking(
-            move || -> Result<bool> {
+            move || -> AgentResult<bool> {
                 let conn = lock(&conn, AgentError::memory)?;
                 let affected = conn
                     .execute("DELETE FROM entries WHERE id = ?1", params![id])
@@ -259,7 +262,7 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let like = format!("%{}%", query.to_lowercase());
         query_entries(
             self.conn.clone(),
@@ -272,7 +275,7 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn list(&self, offset: usize, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list(&self, offset: usize, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         query_entries(
             self.conn.clone(),
             format!("SELECT {SELECT_COLUMNS} ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2"),
@@ -281,7 +284,7 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         query_entries(
             self.conn.clone(),
             format!("SELECT {SELECT_COLUMNS} WHERE kind = ?1 ORDER BY updated_at DESC LIMIT ?2"),
@@ -290,7 +293,7 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         // Tags are stored as a JSON array; match the quoted token to avoid prefix collisions.
         let like = format!("%\"{tag}\"%");
         query_entries(
@@ -301,7 +304,11 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn list_by_project(&self, project_id: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_project(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<MemoryEntry>> {
         query_entries(
             self.conn.clone(),
             format!(
@@ -312,10 +319,10 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn count(&self) -> Result<usize> {
+    async fn count(&self) -> AgentResult<usize> {
         let conn = self.conn.clone();
         run_blocking(
-            move || -> Result<usize> {
+            move || -> AgentResult<usize> {
                 let conn = lock(&conn, AgentError::memory)?;
                 let count: i64 = conn
                     .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
@@ -327,11 +334,11 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn count_by_project(&self, project_id: &str) -> Result<usize> {
+    async fn count_by_project(&self, project_id: &str) -> AgentResult<usize> {
         let conn = self.conn.clone();
         let project_id = project_id.to_string();
         run_blocking(
-            move || -> Result<usize> {
+            move || -> AgentResult<usize> {
                 let conn = lock(&conn, AgentError::memory)?;
                 let count: i64 = conn
                     .query_row(

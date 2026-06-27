@@ -2,9 +2,7 @@ use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::application::shared_store::SharedStore;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
-use crate::shared::kernel::error::AgentError;
-
-type Result<T> = std::result::Result<T, AgentError>;
+use crate::shared::kernel::error::AgentResult;
 
 /// Application-level adapter exposing shared memory as the `SharedStore` use-case surface, delegating
 /// to the SQLite-backed `SqliteSharedMemory`. `available` records whether `init` succeeded.
@@ -21,27 +19,31 @@ impl SqliteSharedStore {
 
 #[async_trait::async_trait]
 impl SharedStore for SqliteSharedStore {
-    async fn save(&self, entry: MemoryEntry) -> Result<()> {
+    async fn save(&self, entry: MemoryEntry) -> AgentResult<()> {
         self.inner.save(&entry).await
     }
 
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         self.inner.search(query, limit).await
     }
 
-    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         self.inner.list_by_kind(kind, limit).await
     }
 
-    async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         self.inner.list_by_tag(tag, limit).await
     }
 
-    async fn list_by_project(&self, project_id: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_project(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<MemoryEntry>> {
         self.inner.list_by_project(project_id, limit).await
     }
 
-    async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> Result<()> {
+    async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> AgentResult<()> {
         self.inner.save_embedding(entry_id, model, vector).await
     }
 
@@ -49,7 +51,7 @@ impl SharedStore for SqliteSharedStore {
         &self,
         model: &str,
         limit: usize,
-    ) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+    ) -> AgentResult<Vec<(MemoryEntry, Vec<f32>)>> {
         self.inner.embedded_candidates(model, limit).await
     }
 

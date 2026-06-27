@@ -5,9 +5,7 @@ use std::time::Duration;
 use crate::modules::memory::domain::entry::MemoryEntry;
 use crate::modules::memory::domain::similarity::rank_by_similarity;
 use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
-use crate::shared::kernel::error::AgentError;
-
-type Result<T> = std::result::Result<T, AgentError>;
+use crate::shared::kernel::error::AgentResult;
 
 /// How many embedded entries to pull as the semantic candidate set before cosine-ranking. Bounded so the
 /// brute-force ranking stays cheap without a vector index.
@@ -49,16 +47,16 @@ fn merge_dedup(
 #[async_trait::async_trait]
 pub trait MemoryPort: Send + Sync {
     /// Recall project memories relevant to the query.
-    async fn recall_project(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn recall_project(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
     /// Recall shared memories relevant to the query.
-    async fn recall_shared(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn recall_shared(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
     /// Save a memory in the project scope.
-    async fn remember_project(&self, entry: MemoryEntry) -> Result<()>;
+    async fn remember_project(&self, entry: MemoryEntry) -> AgentResult<()>;
 
     /// Save a memory in the shared scope.
-    async fn remember_shared(&self, entry: MemoryEntry) -> Result<()>;
+    async fn remember_shared(&self, entry: MemoryEntry) -> AgentResult<()>;
 
     /// Whether project memory is available.
     fn project_memory_available(&self) -> bool;
@@ -134,7 +132,7 @@ where
     P: crate::modules::memory::application::project_store::ProjectStore + Send + Sync,
     S: crate::modules::memory::application::shared_store::SharedStore + Send + Sync,
 {
-    async fn recall_project(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn recall_project(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let semantic = match &self.embedder {
             Some(embedder) => {
                 // Best-effort: a candidate-fetch failure degrades this recall to keyword search.
@@ -156,7 +154,7 @@ where
         Ok(merge_dedup(semantic, keyword, limit))
     }
 
-    async fn recall_shared(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn recall_shared(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let semantic = match &self.embedder {
             Some(embedder) => {
                 // Best-effort: a candidate-fetch failure degrades this recall to keyword search.
@@ -176,7 +174,7 @@ where
         Ok(merge_dedup(semantic, keyword, limit))
     }
 
-    async fn remember_project(&self, entry: MemoryEntry) -> Result<()> {
+    async fn remember_project(&self, entry: MemoryEntry) -> AgentResult<()> {
         let id = entry.id.clone();
         let content = entry.content.clone();
         self.project_store.save(entry).await?;
@@ -193,7 +191,7 @@ where
         Ok(())
     }
 
-    async fn remember_shared(&self, entry: MemoryEntry) -> Result<()> {
+    async fn remember_shared(&self, entry: MemoryEntry) -> AgentResult<()> {
         let id = entry.id.clone();
         let content = entry.content.clone();
         self.shared_store.save(entry).await?;
@@ -222,6 +220,7 @@ where
 mod tests {
     use super::*;
     use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
+    use crate::shared::kernel::error::AgentError;
     use std::collections::HashSet;
     use std::sync::Mutex;
 
@@ -241,12 +240,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::modules::memory::application::project_store::ProjectStore for MockProjectStore {
-        async fn save(&self, entry: MemoryEntry) -> Result<()> {
+        async fn save(&self, entry: MemoryEntry) -> AgentResult<()> {
             self.entries.lock().unwrap().push(entry);
             Ok(())
         }
 
-        async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+        async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
             let entries = self.entries.lock().unwrap();
             Ok(entries
                 .iter()
@@ -256,7 +255,11 @@ mod tests {
                 .collect())
         }
 
-        async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>> {
+        async fn list_by_kind(
+            &self,
+            kind: MemoryKind,
+            limit: usize,
+        ) -> AgentResult<Vec<MemoryEntry>> {
             let entries = self.entries.lock().unwrap();
             Ok(entries
                 .iter()
@@ -266,7 +269,7 @@ mod tests {
                 .collect())
         }
 
-        async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+        async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
             let entries = self.entries.lock().unwrap();
             Ok(entries
                 .iter()
@@ -297,12 +300,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::modules::memory::application::shared_store::SharedStore for MockSharedStore {
-        async fn save(&self, entry: MemoryEntry) -> Result<()> {
+        async fn save(&self, entry: MemoryEntry) -> AgentResult<()> {
             self.entries.lock().unwrap().push(entry);
             Ok(())
         }
 
-        async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+        async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
             let entries = self.entries.lock().unwrap();
             Ok(entries
                 .iter()
@@ -312,7 +315,11 @@ mod tests {
                 .collect())
         }
 
-        async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>> {
+        async fn list_by_kind(
+            &self,
+            kind: MemoryKind,
+            limit: usize,
+        ) -> AgentResult<Vec<MemoryEntry>> {
             let entries = self.entries.lock().unwrap();
             Ok(entries
                 .iter()
@@ -322,7 +329,7 @@ mod tests {
                 .collect())
         }
 
-        async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+        async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
             let entries = self.entries.lock().unwrap();
             Ok(entries
                 .iter()
@@ -336,7 +343,7 @@ mod tests {
             &self,
             project_id: &str,
             limit: usize,
-        ) -> Result<Vec<MemoryEntry>> {
+        ) -> AgentResult<Vec<MemoryEntry>> {
             let entries = self.entries.lock().unwrap();
             Ok(entries
                 .iter()
@@ -412,7 +419,7 @@ mod tests {
 
         #[async_trait::async_trait]
         impl EmbeddingProvider for FakeEmbedder {
-            async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            async fn embed(&self, texts: &[String]) -> AgentResult<Vec<Vec<f32>>> {
                 Ok(texts.iter().map(|t| presence_vector(t)).collect())
             }
             fn model(&self) -> &str {
@@ -426,7 +433,7 @@ mod tests {
 
         #[async_trait::async_trait]
         impl EmbeddingProvider for OtherModelEmbedder {
-            async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            async fn embed(&self, texts: &[String]) -> AgentResult<Vec<Vec<f32>>> {
                 Ok(texts.iter().map(|t| presence_vector(t)).collect())
             }
             fn model(&self) -> &str {
@@ -438,7 +445,7 @@ mod tests {
 
         #[async_trait::async_trait]
         impl EmbeddingProvider for FailEmbedder {
-            async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            async fn embed(&self, _texts: &[String]) -> AgentResult<Vec<Vec<f32>>> {
                 Err(AgentError::Provider("embed boom".into()))
             }
             fn model(&self) -> &str {

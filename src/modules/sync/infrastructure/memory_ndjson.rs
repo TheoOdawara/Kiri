@@ -6,9 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::domain::entry::MemoryEntry;
 use crate::modules::sync::domain::merge::incoming_wins;
-use crate::shared::kernel::error::AgentError;
-
-type Result<T> = std::result::Result<T, AgentError>;
+use crate::shared::kernel::error::{AgentError, AgentResult};
 
 /// Upper bound on entries exported in one pass — a personal cross-project memory stays well under this.
 const EXPORT_CAP: usize = 100_000;
@@ -33,7 +31,7 @@ pub struct MergeReport {
 /// Export the shared memory to deterministic NDJSON (one entry per line, sorted by id) so the synced repo
 /// diffs cleanly and merges by line. Embedding vectors are NOT exported — they are machine-local derived
 /// data, re-derivable from content on each machine.
-pub async fn export(memory: &dyn SharedMemory, path: &Path) -> Result<usize> {
+pub async fn export(memory: &dyn SharedMemory, path: &Path) -> AgentResult<usize> {
     let mut entries = memory.list(0, EXPORT_CAP).await?;
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     let mut body = String::new();
@@ -54,7 +52,7 @@ pub async fn export(memory: &dyn SharedMemory, path: &Path) -> Result<usize> {
 /// opened; a byte ceiling (`MAX_IMPORT_BYTES`) rejects an oversized regular file; and the file is then
 /// **streamed line-by-line** (never slurped whole) under the entry cap (`IMPORT_CAP`), with the streamed
 /// bytes bounded too. A malformed line aborts with a clear error rather than silently dropping knowledge.
-pub async fn import(memory: &dyn SharedMemory, path: &Path) -> Result<MergeReport> {
+pub async fn import(memory: &dyn SharedMemory, path: &Path) -> AgentResult<MergeReport> {
     // `symlink_metadata` does NOT follow symlinks: reject a symlink or any non-regular file before it is
     // opened. The work-tree file is materialized by `git reset --hard` from an attacker-controlled remote,
     // so a committed `memory.ndjson -> /dev/zero` (infinite read → OOM) or `-> <fifo>` (blocking read, no
@@ -136,7 +134,7 @@ pub async fn import(memory: &dyn SharedMemory, path: &Path) -> Result<MergeRepor
 /// Windows the file inherits the user-profile DACL (std exposes no ACL control) — the accepted
 /// equivalent. Mirrors `provider/infrastructure/secrets/file_store.rs`.
 #[cfg(unix)]
-async fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+async fn write_owner_only(path: &Path, bytes: &[u8]) -> AgentResult<()> {
     use std::os::unix::fs::PermissionsExt;
     use tokio::io::AsyncWriteExt;
 
@@ -179,7 +177,7 @@ async fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-async fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+async fn write_owner_only(path: &Path, bytes: &[u8]) -> AgentResult<()> {
     fs::write(path, bytes).await?;
     Ok(())
 }

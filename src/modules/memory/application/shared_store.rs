@@ -1,33 +1,40 @@
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
-use crate::shared::kernel::error::AgentError;
-
-type Result<T> = std::result::Result<T, AgentError>;
+use crate::shared::kernel::error::AgentResult;
 
 /// Use cases for shared memory across projects. Implemented by `SqliteSharedStore` (adapter over
 /// `SqliteSharedMemory`).
 #[async_trait::async_trait]
 pub trait SharedStore: Send + Sync {
     /// Save an entry (create or update).
-    async fn save(&self, entry: MemoryEntry) -> Result<()>;
+    async fn save(&self, entry: MemoryEntry) -> AgentResult<()>;
 
     /// Search entries by text query.
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
     /// List entries by kind. Reserved for the future memory-management UI.
     #[allow(dead_code)]
-    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
     /// List entries by tag. Reserved for the future memory-management UI.
     #[allow(dead_code)]
-    async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
     /// List entries for a specific project. Reserved for the future memory-management UI.
     #[allow(dead_code)]
-    async fn list_by_project(&self, project_id: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn list_by_project(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<MemoryEntry>>;
 
     /// Persist the embedding vector for an entry (for semantic recall). Default no-op so a store without
     /// embedding support — and the test doubles — need not implement it.
-    async fn save_embedding(&self, _entry_id: &str, _model: &str, _vector: &[f32]) -> Result<()> {
+    async fn save_embedding(
+        &self,
+        _entry_id: &str,
+        _model: &str,
+        _vector: &[f32],
+    ) -> AgentResult<()> {
         Ok(())
     }
 
@@ -38,7 +45,7 @@ pub trait SharedStore: Send + Sync {
         &self,
         _model: &str,
         _limit: usize,
-    ) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+    ) -> AgentResult<Vec<(MemoryEntry, Vec<f32>)>> {
         Ok(Vec::new())
     }
 
@@ -69,12 +76,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SharedStore for InMemorySharedStore {
-        async fn save(&self, entry: MemoryEntry) -> Result<()> {
+        async fn save(&self, entry: MemoryEntry) -> AgentResult<()> {
             self.entries.lock().unwrap().push(entry);
             Ok(())
         }
 
-        async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+        async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
             let entries = self.entries.lock().unwrap();
             Ok(entries
                 .iter()
@@ -84,7 +91,11 @@ mod tests {
                 .collect())
         }
 
-        async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>> {
+        async fn list_by_kind(
+            &self,
+            kind: MemoryKind,
+            limit: usize,
+        ) -> AgentResult<Vec<MemoryEntry>> {
             let entries = self.entries.lock().unwrap();
             Ok(entries
                 .iter()
@@ -94,7 +105,7 @@ mod tests {
                 .collect())
         }
 
-        async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+        async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
             let entries = self.entries.lock().unwrap();
             Ok(entries
                 .iter()
@@ -108,7 +119,7 @@ mod tests {
             &self,
             project_id: &str,
             limit: usize,
-        ) -> Result<Vec<MemoryEntry>> {
+        ) -> AgentResult<Vec<MemoryEntry>> {
             let entries = self.entries.lock().unwrap();
             Ok(entries
                 .iter()

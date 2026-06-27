@@ -1,15 +1,13 @@
 use crate::modules::memory::application::project_memory::ProjectMemory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::shared::infra::fs::write_atomic;
-use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::error::{AgentError, AgentResult};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
-
-type Result<T> = std::result::Result<T, AgentError>;
 
 /// Largest entry body read into memory, mirroring `docs_library`'s `MAX_FILE_BYTES`. Caps a single read
 /// so a symlinked `/dev/zero` or an over-sized committed `.md` cannot exhaust memory.
@@ -50,7 +48,7 @@ async fn resolve_within(real_root: &Path, root: &Path, rel: &str) -> Option<Path
 
 /// Read at most `MAX_ENTRY_BYTES` of `path` as lossy UTF-8. The bounded read — not a post-hoc slice — is
 /// what caps memory even for an endless source such as `/dev/zero`.
-async fn read_capped(path: &Path) -> Result<String> {
+async fn read_capped(path: &Path) -> AgentResult<String> {
     let file = fs::File::open(path).await?;
     let mut buf = Vec::new();
     file.take(MAX_ENTRY_BYTES).read_to_end(&mut buf).await?;
@@ -103,7 +101,7 @@ impl FileProjectMemory {
         self.root.join("index.json")
     }
 
-    async fn load_index(&self) -> Result<()> {
+    async fn load_index(&self) -> AgentResult<()> {
         let path = self.index_path();
         if path.exists() {
             let content = fs::read_to_string(&path).await?;
@@ -113,7 +111,7 @@ impl FileProjectMemory {
         Ok(())
     }
 
-    async fn save_index(&self) -> Result<()> {
+    async fn save_index(&self) -> AgentResult<()> {
         let index = self.index.read().await.clone();
         let content = serde_json::to_string_pretty(&index).map_err(AgentError::memory)?;
         write_atomic(&self.index_path(), content.as_bytes()).await?;
@@ -124,7 +122,7 @@ impl FileProjectMemory {
         self.root.join("embeddings.json")
     }
 
-    async fn load_embeddings(&self) -> Result<HashMap<String, StoredEmbedding>> {
+    async fn load_embeddings(&self) -> AgentResult<HashMap<String, StoredEmbedding>> {
         let path = self.embeddings_path();
         if !path.exists() {
             return Ok(HashMap::new());
@@ -134,7 +132,12 @@ impl FileProjectMemory {
     }
 
     /// Persist (or replace) the embedding vector for an entry in the sidecar cache.
-    pub async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> Result<()> {
+    pub async fn save_embedding(
+        &self,
+        entry_id: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> AgentResult<()> {
         let mut sidecar = self.load_embeddings().await?;
         sidecar.insert(
             entry_id.to_string(),
@@ -155,7 +158,7 @@ impl FileProjectMemory {
         &self,
         model: &str,
         limit: usize,
-    ) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+    ) -> AgentResult<Vec<(MemoryEntry, Vec<f32>)>> {
         let sidecar = self.load_embeddings().await?;
         if sidecar.is_empty() {
             return Ok(Vec::new());
@@ -199,13 +202,13 @@ impl FileProjectMemory {
         }
     }
 
-    fn ensure_dirs(&self) -> Result<()> {
+    fn ensure_dirs(&self) -> AgentResult<()> {
         std::fs::create_dir_all(&self.root)?;
         std::fs::create_dir_all(self.root.join("decisions"))?;
         Ok(())
     }
 
-    fn parse_markdown_file(&self, _path: &Path, content: &str) -> Result<MemoryEntry> {
+    fn parse_markdown_file(&self, _path: &Path, content: &str) -> AgentResult<MemoryEntry> {
         // Extract the YAML front-matter (between the leading `---` fences).
         let (front_matter, body) = match content.strip_prefix("---\n") {
             Some(after) => match after.find("\n---\n") {
@@ -225,7 +228,7 @@ impl FileProjectMemory {
         Ok(entry)
     }
 
-    fn render_markdown_file(&self, entry: &MemoryEntry) -> Result<String> {
+    fn render_markdown_file(&self, entry: &MemoryEntry) -> AgentResult<String> {
         let front_matter = serde_norway::to_string(entry).map_err(AgentError::memory)?;
         Ok(format!("---\n{}---\n\n{}", front_matter, entry.content))
     }
@@ -233,13 +236,13 @@ impl FileProjectMemory {
 
 #[async_trait::async_trait]
 impl ProjectMemory for FileProjectMemory {
-    async fn init(&self) -> Result<()> {
+    async fn init(&self) -> AgentResult<()> {
         self.ensure_dirs()?;
         self.load_index().await?;
         Ok(())
     }
 
-    async fn save(&self, entry: &MemoryEntry) -> Result<()> {
+    async fn save(&self, entry: &MemoryEntry) -> AgentResult<()> {
         let path = self.entry_path(entry.kind, &entry.id);
         let content = self.render_markdown_file(entry)?;
 
@@ -271,7 +274,7 @@ impl ProjectMemory for FileProjectMemory {
         Ok(())
     }
 
-    async fn load(&self, id: &str) -> Result<Option<MemoryEntry>> {
+    async fn load(&self, id: &str) -> AgentResult<Option<MemoryEntry>> {
         let rel = {
             let index = self.index.read().await;
             let Some(index_entry) = index.entries.get(id) else {
@@ -292,7 +295,7 @@ impl ProjectMemory for FileProjectMemory {
         Ok(Some(entry))
     }
 
-    async fn delete(&self, id: &str) -> Result<bool> {
+    async fn delete(&self, id: &str) -> AgentResult<bool> {
         let rel = {
             let mut index = self.index.write().await;
             let Some(index_entry) = index.entries.remove(id) else {
@@ -311,7 +314,7 @@ impl ProjectMemory for FileProjectMemory {
         Ok(true)
     }
 
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         // Snapshot the candidate paths under the lock, then release it before any file I/O so a long
         // read can never block a concurrent writer (matches `list`/`list_by_kind`).
         let rels: Vec<String> = {
@@ -347,7 +350,7 @@ impl ProjectMemory for FileProjectMemory {
         Ok(results)
     }
 
-    async fn list(&self, offset: usize, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list(&self, offset: usize, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let index = self.index.read().await;
         let ids: Vec<String> = index.entries.keys().cloned().collect();
         drop(index);
@@ -361,7 +364,7 @@ impl ProjectMemory for FileProjectMemory {
         Ok(results)
     }
 
-    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let index = self.index.read().await;
         let ids: Vec<String> = index
             .entries
@@ -380,7 +383,7 @@ impl ProjectMemory for FileProjectMemory {
         Ok(results)
     }
 
-    async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let index = self.index.read().await;
         let ids: Vec<String> = index
             .entries
@@ -399,7 +402,7 @@ impl ProjectMemory for FileProjectMemory {
         Ok(results)
     }
 
-    async fn count(&self) -> Result<usize> {
+    async fn count(&self) -> AgentResult<usize> {
         let index = self.index.read().await;
         Ok(index.entries.len())
     }

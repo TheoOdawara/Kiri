@@ -41,6 +41,10 @@ pub enum AgentError {
     Config(String),
 }
 
+/// The result of any fallible port/adapter signature: `Result<T, AgentError>` named once so the error
+/// type is explicit at every signature without re-declaring a `Result` shadow per module.
+pub type AgentResult<T> = Result<T, AgentError>;
+
 impl AgentError {
     /// Build an [`AgentError::Memory`] from any `Display` source. The single constructor the memory
     /// adapters (SQLite + file) and the sync NDJSON (de)serializer map their non-IO failures through, so
