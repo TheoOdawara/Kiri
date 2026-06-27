@@ -14,14 +14,10 @@ pub(crate) const SECRET_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".ku
 /// Well-known credential files directly under the user's home, denied to confined children by the macOS
 /// Seatbelt profile. They mirror names already in `DEFAULT_SENSITIVE_PATTERNS`, but that file-name guard
 /// only covers the file tools — `run_command`'s free-form shell reaches these through the OS layer alone.
-// Consumed by the macOS Seatbelt read-deny layer (`confine::macos`) in Step 2.
-#[allow(dead_code)]
 pub(crate) const HOME_SECRET_FILES: &[&str] =
     &[".netrc", ".npmrc", ".pypirc", ".pgpass", ".git-credentials"];
 
 /// The harness's own private directory under home (`~/.kiri`), which holds `credentials.json` (the
 /// `0600` API-key fallback) and other state. Denied to confined children so a `run_command` cannot read
 /// it back to the model.
-// Consumed by the macOS Seatbelt read-deny layer (`confine::macos`) in Step 2.
-#[allow(dead_code)]
 pub(crate) const HARNESS_PRIVATE_DIR: &str = ".kiri";

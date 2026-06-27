@@ -4,20 +4,22 @@ use std::path::{Path, PathBuf};
 use crate::modules::tools::application::command_sandbox::{
     CommandSandbox, NetworkPolicy, SandboxPolicy,
 };
+use crate::modules::tools::infrastructure::secret_paths::{
+    HARNESS_PRIVATE_DIR, HOME_SECRET_FILES, SECRET_DIRS,
+};
 use crate::shared::kernel::error::AgentError;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-
-/// Credential directories under the user's home. Reads are denied even though the base profile allows
-/// reads everywhere, so a confined command cannot read keys to exfiltrate them.
-const SECRET_HOME_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker"];
 
 /// macOS OS-confinement adapter. Wraps the child in `sandbox-exec -p <profile>` with a generated
 /// Seatbelt (SBPL) profile. A system binary — no FFI, no crate — so the crate-wide
 /// `unsafe_code = "forbid"` lint is untouched. The profile shape is empirically verified on macOS:
 /// `(deny network*)` blocks outbound connections, `(deny file-write* (subpath "/"))` plus targeted
 /// allows confine writes to the workspace (and `/dev`, the temp dir, configured extras), and
-/// `(deny file-read* …)` blocks credential stores.
+/// `(deny file-read* …)` blocks credential stores — the single-sourced `SECRET_DIRS` (`~/.ssh`,
+/// `~/.aws`, …), the harness's own `~/.kiri` (which holds `credentials.json`), and the well-known home
+/// credential files (`~/.netrc`, `~/.git-credentials`, …) — so a confined `run_command` cannot read
+/// them back to the model.
 ///
 /// `sandbox-exec` is Apple-deprecated but still shipped on current macOS; the long-term successor is
 /// Endpoint Security (recorded in ADR 0009).
@@ -100,17 +102,14 @@ fn build_profile(policy: &SandboxPolicy) -> String {
         push_allow_write(&mut profile, dir);
     }
 
-    // Reads: deny credential directories under home (the base `allow default` would otherwise permit
-    // them), so a confined command cannot read keys to exfiltrate. When HOME is unset there is no
-    // per-user home whose credential dirs we could resolve, so there is nothing home-relative to deny —
-    // the `~/.ssh`-style rules simply have no target. This skip is deliberate, not silent: HOME is
+    // Reads: deny the credential set under home (the base `allow default` would otherwise permit it),
+    // so a confined command cannot read keys to exfiltrate. When HOME is unset there is no per-user home
+    // whose credential paths we could resolve, so there is nothing home-relative to deny — the
+    // `~/.ssh`-style rules simply have no target. This skip is deliberate, not silent: HOME is
     // effectively always set on the macOS v1 target, so the empty case is the headless/CI edge and the
     // base posture stands.
     if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        for dir in SECRET_HOME_DIRS {
-            push_deny_read(&mut profile, &home.join(dir));
-        }
+        push_home_denies(&mut profile, &PathBuf::from(home));
     }
     // Re-allow any explicitly configured read paths (KIRI_SANDBOX_RO_PATHS), so the user can punch a
     // read-hole through the credential-dir denies above — e.g. a deploy tool that legitimately reads
@@ -119,6 +118,19 @@ fn build_profile(policy: &SandboxPolicy) -> String {
         push_allow_read(&mut profile, dir);
     }
     profile
+}
+
+/// Emit the credential read-denies resolved relative to `home`: the single-sourced credential dirs, the
+/// harness's own `~/.kiri` store, and the well-known home credential files. Pure in `home`, so it is
+/// testable with a fixed home without mutating the process environment (edition-2024-safe).
+fn push_home_denies(profile: &mut String, home: &Path) {
+    for dir in SECRET_DIRS {
+        push_deny_read(profile, &home.join(dir));
+    }
+    push_deny_read(profile, &home.join(HARNESS_PRIVATE_DIR));
+    for file in HOME_SECRET_FILES {
+        push_deny_read(profile, &home.join(file));
+    }
 }
 
 fn push_allow_read(profile: &mut String, dir: &Path) {
@@ -187,8 +199,24 @@ mod tests {
         assert!(p.contains("(allow file-write* (subpath \"/dev\"))"));
         // The configured extra is re-allowed for writing.
         assert!(p.contains("kiri-extra"));
-        // Credential stores under home are read-denied.
-        assert!(p.contains("file-read*") && p.contains(".ssh"));
+        // Credential stores under home are read-denied: the dirs (`.ssh`), the harness's own `~/.kiri`
+        // (which holds `credentials.json`), and the well-known home credential files.
+        assert!(p.contains("file-read*"));
+        assert!(p.contains(".ssh"));
+        assert!(p.contains(".kiri"));
+        assert!(p.contains(".netrc"));
+        assert!(p.contains(".git-credentials"));
+    }
+
+    #[test]
+    fn profile_denies_kiri_credential_store() {
+        // Drive the pure helper with a fixed home so the assertion is deterministic (no reliance on the
+        // ambient HOME): `~/.kiri` — the harness's `credentials.json` store — must be read-denied.
+        let mut profile = String::new();
+        push_home_denies(&mut profile, Path::new("/Users/fake"));
+        assert!(profile.contains("(deny file-read* (subpath \"/Users/fake/.kiri\"))"));
+        assert!(profile.contains("/Users/fake/.netrc"));
+        assert!(profile.contains("/Users/fake/.ssh"));
     }
 
     #[tokio::test]
