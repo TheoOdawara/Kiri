@@ -81,28 +81,46 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // then select the adapter. This is the one place adapters are chosen.
     let profile = settings.active_profile()?.clone();
     let credential = resolve_credential(&profile, secrets.as_ref())?;
+    // A keyless active provider whose id once held a key (migrated api-key -> none by hand-edit) leaves a
+    // stale secret in the keyring; clear it best-effort so no orphaned credential lingers. A missing-key
+    // delete is a harmless no-op.
+    if profile.auth == AuthMethod::None {
+        let _ = secrets.delete(&profile.id);
+    }
     // Pick the initial adapter without ever aborting the boot: with a usable credential AND a non-blank
     // model, build the real adapter; otherwise fall back to the null provider and raise onboarding. This
-    // neutralizes both boot-crash paths — no credential, and credential-present-but-blank-model (which
-    // `build_provider` would reject). The client/credential are kept so the runtime's `ProviderSwap` can
-    // rebuild on a live `/effort` change without a keyring round-trip.
-    let (provider, needs_onboarding): (Arc<dyn CompletionProvider>, bool) =
-        match (&credential, !profile.model.trim().is_empty()) {
-            (Some(cred), true) => (
-                build_provider(
-                    client.clone(),
-                    &profile,
-                    cred.clone(),
-                    settings.thinking,
-                    settings.effort,
-                )?,
-                false,
-            ),
-            _ => (
-                Arc::new(UnconfiguredProvider::new()) as Arc<dyn CompletionProvider>,
-                true,
-            ),
-        };
+    // neutralizes every boot-crash path — no credential, credential-present-but-blank-model, and a
+    // misconfigured profile `build_provider` rejects (a hand-edited/synced vendor set to auth = "none", or
+    // an auth value this build does not recognize). The client/credential are kept so the runtime's
+    // `ProviderSwap` can rebuild on a live `/effort` change without a keyring round-trip.
+    let (provider, needs_onboarding): (Arc<dyn CompletionProvider>, bool) = match (
+        &credential,
+        !profile.model.trim().is_empty(),
+    ) {
+        (Some(cred), true) => match build_provider(
+            client.clone(),
+            &profile,
+            cred.clone(),
+            settings.thinking,
+            settings.effort,
+        ) {
+            Ok(provider) => (provider, false),
+            Err(error) => {
+                eprintln!(
+                    "kiri: active provider '{}' could not be initialized ({error}); starting in onboarding",
+                    profile.id
+                );
+                (
+                    Arc::new(UnconfiguredProvider::new()) as Arc<dyn CompletionProvider>,
+                    true,
+                )
+            }
+        },
+        _ => (
+            Arc::new(UnconfiguredProvider::new()) as Arc<dyn CompletionProvider>,
+            true,
+        ),
+    };
     // The file tools plus the plan-mode control tool. `present_plan` is advertised only in plan mode
     // (it carries `plan_only`); the registry's `schemas()` withholds it everywhere else.
     let mut tools = default_fs_tools(
@@ -373,6 +391,12 @@ fn resolve_credential(
     profile: &ProviderProfile,
     secrets: &dyn SecretStore,
 ) -> Result<Option<Credential>> {
+    // A keyless provider (auth = "none") needs no secret: the key-presence decision was recorded in
+    // profile.auth at save time, so do not consult the keyring/env and ignore any stale key left from a
+    // prior keyed config of this id. The OpenAI-compatible adapter omits Authorization for Credential::None.
+    if profile.auth == AuthMethod::None {
+        return Ok(Some(Credential::None));
+    }
     if let Some(credential) = secrets.get(&profile.id)? {
         return Ok(Some(credential));
     }
@@ -461,5 +485,22 @@ mod tests {
             "m",
         );
         assert!(resolve_credential(&p, &store).unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_credential_yields_none_credential_for_a_keyless_profile() {
+        // auth = "none" short-circuits to Credential::None and must ignore any stale stored key — the
+        // early return precedes the keyring lookup, so a leftover key from a prior keyed config is unused.
+        let store = FakeStore(Some(api_key()));
+        let p = profile(
+            "lmstudio",
+            ProviderKind::OpenAiCompatible,
+            AuthMethod::None,
+            "gemma",
+        );
+        match resolve_credential(&p, &store).unwrap() {
+            Some(Credential::None) => {}
+            other => panic!("expected Credential::None, got {other:?}"),
+        }
     }
 }
