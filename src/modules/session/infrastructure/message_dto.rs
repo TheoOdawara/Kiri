@@ -19,32 +19,10 @@ pub struct StoredMessage {
     pub tool_call_id: Option<String>,
 }
 
-/// The wire string for a role. Kept local to the store's serialization concern.
-pub fn role_to_str(role: Role) -> &'static str {
-    match role {
-        Role::System => "system",
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::Tool => "tool",
-    }
-}
-
-/// Parse a stored role string. Unknown values map to `None` so a corrupted row can be skipped defensively
-/// rather than panicking (the DB may have been touched by an external tool).
-pub fn role_from_str(s: &str) -> Option<Role> {
-    match s {
-        "system" => Some(Role::System),
-        "user" => Some(Role::User),
-        "assistant" => Some(Role::Assistant),
-        "tool" => Some(Role::Tool),
-        _ => None,
-    }
-}
-
 impl From<&Message> for StoredMessage {
     fn from(message: &Message) -> Self {
         Self {
-            role: role_to_str(message.role).to_string(),
+            role: message.role.as_wire_str().to_string(),
             content: message.content.clone(),
             images: message.images.clone(),
             tool_calls: message.tool_calls.clone(),
@@ -57,7 +35,7 @@ impl StoredMessage {
     /// Reconstruct a domain `Message`, consuming the DTO. Returns `None` for an unknown role, so the
     /// loader can skip a corrupted row rather than fabricating a wrong one.
     pub fn into_domain(self) -> Option<Message> {
-        let role = role_from_str(&self.role)?;
+        let role = Role::from_wire_str(&self.role)?;
         Some(Message {
             role,
             content: self.content,

@@ -100,19 +100,8 @@ struct ImageUrl<'a> {
     url: &'a str,
 }
 
-/// The OpenAI wire string for a role — the single place the domain `Role` becomes its lowercase wire
-/// form, so the domain enum stays serde-free.
-const fn wire_role(role: Role) -> &'static str {
-    match role {
-        Role::System => "system",
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::Tool => "tool",
-    }
-}
-
 fn serialize_role<S: Serializer>(role: &Role, serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(wire_role(*role))
+    serializer.serialize_str(role.as_wire_str())
 }
 
 /// Serialize tool calls through the wire DTO, re-applying the control-char escaper to each call's
@@ -160,10 +149,10 @@ mod tests {
 
     #[test]
     fn wire_role_maps_all_variants() {
-        assert_eq!(wire_role(Role::System), "system");
-        assert_eq!(wire_role(Role::User), "user");
-        assert_eq!(wire_role(Role::Assistant), "assistant");
-        assert_eq!(wire_role(Role::Tool), "tool");
+        assert_eq!(Role::System.as_wire_str(), "system");
+        assert_eq!(Role::User.as_wire_str(), "user");
+        assert_eq!(Role::Assistant.as_wire_str(), "assistant");
+        assert_eq!(Role::Tool.as_wire_str(), "tool");
     }
 
     #[test]
