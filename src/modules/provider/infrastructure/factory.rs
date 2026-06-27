@@ -117,7 +117,7 @@ pub fn build_embedding_provider(
 /// A migration aid (and the live-`/provider`-switch fallback) so a provider whose key lives in an env
 /// var works without first storing it in the keyring. Filters empties per candidate so a set-but-blank
 /// generic var does not shadow a real vendor var.
-pub fn api_key_from_env(profile: &ProviderProfile) -> Option<String> {
+pub fn api_key_from_env(profile: &ProviderProfile) -> Option<Secret> {
     let generic = generic_env_key(profile);
     let vendor: &[&str] = match profile.kind {
         ProviderKind::Nvidia => &["NVIDIA_API_KEY"],
@@ -127,11 +127,18 @@ pub fn api_key_from_env(profile: &ProviderProfile) -> Option<String> {
     };
     std::iter::once(generic.as_str())
         .chain(vendor.iter().copied())
-        .find_map(|key| {
-            std::env::var(key)
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
+        .find_map(|key| std::env::var(key).ok().and_then(secret_from_env_value))
+}
+
+/// Treat a blank value as absent (so a set-but-blank var never shadows a real one) and wrap a real value
+/// in a [`Secret`], so the env key lives only inside zeroized, Debug-redacted memory — never a plain
+/// `String` the caller must remember to wrap.
+fn secret_from_env_value(value: String) -> Option<Secret> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(Secret::new(value))
+    }
 }
 
 /// The generic per-provider env var name (`KIRI_<ID>_API_KEY`).
@@ -176,7 +183,7 @@ fn optional_key(
 
 #[cfg(test)]
 mod tests {
-    use super::build_provider;
+    use super::{build_provider, secret_from_env_value};
     use crate::shared::kernel::provider::{
         AuthMethod, Credential, Effort, OauthTokens, ProviderKind, ProviderProfile, Secret,
     };
@@ -309,5 +316,21 @@ mod tests {
             "m",
         );
         assert!(build_provider(client, &p, Credential::None, true, Effort::High).is_err());
+    }
+
+    #[test]
+    fn api_key_from_env_wraps_in_secret() {
+        // The crate forbids `unsafe`, and edition-2024 `std::env::set_var` is unsafe, so the env read in
+        // `api_key_from_env` cannot be driven in a test. Its only logic beyond the lookup is the pure
+        // `secret_from_env_value` rule, asserted here: a real value becomes a Secret that exposes the
+        // value yet redacts its Debug, while a blank value is treated as absent.
+        let secret = secret_from_env_value("env-secret-value".to_string())
+            .expect("a non-empty env value must wrap into Some(Secret)");
+        assert_eq!(secret.expose(), "env-secret-value");
+        assert_eq!(format!("{secret:?}"), "Secret(***)");
+        assert!(
+            secret_from_env_value("   ".to_string()).is_none(),
+            "a blank env value must be treated as absent"
+        );
     }
 }

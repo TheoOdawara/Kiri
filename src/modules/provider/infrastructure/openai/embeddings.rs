@@ -66,6 +66,14 @@ fn align_embeddings(
         )));
     }
     data.sort_by_key(|datum| datum.index);
+    // The count check alone passes a response with duplicate/missing indices (e.g. two rows at index 0),
+    // which would return one input's vector for two texts. After sorting, the indices must be exactly
+    // 0..expected for the position-to-input mapping to hold.
+    if !data.iter().enumerate().all(|(i, datum)| datum.index == i) {
+        return Err(AgentError::Provider(format!(
+            "embeddings response has non-contiguous indices (expected 0..{expected}); a duplicate or missing index would misalign vectors with inputs"
+        )));
+    }
     Ok(data.into_iter().map(|datum| datum.embedding).collect())
 }
 
@@ -143,6 +151,40 @@ mod tests {
             index: 0,
             embedding: vec![1.0],
         }];
+        assert!(align_embeddings(data, 2).is_err());
+    }
+
+    #[test]
+    fn align_rejects_duplicate_indices() {
+        // The count matches `expected`, so only the contiguity check can catch that input 1 has no
+        // vector while input 0's vector is returned twice — the silent recall corruption PROV-04 guards.
+        let data = vec![
+            EmbeddingDatum {
+                index: 0,
+                embedding: vec![1.0],
+            },
+            EmbeddingDatum {
+                index: 0,
+                embedding: vec![2.0],
+            },
+        ];
+        assert!(align_embeddings(data, 2).is_err());
+    }
+
+    #[test]
+    fn align_rejects_a_gap() {
+        // Indices {0, 2}: the count matches `expected = 2`, but index 1 is missing, so the contiguity
+        // check (not the count guard) is what must reject it.
+        let data = vec![
+            EmbeddingDatum {
+                index: 0,
+                embedding: vec![1.0],
+            },
+            EmbeddingDatum {
+                index: 2,
+                embedding: vec![3.0],
+            },
+        ];
         assert!(align_embeddings(data, 2).is_err());
     }
 

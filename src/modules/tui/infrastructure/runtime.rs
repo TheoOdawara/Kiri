@@ -53,7 +53,7 @@ use crate::shared::kernel::conversation::Conversation;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::message::Message;
 use crate::shared::kernel::provider::{
-    AuthMethod, Credential, Effort, ProviderKind, ProviderProfile, Secret,
+    AuthMethod, Credential, Effort, ProviderKind, ProviderProfile,
 };
 use crate::shared::kernel::role::Role;
 
@@ -152,9 +152,7 @@ impl ProviderSwap {
             return Ok(credential);
         }
         if let Some(key) = api_key_from_env(profile) {
-            let credential = Credential::ApiKey {
-                key: Secret::new(key),
-            };
+            let credential = Credential::ApiKey { key };
             // Best-effort persist so a later switch needs no env var; a store failure is non-fatal —
             // the credential still works for this swap.
             let _ = self.secrets.set(&profile.id, &credential);

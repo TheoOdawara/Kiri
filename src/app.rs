@@ -33,7 +33,7 @@ use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tui::infrastructure::runtime::{ProviderSwap, Tui};
 use crate::shared::infra::config::Settings;
-use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile, Secret};
+use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile};
 
 /// Caps for the start-of-session memory digest injected into the system prompt: how many entries to
 /// pull per scope and the total byte budget, so the prompt stays bounded regardless of memory size.
@@ -403,9 +403,7 @@ fn resolve_credential(
     if profile.auth == AuthMethod::ApiKey
         && let Some(key) = api_key_from_env(profile)
     {
-        let credential = Credential::ApiKey {
-            key: Secret::new(key),
-        };
+        let credential = Credential::ApiKey { key };
         // Persist so later sessions don't need the env var. A store failure is non-fatal: use the key
         // for this session and tell the user it was not saved.
         match secrets.set(&profile.id, &credential) {
