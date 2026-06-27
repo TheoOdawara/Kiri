@@ -16,7 +16,10 @@ use zeroize::Zeroizing;
 pub enum ProviderKind {
     /// NVIDIA's hosted OpenAI-compatible chat-completions endpoint (the default).
     Nvidia,
-    /// Any other OpenAI-compatible chat-completions endpoint.
+    /// Any other OpenAI-compatible chat-completions endpoint. The canonical token is the kebab-case
+    /// `open-ai-compatible`; the intuitive `openai-compatible` / `openaicompatible` spellings are accepted
+    /// as aliases on read, so a hand-edited config does not fail to parse (serialization stays canonical).
+    #[serde(alias = "openai-compatible", alias = "openaicompatible")]
     OpenAiCompatible,
     /// OpenAI proper: chat-completions at `api.openai.com` with an API key.
     Openai,
@@ -308,6 +311,24 @@ mod tests {
             serde_json::from_str::<Credential>(&json).unwrap(),
             Credential::None
         ));
+    }
+
+    #[test]
+    fn provider_kind_accepts_intuitive_openai_compatible_aliases() {
+        // A hand-edited config using the intuitive spelling must still parse to OpenAiCompatible.
+        for token in [
+            "open-ai-compatible",
+            "openai-compatible",
+            "openaicompatible",
+        ] {
+            let parsed: ProviderKind = serde_json::from_str(&format!("\"{token}\"")).unwrap();
+            assert_eq!(parsed, ProviderKind::OpenAiCompatible, "token {token}");
+        }
+        // Serialization stays canonical (kebab-case), so written configs are unchanged.
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::OpenAiCompatible).unwrap(),
+            "\"open-ai-compatible\""
+        );
     }
 
     #[test]
