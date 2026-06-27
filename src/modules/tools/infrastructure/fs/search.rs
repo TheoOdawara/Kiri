@@ -129,7 +129,7 @@ impl Tool for Search {
                 &[],
                 exec::DEFAULT_TIMEOUT,
                 sandbox.confiner(),
-                &sandbox.command_policy(NetworkPolicy::Deny, &[&start]),
+                &sandbox.command_policy(NetworkPolicy::Deny, &[&start], &[]),
             )
             .await
             {

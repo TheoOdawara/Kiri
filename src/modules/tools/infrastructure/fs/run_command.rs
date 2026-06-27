@@ -204,7 +204,7 @@ impl Tool for RunCommand {
             Some(&cwd),
             Duration::from_millis(effective_timeout_ms(args.timeout_ms)),
             sandbox.confiner(),
-            &sandbox.command_policy(network, &[&cwd]),
+            &sandbox.command_policy(network, &[], &[&cwd]),
         )
         .await
         {

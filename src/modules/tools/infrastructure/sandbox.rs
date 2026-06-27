@@ -114,15 +114,23 @@ impl Sandbox for FsSandbox {
         self.network
     }
 
-    /// Build the per-call OS-confinement policy: writes confined to the workspace root plus the
-    /// configured extras and any per-call `extra_rw` (e.g. an approved out-of-root target's directory).
-    fn command_policy(&self, network: NetworkPolicy, extra_rw: &[&Path]) -> SandboxPolicy {
+    /// Build the per-call OS-confinement policy: fold the per-call `extra_ro`/`extra_rw` into the
+    /// configured read/write extras. Writes stay confined to the workspace root plus the write extras;
+    /// the read extras only re-allow reads (a read-only tool's cwd lands here, not in the write set).
+    fn command_policy(
+        &self,
+        network: NetworkPolicy,
+        extra_ro: &[&Path],
+        extra_rw: &[&Path],
+    ) -> SandboxPolicy {
+        let mut ro: Vec<PathBuf> = self.extra_ro.to_vec();
+        ro.extend(extra_ro.iter().map(|path| path.to_path_buf()));
         let mut rw: Vec<PathBuf> = self.extra_rw.to_vec();
         rw.extend(extra_rw.iter().map(|path| path.to_path_buf()));
         SandboxPolicy {
             root: self.root.clone(),
             network,
-            extra_ro: self.extra_ro.to_vec(),
+            extra_ro: ro,
             extra_rw: rw,
         }
     }
@@ -637,6 +645,40 @@ mod tests {
             .unwrap()
             .target;
         assert_eq!(sb.exec_cwd_for(&target), sb.root());
+    }
+
+    // Least privilege: a read-only tool passes its cwd as a read extra (never a write grant), and a
+    // mutating tool passes its cwd as a write extra. The policy must reflect exactly that split.
+    #[test]
+    fn read_only_policy_has_no_write_extra() {
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        let cwd = sb.root().to_path_buf();
+        let policy = sb.command_policy(NetworkPolicy::Deny, &[&cwd], &[]);
+        assert!(
+            policy.extra_rw.is_empty(),
+            "a read-only tool must grant no write extra"
+        );
+        assert!(
+            policy.extra_ro.contains(&cwd),
+            "the read cwd must be a read extra"
+        );
+    }
+
+    #[test]
+    fn mutating_policy_has_write_extra() {
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        let cwd = sb.root().to_path_buf();
+        let policy = sb.command_policy(NetworkPolicy::Deny, &[], &[&cwd]);
+        assert!(
+            policy.extra_ro.is_empty(),
+            "a mutating tool grants no read extra here"
+        );
+        assert!(
+            policy.extra_rw.contains(&cwd),
+            "the write cwd must be a write extra"
+        );
     }
 
     #[cfg(unix)]

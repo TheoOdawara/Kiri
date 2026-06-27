@@ -48,9 +48,16 @@ pub trait Sandbox {
     /// recursive tools can refuse to poke inside a credential store.
     fn secret_dir_component(&self, real: &Path) -> Option<&'static str>;
 
-    /// Build the per-call OS-confinement policy: writes confined to the workspace root plus the
-    /// configured extras and any per-call `extra_rw` (e.g. an approved out-of-root target's directory).
-    fn command_policy(&self, network: NetworkPolicy, extra_rw: &[&Path]) -> SandboxPolicy;
+    /// Build the per-call OS-confinement policy. Writes are confined to the workspace root plus the
+    /// configured extras and any per-call `extra_rw`; `extra_ro` grants per-call read access only. A
+    /// read-only tool passes its cwd as `extra_ro` (least privilege — never a write grant), a mutating
+    /// tool passes it as `extra_rw` (e.g. an approved out-of-root target's directory).
+    fn command_policy(
+        &self,
+        network: NetworkPolicy,
+        extra_ro: &[&Path],
+        extra_rw: &[&Path],
+    ) -> SandboxPolicy;
 
     /// The OS-confinement adapter every tool wraps its child process with before spawning.
     fn confiner(&self) -> &dyn CommandSandbox;

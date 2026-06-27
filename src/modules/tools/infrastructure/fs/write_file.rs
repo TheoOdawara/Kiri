@@ -90,7 +90,7 @@ impl Tool for WriteFile {
                 &[],
                 exec::DEFAULT_TIMEOUT,
                 sandbox.confiner(),
-                &sandbox.command_policy(NetworkPolicy::Deny, &[&cwd]),
+                &sandbox.command_policy(NetworkPolicy::Deny, &[], &[&cwd]),
             )
             .await
             {

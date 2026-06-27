@@ -107,7 +107,7 @@ impl Tool for MovePath {
                 &[],
                 exec::DEFAULT_TIMEOUT,
                 sandbox.confiner(),
-                &sandbox.command_policy(NetworkPolicy::Deny, &[&cwd, &source_cwd]),
+                &sandbox.command_policy(NetworkPolicy::Deny, &[], &[&cwd, &source_cwd]),
             )
             .await
             {
