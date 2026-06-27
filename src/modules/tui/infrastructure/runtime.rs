@@ -473,40 +473,50 @@ impl Tui {
                         sync_push(&config_path, &mut model, &mut terminal).await;
                     }
                     Effect::ResumeLast => {
-                        match session_store.latest_for_project(&project_id).await {
-                            Ok(Some(summary)) => {
-                                // Learn from the current session before switching away from it.
-                                drive_distillation(
-                                    &agent_loop,
-                                    &memory,
-                                    &project_id,
-                                    &conversation,
-                                    &mut model,
-                                    &mut terminal,
-                                    &mut events,
-                                    &mut ticker,
-                                )
-                                .await;
-                                open_session(
-                                    session_store.as_ref(),
-                                    &system_prompt,
-                                    &mut conversation,
-                                    &mut model,
-                                    &mut session_id,
-                                    &mut persisted_len,
-                                    &project_id,
-                                    &summary.id,
-                                )
-                                .await;
-                            }
-                            Ok(None) => model.transcript.push(TranscriptItem::Notice(
+                        // On an inert store (init never ran, so no `sessions` table) latest_for_project
+                        // raises a raw "no such table" error; guard it the same way /sessions does so the
+                        // user sees the clean degraded-mode notice, not a leaked SQL detail.
+                        if !session_store.is_available() {
+                            model.transcript.push(TranscriptItem::Notice(
                                 NoticeLevel::Info,
-                                "nenhuma sessão anterior neste workspace".to_string(),
-                            )),
-                            Err(error) => model.transcript.push(TranscriptItem::Notice(
-                                NoticeLevel::Error,
-                                format!("não foi possível ler as sessões: {error}"),
-                            )),
+                                "persistência de sessão indisponível".to_string(),
+                            ));
+                        } else {
+                            match session_store.latest_for_project(&project_id).await {
+                                Ok(Some(summary)) => {
+                                    // Learn from the current session before switching away from it.
+                                    drive_distillation(
+                                        &agent_loop,
+                                        &memory,
+                                        &project_id,
+                                        &conversation,
+                                        &mut model,
+                                        &mut terminal,
+                                        &mut events,
+                                        &mut ticker,
+                                    )
+                                    .await;
+                                    open_session(
+                                        session_store.as_ref(),
+                                        &system_prompt,
+                                        &mut conversation,
+                                        &mut model,
+                                        &mut session_id,
+                                        &mut persisted_len,
+                                        &project_id,
+                                        &summary.id,
+                                    )
+                                    .await;
+                                }
+                                Ok(None) => model.transcript.push(TranscriptItem::Notice(
+                                    NoticeLevel::Info,
+                                    "nenhuma sessão anterior neste workspace".to_string(),
+                                )),
+                                Err(error) => model.transcript.push(TranscriptItem::Notice(
+                                    NoticeLevel::Error,
+                                    format!("não foi possível ler as sessões: {error}"),
+                                )),
+                            }
                         }
                     }
                     Effect::OpenSession(id) => {

@@ -11,8 +11,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
@@ -27,19 +25,16 @@ use crate::modules::tui::infrastructure::theme;
 /// wholesale on overflow (cheap, re-warms in one frame) rather than evicting per entry.
 const MAX_RENDER_CACHE: usize = 512;
 
+/// The memoization key: the owned inputs themselves, so a hash collision can never return another
+/// item's rendered lines (a lossy `u64` key did). The extra `String` clone per uncached entry is
+/// negligible against the markdown parse it avoids.
+type CacheKey = (String, Style, usize);
+
 thread_local! {
     /// Per-thread memoization of `render` keyed by `(markdown, base, width)`. The TUI runtime is
     /// single-threaded (`!Send`), so a thread-local is the natural home; rendering the full transcript
     /// each 120ms frame re-parsed every item before this, the dominant idle/stream CPU cost.
-    static RENDER_CACHE: RefCell<HashMap<u64, Vec<Line<'static>>>> = RefCell::new(HashMap::new());
-}
-
-fn cache_key(markdown: &str, base: Style, width: usize) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    markdown.hash(&mut hasher);
-    base.hash(&mut hasher);
-    width.hash(&mut hasher);
-    hasher.finish()
+    static RENDER_CACHE: RefCell<HashMap<CacheKey, Vec<Line<'static>>>> = RefCell::new(HashMap::new());
 }
 
 /// Render `markdown` to a wrapped, styled list of lines at `width` columns, with `base` as the
@@ -47,7 +42,7 @@ fn cache_key(markdown: &str, base: Style, width: usize) -> u64 {
 /// the cached lines instead of re-parsing. Each returned `Line` is one visual row; word-wrap carries
 /// `Style` through every word so inline formatting survives wrapping. Blank lines are preserved.
 pub fn render(markdown: &str, base: Style, width: usize) -> Vec<Line<'static>> {
-    let key = cache_key(markdown, base, width);
+    let key: CacheKey = (markdown.to_string(), base, width);
     if let Some(hit) = RENDER_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
         return hit;
     }

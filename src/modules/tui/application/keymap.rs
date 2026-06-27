@@ -808,7 +808,13 @@ fn on_wizard_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     }
 
     match key.code {
-        Key::Char(c) => {
+        // Ctrl+V pastes into the masked field via the clipboard (which routes to the wizard, never the
+        // plaintext composer), instead of inserting a literal 'v'. Critical on the API-key step: a
+        // pasted key would otherwise be silently corrupted, and the field is masked so it is invisible.
+        Key::Char('v') if key.ctrl && !key.alt => vec![Effect::PasteClipboard],
+        // Only a plain character types into the field; any other chord is ignored so it cannot corrupt
+        // the input (e.g. Ctrl+A inserting 'a').
+        Key::Char(c) if !key.ctrl && !key.alt => {
             wizard.push_char(c);
             vec![]
         }
@@ -947,6 +953,25 @@ mod tests {
         // Digit 3 picks the third model.
         let effects = on_key(&mut m, press(Key::Char('3')));
         assert_eq!(effects, vec![Effect::SetModel("c".to_string())]);
+    }
+
+    #[test]
+    fn wizard_ctrl_v_routes_to_paste_not_a_literal_char() {
+        // On a text step, Ctrl+V must paste (into the masked field, via the clipboard) rather than
+        // insert a literal 'v' — the regression that silently corrupts a pasted API key.
+        let mut wizard = ProviderWizard::new();
+        wizard.step = WizardStep::ApiKey;
+        let mut m = Model {
+            wizard: Some(wizard),
+            ..Default::default()
+        };
+        let ctrl_v = KeyPress {
+            code: Key::Char('v'),
+            ctrl: true,
+            alt: false,
+            shift: false,
+        };
+        assert_eq!(on_key(&mut m, ctrl_v), vec![Effect::PasteClipboard]);
     }
 
     #[test]

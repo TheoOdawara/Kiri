@@ -45,6 +45,12 @@ impl SqliteSessionStore {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(&db_path).map_err(sess)?;
+        // ~/.kiri/sessions.db is global across every workspace and terminal, so a second running Kiri
+        // can contend for a write. SQLITE_BUSY returns instantly (the op timeout cannot wait it out), so
+        // a busy_timeout lets brief cross-process contention be waited out instead of failing. WAL is a
+        // best-effort throughput win that also reduces reader/writer contention.
+        conn.busy_timeout(DB_OP_TIMEOUT).map_err(sess)?;
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             available: true,
@@ -268,23 +274,25 @@ impl SessionStore for SqliteSessionStore {
         let session_id = session_id.to_string();
         run_blocking(move || -> Result<Option<Session>> {
             let conn = lock(&conn)?;
-            let header = conn
-                .query_row(
-                    "SELECT project_id, title, created_at, updated_at FROM sessions WHERE id = ?1",
-                    params![session_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    },
-                )
-                .ok();
-            let Some((project_id, title, created_at, updated_at)) = header else {
-                return Ok(None);
+            let header = match conn.query_row(
+                "SELECT project_id, title, created_at, updated_at FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            ) {
+                Ok(header) => header,
+                // Absent session is `Ok(None)`; a real DB error (locked/corrupt/IO) must surface, not be
+                // reported to the user as "session not found".
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                Err(error) => return Err(sess(error)),
             };
+            let (project_id, title, created_at, updated_at) = header;
             let mut stmt = conn
                 .prepare(
                     "SELECT role, content, images, tool_calls, tool_call_id
@@ -293,22 +301,33 @@ impl SessionStore for SqliteSessionStore {
                 .map_err(sess)?;
             let rows = stmt
                 .query_map(params![session_id], |row| {
-                    let images: String = row.get(2)?;
-                    let tool_calls: String = row.get(3)?;
-                    Ok(StoredMessage {
+                    let images_raw: String = row.get(2)?;
+                    let tool_calls_raw: String = row.get(3)?;
+                    // A corrupt images/tool_calls column makes the row unsafe to keep: silently emptying
+                    // tool_calls would leave an assistant message whose calls vanished while its answers
+                    // (Role::Tool rows) still reference them — an orphaned exchange the provider rejects.
+                    // Skip the whole message instead (returned as None, dropped below).
+                    let images = match serde_json::from_str(&images_raw) {
+                        Ok(value) => value,
+                        Err(_) => return Ok(None),
+                    };
+                    let tool_calls = match serde_json::from_str(&tool_calls_raw) {
+                        Ok(value) => value,
+                        Err(_) => return Ok(None),
+                    };
+                    Ok(Some(StoredMessage {
                         role: row.get(0)?,
                         content: row.get(1)?,
-                        // Defensive: a corrupted JSON column degrades to empty, never a panic.
-                        images: serde_json::from_str(&images).unwrap_or_default(),
-                        tool_calls: serde_json::from_str(&tool_calls).unwrap_or_default(),
+                        images,
+                        tool_calls,
                         tool_call_id: row.get(4)?,
-                    })
+                    }))
                 })
                 .map_err(sess)?;
             let mut messages = Vec::new();
             for row in rows {
-                // Skip a row with an unrecognized role rather than abort the whole load.
-                if let Some(message) = row.map_err(sess)?.into_domain() {
+                // Skip a corrupt row, and a row with an unrecognized role, rather than abort the load.
+                if let Some(message) = row.map_err(sess)?.and_then(StoredMessage::into_domain) {
                     messages.push(message);
                 }
             }
