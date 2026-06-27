@@ -1,13 +1,10 @@
-use eventsource_stream::Eventsource;
-use tokio_stream::StreamExt;
-
 use super::message_dto::MessageDto;
 use super::sse::{TurnAccumulator, handle_event};
 use super::wire::{ChatRequest, ChatTemplateKwargs};
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
-use crate::modules::provider::infrastructure::http_error::error_from_status;
+use crate::modules::provider::infrastructure::streaming::{drain_sse, ensure_success};
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::{Effort, Secret};
@@ -83,26 +80,10 @@ impl CompletionProvider for OpenAiProvider {
             request.json(&body).send().await.map_err(|error| {
                 AgentError::Provider(format!("failed to reach provider: {error}"))
             })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            // The status drives the error path; the body is only diagnostic. If reading it fails, keep
-            // the failure visible in the message rather than silently blanking it.
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("<error body unavailable: {error}>"));
-            return Err(error_from_status(status, body));
-        }
+        let response = ensure_success(response).await?;
 
         let mut accumulator = TurnAccumulator::default();
-        let stream = response.bytes_stream().eventsource();
-        tokio::pin!(stream);
-        while let Some(event) = stream.next().await {
-            let event = event
-                .map_err(|error| AgentError::Provider(format!("error reading stream: {error}")))?;
-            handle_event(&event.data, &mut accumulator, sink)?;
-        }
+        drain_sse(response, |data| handle_event(data, &mut accumulator, sink)).await?;
 
         // A turn the output token cap truncated before any content or tool call: surface it instead of
         // returning an empty turn the user gets no feedback on.

@@ -5,8 +5,10 @@ use super::arguments::normalize_arguments;
 use super::wire::StreamChoice;
 use super::wire::{ChatStreamChunk, Delta, StreamError, ToolCallFragment};
 use crate::modules::provider::application::completion_provider::EventSink;
-use crate::modules::provider::infrastructure::MAX_STREAM_BYTES;
 use crate::modules::provider::infrastructure::http_error::bounded_preview;
+use crate::modules::provider::infrastructure::streaming::{
+    enforce_stream_budget, is_empty_truncation,
+};
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::stream_event::StreamEvent;
@@ -56,12 +58,7 @@ pub(crate) fn handle_event(
             .filter_map(|fragment| fragment.function.as_ref()?.arguments.as_deref())
             .map(str::len)
             .sum::<usize>();
-    accumulator.streamed_bytes = accumulator.streamed_bytes.saturating_add(delta_bytes);
-    if accumulator.streamed_bytes > MAX_STREAM_BYTES {
-        return Err(AgentError::Provider(format!(
-            "provider stream exceeded the maximum response size ({MAX_STREAM_BYTES} bytes)"
-        )));
-    }
+    enforce_stream_budget(&mut accumulator.streamed_bytes, delta_bytes)?;
 
     if let Some(reason) = &choice.finish_reason {
         accumulator.finish_reason = Some(reason.clone());
@@ -162,9 +159,11 @@ impl TurnAccumulator {
     /// producing anything usable. The provider surfaces this as an error rather than returning a turn
     /// that silently did nothing (the truncated case the user otherwise gets no feedback on).
     pub(crate) fn hit_empty_output_limit(&self) -> bool {
-        self.finish_reason.as_deref() == Some(FINISH_REASON_LENGTH)
-            && self.content.is_empty()
-            && self.tool_calls.is_empty()
+        is_empty_truncation(
+            self.finish_reason.as_deref() == Some(FINISH_REASON_LENGTH),
+            &self.content,
+            self.tool_calls.is_empty(),
+        )
     }
 
     fn absorb_tool_fragments(&mut self, fragments: &[ToolCallFragment]) {

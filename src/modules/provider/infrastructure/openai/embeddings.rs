@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
-use crate::modules::provider::infrastructure::http_error::error_from_status;
+use crate::modules::provider::infrastructure::streaming::ensure_success;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::Secret;
 
@@ -100,15 +100,7 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
             .map_err(|error| {
                 AgentError::Provider(format!("failed to reach embeddings endpoint: {error}"))
             })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("<error body unavailable: {error}>"));
-            return Err(error_from_status(status, body));
-        }
+        let response = ensure_success(response).await?;
 
         let parsed: EmbeddingsResponse = response.json().await.map_err(|error| {
             AgentError::Provider(format!("invalid embeddings response: {error}"))

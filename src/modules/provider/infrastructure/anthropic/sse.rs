@@ -8,8 +8,10 @@ use std::collections::BTreeMap;
 
 use super::wire::{BlockDeltaDto, ContentBlockStartDto, MessageDeltaDto, StreamEventDto};
 use crate::modules::provider::application::completion_provider::EventSink;
-use crate::modules::provider::infrastructure::MAX_STREAM_BYTES;
 use crate::modules::provider::infrastructure::http_error::bounded_preview;
+use crate::modules::provider::infrastructure::streaming::{
+    enforce_stream_budget, is_empty_truncation,
+};
 use crate::modules::provider::infrastructure::tool_args;
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
@@ -68,18 +70,18 @@ fn apply_delta(
 ) -> Result<(), AgentError> {
     match delta {
         BlockDeltaDto::TextDelta { text } if !text.is_empty() => {
-            accumulator.bound_streamed_bytes(text.len())?;
+            enforce_stream_budget(&mut accumulator.streamed_bytes, text.len())?;
             accumulator.content.push_str(&text);
             sink.on_event(StreamEvent::Content(text))
         }
         BlockDeltaDto::ThinkingDelta { thinking } if !thinking.is_empty() => {
             // Reasoning is not persisted, but it still flows through the channel/transcript, so it must
             // count toward the same ceiling — otherwise a provider streaming thinking forever OOMs.
-            accumulator.bound_streamed_bytes(thinking.len())?;
+            enforce_stream_budget(&mut accumulator.streamed_bytes, thinking.len())?;
             sink.on_event(StreamEvent::Reasoning(thinking))
         }
         BlockDeltaDto::InputJsonDelta { partial_json } => {
-            accumulator.bound_streamed_bytes(partial_json.len())?;
+            enforce_stream_budget(&mut accumulator.streamed_bytes, partial_json.len())?;
             accumulator.push_tool_input(index, &partial_json);
             Ok(())
         }
@@ -94,7 +96,8 @@ fn apply_delta(
 pub(crate) struct TurnAccumulator {
     content: String,
     tool_uses: BTreeMap<u32, PartialToolUse>,
-    /// Running total of streamed text + reasoning + tool-input bytes, bounded by `MAX_STREAM_BYTES`.
+    /// Running total of streamed text + reasoning + tool-input bytes, bounded by the shared
+    /// `MAX_STREAM_BYTES` via `enforce_stream_budget`.
     streamed_bytes: usize,
     /// The message's `stop_reason`; `"max_tokens"` means the output cap truncated the turn.
     stop_reason: Option<String>,
@@ -111,22 +114,11 @@ impl TurnAccumulator {
     /// Whether the output token cap (`stop_reason == "max_tokens"`) truncated the turn before producing
     /// anything usable. Surfaced by the provider as an error rather than an empty turn.
     pub(crate) fn hit_empty_output_limit(&self) -> bool {
-        self.stop_reason.as_deref() == Some(STOP_REASON_MAX_TOKENS)
-            && self.content.is_empty()
-            && self.tool_uses.is_empty()
-    }
-
-    /// Bound the running total of streamed text + reasoning + tool-input bytes before absorbing more, so
-    /// an unbounded stream fails fast instead of OOMing (`read_timeout` only bounds idle time between
-    /// chunks). Mirrors the OpenAI accumulator's ceiling against the single shared `MAX_STREAM_BYTES`.
-    fn bound_streamed_bytes(&mut self, delta: usize) -> Result<(), AgentError> {
-        self.streamed_bytes = self.streamed_bytes.saturating_add(delta);
-        if self.streamed_bytes > MAX_STREAM_BYTES {
-            return Err(AgentError::Provider(format!(
-                "provider stream exceeded the maximum response size ({MAX_STREAM_BYTES} bytes)"
-            )));
-        }
-        Ok(())
+        is_empty_truncation(
+            self.stop_reason.as_deref() == Some(STOP_REASON_MAX_TOKENS),
+            &self.content,
+            self.tool_uses.is_empty(),
+        )
     }
 
     fn start_tool_use(&mut self, index: u32, id: String, name: String) {
@@ -367,7 +359,9 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_stream_exceeding_cap_fails() {
+    fn anthropic_stream_exceeding_the_cap_fails_fast() {
+        // PROV-01 lock: the Anthropic stream now enforces MAX_STREAM_BYTES through the shared
+        // enforce_stream_budget, so an unbounded text stream fails fast instead of OOMing.
         let chunk = serde_json::json!({
             "type": "content_block_delta",
             "index": 0,
