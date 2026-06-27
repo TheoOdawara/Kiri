@@ -20,9 +20,8 @@ const EMBED_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Minimum cosine similarity for a semantic hit to count. Below this a match is treated as noise (a
 /// query that matches nothing semantically yields no semantic hits rather than the most-recent embedded
-/// entries surfaced as if relevant). It also blunts cross-model vector mismatch: vectors produced by a
-/// different embedding model rarely clear the floor against the current query, so recall degrades to
-/// keyword instead of ranking on meaningless cosines.
+/// entries surfaced as if relevant). Cross-model mismatch is no longer the floor's burden: the candidate
+/// fetch is scoped to the active embedder's `model()`, so foreign-model vectors are never ranked.
 const MIN_SIMILARITY: f32 = 0.15;
 
 /// Merge `primary` (semantic hits) with `secondary` (keyword hits), deduplicated by id and capped at
@@ -142,7 +141,7 @@ where
                 // Best-effort: a candidate-fetch failure degrades this recall to keyword search.
                 let candidates = self
                     .project_store
-                    .embedded_candidates(SEMANTIC_CANDIDATES)
+                    .embedded_candidates(embedder.model(), SEMANTIC_CANDIDATES)
                     .await
                     .unwrap_or_default();
                 semantic_pick(embedder.as_ref(), candidates, query, limit).await
@@ -164,7 +163,7 @@ where
                 // Best-effort: a candidate-fetch failure degrades this recall to keyword search.
                 let candidates = self
                     .shared_store
-                    .embedded_candidates(SEMANTIC_CANDIDATES)
+                    .embedded_candidates(embedder.model(), SEMANTIC_CANDIDATES)
                     .await
                     .unwrap_or_default();
                 semantic_pick(embedder.as_ref(), candidates, query, limit).await
@@ -392,6 +391,7 @@ mod tests {
         use super::*;
         use crate::modules::memory::application::project_memory::ProjectMemory;
         use crate::modules::memory::application::shared_memory::SharedMemory;
+        use crate::modules::memory::application::shared_store::SharedStore;
         use crate::modules::memory::infrastructure::file_project_memory::FileProjectMemory;
         use crate::modules::memory::infrastructure::file_project_store::FileProjectStore;
         use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
@@ -399,25 +399,39 @@ mod tests {
         use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
         use tempfile::TempDir;
 
+        /// Map a text to a 3-dim presence vector over ["alpha","beta","gamma"].
+        fn presence_vector(text: &str) -> Vec<f32> {
+            let t = text.to_lowercase();
+            vec![
+                t.contains("alpha") as i32 as f32,
+                t.contains("beta") as i32 as f32,
+                t.contains("gamma") as i32 as f32,
+            ]
+        }
+
         struct FakeEmbedder;
 
         #[async_trait]
         impl EmbeddingProvider for FakeEmbedder {
             async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-                Ok(texts
-                    .iter()
-                    .map(|t| {
-                        let t = t.to_lowercase();
-                        vec![
-                            t.contains("alpha") as i32 as f32,
-                            t.contains("beta") as i32 as f32,
-                            t.contains("gamma") as i32 as f32,
-                        ]
-                    })
-                    .collect())
+                Ok(texts.iter().map(|t| presence_vector(t)).collect())
             }
             fn model(&self) -> &str {
                 "fake-embed"
+            }
+        }
+
+        /// Same mapping as `FakeEmbedder` but a different model id, so a vector stored under another model
+        /// is out of scope for this embedder's recall.
+        struct OtherModelEmbedder;
+
+        #[async_trait]
+        impl EmbeddingProvider for OtherModelEmbedder {
+            async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                Ok(texts.iter().map(|t| presence_vector(t)).collect())
+            }
+            fn model(&self) -> &str {
+                "other-model"
             }
         }
 
@@ -549,6 +563,36 @@ mod tests {
             // The embedder errors on the query; recall must still find the entry by keyword.
             let hits = port.recall_shared("unique-token", 5).await.unwrap();
             assert_eq!(hits.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn recall_ignores_other_model_vectors() {
+            let dir = TempDir::new().unwrap();
+            let shared = shared_store(&dir).await;
+
+            // A body sharing no literal token with the query, embedded under model "a" with the exact
+            // vector the "alpha" query produces. A cross-model rank would surface it on a perfect cosine;
+            // scoping the candidate fetch to the active model must keep it out, degrading to keyword.
+            let entry = MemoryEntry::new(
+                MemoryKind::Fact,
+                "the first greek letter".into(),
+                HashSet::new(),
+                Some("p".into()),
+            );
+            shared.save(entry.clone()).await.unwrap();
+            shared
+                .save_embedding(&entry.id, "a", &[1.0, 0.0, 0.0])
+                .await
+                .unwrap();
+
+            let port = MemoryPortImpl::new(project_store(&dir).await, shared)
+                .with_embedder(Arc::new(OtherModelEmbedder));
+
+            let hits = port.recall_shared("alpha", 5).await.unwrap();
+            assert!(
+                hits.is_empty(),
+                "a vector from another model must not be ranked: {hits:?}"
+            );
         }
     }
 }

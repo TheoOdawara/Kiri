@@ -70,10 +70,16 @@ impl SqliteSharedMemory {
         .await
     }
 
-    /// The most recently updated entries that carry an embedding, paired with their vector. Backs the
-    /// semantic recall's candidate set (ranked by cosine in the application layer).
-    pub async fn embedded_candidates(&self, limit: usize) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+    /// The most recently updated entries embedded under `model`, paired with their vector. Backs the
+    /// semantic recall's candidate set (ranked by cosine in the application layer). Scoping to `model`
+    /// keeps cross-model vectors out of the ranking when the active embedder changes.
+    pub async fn embedded_candidates(
+        &self,
+        model: &str,
+        limit: usize,
+    ) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
         let conn = self.conn.clone();
+        let model = model.to_string();
         run_blocking(move || -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
             let conn = lock(&conn)?;
             let mut stmt = conn
@@ -81,11 +87,12 @@ impl SqliteSharedMemory {
                     "SELECT e.id, e.kind, e.content, e.tags, e.project_id, e.created_at, \
                      e.updated_at, emb.vector \
                      FROM entries e JOIN entry_embeddings emb ON emb.entry_id = e.id \
-                     ORDER BY e.updated_at DESC LIMIT ?1",
+                     WHERE emb.model = ?1 \
+                     ORDER BY e.updated_at DESC LIMIT ?2",
                 )
                 .map_err(mem)?;
             let rows = stmt
-                .query_map(params![limit as i64], |row| {
+                .query_map(params![model, limit as i64], |row| {
                     let entry = row_to_entry(row)?;
                     let blob: Vec<u8> = row.get("vector")?;
                     Ok((entry, blob_to_vec(&blob)))
@@ -456,5 +463,28 @@ mod tests {
         let reopened = SqliteSharedMemory::new(db).unwrap();
         reopened.init().await.unwrap();
         assert_eq!(reopened.count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn embedded_candidates_filters_by_model() {
+        let dir = TempDir::new().unwrap();
+        let memory = memory(&dir).await;
+
+        let a = entry(MemoryKind::Fact, "content a", &[], None);
+        let b = entry(MemoryKind::Fact, "content b", &[], None);
+        memory.save(&a).await.unwrap();
+        memory.save(&b).await.unwrap();
+        memory
+            .save_embedding(&a.id, "model-a", &[1.0, 0.0])
+            .await
+            .unwrap();
+        memory
+            .save_embedding(&b.id, "model-b", &[0.0, 1.0])
+            .await
+            .unwrap();
+
+        let candidates = memory.embedded_candidates("model-a", 10).await.unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0.id, a.id);
     }
 }

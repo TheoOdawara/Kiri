@@ -116,9 +116,14 @@ impl FileProjectMemory {
         Ok(())
     }
 
-    /// The most recently updated entries that carry an embedding, paired with their vector. Reads file
-    /// bodies only for the (bounded) candidates, ranked by the in-memory index's `updated_at`.
-    pub async fn embedded_candidates(&self, limit: usize) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+    /// The most recently updated entries embedded under `model`, paired with their vector. Reads file
+    /// bodies only for the (bounded) candidates, ranked by the in-memory index's `updated_at`. Scoping
+    /// to `model` keeps cross-model vectors out of the ranking when the active embedder changes.
+    pub async fn embedded_candidates(
+        &self,
+        model: &str,
+        limit: usize,
+    ) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
         let sidecar = self.load_embeddings().await?;
         if sidecar.is_empty() {
             return Ok(Vec::new());
@@ -126,8 +131,9 @@ impl FileProjectMemory {
         let mut ids: Vec<(String, String)> = {
             let index = self.index.read().await;
             sidecar
-                .keys()
-                .filter_map(|id| {
+                .iter()
+                .filter(|(_, embedding)| embedding.model == model)
+                .filter_map(|(id, _)| {
                     index
                         .entries
                         .get(id)
@@ -479,5 +485,30 @@ mod tests {
             let count = memory.count().await.unwrap();
             assert_eq!(count, 1);
         }
+    }
+
+    #[tokio::test]
+    async fn embedded_candidates_filters_by_model() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        let memory = FileProjectMemory::new(root);
+        memory.init().await.unwrap();
+
+        let a = MemoryEntry::new(MemoryKind::Fact, "content a".into(), HashSet::new(), None);
+        let b = MemoryEntry::new(MemoryKind::Fact, "content b".into(), HashSet::new(), None);
+        memory.save(&a).await.unwrap();
+        memory.save(&b).await.unwrap();
+        memory
+            .save_embedding(&a.id, "model-a", &[1.0, 0.0])
+            .await
+            .unwrap();
+        memory
+            .save_embedding(&b.id, "model-b", &[0.0, 1.0])
+            .await
+            .unwrap();
+
+        let candidates = memory.embedded_candidates("model-a", 10).await.unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0.id, a.id);
     }
 }

@@ -28,9 +28,14 @@ pub trait ProjectStore: Send + Sync {
         Ok(())
     }
 
-    /// Entries that carry a stored embedding, paired with their vector, up to `limit`. Default empty so a
-    /// non-embedding store transparently falls back to keyword recall.
-    async fn embedded_candidates(&self, _limit: usize) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+    /// Entries embedded under `model`, paired with their vector, up to `limit`. Scoped to the active
+    /// embedder's model so cross-model vectors are never ranked. Default empty so a non-embedding store
+    /// transparently falls back to keyword recall.
+    async fn embedded_candidates(
+        &self,
+        _model: &str,
+        _limit: usize,
+    ) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
         Ok(Vec::new())
     }
 
