@@ -18,8 +18,12 @@ pub struct FunctionCall {
     pub arguments: String,
 }
 
+/// The canonical OpenAI tool-call `type`. The only value the chat-completions API assigns, and the kind
+/// the agent re-sends in history — named once so the SSE accumulators and the serde default agree.
+pub const TOOL_CALL_FUNCTION_KIND: &str = "function";
+
 fn default_function_type() -> String {
-    "function".to_string()
+    TOOL_CALL_FUNCTION_KIND.to_string()
 }
 
 #[cfg(test)]
@@ -47,5 +51,10 @@ mod tests {
             serde_json::from_str(r#"{"id":"c1","function":{"name":"x","arguments":"{}"}}"#)
                 .unwrap();
         assert_eq!(back.kind, "function");
+    }
+
+    #[test]
+    fn default_function_type_equals_the_const() {
+        assert_eq!(default_function_type(), TOOL_CALL_FUNCTION_KIND);
     }
 }

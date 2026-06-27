@@ -13,7 +13,10 @@ use crate::modules::provider::infrastructure::http_error::bounded_preview;
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::stream_event::StreamEvent;
-use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
+use crate::shared::kernel::tool_call::{FunctionCall, TOOL_CALL_FUNCTION_KIND, ToolCall};
+
+/// The Messages API `stop_reason` that means the output token cap truncated the turn.
+const STOP_REASON_MAX_TOKENS: &str = "max_tokens";
 
 /// Feed one parsed SSE event's `data` payload into the accumulator and the live `sink`. A non-JSON
 /// payload (keep-alive comment, blank line) is ignored; an `error` event fails the turn so a mid-stream
@@ -107,7 +110,7 @@ impl TurnAccumulator {
     /// Whether the output token cap (`stop_reason == "max_tokens"`) truncated the turn before producing
     /// anything usable. Surfaced by the provider as an error rather than an empty turn.
     pub(crate) fn hit_empty_output_limit(&self) -> bool {
-        self.stop_reason.as_deref() == Some("max_tokens")
+        self.stop_reason.as_deref() == Some(STOP_REASON_MAX_TOKENS)
             && self.content.is_empty()
             && self.tool_uses.is_empty()
     }
@@ -151,8 +154,8 @@ impl TurnAccumulator {
             .map(|partial| ToolCall {
                 id: partial.id,
                 // The domain carries an OpenAI-style `type`; Anthropic tool_use blocks have none, so the
-                // re-sent history uses the canonical "function".
-                kind: "function".to_string(),
+                // re-sent history uses the canonical kind.
+                kind: TOOL_CALL_FUNCTION_KIND.to_string(),
                 function: FunctionCall {
                     name: partial.name,
                     arguments: tool_input_to_arguments(partial.input),

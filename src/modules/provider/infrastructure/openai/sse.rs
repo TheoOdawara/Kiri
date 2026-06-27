@@ -10,7 +10,7 @@ use crate::modules::provider::infrastructure::http_error::bounded_preview;
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::stream_event::StreamEvent;
-use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
+use crate::shared::kernel::tool_call::{FunctionCall, TOOL_CALL_FUNCTION_KIND, ToolCall};
 
 /// Feed one parsed SSE event's `data` payload into the accumulator (content/tool-calls) and the live
 /// `on_event` callback (reasoning/content). The `[DONE]` sentinel and malformed JSON are ignored. Line
@@ -105,6 +105,9 @@ fn format_stream_error(error: &StreamError) -> String {
 /// The sentinel payload OpenAI-compatible SSE streams send to mark the end of a completion.
 const SSE_DONE_SENTINEL: &str = "[DONE]";
 
+/// The `finish_reason` the chat-completions API sends when the output token cap truncated the turn.
+const FINISH_REASON_LENGTH: &str = "length";
+
 /// Parse one event's `data` payload into its first choice. Yields nothing for the `[DONE]` sentinel,
 /// an empty payload, or malformed JSON. (A test seam; the live path uses `handle_event`.)
 #[cfg(test)]
@@ -159,7 +162,7 @@ impl TurnAccumulator {
     /// producing anything usable. The provider surfaces this as an error rather than returning a turn
     /// that silently did nothing (the truncated case the user otherwise gets no feedback on).
     pub(crate) fn hit_empty_output_limit(&self) -> bool {
-        self.finish_reason.as_deref() == Some("length")
+        self.finish_reason.as_deref() == Some(FINISH_REASON_LENGTH)
             && self.content.is_empty()
             && self.tool_calls.is_empty()
     }
@@ -191,7 +194,7 @@ impl TurnAccumulator {
             .map(|partial| ToolCall {
                 id: partial.id,
                 kind: if partial.kind.is_empty() {
-                    "function".to_string()
+                    TOOL_CALL_FUNCTION_KIND.to_string()
                 } else {
                     partial.kind
                 },
