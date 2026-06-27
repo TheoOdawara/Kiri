@@ -1,278 +1,61 @@
-use std::future::Future;
+//! The TUI front-end facade. Holds the assembled [`Tui`], the [`RunLoop`] run-state struct, the
+//! event-loop driver [`Tui::run`] with its effect dispatcher [`RunLoop::apply_effect`], and the borrowed
+//! loop-handle context structs ([`UiDriver`]/[`EngineHandles`]). Each concern lives in a submodule behind
+//! this facade: provider swapping, the per-turn driver, session persistence, distillation, `/sync`, and
+//! render/clipboard glue. Re-exports keep `runtime::Tui`/`runtime::ProviderSwap`/`runtime::SyncContext`
+//! stable for `app::wire`.
+
+mod distill;
+mod provider_swap;
+mod render;
+mod session_ops;
+mod sync;
+mod turn;
+
+pub use provider_swap::ProviderSwap;
+pub use sync::SyncContext;
+
+use session_ops::SessionCursor;
+
 use std::io;
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{
-    EnableBracketedPaste, EnableMouseCapture, Event, EventStream, KeyCode, KeyModifiers,
-};
-use ratatui::backend::Backend;
-use ratatui::layout::Rect;
-use ratatui::{DefaultTerminal, Terminal};
+use crossterm::event::{EnableBracketedPaste, EnableMouseCapture, EventStream};
+use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{self, Interval};
 use tokio_stream::StreamExt;
 
-use crate::modules::agent::application::agent_loop::{AgentLoop, TurnOutcome};
+use crate::modules::agent::application::agent_loop::AgentLoop;
 use crate::modules::agent::application::approval_policy::Approval;
-use crate::modules::memory::application::distill::Distiller;
 use crate::modules::memory::application::memory_port::MemoryPort;
-use crate::modules::memory::application::shared_memory::SharedMemory;
-use crate::modules::memory::domain::project_id::project_id_from_path;
-use crate::modules::provider::application::completion_provider::CompletionProvider;
-use crate::modules::provider::application::secret_store::SecretStore;
-use crate::modules::provider::infrastructure::factory::{
-    CredentialResolution, build_provider, resolve_credential as resolve_credential_policy,
-};
 use crate::modules::session::application::session_store::SessionStore;
-use crate::modules::session::domain::session::derive_title;
-use crate::modules::sync::application::git::Git;
-use crate::modules::sync::application::sync_service::SyncService;
-use crate::modules::sync::application::work_tree::SyncWorkTree;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
-use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::application::update::update;
-use crate::modules::tui::domain::modal::PendingPlan;
-use crate::modules::tui::domain::model::{Model, Motion};
-use crate::modules::tui::domain::picker::{Picker, PickerKind};
-use crate::modules::tui::domain::selection::SelectionState;
-use crate::modules::tui::domain::transcript::{NoticeLevel, Transcript, TranscriptItem};
+use crate::modules::tui::domain::model::Model;
+use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
-use crate::modules::tui::infrastructure::clipboard::{self, ClipboardContent};
 use crate::modules::tui::infrastructure::input;
 use crate::modules::tui::infrastructure::terminal_guard::TerminalGuard;
 use crate::modules::tui::infrastructure::text;
 use crate::modules::tui::infrastructure::theme;
-use crate::modules::tui::infrastructure::view::{frame_regions, view};
-use crate::modules::tui::infrastructure::widgets::{editor, selection_overlay};
-use crate::shared::infra::config;
-use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::conversation::Conversation;
-use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::message::Message;
-use crate::shared::kernel::provider::{
-    AuthMethod, Credential, Effort, ProviderKind, ProviderProfile,
-};
-use crate::shared::kernel::role::Role;
+use crate::shared::kernel::provider::ProviderProfile;
 
-/// The agent-turn future, boxed and `!Send`. Driven as a `select!` arm — never spawned — so no
-/// `Send`/`'static` bound is needed and the engine borrows stay plain references.
-type TurnFuture<'a> = Pin<Box<dyn Future<Output = Result<TurnOutcome, AgentError>> + 'a>>;
-
-const FRAME_INTERVAL: Duration = Duration::from_millis(120);
+/// The frame cadence: an idle TUI ticks at this rate, and the spinner advances one step per interval.
+pub(super) const FRAME_INTERVAL: Duration = Duration::from_millis(120);
 
 /// Minimum spacing between redraws while a turn streams. Finer than `FRAME_INTERVAL` so streamed text
 /// flows at ~30 fps instead of appearing in coarse 120 ms blocks. It only paces draws that are already
 /// being driven by incoming deltas, so an idle TUI still ticks at `FRAME_INTERVAL` and burns no extra CPU.
-const STREAM_FRAME: Duration = Duration::from_millis(33);
-
-/// Everything the runtime needs to rebuild the provider adapter for a live `/models`/`/effort`/
-/// `/provider` change: the HTTP client, the secret store, the full provider catalog, the active id, the
-/// active provider's cached credential (so a rebuild needs no keyring round-trip), and the thinking/
-/// effort dials. Effort is captured at adapter construction, so changing effort — or the active
-/// provider — means rebuilding the `Arc`. The cached `credential` has three states: `None` during
-/// first-run onboarding (no usable key yet); `Some(Credential::None)` for an active keyless provider
-/// (auth = "none"); and `Some(Credential::ApiKey { .. })` for a keyed one. It is set the moment a
-/// provider is switched to or saved, so a rebuild needs no keyring round-trip.
-pub struct ProviderSwap {
-    client: reqwest::Client,
-    secrets: Box<dyn SecretStore>,
-    providers: Vec<ProviderProfile>,
-    active: String,
-    credential: Option<Credential>,
-    thinking: bool,
-    effort: Effort,
-}
-
-/// The outcome of a live `/provider` switch: the rebuilt adapter, its model, and an optional persist
-/// warning — `Some` when a one-time env-import key failed to save — so `apply_set_provider` can surface
-/// it as a transcript Notice instead of swallowing it (ERR-02).
-struct ProviderSwitch {
-    provider: Arc<dyn CompletionProvider>,
-    model: String,
-    persist_warning: Option<AgentError>,
-}
-
-/// The sync ports + paths, built once in `app::wire` and injected into the front-end so a live `/sync`
-/// push constructs **no** adapter and recomputes **no** path — the runtime is no longer a second
-/// composition root. The concrete git/shared-memory/work-tree adapter *choice* lives only in `wire`;
-/// here they are seen only as ports, and the home/config paths come from `Settings`.
-pub struct SyncContext {
-    git: Arc<dyn Git>,
-    memory: Arc<dyn SharedMemory>,
-    work_tree: Arc<dyn SyncWorkTree>,
-    global_dir: PathBuf,
-    config_path: PathBuf,
-}
-
-impl SyncContext {
-    pub fn new(
-        git: Arc<dyn Git>,
-        memory: Arc<dyn SharedMemory>,
-        work_tree: Arc<dyn SyncWorkTree>,
-        global_dir: PathBuf,
-        config_path: PathBuf,
-    ) -> Self {
-        Self {
-            git,
-            memory,
-            work_tree,
-            global_dir,
-            config_path,
-        }
-    }
-}
-
-impl ProviderSwap {
-    pub fn new(
-        client: reqwest::Client,
-        secrets: Box<dyn SecretStore>,
-        providers: Vec<ProviderProfile>,
-        active: String,
-        credential: Option<Credential>,
-        thinking: bool,
-        effort: Effort,
-    ) -> Self {
-        Self {
-            client,
-            secrets,
-            providers,
-            active,
-            credential,
-            thinking,
-            effort,
-        }
-    }
-
-    fn active_profile(&self) -> Option<&ProviderProfile> {
-        self.providers.iter().find(|p| p.id == self.active)
-    }
-
-    fn active_profile_mut(&mut self) -> Option<&mut ProviderProfile> {
-        let active = self.active.clone();
-        self.providers.iter_mut().find(|p| p.id == active)
-    }
-
-    /// The configured provider ids, in catalog order — the `/provider` picker's options.
-    pub fn provider_ids(&self) -> Vec<String> {
-        self.providers.iter().map(|p| p.id.clone()).collect()
-    }
-
-    /// Build an adapter for a specific profile/credential/effort without committing any state, so a
-    /// failed rebuild leaves the current provider untouched.
-    fn build(
-        &self,
-        profile: &ProviderProfile,
-        credential: &Credential,
-        effort: Effort,
-    ) -> Result<Arc<dyn CompletionProvider>, AgentError> {
-        build_provider(
-            self.client.clone(),
-            profile,
-            credential.clone(),
-            self.thinking,
-            effort,
-        )
-    }
-
-    /// Resolve a provider's credential via the single shared resolver (the same keyless → stored →
-    /// env-import policy as boot), returning the credential plus any env-import persist warning — `Some`
-    /// when a one-time env key failed to save — so the caller can surface it instead of swallowing it.
-    /// A keyless provider yields `Credential::None`; a provider with nothing configured is a clear error.
-    fn resolve_credential(
-        &self,
-        profile: &ProviderProfile,
-    ) -> Result<(Credential, Option<AgentError>), AgentError> {
-        match resolve_credential_policy(profile, self.secrets.as_ref())? {
-            CredentialResolution::Keyless => Ok((Credential::None, None)),
-            CredentialResolution::Stored(credential) => Ok((credential, None)),
-            CredentialResolution::Imported {
-                credential,
-                persisted,
-            } => Ok((credential, persisted.err())),
-            CredentialResolution::Absent => Err(AgentError::Provider(format!(
-                "no credential for provider '{}'. Configure it via /provider or set its API-key env var.",
-                profile.id
-            ))),
-        }
-    }
-
-    /// Rebuild the active provider with a new `effort`, committing the effort only on success. Without a
-    /// live credential (first-run onboarding) there is nothing to rebuild, so it surfaces a clear error
-    /// and leaves the effort dial untouched rather than panicking or silently diverging.
-    fn rebuild_with_effort(
-        &mut self,
-        effort: Effort,
-    ) -> Result<Arc<dyn CompletionProvider>, AgentError> {
-        let Some(credential) = self.credential.clone() else {
-            return Err(AgentError::Provider(
-                "configure um provider com /provider antes de mudar o esforço".to_string(),
-            ));
-        };
-        let profile = self
-            .active_profile()
-            .ok_or_else(|| AgentError::Provider("no active provider configured".to_string()))?;
-        let provider = self.build(profile, &credential, effort)?;
-        self.effort = effort;
-        Ok(provider)
-    }
-
-    /// Switch the active provider to `id`: look up its profile + credential, build the adapter, and
-    /// commit (active id + cached credential) only on success. Returns the new adapter, the target model
-    /// id, and any env-import persist warning so the caller can surface it. An unknown id or a missing
-    /// credential is a clear error.
-    fn switch_to(&mut self, id: &str) -> Result<ProviderSwitch, AgentError> {
-        let profile = self
-            .providers
-            .iter()
-            .find(|p| p.id == id)
-            .ok_or_else(|| AgentError::Provider(format!("provider '{id}' is not configured")))?
-            .clone();
-        let (credential, persist_warning) = self.resolve_credential(&profile)?;
-        let provider = self.build(&profile, &credential, self.effort)?;
-        self.active = id.to_string();
-        self.credential = Some(credential);
-        Ok(ProviderSwitch {
-            provider,
-            model: profile.model,
-            persist_warning,
-        })
-    }
-
-    /// Store a new provider's credential, build its adapter, add-or-replace it in the catalog, and make
-    /// it active — all committed only if the credential stores and the adapter builds. Returns the new
-    /// adapter and its model.
-    fn add_and_activate(
-        &mut self,
-        profile: ProviderProfile,
-        credential: Credential,
-    ) -> Result<(Arc<dyn CompletionProvider>, String), AgentError> {
-        // Build first (validates the profile/credential), then store the secret — so a build failure
-        // never leaves an orphaned credential in the keyring for a provider that was not added.
-        let provider = self.build(&profile, &credential, self.effort)?;
-        match &credential {
-            // A keyless provider stores nothing; clear any stale key from a prior keyed config of this
-            // id best-effort (a missing-key delete is a harmless no-op) so no orphaned secret lingers.
-            Credential::None => {
-                let _ = self.secrets.delete(&profile.id);
-            }
-            _ => self.secrets.set(&profile.id, &credential)?,
-        }
-        let id = profile.id.clone();
-        let model = profile.model.clone();
-        self.providers.retain(|p| p.id != id);
-        self.providers.push(profile);
-        self.active = id;
-        self.credential = Some(credential);
-        Ok((provider, model))
-    }
-}
+pub(super) const STREAM_FRAME: Duration = Duration::from_millis(33);
 
 /// The full-screen TUI frontend: owns the engine handles and the UI model, runs the render/input loop,
 /// and drives one agent turn at a time. The sole frontend, assembled in `app::wire`.
@@ -300,21 +83,72 @@ pub struct Tui {
     project_id: String,
 }
 
+/// The wire-time inputs to [`Tui::new`], grouped so the constructor takes a single argument (no
+/// argument-count lint). Assembled in `app::wire`, the one place the adapters are chosen.
+pub struct TuiParams {
+    pub agent_loop: AgentLoop,
+    pub sandbox: FsSandbox,
+    pub system_prompt: String,
+    pub seed: Option<String>,
+    pub provider_swap: ProviderSwap,
+    pub config_path: PathBuf,
+    pub sync_context: SyncContext,
+    pub needs_onboarding: bool,
+    pub session_store: Arc<dyn SessionStore>,
+    pub memory: Arc<dyn MemoryPort>,
+    pub project_id: String,
+}
+
+/// The long-lived owned run state, aggregated so the per-turn driver and the effect handlers are
+/// `&mut self` methods that take only the effect payload plus the borrowed loop handles — never the owned
+/// state by argument. This is what keeps every handler under the argument-count lint with no `#[allow]`.
+pub(super) struct RunLoop {
+    agent_loop: AgentLoop,
+    sandbox: FsSandbox,
+    conversation: Conversation,
+    model: Model,
+    system_prompt: String,
+    provider_swap: ProviderSwap,
+    config_path: PathBuf,
+    sync_context: SyncContext,
+    session_store: Arc<dyn SessionStore>,
+    memory: Arc<dyn MemoryPort>,
+    project_id: String,
+    cursor: SessionCursor,
+}
+
+/// The live loop handles threaded into the per-turn driver and distillation: the terminal to draw on, the
+/// crossterm event stream, and the frame ticker. Disjoint borrows, grouped so the handlers stay small.
+pub(super) struct UiDriver<'a> {
+    pub(super) terminal: &'a mut DefaultTerminal,
+    pub(super) events: &'a mut EventStream,
+    pub(super) ticker: &'a mut Interval,
+}
+
+/// The engine-side handles for the per-turn driver: the bridge the agent loop reports through, the
+/// receiver of its messages, the cooperative cancel token, and the slot for a pending approval's reply.
+pub(super) struct EngineHandles<'a> {
+    pub(super) bridge: &'a mut Bridge,
+    pub(super) engine_rx: &'a mut mpsc::UnboundedReceiver<EngineMsg>,
+    pub(super) cancel: &'a CancelToken,
+    pub(super) pending_reply: &'a mut Option<oneshot::Sender<Approval>>,
+}
+
 impl Tui {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        agent_loop: AgentLoop,
-        sandbox: FsSandbox,
-        system_prompt: String,
-        seed: Option<String>,
-        provider_swap: ProviderSwap,
-        config_path: PathBuf,
-        sync_context: SyncContext,
-        needs_onboarding: bool,
-        session_store: Arc<dyn SessionStore>,
-        memory: Arc<dyn MemoryPort>,
-        project_id: String,
-    ) -> Self {
+    pub fn new(params: TuiParams) -> Self {
+        let TuiParams {
+            agent_loop,
+            sandbox,
+            system_prompt,
+            seed,
+            provider_swap,
+            config_path,
+            sync_context,
+            needs_onboarding,
+            session_store,
+            memory,
+            project_id,
+        } = params;
         let workspace = text::display_path(sandbox.root());
         let (model_id, models) = provider_swap
             .active_profile()
@@ -346,25 +180,19 @@ impl Tui {
 
     pub async fn run(self) -> Result<()> {
         let Tui {
-            mut agent_loop,
-            mut sandbox,
-            mut conversation,
+            agent_loop,
+            sandbox,
+            conversation,
             mut model,
             seed,
             system_prompt,
-            mut provider_swap,
+            provider_swap,
             config_path,
             sync_context,
             session_store,
             memory,
-            mut project_id,
+            project_id,
         } = self;
-
-        // Session persistence cursor: the id of the row backing the current conversation (lazily created
-        // on the first flush, so an empty session never hits the DB) and how many non-system messages
-        // have already been written, so each flush appends only the new tail.
-        let mut session_id: Option<String> = None;
-        let mut persisted_len: usize = 0;
 
         let mut terminal = ratatui::init();
         let _guard = TerminalGuard;
@@ -382,7 +210,7 @@ impl Tui {
             .set_styles(theme::base(), cursor, theme::selection());
         // Resolve the motion preference once: reading the environment is infrastructure's job, kept out
         // of the pure domain. The view folds in per-frame geometry on top of this.
-        model.motion = resolve_motion();
+        model.motion = render::resolve_motion();
         // Stamp the open instant for the splash breath-in and the cursor pulse (clock stays out of the
         // domain constructor).
         model.opened_at = Some(Instant::now());
@@ -394,1276 +222,167 @@ impl Tui {
         let mut events = EventStream::new();
         let mut ticker = time::interval(FRAME_INTERVAL);
 
+        // Aggregate the long-lived owned state once; the handlers drive it as `&mut self` methods.
+        let mut run_loop = RunLoop {
+            agent_loop,
+            sandbox,
+            conversation,
+            model,
+            system_prompt,
+            provider_swap,
+            config_path,
+            sync_context,
+            session_store,
+            memory,
+            project_id,
+            // Session persistence cursor: the row backing the current conversation (lazily created on the
+            // first flush, so an empty session never hits the DB) and how many non-system messages have
+            // already been written, so each flush appends only the new tail.
+            cursor: SessionCursor {
+                session_id: None,
+                persisted_len: 0,
+            },
+        };
+        let mut ui = UiDriver {
+            terminal: &mut terminal,
+            events: &mut events,
+            ticker: &mut ticker,
+        };
+        let mut engine = EngineHandles {
+            bridge: &mut bridge,
+            engine_rx: &mut engine_rx,
+            cancel: &cancel,
+            pending_reply: &mut pending_reply,
+        };
+
         // An initial prompt from the CLI runs as the first turn.
         if let Some(line) = seed.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
             match command::parse(&line) {
-                Some(Command::Quit) => model.should_quit = true,
+                Some(Command::Quit) => run_loop.model.should_quit = true,
                 // A non-quit command as the CLI seed is ignored; the seed is meant to be a prompt.
                 Some(_) => {}
                 // Onboarding: there is no usable provider yet, so the seed can't run against the null
                 // provider. Surface it and let the user configure a provider via the welcome wizard.
-                None if model.unconfigured => {
-                    model.transcript.push(TranscriptItem::Notice(
+                None if run_loop.model.unconfigured => {
+                    run_loop.model.transcript.push(TranscriptItem::Notice(
                         NoticeLevel::Info,
                         "configure um provider antes de enviar — a mensagem inicial foi ignorada"
                             .to_string(),
                     ));
                 }
                 None => {
-                    model.history.record(&line);
-                    model.transcript.push(TranscriptItem::User(line.clone()));
-                    model.busy = true;
-                    conversation.push(Message::user(line));
-                    drive_turn(
-                        &agent_loop,
-                        &mut conversation,
-                        &sandbox,
-                        &mut bridge,
-                        &mut model,
-                        &mut engine_rx,
-                        &cancel,
-                        &mut pending_reply,
-                        &mut terminal,
-                        &mut events,
-                        &mut ticker,
-                    )
-                    .await?;
-                    flush_session(
-                        session_store.as_ref(),
-                        &mut session_id,
-                        &mut persisted_len,
-                        &project_id,
-                        &conversation,
-                        &mut model,
-                    )
-                    .await;
+                    run_loop.model.history.record(&line);
+                    run_loop
+                        .model
+                        .transcript
+                        .push(TranscriptItem::User(line.clone()));
+                    run_loop.model.busy = true;
+                    run_loop.conversation.push(Message::user(line));
+                    run_loop.drive_turn(&mut ui, &mut engine).await?;
+                    run_loop.flush_session().await;
                 }
             }
         }
 
-        while !model.should_quit {
-            model.render_at = Some(Instant::now());
-            draw_and_copy(&mut terminal, &mut model)?;
+        while !run_loop.model.should_quit {
+            run_loop.model.render_at = Some(Instant::now());
+            render::draw_and_copy(ui.terminal, &mut run_loop.model)?;
 
             // Resolve one input into a message, then handle it outside the select so the engine
             // handles are unambiguously free when a turn is armed.
             let msg = tokio::select! {
                 biased;
-                maybe = events.next() => match maybe {
+                maybe = ui.events.next() => match maybe {
                     Some(Ok(event)) => {
                         // Stamp arrival time for multi-click detection (before the reducer reads it).
-                        model.last_event_at = Some(Instant::now());
+                        run_loop.model.last_event_at = Some(Instant::now());
                         input::to_msg(event)
                     }
                     Some(Err(_)) => None,
                     None => {
-                        model.should_quit = true;
+                        run_loop.model.should_quit = true;
                         None
                     }
                 },
-                _ = ticker.tick() => None,
+                _ = ui.ticker.tick() => None,
             };
             let Some(msg) = msg else {
                 continue;
             };
 
-            for effect in update(&mut model, msg) {
-                match effect {
-                    Effect::SubmitPrompt { text, images } => {
-                        let message = if images.is_empty() {
-                            Message::user(text)
-                        } else {
-                            Message::user_multimodal(text, images)
-                        };
-                        conversation.push(message);
-                        drive_turn(
-                            &agent_loop,
-                            &mut conversation,
-                            &sandbox,
-                            &mut bridge,
-                            &mut model,
-                            &mut engine_rx,
-                            &cancel,
-                            &mut pending_reply,
-                            &mut terminal,
-                            &mut events,
-                            &mut ticker,
-                        )
-                        .await?;
-                        flush_session(
-                            session_store.as_ref(),
-                            &mut session_id,
-                            &mut persisted_len,
-                            &project_id,
-                            &conversation,
-                            &mut model,
-                        )
-                        .await;
-                    }
-                    Effect::CopyToClipboard(text) => copy_to_clipboard(&mut model, &text),
-                    Effect::PasteClipboard => paste_from_clipboard(&mut model),
-                    Effect::PlaceCursor { col, row } => {
-                        place_cursor(&mut model, &terminal, col, row)
-                    }
-                    Effect::Quit => model.should_quit = true,
-                    Effect::NewSession => {
-                        // Learn from the session being discarded before it is gone.
-                        drive_distillation(
-                            &agent_loop,
-                            &memory,
-                            &project_id,
-                            &conversation,
-                            &mut model,
-                            &mut terminal,
-                            &mut events,
-                            &mut ticker,
-                        )
-                        .await;
-                        conversation = Conversation::new(system_prompt.clone());
-                        // Detach from the persisted row: the next turn lazily creates a fresh session.
-                        session_id = None;
-                        persisted_len = 0;
-                        model.transcript = Transcript::default();
-                        model.attachments.clear();
-                        model.scroll.pin();
-                        model.transcript.push(TranscriptItem::Notice(
-                            NoticeLevel::Info,
-                            "nova sessão".to_string(),
-                        ));
-                    }
-                    Effect::ListSessions => {
-                        list_sessions(session_store.as_ref(), &project_id, &mut model).await;
-                    }
-                    Effect::SyncPush => {
-                        sync_push(&sync_context, &mut model, &mut terminal).await;
-                    }
-                    Effect::ResumeLast => {
-                        // On an inert store (init never ran, so no `sessions` table) latest_for_project
-                        // raises a raw "no such table" error; guard it the same way /sessions does so the
-                        // user sees the clean degraded-mode notice, not a leaked SQL detail.
-                        if !session_store.is_available() {
-                            model.transcript.push(TranscriptItem::Notice(
-                                NoticeLevel::Info,
-                                "persistência de sessão indisponível".to_string(),
-                            ));
-                        } else {
-                            match session_store.latest_for_project(&project_id).await {
-                                Ok(Some(summary)) => {
-                                    // Learn from the current session before switching away from it.
-                                    drive_distillation(
-                                        &agent_loop,
-                                        &memory,
-                                        &project_id,
-                                        &conversation,
-                                        &mut model,
-                                        &mut terminal,
-                                        &mut events,
-                                        &mut ticker,
-                                    )
-                                    .await;
-                                    open_session(
-                                        session_store.as_ref(),
-                                        &system_prompt,
-                                        &mut conversation,
-                                        &mut model,
-                                        &mut session_id,
-                                        &mut persisted_len,
-                                        &project_id,
-                                        &summary.id,
-                                    )
-                                    .await;
-                                }
-                                Ok(None) => model.transcript.push(TranscriptItem::Notice(
-                                    NoticeLevel::Info,
-                                    "nenhuma sessão anterior neste workspace".to_string(),
-                                )),
-                                Err(error) => model.transcript.push(TranscriptItem::Notice(
-                                    NoticeLevel::Error,
-                                    format!("não foi possível ler as sessões: {error}"),
-                                )),
-                            }
-                        }
-                    }
-                    Effect::OpenSession(id) => {
-                        // Learn from the current session before switching away from it.
-                        drive_distillation(
-                            &agent_loop,
-                            &memory,
-                            &project_id,
-                            &conversation,
-                            &mut model,
-                            &mut terminal,
-                            &mut events,
-                            &mut ticker,
-                        )
-                        .await;
-                        open_session(
-                            session_store.as_ref(),
-                            &system_prompt,
-                            &mut conversation,
-                            &mut model,
-                            &mut session_id,
-                            &mut persisted_len,
-                            &project_id,
-                            &id,
-                        )
-                        .await;
-                    }
-                    Effect::ChangeWorkspace(path) => match sandbox.relocated(&path) {
-                        Ok(new_sandbox) => {
-                            // Learn from the old project's session before re-keying to the new workspace.
-                            drive_distillation(
-                                &agent_loop,
-                                &memory,
-                                &project_id,
-                                &conversation,
-                                &mut model,
-                                &mut terminal,
-                                &mut events,
-                                &mut ticker,
-                            )
-                            .await;
-                            model.status.workspace = text::display_path(new_sandbox.root());
-                            // Sessions are keyed by workspace: the current one belongs to the old
-                            // project, so detach and re-key. The next turn starts a fresh session under
-                            // the new project_id.
-                            let root = new_sandbox.root();
-                            let canonical_root =
-                                root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-                            project_id = project_id_from_path(&canonical_root);
-                            session_id = None;
-                            persisted_len = 0;
-                            sandbox = new_sandbox;
-                            model.transcript.push(TranscriptItem::Notice(
-                                NoticeLevel::Info,
-                                format!("workspace: {}", model.status.workspace),
-                            ));
-                        }
-                        Err(error) => model.transcript.push(TranscriptItem::Notice(
-                            NoticeLevel::Error,
-                            format!("erro: {error:#}"),
-                        )),
-                    },
-                    Effect::ApprovePlan(mode) => {
-                        model.approval_mode = mode;
-                        let notice = if mode == ApprovalMode::Auto {
-                            "▶ executando o plano (auto)"
-                        } else {
-                            "▶ executando o plano"
-                        };
-                        model.transcript.push(TranscriptItem::Notice(
-                            NoticeLevel::Info,
-                            notice.to_string(),
-                        ));
-                        model.busy = true;
-                        conversation.push(Message::user(
-                            "Plano aprovado. Prossiga com a execução.".to_string(),
-                        ));
-                        drive_turn(
-                            &agent_loop,
-                            &mut conversation,
-                            &sandbox,
-                            &mut bridge,
-                            &mut model,
-                            &mut engine_rx,
-                            &cancel,
-                            &mut pending_reply,
-                            &mut terminal,
-                            &mut events,
-                            &mut ticker,
-                        )
-                        .await?;
-                        flush_session(
-                            session_store.as_ref(),
-                            &mut session_id,
-                            &mut persisted_len,
-                            &project_id,
-                            &conversation,
-                            &mut model,
-                        )
-                        .await;
-                    }
-                    Effect::SetModel(model_id) => apply_set_model(
-                        model_id,
-                        &mut provider_swap,
-                        &mut agent_loop,
-                        &mut model,
-                        &config_path,
-                    ),
-                    Effect::SetEffort(effort) => apply_set_effort(
-                        effort,
-                        &mut provider_swap,
-                        &mut agent_loop,
-                        &mut model,
-                        &config_path,
-                    ),
-                    Effect::SetProvider(id) => apply_set_provider(
-                        id,
-                        &mut provider_swap,
-                        &mut agent_loop,
-                        &mut model,
-                        &config_path,
-                    ),
-                    Effect::SaveProvider {
-                        id,
-                        kind,
-                        base_url,
-                        model: model_id,
-                        models,
-                        auth,
-                    } => {
-                        let profile = ProviderProfile {
-                            id,
-                            kind,
-                            base_url,
-                            model: model_id,
-                            models,
-                            auth,
-                        };
-                        apply_save_provider(
-                            profile,
-                            &mut provider_swap,
-                            &mut agent_loop,
-                            &mut model,
-                            &config_path,
-                        );
-                    }
-                    Effect::AnswerApproval(_) | Effect::CancelTurn => {}
-                }
+            for effect in update(&mut run_loop.model, msg) {
+                run_loop.apply_effect(effect, &mut ui, &mut engine).await?;
             }
         }
 
         // Distill the final session before tearing down, so the last conversation also teaches the
         // memory. Best-effort, bounded, and Ctrl+C-skippable — quit is never held hostage.
-        drive_distillation(
-            &agent_loop,
-            &memory,
-            &project_id,
-            &conversation,
-            &mut model,
-            &mut terminal,
-            &mut events,
-            &mut ticker,
-        )
-        .await;
+        run_loop.drive_distillation(&mut ui).await;
 
         Ok(())
     }
 }
 
-/// Draw a frame and, if a copy was requested, scrape the just-rendered selection to the OS clipboard.
-/// The caller stamps `model.render_at` first (so line landings share the frame instant). Returns the
-/// draw error so each caller chooses how to handle it (the main loop propagates; the turn loop must
-/// break, never `?`, so its cleanup still runs).
-fn draw_and_copy(terminal: &mut DefaultTerminal, model: &mut Model) -> io::Result<()> {
-    // Lift the pending copy out first (ScreenSelection is `Copy`), so no `&model` borrow is held across
-    // the draw and the post-draw mutation below type-checks.
-    let pending = model.selection.filter(|s| s.state != SelectionState::Idle);
-    let completed = terminal.draw(|frame| view(model, frame))?;
-    if let Some(sel) = pending {
-        // `completed` borrows the terminal, not the model, so scraping it and then mutating the model
-        // below is disjoint — no explicit drop needed.
-        let text = selection_overlay::scrape(completed.buffer, &sel, completed.area);
-        copy_to_clipboard(model, &text);
-        // Mouse-release keeps the highlight (just settle the state); Ctrl+C drops it so the next Ctrl+C
-        // is free to cancel/quit. Either way the request is consumed exactly once.
-        match sel.state {
-            SelectionState::CopyAndClear => model.selection = None,
-            _ => {
-                if let Some(s) = model.selection.as_mut() {
-                    s.state = SelectionState::Idle;
-                }
+impl RunLoop {
+    /// Dispatch one effect the reducer requested. The long-running arms delegate to `&mut self` handler
+    /// methods in the area modules; the short arms run inline. Returns `Result<()>` because some handlers
+    /// (`submit_prompt`/`approve_plan`) and the inline draws propagate an I/O error; loop exit stays
+    /// governed solely by `model.should_quit`, so no `ControlFlow` is needed.
+    pub(super) async fn apply_effect(
+        &mut self,
+        effect: Effect,
+        ui: &mut UiDriver<'_>,
+        engine: &mut EngineHandles<'_>,
+    ) -> Result<()> {
+        match effect {
+            Effect::SubmitPrompt { text, images } => {
+                self.submit_prompt(text, images, ui, engine).await?
             }
-        }
-    }
-    Ok(())
-}
-
-/// Copy text to the OS clipboard, surfacing a failure as a transcript notice — copy is a direct user
-/// intent, so it must never fail silently. An empty text is a no-op (the clipboard is left untouched).
-fn copy_to_clipboard(model: &mut Model, text: &str) {
-    if let Err(error) = clipboard::copy_text(text) {
-        model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            format!("falha ao copiar para a área de transferência: {error}"),
-        ));
-    }
-}
-
-/// Resolve a composer click to a logical cursor move, against the freshly rendered geometry. The runtime
-/// owns the only honest source of the editor's rect — it recomputes it from the current terminal size and
-/// model, exactly as the last frame did. A click outside the box, or a wrapped/scrolled layout the widget
-/// renders ambiguously, resolves to `None` and leaves the cursor put (never mis-placed).
-fn place_cursor<B: Backend>(model: &mut Model, terminal: &Terminal<B>, col: u16, row: u16) {
-    // Without the terminal size the geometry is unknown, so the click cannot be mapped — a safe no-op
-    // (the user can still navigate by key); nothing actionable is dropped silently.
-    let Ok(size) = terminal.size() else { return };
-    let area = Rect::new(0, 0, size.width, size.height);
-    let editor_area = editor::content_rect(frame_regions(area, model).input);
-    if let Some((r, c)) = editor::click_to_cursor(&model.input, editor_area, col, row) {
-        model.input.set_cursor(r, c);
-    }
-}
-
-/// Read the OS clipboard and route it into the buffer: an image becomes a staged attachment, text is
-/// inserted at the cursor. Best-effort — an empty or unreadable clipboard is a no-op.
-fn paste_from_clipboard(model: &mut Model) {
-    // `update` for these messages produces no effects (they only mutate the model), so the returned
-    // Vec is intentionally discarded — there is nothing for the runtime to perform.
-    match clipboard::read() {
-        ClipboardContent::Image(attachment) => {
-            let _ = update(model, Msg::ImageAttached(attachment));
-        }
-        ClipboardContent::Text(text) => {
-            let _ = update(model, Msg::Paste(text));
-        }
-        ClipboardContent::Empty => {}
-    }
-}
-
-/// One step the turn loop's `select!` produced.
-enum Step {
-    Done(Result<TurnOutcome, AgentError>),
-    Apply(Msg),
-    Idle,
-}
-
-/// Whether applying `msg` must force an immediate redraw. Stream deltas and the periodic tick are
-/// throttled to at most one draw per `FRAME_INTERVAL`, so a burst of tokens coalesces into a single
-/// re-render; every structural change (tool lines, approvals, turn boundaries, user input) draws at
-/// once for responsiveness.
-fn forces_draw(msg: &Msg) -> bool {
-    !matches!(msg, Msg::StreamDelta(..) | Msg::Tick)
-}
-
-/// The spinner frame index for an elapsed time: one step per `FRAME_INTERVAL`. Wrapping into the glyph
-/// table is the renderer's job (`% SPINNER.len()`). Pure, so the animation cadence is unit-testable and
-/// is driven by wall clock rather than message arrival.
-fn spinner_frame(elapsed: Duration) -> usize {
-    (elapsed.as_millis() / FRAME_INTERVAL.as_millis()) as usize
-}
-
-/// Resolve the session-wide motion preference from the environment: any non-empty `KIRI_REDUCED_MOTION`
-/// or `NO_COLOR` freezes motion to a steady, layout-identical UI; otherwise it is fully expressed.
-fn resolve_motion() -> Motion {
-    let set = |key: &str| std::env::var_os(key).is_some_and(|v| !v.is_empty());
-    if set("KIRI_REDUCED_MOTION") || set("NO_COLOR") {
-        Motion::Reduced
-    } else {
-        Motion::Full
-    }
-}
-
-/// Drive one agent turn to completion while keeping the UI live: stream deltas render, approvals show
-/// a prompt, and ^C cancels cooperatively. The agent future borrows `conversation`/`sandbox`/`bridge`
-/// only inside the inner block, so the caller may start another turn afterward.
-#[allow(clippy::too_many_arguments)]
-async fn drive_turn(
-    agent_loop: &AgentLoop,
-    conversation: &mut Conversation,
-    sandbox: &dyn Sandbox,
-    bridge: &mut Bridge,
-    model: &mut Model,
-    engine_rx: &mut mpsc::UnboundedReceiver<EngineMsg>,
-    cancel: &CancelToken,
-    pending_reply: &mut Option<oneshot::Sender<Approval>>,
-    terminal: &mut DefaultTerminal,
-    events: &mut EventStream,
-    ticker: &mut Interval,
-) -> Result<()> {
-    cancel.reset();
-    let started = Instant::now();
-    // The approval mode is fixed for this turn; cycling it mid-turn applies to the next one.
-    let mode = model.approval_mode;
-
-    let result = {
-        let mut turn: TurnFuture = Box::pin(agent_loop.run(conversation, sandbox, mode, bridge));
-        let mut last_draw = Instant::now();
-        loop {
-            let step = tokio::select! {
-                biased;
-                maybe = events.next() => match maybe {
-                    Some(Ok(event)) => {
-                        model.last_event_at = Some(Instant::now());
-                        input::to_msg(event).map(Step::Apply).unwrap_or(Step::Idle)
-                    }
-                    _ => Step::Idle,
-                },
-                Some(engine) = engine_rx.recv() => Step::Apply(engine_msg(engine, pending_reply)),
-                _ = ticker.tick() => Step::Apply(Msg::Tick),
-                outcome = &mut turn => Step::Done(outcome),
-            };
-
-            // Stamp the frame before applying the step, so line landings (in `update`) and the draw that
-            // shows them share one instant — a freshly landed line starts at age zero (forge-warm).
-            model.render_at = Some(Instant::now());
-
-            let mut done: Option<_> = None;
-            // Forced steps redraw immediately; throttled ones (stream deltas, ticks) wait for the frame.
-            let mut force = false;
-            match step {
-                Step::Done(outcome) => {
-                    done = Some(outcome);
-                    force = true;
-                }
-                Step::Idle => {}
-                Step::Apply(msg) => {
-                    force = forces_draw(&msg);
-                    for effect in update(model, msg) {
-                        match effect {
-                            Effect::AnswerApproval(decision) => {
-                                if let Some(reply) = pending_reply.take() {
-                                    // Best-effort: the engine awaits this reply, but if the turn future
-                                    // was already dropped (cancel/quit) the receiver is gone — a failed
-                                    // send is then expected and harmless.
-                                    let _ = reply.send(decision);
-                                }
-                            }
-                            Effect::CancelTurn => {
-                                cancel.cancel();
-                                // Break the select! loop immediately — dropping the turn future
-                                // kills any running child process (kill_on_drop on run_command).
-                                done = Some(Ok(TurnOutcome::Aborted));
-                                force = true;
-                            }
-                            Effect::Quit => {
-                                model.should_quit = true;
-                                cancel.cancel();
-                                done = Some(Ok(TurnOutcome::Aborted));
-                                force = true;
-                            }
-                            // Clipboard chords stay live during a turn (composing the next prompt).
-                            Effect::CopyToClipboard(text) => copy_to_clipboard(model, &text),
-                            Effect::PasteClipboard => paste_from_clipboard(model),
-                            Effect::PlaceCursor { col, row } => {
-                                place_cursor(model, terminal, col, row)
-                            }
-                            // A picker/wizard cannot open mid-turn, so these never arrive here.
-                            Effect::SubmitPrompt { .. }
-                            | Effect::NewSession
-                            | Effect::ResumeLast
-                            | Effect::ListSessions
-                            | Effect::OpenSession(_)
-                            | Effect::SyncPush
-                            | Effect::ChangeWorkspace(_)
-                            | Effect::ApprovePlan(_)
-                            | Effect::SetModel(_)
-                            | Effect::SetEffort(_)
-                            | Effect::SetProvider(_)
-                            | Effect::SaveProvider { .. } => {}
-                        }
-                    }
-                    // Coalesce a burst: drain every engine message already queued before drawing, so
-                    // many tokens that arrived together become one re-render instead of one per token.
-                    // These messages only mutate the model (no effects); a structural one among them
-                    // (tool line, approval, turn boundary) still forces an immediate draw.
-                    while let Ok(engine) = engine_rx.try_recv() {
-                        let queued = engine_msg(engine, pending_reply);
-                        force |= forces_draw(&queued);
-                        let _ = update(model, queued);
-                    }
-                }
+            Effect::CopyToClipboard(text) => render::copy_to_clipboard(&mut self.model, &text),
+            Effect::PasteClipboard => render::paste_from_clipboard(&mut self.model),
+            Effect::PlaceCursor { col, row } => {
+                render::place_cursor(&mut self.model, ui.terminal, col, row)
             }
-            model.status.elapsed_secs = started.elapsed().as_secs();
-            // The spinner animates by wall clock, so its rate is independent of message cadence — it
-            // spins during the wait for the first token and during tool execution, not only while
-            // content streams.
-            model.status.spinner_frame = spinner_frame(started.elapsed());
-            // Draw on a forced step or once the stream-frame budget elapsed. Incoming deltas pace the
-            // redraws at ~30 fps (smooth, no coarse blocks), while the 120ms ticker still guarantees a
-            // periodic draw during a quiet wait. Coalescing keeps it to one transcript re-render per
-            // frame rather than one per token (the cause of the lag).
-            // A draw failure must NOT `?`-propagate out of this loop: that would skip `on_turn_end` and
-            // leave `model.busy` stuck true, silently deadening every future submit. End the turn with
-            // the error instead, so cleanup always runs.
-            if force || last_draw.elapsed() >= STREAM_FRAME {
-                // break-not-`?`: a draw failure must still run `on_turn_end` so `busy` resets.
-                if let Err(error) = draw_and_copy(terminal, model) {
-                    break Err(AgentError::Io(error));
-                }
-                last_draw = Instant::now();
+            Effect::Quit => self.model.should_quit = true,
+            Effect::NewSession => self.new_session(ui).await,
+            Effect::ListSessions => self.list_sessions().await,
+            Effect::SyncPush => {
+                sync::sync_push(&self.sync_context, &mut self.model, ui.terminal).await
             }
-            if let Some(outcome) = done {
-                break outcome;
+            Effect::ResumeLast => self.resume_last(ui).await,
+            Effect::OpenSession(id) => self.open_session(&id, ui).await,
+            Effect::ChangeWorkspace(path) => self.change_workspace(path, ui).await,
+            Effect::ApprovePlan(mode) => self.approve_plan(mode, ui, engine).await?,
+            Effect::SetModel(model_id) => self.apply_set_model(model_id),
+            Effect::SetEffort(effort) => self.apply_set_effort(effort),
+            Effect::SetProvider(id) => self.apply_set_provider(id),
+            Effect::SaveProvider {
+                id,
+                kind,
+                base_url,
+                model: model_id,
+                models,
+                auth,
+            } => {
+                let profile = ProviderProfile {
+                    id,
+                    kind,
+                    base_url,
+                    model: model_id,
+                    models,
+                    auth,
+                };
+                self.apply_save_provider(profile);
             }
+            Effect::AnswerApproval(_) | Effect::CancelTurn => {}
         }
-    };
-
-    // Drain any deltas/notices buffered when the turn future resolved, so nothing is lost. These
-    // messages only mutate the model (no effects), so the returned Vec is intentionally discarded.
-    while let Ok(engine) = engine_rx.try_recv() {
-        let _ = update(model, engine_msg(engine, pending_reply));
-    }
-
-    let cancelled = cancel.is_cancelled();
-    on_turn_end(result, cancelled, model, conversation);
-    cancel.reset();
-    *pending_reply = None;
-    Ok(())
-}
-
-/// Apply a `/models` selection: a model change is just the per-turn `model` field — no provider rebuild.
-/// Apply it live, reflect it in the status line, and persist (best-effort) to the global config; a write
-/// failure is surfaced but the live change stands.
-fn apply_set_model(
-    model_id: String,
-    provider_swap: &mut ProviderSwap,
-    agent_loop: &mut AgentLoop,
-    model: &mut Model,
-    config_path: &Path,
-) {
-    if let Some(profile) = provider_swap.active_profile_mut() {
-        profile.model = model_id.clone();
-    }
-    agent_loop.set_model(model_id.clone());
-    model.status.model = model_id.clone();
-    model.transcript.push(TranscriptItem::Notice(
-        NoticeLevel::Info,
-        format!("modelo: {model_id}"),
-    ));
-    if let Err(error) = config::persist_active_model(config_path, &provider_swap.active, &model_id)
-    {
-        model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            format!("não persistiu o modelo: {error:#}"),
-        ));
-    }
-}
-
-/// Apply an `/effort` selection. Effort is baked into the provider at construction, so rebuild and swap it
-/// in. Build with the new effort first; commit (status + cached effort + persist) only if the rebuild
-/// succeeds, so a failure leaves the current provider untouched.
-fn apply_set_effort(
-    effort: Effort,
-    provider_swap: &mut ProviderSwap,
-    agent_loop: &mut AgentLoop,
-    model: &mut Model,
-    config_path: &Path,
-) {
-    let is_anthropic =
-        provider_swap.active_profile().map(|p| p.kind) == Some(ProviderKind::Anthropic);
-    match provider_swap.rebuild_with_effort(effort) {
-        Ok(provider) => {
-            agent_loop.set_provider(provider);
-            model.status.effort = effort;
-            // The Anthropic adapter ignores effort today — surface that rather than
-            // silently appearing to change nothing.
-            let note = if is_anthropic {
-                format!(
-                    "esforço: {} — nota: ainda não afeta modelos Claude",
-                    effort.label()
-                )
-            } else {
-                format!("esforço: {}", effort.label())
-            };
-            model
-                .transcript
-                .push(TranscriptItem::Notice(NoticeLevel::Info, note));
-            if let Err(error) = config::persist_effort(config_path, effort) {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Error,
-                    format!("não persistiu o esforço: {error:#}"),
-                ));
-            }
-        }
-        Err(error) => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            format!("não foi possível aplicar o esforço: {error:#}"),
-        )),
-    }
-}
-
-/// Apply a `/provider` switch: rebuild the chosen provider's adapter with its stored credential and swap
-/// it in, also adopting its model. Commit + persist only on success; a missing credential or unknown id is
-/// surfaced, never a silent no-op.
-fn apply_set_provider(
-    id: String,
-    provider_swap: &mut ProviderSwap,
-    agent_loop: &mut AgentLoop,
-    model: &mut Model,
-    config_path: &Path,
-) {
-    match provider_swap.switch_to(&id) {
-        Ok(ProviderSwitch {
-            provider,
-            model: target_model,
-            persist_warning,
-        }) => {
-            agent_loop.set_provider(provider);
-            agent_loop.set_model(target_model.clone());
-            model.status.model = target_model.clone();
-            model.status.provider = id.clone();
-            model.models = provider_swap
-                .active_profile()
-                .map(|p| p.models.clone())
-                .unwrap_or_default();
-            model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                format!("provider: {id} ({target_model})"),
-            ));
-            // Surface a one-time env-import persist failure (closes the former swallowed `let _ =`): the
-            // switch still succeeded for this session, but the key was not saved for the next one.
-            if let Some(warning) = persist_warning {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Error,
-                    format!("a chave importada do ambiente não foi salva: {warning:#}"),
-                ));
-            }
-            if let Err(error) = config::persist_active_provider(config_path, &id) {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Error,
-                    format!("não persistiu o provider ativo: {error:#}"),
-                ));
-            }
-        }
-        Err(error) => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            format!("não foi possível trocar de provider: {error:#}"),
-        )),
-    }
-}
-
-/// Apply a wizard `SaveProvider`: derive the credential from the profile's `auth` (keyed takes the staged
-/// key; keyless stores nothing), build and store the new provider, make it active, drop the onboarding
-/// submit gate, and persist the profile + active selection. Commit only on success; a missing key (keyed),
-/// an unsupported auth method, or a build/store failure is surfaced. The profile is assembled by the caller
-/// (the wizard fields plus its `auth`), so this stays under the argument-count lint without a context struct.
-fn apply_save_provider(
-    profile: ProviderProfile,
-    provider_swap: &mut ProviderSwap,
-    agent_loop: &mut AgentLoop,
-    model: &mut Model,
-    config_path: &Path,
-) {
-    // Build the credential from the wizard-derived auth (carried on the profile). A keyed save takes the
-    // key staged in `pending_credential`; a keyless save (auth = none) stores nothing.
-    let credential = match &profile.auth {
-        AuthMethod::ApiKey => {
-            let Some(key) = model.pending_credential.take() else {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Error,
-                    "chave ausente; provider não foi salvo".to_string(),
-                ));
-                return;
-            };
-            Credential::ApiKey { key }
-        }
-        AuthMethod::None => {
-            // Keyless: drop any stray staged secret and store no credential.
-            model.pending_credential = None;
-            Credential::None
-        }
-        other => {
-            // The wizard never emits OAuth or an unrecognized method; guard, never panic.
-            model.pending_credential = None;
-            model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                format!(
-                    "método de auth não suportado pelo wizard ({other:?}); provider não foi salvo"
-                ),
-            ));
-            return;
-        }
-    };
-    let id = profile.id.clone();
-    match provider_swap.add_and_activate(profile.clone(), credential) {
-        Ok((provider, target_model)) => {
-            agent_loop.set_provider(provider);
-            agent_loop.set_model(target_model.clone());
-            // Onboarding (or a re-add) succeeded: a real adapter is live, so drop the
-            // submit gate and let the user into the normal chat.
-            model.unconfigured = false;
-            model.status.model = target_model;
-            model.status.provider = id.clone();
-            model.models = profile.models.clone();
-            model.providers = provider_swap.provider_ids();
-            model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                format!("provider '{id}' adicionado e ativo"),
-            ));
-            // Persist the profile (config) and the active selection; the credential
-            // already went to the keyring above.
-            if let Err(error) = config::upsert_provider(config_path, &profile)
-                .and_then(|()| config::persist_active_provider(config_path, &id))
-            {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Error,
-                    format!("provider ativo, mas não persistiu no config: {error:#}"),
-                ));
-            }
-        }
-        Err(error) => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            format!("não foi possível salvar o provider: {error:#}"),
-        )),
-    }
-}
-
-/// Persist the conversation's new tail to the session store, lazily creating the session row on the first
-/// non-empty flush (so an empty session never touches the DB). The system message (index 0) is never
-/// stored — it is regenerated per run from the current memory digest. Best-effort: an unavailable store is
-/// a silent no-op, and a write failure surfaces a Notice without ever losing the in-memory conversation.
-/// Called after a turn settles (post-rollback), so the DB mirrors the resumable in-memory state.
-async fn flush_session(
-    store: &dyn SessionStore,
-    session_id: &mut Option<String>,
-    persisted_len: &mut usize,
-    project_id: &str,
-    conversation: &Conversation,
-    model: &mut Model,
-) {
-    if !store.is_available() {
-        return;
-    }
-    let messages = conversation.messages();
-    // The body excludes the system seed at index 0.
-    let body = &messages[1..];
-    // Clamp the cursor: a rollback can shrink the body below it. In practice the rolled-back messages
-    // were never persisted (we only flush after a turn settles), so this only guards against a panic.
-    let cursor = (*persisted_len).min(body.len());
-    if body.len() <= cursor {
-        return;
-    }
-    let delta = &body[cursor..];
-
-    let id = match session_id {
-        Some(id) => id.clone(),
-        None => match store.create(project_id).await {
-            Ok(session) => {
-                *session_id = Some(session.id.clone());
-                session.id
-            }
-            Err(error) => {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Error,
-                    format!("não persistiu a sessão: {error}"),
-                ));
-                return;
-            }
-        },
-    };
-
-    let first_flush = cursor == 0;
-    if let Err(error) = store.append_messages(&id, delta).await {
-        model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            format!("não persistiu a sessão: {error}"),
-        ));
-        return;
-    }
-    if first_flush
-        && let Some(title_source) = body
-            .iter()
-            .find(|m| m.role == Role::User)
-            .and_then(|m| m.content.as_deref())
-    {
-        // Title is cosmetic (the `/sessions` label); a failure must not fail the flush, and the messages
-        // are already saved, so a derive/store failure is safely ignored.
-        let _ = store.set_title(&id, &derive_title(title_source)).await;
-    }
-    *persisted_len = body.len();
-}
-
-/// How many recent sessions the `/sessions` picker lists.
-const SESSION_LIST_LIMIT: usize = 20;
-
-/// Trim an RFC3339 timestamp to `YYYY-MM-DD HH:MM` for the compact session-list label.
-fn short_timestamp(raw: &str) -> String {
-    raw.get(..16).unwrap_or(raw).replace('T', " ")
-}
-
-/// Query the workspace's recent sessions and open the `/sessions` picker, recording the parallel id list
-/// the keymap resolves against. An unavailable store or an empty list surfaces a Notice and opens nothing.
-async fn list_sessions(store: &dyn SessionStore, project_id: &str, model: &mut Model) {
-    if !store.is_available() {
-        model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            "persistência de sessão indisponível".to_string(),
-        ));
-        return;
-    }
-    match store.list_for_project(project_id, SESSION_LIST_LIMIT).await {
-        Ok(sessions) if !sessions.is_empty() => {
-            model.session_ids = sessions.iter().map(|s| s.id.clone()).collect();
-            let options = sessions
-                .iter()
-                .map(|s| {
-                    let title = if s.title.trim().is_empty() {
-                        "(sem título)"
-                    } else {
-                        s.title.trim()
-                    };
-                    format!(
-                        "{title} · {} · {} msgs",
-                        short_timestamp(&s.updated_at),
-                        s.message_count
-                    )
-                })
-                .collect();
-            model.picker = Some(Picker::new(
-                PickerKind::Sessions,
-                "sessão",
-                "Escolha uma sessão para retomar:",
-                options,
-                0,
-            ));
-        }
-        Ok(_) => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            "nenhuma sessão anterior neste workspace".to_string(),
-        )),
-        Err(error) => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            format!("não foi possível listar as sessões: {error}"),
-        )),
-    }
-}
-
-/// Finalize the current session, then load `target_id` and rebuild the conversation and transcript from
-/// it. The system prompt is the current one (a fresh memory digest), correct because stored messages
-/// exclude the system seed. A missing/failed load surfaces a Notice and leaves the current state intact.
-#[allow(clippy::too_many_arguments)]
-async fn open_session(
-    store: &dyn SessionStore,
-    system_prompt: &str,
-    conversation: &mut Conversation,
-    model: &mut Model,
-    session_id: &mut Option<String>,
-    persisted_len: &mut usize,
-    project_id: &str,
-    target_id: &str,
-) {
-    // Persist the current session's tail before switching away, so nothing is lost.
-    flush_session(
-        store,
-        session_id,
-        persisted_len,
-        project_id,
-        conversation,
-        model,
-    )
-    .await;
-    match store.load(target_id).await {
-        Ok(Some(session)) => {
-            let mut fresh = Conversation::new(system_prompt.to_string());
-            for message in &session.messages {
-                fresh.push(message.clone());
-            }
-            model.transcript = rebuild_transcript(&session.messages);
-            model.attachments.clear();
-            model.scroll.pin();
-            let title = if session.title.trim().is_empty() {
-                "(sem título)".to_string()
-            } else {
-                session.title.clone()
-            };
-            model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                format!("sessão retomada: {title}"),
-            ));
-            *conversation = fresh;
-            *session_id = Some(session.id);
-            *persisted_len = session.messages.len();
-        }
-        Ok(None) => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            "sessão não encontrada".to_string(),
-        )),
-        Err(error) => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            format!("não foi possível abrir a sessão: {error}"),
-        )),
-    }
-}
-
-/// Project a loaded conversation back into a display transcript: user and assistant text become their
-/// items; an assistant turn that only called tools becomes a compact notice; tool results and the system
-/// seed are omitted (verbose / never stored). A render-only projection — the conversation stays the
-/// source of truth.
-fn rebuild_transcript(messages: &[Message]) -> Transcript {
-    let mut transcript = Transcript::default();
-    for message in messages {
-        match message.role {
-            Role::User => {
-                if let Some(content) = message.content.as_deref().filter(|c| !c.trim().is_empty()) {
-                    transcript.push(TranscriptItem::User(content.to_string()));
-                }
-            }
-            Role::Assistant => {
-                if let Some(content) = message.content.as_deref().filter(|c| !c.trim().is_empty()) {
-                    transcript.push(TranscriptItem::Assistant(content.to_string()));
-                } else if !message.tool_calls.is_empty() {
-                    transcript.push(TranscriptItem::Notice(
-                        NoticeLevel::Info,
-                        format!("· {} ferramenta(s) executada(s)", message.tool_calls.len()),
-                    ));
-                }
-            }
-            Role::Tool | Role::System => {}
-        }
-    }
-    transcript
-}
-
-/// Push the portable profile (config + shared memory) to the configured private repo via `/sync`. Shows
-/// a "syncing" notice and draws it before the (network-bound, timeout-bounded) push, then reports the
-/// result. Constructs no adapter and recomputes no path — the ports and the home/config paths come from
-/// the wire-built [`SyncContext`], so the front-end is not a composition root.
-async fn sync_push(ctx: &SyncContext, model: &mut Model, terminal: &mut DefaultTerminal) {
-    model.transcript.push(TranscriptItem::Notice(
-        NoticeLevel::Info,
-        "sincronizando (push)…".to_string(),
-    ));
-    model.render_at = Some(Instant::now());
-    let _ = draw_and_copy(terminal, model);
-
-    let service = SyncService::new(
-        ctx.git.as_ref(),
-        ctx.global_dir.clone(),
-        ctx.config_path.clone(),
-        ctx.memory.as_ref(),
-        ctx.work_tree.as_ref(),
-    );
-    match service.push().await {
-        Ok(summary) => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            format!("sync: {summary}"),
-        )),
-        Err(error) => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            format!("sync falhou: {error}"),
-        )),
-    }
-}
-
-/// Whether a session is worth distilling: it must hold at least one user message and one non-empty
-/// assistant reply, so an empty or aborted session never spends an LLM call on noise.
-fn should_distill(conversation: &Conversation) -> bool {
-    let mut has_user = false;
-    let mut has_assistant = false;
-    for message in conversation.messages() {
-        match message.role {
-            Role::User => has_user = true,
-            Role::Assistant
-                if message
-                    .content
-                    .as_deref()
-                    .is_some_and(|c| !c.trim().is_empty()) =>
-            {
-                has_assistant = true
-            }
-            _ => {}
-        }
-    }
-    has_user && has_assistant
-}
-
-/// Whether a crossterm event is Ctrl+C — the skip key during distillation.
-fn is_ctrl_c(event: &Event) -> bool {
-    matches!(event, Event::Key(key)
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-}
-
-/// One step the distillation `select!` produced.
-enum DistillStep {
-    Done(Result<crate::modules::memory::application::distill::DistillReport, AgentError>),
-    Skip,
-    Tick,
-}
-
-/// Run the end-of-session distillation while keeping the UI responsive: a spinner ticks and Ctrl+C skips.
-/// Best-effort and bounded — the distiller's own timeout caps the wait, a skip or failure surfaces a
-/// Notice and never blocks the caller (a `/new`, a session switch, or quit). The conversation is read
-/// only and already persisted, so distillation never risks the session's data.
-#[allow(clippy::too_many_arguments)]
-async fn drive_distillation(
-    agent_loop: &AgentLoop,
-    memory: &Arc<dyn MemoryPort>,
-    project_id: &str,
-    conversation: &Conversation,
-    model: &mut Model,
-    terminal: &mut DefaultTerminal,
-    events: &mut EventStream,
-    ticker: &mut Interval,
-) {
-    if !should_distill(conversation) {
-        return;
-    }
-    // Both scopes inert (memory disabled or failed): there is nothing to write to, so skip the LLM call.
-    if !memory.project_memory_available() && !memory.shared_memory_available() {
-        return;
-    }
-
-    let provider = agent_loop.provider();
-    let model_id = agent_loop.model().to_string();
-    let distiller = Distiller::new(memory.clone(), project_id.to_string());
-    let messages: Vec<Message> = conversation.messages().to_vec();
-
-    model.transcript.push(TranscriptItem::Notice(
-        NoticeLevel::Info,
-        "destilando memórias da sessão… (^C pula)".to_string(),
-    ));
-    model.busy = true;
-    let started = Instant::now();
-    model.render_at = Some(started);
-    let _ = draw_and_copy(terminal, model);
-
-    let outcome = {
-        let mut distillation = Box::pin(distiller.distill(provider.as_ref(), &model_id, &messages));
-        loop {
-            let step = tokio::select! {
-                biased;
-                maybe = events.next() => match maybe {
-                    Some(Ok(event)) if is_ctrl_c(&event) => DistillStep::Skip,
-                    // Other input is ignored during the (brief) distillation.
-                    _ => DistillStep::Tick,
-                },
-                _ = ticker.tick() => DistillStep::Tick,
-                done = &mut distillation => DistillStep::Done(done),
-            };
-            match step {
-                DistillStep::Done(result) => break Some(result),
-                DistillStep::Skip => break None,
-                DistillStep::Tick => {
-                    model.status.spinner_frame = spinner_frame(started.elapsed());
-                    model.render_at = Some(Instant::now());
-                    // A draw failure ends the best-effort distillation rather than looping blind.
-                    if draw_and_copy(terminal, model).is_err() {
-                        break None;
-                    }
-                }
-            }
-        }
-    };
-
-    model.busy = false;
-    match outcome {
-        None => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            "destilação pulada".to_string(),
-        )),
-        Some(Ok(report)) if report.written > 0 => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            format!("memória atualizada: {} aprendizado(s)", report.written),
-        )),
-        // Nothing worth keeping: stay quiet rather than add noise on every /new.
-        Some(Ok(_)) => {}
-        Some(Err(error)) => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            format!("destilação não concluída: {error}"),
-        )),
-    }
-}
-
-/// Translate an engine message into a UI message, capturing an approval's reply channel on the way.
-fn engine_msg(engine: EngineMsg, pending_reply: &mut Option<oneshot::Sender<Approval>>) -> Msg {
-    match engine {
-        EngineMsg::Began => Msg::TurnBegan,
-        EngineMsg::Reasoning(text) => Msg::StreamDelta(StreamKind::Reasoning, text),
-        EngineMsg::Content(text) => Msg::StreamDelta(StreamKind::Content, text),
-        EngineMsg::ToolStarted { command, diff } => Msg::ToolStarted { command, diff },
-        EngineMsg::ToolFinished {
-            status,
-            output,
-            elapsed,
-        } => Msg::ToolFinished {
-            status,
-            output,
-            elapsed,
-        },
-        EngineMsg::Finished => Msg::TurnFinished,
-        EngineMsg::Approval { pending, reply } => {
-            *pending_reply = Some(reply);
-            Msg::ApprovalRequested(pending)
-        }
-    }
-}
-
-/// Apply the turn's outcome: surface errors, roll back the conversation, and reset per-turn UI state.
-/// A user cancel (^C) is reported as such, not as an error.
-fn on_turn_end(
-    result: Result<TurnOutcome, AgentError>,
-    cancelled: bool,
-    model: &mut Model,
-    conversation: &mut Conversation,
-) {
-    match result {
-        Ok(TurnOutcome::Completed) => {
-            if turn_produced_nothing(conversation) {
-                // A 200 with an empty assistant reply and no tool activity: the provider returned
-                // nothing usable (e.g. an empty stream). Surface it — never silent.
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Error,
-                    "o provedor não retornou conteúdo — verifique o modelo/endpoint".to_string(),
-                ));
-            }
-        }
-        // A plan-mode turn called `present_plan`: render the finished plan and open the approval box.
-        // The box appears ONLY here — never on a plain text turn — so the model may think or ask
-        // questions in plan mode without prematurely triggering approval, and the plan shown is always
-        // the complete tool argument, never a half-streamed transcript.
-        Ok(TurnOutcome::PlanProposed(plan)) if !cancelled => {
-            model.transcript.push(TranscriptItem::Assistant(plan));
-            model.pending_plan = Some(PendingPlan::default());
-        }
-        Ok(TurnOutcome::PlanProposed(_)) => {}
-        // A ^C while busy cancels just this turn: `drive_turn` sets the cancel token and synthesizes
-        // `Aborted`, so `cancelled` is true here — show it and drop the dangling user message, but keep
-        // the session alive. Only a genuine input-stream end (`cancelled == false`, e.g. the approval
-        // channel closed) quits.
-        Ok(TurnOutcome::Aborted) if cancelled => {
-            model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                "⨯ cancelado".to_string(),
-            ));
-            conversation.rollback_dangling_user();
-        }
-        Ok(TurnOutcome::Aborted) => model.should_quit = true,
-        Err(error) => {
-            if cancelled {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Info,
-                    "⨯ cancelado".to_string(),
-                ));
-            } else {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Error,
-                    format!("erro: {error}"),
-                ));
-            }
-            conversation.rollback_dangling_user();
-            if !cancelled && matches!(error, AgentError::ProviderRejected { .. }) {
-                conversation.rollback_last_assistant_turn();
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Info,
-                    "turno anterior descartado (request rejeitado pelo provedor)".to_string(),
-                ));
-            }
-        }
-    }
-    // `TurnEnded` only resets per-turn model state (no effects); the returned Vec is intentionally
-    // discarded.
-    let _ = update(model, Msg::TurnEnded);
-}
-
-/// True when the turn ended with an empty assistant reply and no tool activity — the provider returned
-/// a 200 with nothing usable. The agent loop appends the final assistant text even when it is blank, so
-/// the trailing message is the signal: an assistant message with blank content and no tool calls. A
-/// turn that ran tools (trailing `Role::Tool`) or produced real text is not "nothing".
-fn turn_produced_nothing(conversation: &Conversation) -> bool {
-    match conversation.messages().last() {
-        Some(last) => {
-            last.role == Role::Assistant
-                && last.tool_calls.is_empty()
-                && last.content.as_deref().unwrap_or("").trim().is_empty()
-        }
-        None => false,
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{on_turn_end, turn_produced_nothing};
+    use super::turn::{on_turn_end, turn_produced_nothing};
     use crate::modules::agent::application::agent_loop::TurnOutcome;
     use crate::modules::tui::domain::model::Model;
     use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
@@ -2087,7 +806,8 @@ mod tests {
 
     #[test]
     fn spinner_frame_advances_one_step_per_frame_interval() {
-        use super::{FRAME_INTERVAL, spinner_frame};
+        use super::FRAME_INTERVAL;
+        use super::turn::spinner_frame;
         use std::time::Duration;
         assert_eq!(spinner_frame(Duration::ZERO), 0);
         assert_eq!(spinner_frame(FRAME_INTERVAL - Duration::from_millis(1)), 0);
@@ -2097,7 +817,8 @@ mod tests {
 
     #[test]
     fn place_cursor_moves_the_edit_cursor() {
-        use super::{frame_regions, place_cursor};
+        use super::render::place_cursor;
+        use crate::modules::tui::infrastructure::view::frame_regions;
         use crate::modules::tui::infrastructure::widgets::editor;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;

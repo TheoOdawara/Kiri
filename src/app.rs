@@ -44,7 +44,7 @@ use crate::modules::tools::infrastructure::control::present_plan::PresentPlan;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tools::infrastructure::sensitive::load_sensitive_matcher;
-use crate::modules::tui::infrastructure::runtime::{ProviderSwap, SyncContext, Tui};
+use crate::modules::tui::infrastructure::runtime::{ProviderSwap, SyncContext, Tui, TuiParams};
 use crate::shared::infra::config::{Settings, SyncAction, ensure_private_dir};
 use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile};
 
@@ -181,19 +181,19 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         settings.thinking,
         settings.effort,
     );
-    Ok(Tui::new(
+    Ok(Tui::new(TuiParams {
         agent_loop,
         sandbox,
         system_prompt,
-        settings.seed,
+        seed: settings.seed,
         provider_swap,
-        settings.config_path,
+        config_path: settings.config_path,
         sync_context,
         needs_onboarding,
         session_store,
         memory,
         project_id,
-    ))
+    }))
 }
 
 /// The headless `kiri sync …` route, wired through the single composition root: harden the harness home,
