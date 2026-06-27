@@ -7,7 +7,6 @@ use crossterm::event::{Event, KeyCode, KeyModifiers};
 use tokio_stream::StreamExt;
 
 use crate::modules::memory::application::distill::{DistillReport, Distiller};
-use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::shared::kernel::conversation::Conversation;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::message::Message;
@@ -71,10 +70,8 @@ impl RunLoop {
         let distiller = Distiller::new(self.memory.clone(), self.project_id.to_string());
         let messages: Vec<Message> = self.conversation.messages().to_vec();
 
-        self.model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            "destilando memórias da sessão… (^C pula)".to_string(),
-        ));
+        self.model
+            .notify_info("destilando memórias da sessão… (^C pula)");
         self.model.busy = true;
         let started = Instant::now();
         self.model.render_at = Some(started);
@@ -111,22 +108,16 @@ impl RunLoop {
 
         self.model.busy = false;
         match outcome {
-            None => self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                "destilação pulada".to_string(),
+            None => self.model.notify_info("destilação pulada"),
+            Some(Ok(report)) if report.written > 0 => self.model.notify_info(format!(
+                "memória atualizada: {} aprendizado(s)",
+                report.written
             )),
-            Some(Ok(report)) if report.written > 0 => {
-                self.model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Info,
-                    format!("memória atualizada: {} aprendizado(s)", report.written),
-                ))
-            }
             // Nothing worth keeping: stay quiet rather than add noise on every /new.
             Some(Ok(_)) => {}
-            Some(Err(error)) => self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                format!("destilação não concluída: {error}"),
-            )),
+            Some(Err(error)) => self
+                .model
+                .notify_info(format!("destilação não concluída: {error}")),
         }
     }
 }

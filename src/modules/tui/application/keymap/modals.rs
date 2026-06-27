@@ -68,15 +68,12 @@ pub(super) fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         ),
         Approval::Aborted => (NoticeLevel::Error, "✗ sessão encerrada".to_string()),
     };
-    model.transcript.push(TranscriptItem::Notice(level, label));
+    model.notify(level, label);
     // `ApprovedAuto` already runs the rest of this turn unattended; also make auto the standing mode
     // so later turns no longer prompt either.
     if switch_auto {
         model.approval_mode = ApprovalMode::Auto;
-        model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            "✓ modo auto ativo".to_string(),
-        ));
+        model.notify_info("✓ modo auto ativo");
     }
     vec![Effect::AnswerApproval(decision)]
 }
@@ -127,10 +124,7 @@ pub(super) fn on_plan_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         // Cancel: leave plan mode without executing.
         _ => {
             model.approval_mode = ApprovalMode::Default;
-            model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                "modo plan cancelado".to_string(),
-            ));
+            model.notify_info("modo plan cancelado");
             vec![]
         }
     }

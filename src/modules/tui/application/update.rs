@@ -4,7 +4,6 @@ use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::keymap;
 use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::domain::model::Model;
-use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 
 /// Backdating the open instant by more than the splash settle window instantly freezes the breath-in.
 const SPLASH_FAST_FORWARD: Duration = Duration::from_millis(700);
@@ -43,9 +42,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 attachment.width, attachment.height
             );
             model.attachments.push(attachment);
-            model
-                .transcript
-                .push(TranscriptItem::Notice(NoticeLevel::Info, label));
+            model.notify_info(label);
             Vec::new()
         }
         // A reflow makes the (col,row) selection anchors meaningless — drop it so the overlay never

@@ -184,16 +184,30 @@ impl Model {
         self.selection = None;
     }
 
+    /// Push an out-of-band notice at `level` — the single constructor for transcript notices, so no call
+    /// site open-codes `TranscriptItem::Notice`. The base method also serves the one dynamic-level caller.
+    pub fn notify(&mut self, level: NoticeLevel, message: impl Into<String>) {
+        self.transcript
+            .push(TranscriptItem::Notice(level, message.into()));
+    }
+
+    /// Push an info-level notice.
+    pub fn notify_info(&mut self, message: impl Into<String>) {
+        self.notify(NoticeLevel::Info, message);
+    }
+
+    /// Push an error-level notice.
+    pub fn notify_error(&mut self, message: impl Into<String>) {
+        self.notify(NoticeLevel::Error, message);
+    }
+
     /// Enter first-run onboarding: raise the submit gate, open the welcome wizard (NVIDIA preselected),
     /// and post the welcome notice. A pure model mutation the runtime calls from `Tui::new` when wiring
     /// fell back to the null provider.
     pub fn enter_onboarding(&mut self) {
         self.unconfigured = true;
         self.wizard = Some(ProviderWizard::onboarding());
-        self.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            ONBOARDING_WELCOME.to_string(),
-        ));
+        self.notify_info(ONBOARDING_WELCOME);
     }
 }
 
@@ -231,6 +245,45 @@ mod tests {
             ..Status::default()
         };
         assert_eq!(s.elapsed_label(), "2m 5s");
+    }
+
+    #[test]
+    fn notify_info_pushes_an_info_notice() {
+        let mut m = Model::default();
+        m.notify_info("hello");
+        assert_eq!(
+            m.transcript.items().last(),
+            Some(&TranscriptItem::Notice(
+                NoticeLevel::Info,
+                "hello".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn notify_error_pushes_an_error_notice() {
+        let mut m = Model::default();
+        m.notify_error("boom");
+        assert_eq!(
+            m.transcript.items().last(),
+            Some(&TranscriptItem::Notice(
+                NoticeLevel::Error,
+                "boom".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn notify_pushes_with_the_given_level() {
+        let mut m = Model::default();
+        m.notify(NoticeLevel::Error, "dynamic");
+        assert_eq!(
+            m.transcript.items().last(),
+            Some(&TranscriptItem::Notice(
+                NoticeLevel::Error,
+                "dynamic".to_string()
+            ))
+        );
     }
 
     #[test]

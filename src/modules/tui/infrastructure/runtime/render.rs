@@ -11,7 +11,6 @@ use crate::modules::tui::application::msg::Msg;
 use crate::modules::tui::application::update::update;
 use crate::modules::tui::domain::model::{Model, Motion};
 use crate::modules::tui::domain::selection::SelectionState;
-use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::modules::tui::infrastructure::clipboard::{self, ClipboardContent};
 use crate::modules::tui::infrastructure::view::{frame_regions, view};
 use crate::modules::tui::infrastructure::widgets::{editor, selection_overlay};
@@ -48,9 +47,8 @@ pub(super) fn draw_and_copy(terminal: &mut DefaultTerminal, model: &mut Model) -
 /// intent, so it must never fail silently. An empty text is a no-op (the clipboard is left untouched).
 pub(super) fn copy_to_clipboard(model: &mut Model, text: &str) {
     if let Err(error) = clipboard::copy_text(text) {
-        model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            format!("falha ao copiar para a área de transferência: {error}"),
+        model.notify_error(format!(
+            "falha ao copiar para a área de transferência: {error}"
         ));
     }
 }

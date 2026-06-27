@@ -12,7 +12,6 @@ use crate::modules::sync::application::git::Git;
 use crate::modules::sync::application::sync_service::SyncService;
 use crate::modules::sync::application::work_tree::SyncWorkTree;
 use crate::modules::tui::domain::model::Model;
-use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 
 use super::render::draw_and_copy;
 
@@ -55,10 +54,7 @@ pub(super) async fn sync_push(
     model: &mut Model,
     terminal: &mut DefaultTerminal,
 ) {
-    model.transcript.push(TranscriptItem::Notice(
-        NoticeLevel::Info,
-        "sincronizando (push)…".to_string(),
-    ));
+    model.notify_info("sincronizando (push)…");
     model.render_at = Some(Instant::now());
     let _ = draw_and_copy(terminal, model);
 
@@ -70,13 +66,7 @@ pub(super) async fn sync_push(
         ctx.work_tree.as_ref(),
     );
     match service.push().await {
-        Ok(summary) => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            format!("sync: {summary}"),
-        )),
-        Err(error) => model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            format!("sync falhou: {error}"),
-        )),
+        Ok(summary) => model.notify_info(format!("sync: {summary}")),
+        Err(error) => model.notify_error(format!("sync falhou: {error}")),
     }
 }

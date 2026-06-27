@@ -16,7 +16,7 @@ use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::application::update::update;
 use crate::modules::tui::domain::modal::PendingPlan;
 use crate::modules::tui::domain::model::Model;
-use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
+use crate::modules::tui::domain::transcript::TranscriptItem;
 use crate::modules::tui::infrastructure::bridge::EngineMsg;
 use crate::modules::tui::infrastructure::input;
 use crate::shared::kernel::approval_mode::ApprovalMode;
@@ -91,10 +91,8 @@ pub(super) fn on_turn_end(
             if turn_produced_nothing(conversation) {
                 // A 200 with an empty assistant reply and no tool activity: the provider returned
                 // nothing usable (e.g. an empty stream). Surface it — never silent.
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Error,
-                    "o provedor não retornou conteúdo — verifique o modelo/endpoint".to_string(),
-                ));
+                model
+                    .notify_error("o provedor não retornou conteúdo — verifique o modelo/endpoint");
             }
         }
         // A plan-mode turn called `present_plan`: render the finished plan and open the approval box.
@@ -111,32 +109,20 @@ pub(super) fn on_turn_end(
         // the session alive. Only a genuine input-stream end (`cancelled == false`, e.g. the approval
         // channel closed) quits.
         Ok(TurnOutcome::Aborted) if cancelled => {
-            model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                "⨯ cancelado".to_string(),
-            ));
+            model.notify_info("⨯ cancelado");
             conversation.rollback_dangling_user();
         }
         Ok(TurnOutcome::Aborted) => model.should_quit = true,
         Err(error) => {
             if cancelled {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Info,
-                    "⨯ cancelado".to_string(),
-                ));
+                model.notify_info("⨯ cancelado");
             } else {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Error,
-                    format!("erro: {error}"),
-                ));
+                model.notify_error(format!("erro: {error}"));
             }
             conversation.rollback_dangling_user();
             if !cancelled && matches!(error, AgentError::ProviderRejected { .. }) {
                 conversation.rollback_last_assistant_turn();
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Info,
-                    "turno anterior descartado (request rejeitado pelo provedor)".to_string(),
-                ));
+                model.notify_info("turno anterior descartado (request rejeitado pelo provedor)");
             }
         }
     }
@@ -194,10 +180,7 @@ impl RunLoop {
         } else {
             "▶ executando o plano"
         };
-        self.model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            notice.to_string(),
-        ));
+        self.model.notify_info(notice);
         self.model.busy = true;
         self.conversation.push(Message::user(
             "Plano aprovado. Prossiga com a execução.".to_string(),

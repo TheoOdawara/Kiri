@@ -8,7 +8,7 @@ use crate::modules::provider::application::secret_store::SecretStore;
 use crate::modules::provider::infrastructure::factory::{
     CredentialResolution, build_provider, resolve_credential as resolve_credential_policy,
 };
-use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
+use crate::modules::tui::domain::model::Model;
 use crate::shared::infra::config;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::{
@@ -189,6 +189,19 @@ impl ProviderSwap {
     }
 }
 
+/// Surface a persist failure as an error notice, or stay silent on success — the single "persist failed →
+/// report it" path shared by the four `apply_*` handlers, so a write failure is never swallowed. Generic
+/// over `E: Display` so it survives the config writers moving from `anyhow::Result` to `AgentError`.
+fn persist_or_notice<E: std::fmt::Display>(
+    result: Result<(), E>,
+    model: &mut Model,
+    context: &str,
+) {
+    if let Err(error) = result {
+        model.notify_error(format!("{context}: {error:#}"));
+    }
+}
+
 impl RunLoop {
     /// Apply a `/models` selection: a model change is just the per-turn `model` field — no provider
     /// rebuild. Apply it live, reflect it in the status line, and persist (best-effort) to the global
@@ -199,18 +212,10 @@ impl RunLoop {
         }
         self.agent_loop.set_model(model_id.clone());
         self.model.status.model = model_id.clone();
-        self.model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            format!("modelo: {model_id}"),
-        ));
-        if let Err(error) =
-            config::persist_active_model(&self.config_path, &self.provider_swap.active, &model_id)
-        {
-            self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                format!("não persistiu o modelo: {error:#}"),
-            ));
-        }
+        self.model.notify_info(format!("modelo: {model_id}"));
+        let persisted =
+            config::persist_active_model(&self.config_path, &self.provider_swap.active, &model_id);
+        persist_or_notice(persisted, &mut self.model, "não persistiu o modelo");
     }
 
     /// Apply an `/effort` selection. Effort is baked into the provider at construction, so rebuild and
@@ -233,20 +238,16 @@ impl RunLoop {
                 } else {
                     format!("esforço: {}", effort.label())
                 };
-                self.model
-                    .transcript
-                    .push(TranscriptItem::Notice(NoticeLevel::Info, note));
-                if let Err(error) = config::persist_effort(&self.config_path, effort) {
-                    self.model.transcript.push(TranscriptItem::Notice(
-                        NoticeLevel::Error,
-                        format!("não persistiu o esforço: {error:#}"),
-                    ));
-                }
+                self.model.notify_info(note);
+                persist_or_notice(
+                    config::persist_effort(&self.config_path, effort),
+                    &mut self.model,
+                    "não persistiu o esforço",
+                );
             }
-            Err(error) => self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                format!("não foi possível aplicar o esforço: {error:#}"),
-            )),
+            Err(error) => self
+                .model
+                .notify_error(format!("não foi possível aplicar o esforço: {error:#}")),
         }
     }
 
@@ -269,29 +270,24 @@ impl RunLoop {
                     .active_profile()
                     .map(|p| p.models.clone())
                     .unwrap_or_default();
-                self.model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Info,
-                    format!("provider: {id} ({target_model})"),
-                ));
+                self.model
+                    .notify_info(format!("provider: {id} ({target_model})"));
                 // Surface a one-time env-import persist failure (closes the former swallowed `let _ =`):
                 // the switch still succeeded for this session, but the key was not saved for the next one.
                 if let Some(warning) = persist_warning {
-                    self.model.transcript.push(TranscriptItem::Notice(
-                        NoticeLevel::Error,
-                        format!("a chave importada do ambiente não foi salva: {warning:#}"),
+                    self.model.notify_error(format!(
+                        "a chave importada do ambiente não foi salva: {warning:#}"
                     ));
                 }
-                if let Err(error) = config::persist_active_provider(&self.config_path, &id) {
-                    self.model.transcript.push(TranscriptItem::Notice(
-                        NoticeLevel::Error,
-                        format!("não persistiu o provider ativo: {error:#}"),
-                    ));
-                }
+                persist_or_notice(
+                    config::persist_active_provider(&self.config_path, &id),
+                    &mut self.model,
+                    "não persistiu o provider ativo",
+                );
             }
-            Err(error) => self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                format!("não foi possível trocar de provider: {error:#}"),
-            )),
+            Err(error) => self
+                .model
+                .notify_error(format!("não foi possível trocar de provider: {error:#}")),
         }
     }
 
@@ -306,10 +302,8 @@ impl RunLoop {
         let credential = match &profile.auth {
             AuthMethod::ApiKey => {
                 let Some(key) = self.model.pending_credential.take() else {
-                    self.model.transcript.push(TranscriptItem::Notice(
-                        NoticeLevel::Error,
-                        "chave ausente; provider não foi salvo".to_string(),
-                    ));
+                    self.model
+                        .notify_error("chave ausente; provider não foi salvo");
                     return;
                 };
                 Credential::ApiKey { key }
@@ -322,11 +316,8 @@ impl RunLoop {
             other => {
                 // The wizard never emits OAuth or an unrecognized method; guard, never panic.
                 self.model.pending_credential = None;
-                self.model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Error,
-                    format!(
-                        "método de auth não suportado pelo wizard ({other:?}); provider não foi salvo"
-                    ),
+                self.model.notify_error(format!(
+                    "método de auth não suportado pelo wizard ({other:?}); provider não foi salvo"
                 ));
                 return;
             }
@@ -346,25 +337,51 @@ impl RunLoop {
                 self.model.status.provider = id.clone();
                 self.model.models = profile.models.clone();
                 self.model.providers = self.provider_swap.provider_ids();
-                self.model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Info,
-                    format!("provider '{id}' adicionado e ativo"),
-                ));
+                self.model
+                    .notify_info(format!("provider '{id}' adicionado e ativo"));
                 // Persist the profile (config) and the active selection; the credential
                 // already went to the keyring above.
-                if let Err(error) = config::upsert_provider(&self.config_path, &profile)
-                    .and_then(|()| config::persist_active_provider(&self.config_path, &id))
-                {
-                    self.model.transcript.push(TranscriptItem::Notice(
-                        NoticeLevel::Error,
-                        format!("provider ativo, mas não persistiu no config: {error:#}"),
-                    ));
-                }
+                let persisted = config::upsert_provider(&self.config_path, &profile)
+                    .and_then(|()| config::persist_active_provider(&self.config_path, &id));
+                persist_or_notice(
+                    persisted,
+                    &mut self.model,
+                    "provider ativo, mas não persistiu no config",
+                );
             }
-            Err(error) => self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                format!("não foi possível salvar o provider: {error:#}"),
-            )),
+            Err(error) => self
+                .model
+                .notify_error(format!("não foi possível salvar o provider: {error:#}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
+
+    #[test]
+    fn persist_or_notice_is_silent_on_ok() {
+        let mut model = Model::default();
+        persist_or_notice(Ok::<(), String>(()), &mut model, "contexto");
+        assert!(
+            model.transcript.is_empty(),
+            "a successful persist must add no notice"
+        );
+    }
+
+    #[test]
+    fn persist_or_notice_pushes_an_error_notice_on_err() {
+        let mut model = Model::default();
+        persist_or_notice(Err("disco cheio"), &mut model, "não persistiu o modelo");
+        assert_eq!(
+            model.transcript.items().last(),
+            Some(&TranscriptItem::Notice(
+                NoticeLevel::Error,
+                "não persistiu o modelo: disco cheio".to_string()
+            )),
+            "a persist failure must surface a contextual error notice"
+        );
     }
 }

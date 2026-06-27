@@ -39,7 +39,7 @@ use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::update::update;
 use crate::modules::tui::domain::model::Model;
-use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
+use crate::modules::tui::domain::transcript::TranscriptItem;
 use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
 use crate::modules::tui::infrastructure::input;
 use crate::modules::tui::infrastructure::terminal_guard::TerminalGuard;
@@ -264,11 +264,9 @@ impl Tui {
                 // Onboarding: there is no usable provider yet, so the seed can't run against the null
                 // provider. Surface it and let the user configure a provider via the welcome wizard.
                 None if run_loop.model.unconfigured => {
-                    run_loop.model.transcript.push(TranscriptItem::Notice(
-                        NoticeLevel::Info,
-                        "configure um provider antes de enviar — a mensagem inicial foi ignorada"
-                            .to_string(),
-                    ));
+                    run_loop.model.notify_info(
+                        "configure um provider antes de enviar — a mensagem inicial foi ignorada",
+                    );
                 }
                 None => {
                     run_loop.model.history.record(&line);

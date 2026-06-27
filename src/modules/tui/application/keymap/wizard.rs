@@ -20,10 +20,7 @@ pub(super) fn on_wizard_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         } else {
             "wizard cancelado"
         };
-        model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            message.to_string(),
-        ));
+        model.notify_info(message);
         return vec![];
     }
 

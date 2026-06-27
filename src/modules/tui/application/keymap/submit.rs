@@ -19,10 +19,7 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
         Some(Command::Sessions) => vec![Effect::ListSessions],
         Some(Command::Sync) => vec![Effect::SyncPush],
         Some(Command::Help) => {
-            model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                command::help_text(),
-            ));
+            model.notify_info(command::help_text());
             vec![]
         }
         Some(Command::SetMode(mode)) => {
@@ -30,10 +27,7 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
             vec![]
         }
         Some(Command::ChangeWorkspace(None)) => {
-            model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                format!("workspace: {}", model.status.workspace),
-            ));
+            model.notify_info(format!("workspace: {}", model.status.workspace));
             vec![]
         }
         Some(Command::ChangeWorkspace(Some(path))) => vec![Effect::ChangeWorkspace(path)],
@@ -41,10 +35,7 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
         Some(Command::Effort) => open_effort_picker(model),
         Some(Command::Provider) => open_provider_picker(model),
         Some(Command::Unknown) => {
-            model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                format!("comando desconhecido: {} (use /help)", line.trim()),
-            ));
+            model.notify_error(format!("comando desconhecido: {} (use /help)", line.trim()));
             vec![]
         }
         None if line.trim().is_empty() && model.attachments.is_empty() => vec![],
@@ -53,10 +44,7 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
             // surface a clear notice, and re-open onboarding. `busy` is intentionally left false so no
             // turn is armed and the UI is not stranded.
             model.attachments.clear();
-            model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                "configure um provider primeiro — escolha um e informe a API key".to_string(),
-            ));
+            model.notify_info("configure um provider primeiro — escolha um e informe a API key");
             model.wizard = Some(ProviderWizard::onboarding());
             vec![]
         }
@@ -82,11 +70,9 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
 /// catalog surfaces a notice instead — there is nothing to pick.
 fn open_models_picker(model: &mut Model) -> Vec<Effect> {
     if model.models.is_empty() {
-        model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            "este provider não tem catálogo de modelos; adicione em ~/.kiri/config.toml"
-                .to_string(),
-        ));
+        model.notify_info(
+            "este provider não tem catálogo de modelos; adicione em ~/.kiri/config.toml",
+        );
     } else {
         let current = model.status.model.clone();
         let selected = model.models.iter().position(|m| *m == current).unwrap_or(0);
@@ -122,10 +108,7 @@ fn open_effort_picker(model: &mut Model) -> Vec<Effect> {
 /// add wizard), preselecting the active one. With no providers configured it surfaces a notice instead.
 fn open_provider_picker(model: &mut Model) -> Vec<Effect> {
     if model.providers.is_empty() {
-        model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            "nenhum provider configurado".to_string(),
-        ));
+        model.notify_info("nenhum provider configurado");
     } else {
         let current = model.status.provider.clone();
         let selected = model

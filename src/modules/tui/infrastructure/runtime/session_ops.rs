@@ -88,10 +88,8 @@ impl RunLoop {
                     session.id
                 }
                 Err(error) => {
-                    self.model.transcript.push(TranscriptItem::Notice(
-                        NoticeLevel::Error,
-                        format!("não persistiu a sessão: {error}"),
-                    ));
+                    self.model
+                        .notify_error(format!("não persistiu a sessão: {error}"));
                     return;
                 }
             },
@@ -99,10 +97,8 @@ impl RunLoop {
 
         let first_flush = cursor == 0;
         if let Err(error) = self.session_store.append_messages(&id, delta).await {
-            self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                format!("não persistiu a sessão: {error}"),
-            ));
+            self.model
+                .notify_error(format!("não persistiu a sessão: {error}"));
             return;
         }
         if first_flush
@@ -126,10 +122,8 @@ impl RunLoop {
     /// opens nothing.
     pub(super) async fn list_sessions(&mut self) {
         if !self.session_store.is_available() {
-            self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                "persistência de sessão indisponível".to_string(),
-            ));
+            self.model
+                .notify_info("persistência de sessão indisponível");
             return;
         }
         match self
@@ -162,14 +156,12 @@ impl RunLoop {
                     0,
                 ));
             }
-            Ok(_) => self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                "nenhuma sessão anterior neste workspace".to_string(),
-            )),
-            Err(error) => self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                format!("não foi possível listar as sessões: {error}"),
-            )),
+            Ok(_) => self
+                .model
+                .notify_info("nenhuma sessão anterior neste workspace"),
+            Err(error) => self
+                .model
+                .notify_error(format!("não foi possível listar as sessões: {error}")),
         }
     }
 
@@ -181,10 +173,8 @@ impl RunLoop {
         // "no such table" error; guard it the same way /sessions does so the user sees the clean
         // degraded-mode notice, not a leaked SQL detail.
         if !self.session_store.is_available() {
-            self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                "persistência de sessão indisponível".to_string(),
-            ));
+            self.model
+                .notify_info("persistência de sessão indisponível");
             return;
         }
         match self
@@ -193,14 +183,12 @@ impl RunLoop {
             .await
         {
             Ok(Some(summary)) => self.open_session(&summary.id, ui).await,
-            Ok(None) => self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Info,
-                "nenhuma sessão anterior neste workspace".to_string(),
-            )),
-            Err(error) => self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                format!("não foi possível ler as sessões: {error}"),
-            )),
+            Ok(None) => self
+                .model
+                .notify_info("nenhuma sessão anterior neste workspace"),
+            Err(error) => self
+                .model
+                .notify_error(format!("não foi possível ler as sessões: {error}")),
         }
     }
 
@@ -227,22 +215,15 @@ impl RunLoop {
                 } else {
                     session.title.clone()
                 };
-                self.model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Info,
-                    format!("sessão retomada: {title}"),
-                ));
+                self.model.notify_info(format!("sessão retomada: {title}"));
                 self.conversation = fresh;
                 self.cursor.session_id = Some(session.id);
                 self.cursor.persisted_len = session.messages.len();
             }
-            Ok(None) => self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                "sessão não encontrada".to_string(),
-            )),
-            Err(error) => self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                format!("não foi possível abrir a sessão: {error}"),
-            )),
+            Ok(None) => self.model.notify_error("sessão não encontrada"),
+            Err(error) => self
+                .model
+                .notify_error(format!("não foi possível abrir a sessão: {error}")),
         }
     }
 
@@ -263,15 +244,10 @@ impl RunLoop {
                 self.cursor.session_id = None;
                 self.cursor.persisted_len = 0;
                 self.sandbox = new_sandbox;
-                self.model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Info,
-                    format!("workspace: {}", self.model.status.workspace),
-                ));
+                self.model
+                    .notify_info(format!("workspace: {}", self.model.status.workspace));
             }
-            Err(error) => self.model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                format!("erro: {error:#}"),
-            )),
+            Err(error) => self.model.notify_error(format!("erro: {error:#}")),
         }
     }
 
@@ -287,9 +263,6 @@ impl RunLoop {
         self.model.transcript = Transcript::default();
         self.model.attachments.clear();
         self.model.scroll.pin();
-        self.model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Info,
-            "nova sessão".to_string(),
-        ));
+        self.model.notify_info("nova sessão");
     }
 }
