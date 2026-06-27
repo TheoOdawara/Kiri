@@ -10,6 +10,7 @@ use crate::modules::tools::application::sandbox::{CreateResolution, Sandbox};
 #[cfg(test)]
 use crate::modules::tools::infrastructure::confine::noop::NoConfinement;
 use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+use crate::shared::kernel::error::AgentError;
 
 /// The credential-directory names guarded by both the path-resolution refusal here and the macOS
 /// Seatbelt read-deny. Single-sourced in `secret_paths` and re-exported so existing importers
@@ -183,18 +184,18 @@ impl Sandbox for FsSandbox {
     /// Resolve a path that must already exist (read/edit/overwrite/delete/list/search). A relative path
     /// resolves under the active root and is asserted to stay within it; an absolute path (or `~/…`) is
     /// resolved as given — allowed outside the root, since the CLI gates it with explicit confirmation.
-    fn resolve_existing(&self, rel: &str) -> Result<PathBuf> {
+    fn resolve_existing(&self, rel: &str) -> Result<PathBuf, AgentError> {
         let expanded = expand_tilde(rel, home().as_deref());
         if expanded.is_absolute() {
             let real = std::fs::canonicalize(&expanded)
-                .with_context(|| format!("path not found: {rel}"))?;
+                .map_err(|_| AgentError::Sandbox(format!("path not found: {rel}")))?;
             self.assert_not_sensitive(&real, rel)?;
             self.assert_not_in_secret_dir(&real, rel)?;
             return Ok(real);
         }
         let candidate = self.join_checked(rel)?;
-        let real =
-            std::fs::canonicalize(&candidate).with_context(|| format!("path not found: {rel}"))?;
+        let real = std::fs::canonicalize(&candidate)
+            .map_err(|_| AgentError::Sandbox(format!("path not found: {rel}")))?;
         self.assert_within(&real)?;
         self.assert_not_sensitive(&real, rel)?;
         self.assert_not_in_secret_dir(&real, rel)?;
@@ -210,7 +211,7 @@ impl Sandbox for FsSandbox {
     /// location the user must approve at the confirmation prompt, so it deliberately bypasses the
     /// within-root check (`confined == false`). It is still run through `assert_not_sensitive`, so
     /// secret paths are rejected regardless.
-    fn resolve_create(&self, rel: &str) -> Result<CreateResolution> {
+    fn resolve_create(&self, rel: &str) -> Result<CreateResolution, AgentError> {
         let expanded = expand_tilde(rel, home().as_deref());
         let (candidate, confined) = if expanded.is_absolute() {
             // Absolute/tilde-expanded paths are user-approved out-of-root targets — not confined here;
@@ -220,7 +221,7 @@ impl Sandbox for FsSandbox {
             (self.join_checked(rel)?, true)
         };
         if confined && candidate == self.root {
-            bail!("path has no file name: {rel}");
+            return Err(AgentError::Sandbox(format!("path has no file name: {rel}")));
         }
 
         let mut existing = candidate.as_path();
@@ -229,11 +230,12 @@ impl Sandbox for FsSandbox {
             missing.push(existing);
             existing = existing
                 .parent()
-                .with_context(|| format!("invalid path: {rel}"))?;
+                .ok_or_else(|| AgentError::Sandbox(format!("invalid path: {rel}")))?;
         }
 
-        let real_existing = std::fs::canonicalize(existing)
-            .with_context(|| format!("cannot resolve an existing ancestor of {rel}"))?;
+        let real_existing = std::fs::canonicalize(existing).map_err(|_| {
+            AgentError::Sandbox(format!("cannot resolve an existing ancestor of {rel}"))
+        })?;
         if confined {
             self.assert_within(&real_existing)?;
         }
@@ -245,7 +247,7 @@ impl Sandbox for FsSandbox {
         for (idx, segment) in missing.iter().enumerate() {
             let name = segment
                 .file_name()
-                .with_context(|| format!("invalid path component in {rel}"))?;
+                .ok_or_else(|| AgentError::Sandbox(format!("invalid path component in {rel}")))?;
             real_target = real_target.join(name);
             // Every component but the last one is a directory that must be created.
             if idx + 1 < missing.len() {
@@ -271,27 +273,35 @@ impl Sandbox for FsSandbox {
 impl FsSandbox {
     /// Lexical guard + normalization: reject `..`, absolute paths, and empty input before touching the
     /// filesystem, dropping any `.` components. Returns the root joined with the normal components.
-    fn join_checked(&self, rel: &str) -> Result<PathBuf> {
+    fn join_checked(&self, rel: &str) -> Result<PathBuf, AgentError> {
         if rel.trim().is_empty() {
-            bail!("empty path");
+            return Err(AgentError::Sandbox("empty path".to_string()));
         }
         let mut clean = self.root.clone();
         for component in Path::new(rel).components() {
             match component {
                 Component::Normal(segment) => clean.push(segment),
                 Component::CurDir => {}
-                Component::ParentDir => bail!("path traversal ('..') is not allowed: {rel}"),
+                Component::ParentDir => {
+                    return Err(AgentError::Sandbox(format!(
+                        "path traversal ('..') is not allowed: {rel}"
+                    )));
+                }
                 Component::RootDir | Component::Prefix(_) => {
-                    bail!("absolute paths are not allowed: {rel}")
+                    return Err(AgentError::Sandbox(format!(
+                        "absolute paths are not allowed: {rel}"
+                    )));
                 }
             }
         }
         Ok(clean)
     }
 
-    fn assert_within(&self, real: &Path) -> Result<()> {
+    fn assert_within(&self, real: &Path) -> Result<(), AgentError> {
         if !real.starts_with(&self.root) {
-            bail!("path escapes the sandbox root");
+            return Err(AgentError::Sandbox(
+                "path escapes the sandbox root".to_string(),
+            ));
         }
         Ok(())
     }
@@ -299,11 +309,13 @@ impl FsSandbox {
     /// Refuse CRUD on files whose name matches a sensitive pattern (secrets, keys, credentials).
     /// The check is on the last path component only, so a directory named `.ssh` is not blocked
     /// (the files inside it are: `id_rsa`, `authorized_keys`, etc.).
-    fn assert_not_sensitive(&self, real: &Path, display: &str) -> Result<()> {
+    fn assert_not_sensitive(&self, real: &Path, display: &str) -> Result<(), AgentError> {
         if let Some(name) = real.file_name().and_then(|n| n.to_str())
             && let Some(glob) = self.sensitive.matches(name)
         {
-            bail!("path matches sensitive file pattern '{glob}': {display}");
+            return Err(AgentError::Sandbox(format!(
+                "path matches sensitive file pattern '{glob}': {display}"
+            )));
         }
         Ok(())
     }
@@ -313,10 +325,12 @@ impl FsSandbox {
     /// file-name guard alone misses for non-sensitive names like `~/.aws/config`. For an in-root path
     /// only the portion beyond the workspace root is inspected, so a workspace that itself sits under
     /// such a directory is not self-blocked; an out-of-root (absolute/`~`) target is inspected in full.
-    fn assert_not_in_secret_dir(&self, real: &Path, display: &str) -> Result<()> {
+    fn assert_not_in_secret_dir(&self, real: &Path, display: &str) -> Result<(), AgentError> {
         let scoped = real.strip_prefix(&self.root).unwrap_or(real);
         if let Some(name) = self.secret_dir_component(scoped) {
-            bail!("path is inside the secret directory '{name}': {display}");
+            return Err(AgentError::Sandbox(format!(
+                "path is inside the secret directory '{name}': {display}"
+            )));
         }
         Ok(())
     }
@@ -717,5 +731,57 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), sb.root().join("link")).unwrap();
 
         assert!(sb.resolve_create("link/new.txt").is_err());
+    }
+
+    // The port contract is the *typed* `AgentError::Sandbox`, not a stringified anyhow. These lock the
+    // refusal type at every guard so a future `?`-propagating caller keeps the typed contract.
+    #[test]
+    fn resolve_existing_traversal_yields_agenterror_sandbox() {
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        assert!(matches!(
+            sb.resolve_existing("../etc"),
+            Err(AgentError::Sandbox(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_create_sensitive_yields_agenterror_sandbox() {
+        let dir = TempDir::new().unwrap();
+        let sb = guarded_sandbox(&dir);
+        assert!(matches!(
+            sb.resolve_create(".env"),
+            Err(AgentError::Sandbox(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_existing_credential_dir_yields_agenterror_sandbox() {
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        fs::create_dir(dir.path().join(".ssh")).unwrap();
+        fs::write(dir.path().join(".ssh").join("config"), b"x").unwrap();
+        assert!(matches!(
+            sb.resolve_existing(".ssh/config"),
+            Err(AgentError::Sandbox(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_existing_missing_yields_agenterror_sandbox() {
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        assert!(matches!(
+            sb.resolve_existing("does-not-exist.txt"),
+            Err(AgentError::Sandbox(_))
+        ));
+    }
+
+    // Compile-asserting regression lock: the port methods expose the typed signature, not anyhow.
+    #[test]
+    fn sandbox_port_error_type_is_agenterror() {
+        let _: fn(&FsSandbox, &str) -> Result<PathBuf, AgentError> = FsSandbox::resolve_existing;
+        let _: fn(&FsSandbox, &str) -> Result<CreateResolution, AgentError> =
+            FsSandbox::resolve_create;
     }
 }

@@ -1,10 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-
 use crate::modules::tools::application::command_sandbox::{
     CommandSandbox, NetworkPolicy, SandboxPolicy,
 };
+use crate::shared::kernel::error::AgentError;
 
 /// The resolved target of a create operation, plus any parent directories that do not yet exist (in
 /// shallow-first order) and would have to be created for the write to succeed. Pure data, so it lives
@@ -31,11 +30,11 @@ pub trait Sandbox {
     /// Resolve a path that must already exist (read/edit/overwrite/delete/list/search), refusing
     /// traversal, sensitive names, and credential directories. Absolute/`~` targets are allowed but
     /// the engine gates them with explicit confirmation.
-    fn resolve_existing(&self, rel: &str) -> Result<PathBuf>;
+    fn resolve_existing(&self, rel: &str) -> Result<PathBuf, AgentError>;
 
     /// Resolve a path for creation: the target need not exist and missing intermediate directories are
     /// reported, with the same sensitive-name and credential-directory guards applied.
-    fn resolve_create(&self, rel: &str) -> Result<CreateResolution>;
+    fn resolve_create(&self, rel: &str) -> Result<CreateResolution, AgentError>;
 
     /// The working directory a command should run in for `resolved`: the root inside the jail, or the
     /// target's nearest existing directory for an approved out-of-root target.

@@ -1,3 +1,8 @@
+//! The sensitive-file matcher and its env-driven loader. `SensitiveMatcher::new` and
+//! `load_sensitive_matcher` are edge-only wiring constructors — invoked solely from the composition
+//! root (`app::wire`) — so they keep `anyhow::Result`; the matcher is then injected into `FsSandbox`,
+//! whose port methods return the typed `AgentError`.
+
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};

@@ -13,7 +13,9 @@ pub enum AgentError {
     /// A terminal/IO failure while rendering or prompting.
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    /// Failed to set up OS-level command confinement before spawning a tool's child process.
+    /// A sandbox refusal: either a confinement-setup failure before spawning a tool's child process,
+    /// or a path-resolution refusal at the filesystem chokepoint (traversal, a sensitive file name, a
+    /// credential directory, a not-found target, or a path that escapes the workspace root).
     #[error("sandbox error: {0}")]
     Sandbox(String),
     /// A memory-store failure (file/SQLite persistence, serialization) in the `memory` context. The
