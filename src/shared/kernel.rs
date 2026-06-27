@@ -5,5 +5,6 @@ pub mod error;
 pub mod message;
 pub mod provider;
 pub mod role;
+pub mod sandbox;
 pub mod stream_event;
 pub mod tool_call;

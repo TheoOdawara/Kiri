@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::infrastructure::sensitive::{SensitiveMatcher, load_sensitive_matcher};
 use crate::shared::kernel::provider::{AuthMethod, Effort, ProviderKind, ProviderProfile};
+use crate::shared::kernel::sandbox::{NetworkStance, SandboxMode};
 
 /// Seeded once as the first message of the session; broken into 9 named sections (Identity, Quality,
 /// Posture, Workspace & paths, Tools, Approval modes, Turn mechanics, Memory & preferences, Security)
@@ -467,27 +468,29 @@ fn resolve_bool(config: Option<bool>, env_key: &str, default: bool) -> bool {
 
 /// `KIRI_SANDBOX` / `[sandbox].mode`: `os` (default) uses the platform adapter where available; `off`
 /// disables OS confinement; `require` refuses `run_command` when no OS sandbox is available. Returns
-/// `(enabled, require)`.
+/// `(enabled, require)`. The parse lives in the kernel [`SandboxMode`] so the loader and the sync trust
+/// gate read it one way; this resolver only owns the config-then-env precedence and the runtime mapping.
 fn resolve_sandbox_mode(config: Option<&str>) -> (bool, bool) {
     let raw = config
         .map(str::to_string)
         .or_else(|| std::env::var("KIRI_SANDBOX").ok());
-    match raw.as_deref() {
-        Some("off") => (false, false),
-        Some("require") => (true, true),
-        _ => (true, false),
+    match SandboxMode::from_config(raw.as_deref()) {
+        SandboxMode::Off => (false, false),
+        SandboxMode::Os => (true, false),
+        SandboxMode::Require => (true, true),
     }
 }
 
 /// `KIRI_SANDBOX_NETWORK` / `[sandbox].network`: the base network stance for `run_command`. `deny`
-/// default.
+/// default. The parse lives in the kernel [`NetworkStance`]; this resolver maps it to the tools-layer
+/// [`NetworkPolicy`] runtime enum.
 fn resolve_sandbox_network(config: Option<&str>) -> NetworkPolicy {
     let raw = config
         .map(str::to_string)
         .or_else(|| std::env::var("KIRI_SANDBOX_NETWORK").ok());
-    match raw.as_deref() {
-        Some("allow") => NetworkPolicy::Allow,
-        _ => NetworkPolicy::Deny,
+    match NetworkStance::from_config(raw.as_deref()) {
+        NetworkStance::Allow => NetworkPolicy::Allow,
+        NetworkStance::Deny => NetworkPolicy::Deny,
     }
 }
 

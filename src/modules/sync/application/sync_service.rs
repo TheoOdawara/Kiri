@@ -9,6 +9,8 @@ use crate::modules::sync::application::git::Git;
 use crate::modules::sync::infrastructure::memory_ndjson;
 use crate::shared::infra::config;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::provider::AuthMethod;
+use crate::shared::kernel::sandbox::{NetworkStance, SandboxMode};
 
 type Result<T> = std::result::Result<T, AgentError>;
 
@@ -266,16 +268,20 @@ struct TrustView {
 struct TrustProvider {
     #[serde(default)]
     base_url: Option<String>,
+    /// Typed against the kernel [`AuthMethod`] (forward-compat `Deserialize`) so the gate reasons over
+    /// the same enum the loader uses, not a hand-typed `"none"` literal. Absent = the historical default.
     #[serde(default)]
-    auth: Option<String>,
+    auth: Option<AuthMethod>,
 }
 
 #[derive(Deserialize, Default)]
 struct TrustSandbox {
+    /// Typed against the kernel sandbox primitives; an unknown value maps to the safe variant, so a
+    /// forward-version config is never read as a downgrade. Absent = the resolver's baseline.
     #[serde(default)]
-    mode: Option<String>,
+    mode: Option<SandboxMode>,
     #[serde(default)]
-    network: Option<String>,
+    network: Option<NetworkStance>,
 }
 
 #[derive(Deserialize, Default)]
@@ -286,8 +292,10 @@ struct TrustEmbeddings {
 
 /// Identify risky differences in an incoming config that, applied as the trusted global layer, could
 /// redirect a credential or weaken the sandbox. Flags: a newly added provider; an existing provider's
-/// `base_url` added or changed; the active provider switching to a different endpoint; the embeddings
-/// provider changing; the sandbox mode set to `off`; the sandbox network widened to `allow`. Returns a
+/// `base_url` added or changed; an existing provider's auth disabled; the active provider switching to a
+/// different endpoint; the embeddings provider changing; the sandbox confinement *weakened* by rank
+/// (`require → os`, `require → off`, `os → off`); the sandbox network widened to allow. Reasons over the
+/// typed kernel [`AuthMethod`]/[`SandboxMode`]/[`NetworkStance`] (no magic strings). Returns a
 /// human-readable list (empty = safe to apply). Schema validity is checked separately by the caller.
 fn risky_config_changes(current: &str, incoming: &str) -> Vec<String> {
     let incoming: TrustView = match toml::from_str(incoming) {
@@ -318,10 +326,11 @@ fn risky_config_changes(current: &str, incoming: &str) -> Vec<String> {
                 if cur.base_url != inc.base_url {
                     risks.push(format!("provider '{id}' base_url changes"));
                 }
-                // Anything not explicitly "none" (api-key/oauth, or absent = the historical default) is
-                // treated as keyed, so dropping authentication is always flagged.
-                if cur.auth.as_deref() != Some("none") && inc.auth.as_deref() == Some("none") {
-                    risks.push(format!("provider '{id}' auth disabled (set to none)"));
+                // Anything not explicitly `None` (api-key/oauth, or absent = the historical default,
+                // since `None != Some(AuthMethod::None)`) is treated as keyed, so dropping authentication
+                // is always flagged.
+                if cur.auth != Some(AuthMethod::None) && inc.auth == Some(AuthMethod::None) {
+                    risks.push(format!("provider '{id}' auth disabled"));
                 }
             }
         }
@@ -345,21 +354,25 @@ fn risky_config_changes(current: &str, incoming: &str) -> Vec<String> {
         risks.push("embeddings provider changes".to_string());
     }
 
-    // Sandbox weakened: mode disabled, or the base network stance widened from deny to allow.
-    if incoming.sandbox.mode.as_deref() == Some("off")
-        && current.sandbox.mode.as_deref() != Some("off")
-    {
-        risks.push("sandbox mode set to 'off'".to_string());
+    // Sandbox confinement must not weaken. Rank the modes (`Require > Os > Off`) so any strictly-lower
+    // incoming rank is flagged — not only `→ off`. An absent mode is the resolver's `Os` baseline, so
+    // `absent → os` (and `os → require`) does not flag. Debug-format the modes so the message carries no
+    // bare `"off"`/`"require"` literal the gate could be mistaken for comparing against.
+    let current_mode = current.sandbox.mode.unwrap_or(SandboxMode::Os);
+    let incoming_mode = incoming.sandbox.mode.unwrap_or(SandboxMode::Os);
+    if incoming_mode.rank() < current_mode.rank() {
+        risks.push(format!(
+            "sandbox confinement weakened ({current_mode:?} -> {incoming_mode:?})"
+        ));
     }
-    let net = |view: &TrustView| {
-        view.sandbox
-            .network
-            .as_deref()
-            .unwrap_or("deny")
-            .to_string()
-    };
-    if net(&incoming) == "allow" && net(&current) != "allow" {
-        risks.push("sandbox network widened to 'allow'".to_string());
+
+    // Base network stance must not widen from deny to allow (an absent stance is the `Deny` baseline).
+    let current_net = current.sandbox.network.unwrap_or(NetworkStance::Deny);
+    let incoming_net = incoming.sandbox.network.unwrap_or(NetworkStance::Deny);
+    if incoming_net == NetworkStance::Allow && current_net != NetworkStance::Allow {
+        risks.push(format!(
+            "sandbox network widened ({current_net:?} -> {incoming_net:?})"
+        ));
     }
 
     risks
@@ -486,6 +499,70 @@ base_url = "https://evil.example/v1"
     fn detects_sandbox_off() {
         let risks = risky_config_changes("", "[sandbox]\nmode = \"off\"\n");
         assert!(risks.iter().any(|r| r.contains("sandbox")));
+    }
+
+    #[test]
+    fn detects_sandbox_require_to_os_downgrade() {
+        // The audited hole: `require → os` is a genuine weakening on a platform with no OS sandbox, yet
+        // the old gate only flagged `→ off`. Ranking catches it.
+        let risks = risky_config_changes(
+            "[sandbox]\nmode = \"require\"\n",
+            "[sandbox]\nmode = \"os\"\n",
+        );
+        assert!(risks.iter().any(|r| r.contains("sandbox")), "{risks:?}");
+    }
+
+    #[test]
+    fn detects_sandbox_require_to_off_downgrade() {
+        let risks = risky_config_changes(
+            "[sandbox]\nmode = \"require\"\n",
+            "[sandbox]\nmode = \"off\"\n",
+        );
+        assert!(risks.iter().any(|r| r.contains("sandbox")), "{risks:?}");
+    }
+
+    #[test]
+    fn detects_sandbox_os_to_off_downgrade() {
+        let risks =
+            risky_config_changes("[sandbox]\nmode = \"os\"\n", "[sandbox]\nmode = \"off\"\n");
+        assert!(risks.iter().any(|r| r.contains("sandbox")), "{risks:?}");
+    }
+
+    #[test]
+    fn sandbox_os_to_require_is_safe() {
+        // Strengthening confinement (lower → higher rank) is never risky.
+        let risks = risky_config_changes(
+            "[sandbox]\nmode = \"os\"\n",
+            "[sandbox]\nmode = \"require\"\n",
+        );
+        assert!(
+            !risks.iter().any(|r| r.contains("sandbox")),
+            "strengthening must not flag: {risks:?}"
+        );
+    }
+
+    #[test]
+    fn sandbox_absent_to_os_is_safe() {
+        // An absent mode is the `Os` baseline, so `absent → os` is a no-op, not a downgrade.
+        let risks = risky_config_changes("", "[sandbox]\nmode = \"os\"\n");
+        assert!(
+            !risks.iter().any(|r| r.contains("sandbox")),
+            "absent baseline is os: {risks:?}"
+        );
+    }
+
+    #[test]
+    fn auth_gate_uses_typed_authmethod() {
+        // The auth-disabled check reasons over the typed `Some(AuthMethod::None)`, not a `"none"` string:
+        // an `api-key → none` change on the same endpoint is flagged.
+        let current = provider_toml("nvidia", "https://x/v1"); // auth = "api-key"
+        let incoming = "[providers.nvidia]\nkind = \"open-ai-compatible\"\n\
+                        base_url = \"https://x/v1\"\nmodel = \"m\"\nauth = \"none\"\n";
+        let risks = risky_config_changes(&current, incoming);
+        assert!(
+            risks.iter().any(|r| r.contains("auth disabled")),
+            "{risks:?}"
+        );
     }
 
     #[test]
