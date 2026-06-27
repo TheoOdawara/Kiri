@@ -447,67 +447,9 @@ fn submit(model: &mut Model) -> Vec<Effect> {
             vec![]
         }
         Some(Command::ChangeWorkspace(Some(path))) => vec![Effect::ChangeWorkspace(path)],
-        Some(Command::Models) => {
-            if model.models.is_empty() {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Info,
-                    "este provider não tem catálogo de modelos; adicione em ~/.kiri/config.toml"
-                        .to_string(),
-                ));
-            } else {
-                let current = model.status.model.clone();
-                let selected = model.models.iter().position(|m| *m == current).unwrap_or(0);
-                model.picker = Some(Picker::new(
-                    PickerKind::Models,
-                    "modelo",
-                    "Escolha o modelo ativo:",
-                    model.models.clone(),
-                    selected,
-                ));
-            }
-            vec![]
-        }
-        Some(Command::Effort) => {
-            let options: Vec<String> = Effort::ALL.iter().map(|e| e.label().to_string()).collect();
-            let selected = Effort::ALL
-                .iter()
-                .position(|e| *e == model.status.effort)
-                .unwrap_or(0);
-            model.picker = Some(Picker::new(
-                PickerKind::Effort,
-                "esforço",
-                "Escolha o nível de esforço (reasoning):",
-                options,
-                selected,
-            ));
-            vec![]
-        }
-        Some(Command::Provider) => {
-            if model.providers.is_empty() {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Info,
-                    "nenhum provider configurado".to_string(),
-                ));
-            } else {
-                let current = model.status.provider.clone();
-                let selected = model
-                    .providers
-                    .iter()
-                    .position(|p| *p == current)
-                    .unwrap_or(0);
-                // The configured providers, plus the "+ adicionar" row that opens the add wizard.
-                let mut options = model.providers.clone();
-                options.push(ADD_PROVIDER_LABEL.to_string());
-                model.picker = Some(Picker::new(
-                    PickerKind::Provider,
-                    "provider",
-                    "Escolha o provider ativo (ou adicione um novo):",
-                    options,
-                    selected,
-                ));
-            }
-            vec![]
-        }
+        Some(Command::Models) => open_models_picker(model),
+        Some(Command::Effort) => open_effort_picker(model),
+        Some(Command::Provider) => open_provider_picker(model),
         Some(Command::Unknown) => {
             model.transcript.push(TranscriptItem::Notice(
                 NoticeLevel::Error,
@@ -544,6 +486,75 @@ fn submit(model: &mut Model) -> Vec<Effect> {
             vec![Effect::SubmitPrompt { text: line, images }]
         }
     }
+}
+
+/// Open the `/models` picker for the active provider's catalog, preselecting the current model. An empty
+/// catalog surfaces a notice instead — there is nothing to pick.
+fn open_models_picker(model: &mut Model) -> Vec<Effect> {
+    if model.models.is_empty() {
+        model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Info,
+            "este provider não tem catálogo de modelos; adicione em ~/.kiri/config.toml"
+                .to_string(),
+        ));
+    } else {
+        let current = model.status.model.clone();
+        let selected = model.models.iter().position(|m| *m == current).unwrap_or(0);
+        model.picker = Some(Picker::new(
+            PickerKind::Models,
+            "modelo",
+            "Escolha o modelo ativo:",
+            model.models.clone(),
+            selected,
+        ));
+    }
+    vec![]
+}
+
+/// Open the `/effort` picker over the reasoning-effort levels, preselecting the current effort.
+fn open_effort_picker(model: &mut Model) -> Vec<Effect> {
+    let options: Vec<String> = Effort::ALL.iter().map(|e| e.label().to_string()).collect();
+    let selected = Effort::ALL
+        .iter()
+        .position(|e| *e == model.status.effort)
+        .unwrap_or(0);
+    model.picker = Some(Picker::new(
+        PickerKind::Effort,
+        "esforço",
+        "Escolha o nível de esforço (reasoning):",
+        options,
+        selected,
+    ));
+    vec![]
+}
+
+/// Open the `/provider` picker over the configured providers (plus the "+ adicionar" row that opens the
+/// add wizard), preselecting the active one. With no providers configured it surfaces a notice instead.
+fn open_provider_picker(model: &mut Model) -> Vec<Effect> {
+    if model.providers.is_empty() {
+        model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Info,
+            "nenhum provider configurado".to_string(),
+        ));
+    } else {
+        let current = model.status.provider.clone();
+        let selected = model
+            .providers
+            .iter()
+            .position(|p| *p == current)
+            .unwrap_or(0);
+        // The configured providers, plus the "+ adicionar" row that opens the add wizard.
+        let mut options = model.providers.clone();
+        options.push(ADD_PROVIDER_LABEL.to_string());
+        model.picker = Some(Picker::new(
+            PickerKind::Provider,
+            "provider",
+            "Escolha o provider ativo (ou adicione um novo):",
+            options,
+            selected,
+        ));
+    }
+    vec![]
 }
 
 /// A resolved approval choice from a key press while a confirmation is pending.

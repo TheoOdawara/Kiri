@@ -636,99 +636,27 @@ impl Tui {
                         )
                         .await;
                     }
-                    Effect::SetModel(model_id) => {
-                        // A model change is just the per-turn `model` field — no provider rebuild. Apply
-                        // it live, reflect it in the status line, and persist (best-effort) to the global
-                        // config; a write failure is surfaced but the live change stands.
-                        if let Some(profile) = provider_swap.active_profile_mut() {
-                            profile.model = model_id.clone();
-                        }
-                        agent_loop.set_model(model_id.clone());
-                        model.status.model = model_id.clone();
-                        model.transcript.push(TranscriptItem::Notice(
-                            NoticeLevel::Info,
-                            format!("modelo: {model_id}"),
-                        ));
-                        if let Err(error) = config::persist_active_model(
-                            &config_path,
-                            &provider_swap.active,
-                            &model_id,
-                        ) {
-                            model.transcript.push(TranscriptItem::Notice(
-                                NoticeLevel::Error,
-                                format!("não persistiu o modelo: {error:#}"),
-                            ));
-                        }
-                    }
-                    Effect::SetEffort(effort) => {
-                        // Effort is baked into the provider at construction, so rebuild and swap it in.
-                        // Build with the new effort first; commit (status + cached effort + persist) only
-                        // if the rebuild succeeds, so a failure leaves the current provider untouched.
-                        let is_anthropic = provider_swap.active_profile().map(|p| p.kind)
-                            == Some(ProviderKind::Anthropic);
-                        match provider_swap.rebuild_with_effort(effort) {
-                            Ok(provider) => {
-                                agent_loop.set_provider(provider);
-                                model.status.effort = effort;
-                                // The Anthropic adapter ignores effort today — surface that rather than
-                                // silently appearing to change nothing.
-                                let note = if is_anthropic {
-                                    format!(
-                                        "esforço: {} — nota: ainda não afeta modelos Claude",
-                                        effort.label()
-                                    )
-                                } else {
-                                    format!("esforço: {}", effort.label())
-                                };
-                                model
-                                    .transcript
-                                    .push(TranscriptItem::Notice(NoticeLevel::Info, note));
-                                if let Err(error) = config::persist_effort(&config_path, effort) {
-                                    model.transcript.push(TranscriptItem::Notice(
-                                        NoticeLevel::Error,
-                                        format!("não persistiu o esforço: {error:#}"),
-                                    ));
-                                }
-                            }
-                            Err(error) => model.transcript.push(TranscriptItem::Notice(
-                                NoticeLevel::Error,
-                                format!("não foi possível aplicar o esforço: {error:#}"),
-                            )),
-                        }
-                    }
-                    Effect::SetProvider(id) => {
-                        // Switch the active provider: rebuild its adapter with its stored credential and
-                        // swap it in, also adopting its model. Commit + persist only on success; a missing
-                        // credential or unknown id is surfaced, never a silent no-op.
-                        match provider_swap.switch_to(&id) {
-                            Ok((provider, target_model)) => {
-                                agent_loop.set_provider(provider);
-                                agent_loop.set_model(target_model.clone());
-                                model.status.model = target_model.clone();
-                                model.status.provider = id.clone();
-                                model.models = provider_swap
-                                    .active_profile()
-                                    .map(|p| p.models.clone())
-                                    .unwrap_or_default();
-                                model.transcript.push(TranscriptItem::Notice(
-                                    NoticeLevel::Info,
-                                    format!("provider: {id} ({target_model})"),
-                                ));
-                                if let Err(error) =
-                                    config::persist_active_provider(&config_path, &id)
-                                {
-                                    model.transcript.push(TranscriptItem::Notice(
-                                        NoticeLevel::Error,
-                                        format!("não persistiu o provider ativo: {error:#}"),
-                                    ));
-                                }
-                            }
-                            Err(error) => model.transcript.push(TranscriptItem::Notice(
-                                NoticeLevel::Error,
-                                format!("não foi possível trocar de provider: {error:#}"),
-                            )),
-                        }
-                    }
+                    Effect::SetModel(model_id) => apply_set_model(
+                        model_id,
+                        &mut provider_swap,
+                        &mut agent_loop,
+                        &mut model,
+                        &config_path,
+                    ),
+                    Effect::SetEffort(effort) => apply_set_effort(
+                        effort,
+                        &mut provider_swap,
+                        &mut agent_loop,
+                        &mut model,
+                        &config_path,
+                    ),
+                    Effect::SetProvider(id) => apply_set_provider(
+                        id,
+                        &mut provider_swap,
+                        &mut agent_loop,
+                        &mut model,
+                        &config_path,
+                    ),
                     Effect::SaveProvider {
                         id,
                         kind,
@@ -737,79 +665,21 @@ impl Tui {
                         models,
                         auth,
                     } => {
-                        // Build the credential from the wizard-derived auth. The key was staged in
-                        // `pending_credential` only when present; a keyless save stores nothing.
-                        let credential = match &auth {
-                            AuthMethod::ApiKey => {
-                                let Some(key) = model.pending_credential.take() else {
-                                    model.transcript.push(TranscriptItem::Notice(
-                                        NoticeLevel::Error,
-                                        "chave ausente; provider não foi salvo".to_string(),
-                                    ));
-                                    continue;
-                                };
-                                Credential::ApiKey { key }
-                            }
-                            AuthMethod::None => {
-                                // Keyless: drop any stray staged secret and store no credential.
-                                model.pending_credential = None;
-                                Credential::None
-                            }
-                            other => {
-                                // The wizard never emits OAuth or an unrecognized method; guard, never panic.
-                                model.pending_credential = None;
-                                model.transcript.push(TranscriptItem::Notice(
-                                    NoticeLevel::Error,
-                                    format!(
-                                        "método de auth não suportado pelo wizard ({other:?}); provider não foi salvo"
-                                    ),
-                                ));
-                                continue;
-                            }
-                        };
                         let profile = ProviderProfile {
-                            id: id.clone(),
+                            id,
                             kind,
                             base_url,
-                            model: model_id.clone(),
-                            models: models.clone(),
+                            model: model_id,
+                            models,
                             auth,
                         };
-                        match provider_swap.add_and_activate(profile.clone(), credential) {
-                            Ok((provider, target_model)) => {
-                                agent_loop.set_provider(provider);
-                                agent_loop.set_model(target_model.clone());
-                                // Onboarding (or a re-add) succeeded: a real adapter is live, so drop the
-                                // submit gate and let the user into the normal chat.
-                                model.unconfigured = false;
-                                model.status.model = target_model;
-                                model.status.provider = id.clone();
-                                model.models = models;
-                                model.providers = provider_swap.provider_ids();
-                                model.transcript.push(TranscriptItem::Notice(
-                                    NoticeLevel::Info,
-                                    format!("provider '{id}' adicionado e ativo"),
-                                ));
-                                // Persist the profile (config) and the active selection; the credential
-                                // (if any) was stored by add_and_activate above.
-                                if let Err(error) = config::upsert_provider(&config_path, &profile)
-                                    .and_then(|()| {
-                                        config::persist_active_provider(&config_path, &id)
-                                    })
-                                {
-                                    model.transcript.push(TranscriptItem::Notice(
-                                        NoticeLevel::Error,
-                                        format!(
-                                            "provider ativo, mas não persistiu no config: {error:#}"
-                                        ),
-                                    ));
-                                }
-                            }
-                            Err(error) => model.transcript.push(TranscriptItem::Notice(
-                                NoticeLevel::Error,
-                                format!("não foi possível salvar o provider: {error:#}"),
-                            )),
-                        }
+                        apply_save_provider(
+                            profile,
+                            &mut provider_swap,
+                            &mut agent_loop,
+                            &mut model,
+                            &config_path,
+                        );
                     }
                     Effect::AnswerApproval(_) | Effect::CancelTurn => {}
                 }
@@ -1083,6 +953,191 @@ async fn drive_turn(
     cancel.reset();
     *pending_reply = None;
     Ok(())
+}
+
+/// Apply a `/models` selection: a model change is just the per-turn `model` field — no provider rebuild.
+/// Apply it live, reflect it in the status line, and persist (best-effort) to the global config; a write
+/// failure is surfaced but the live change stands.
+fn apply_set_model(
+    model_id: String,
+    provider_swap: &mut ProviderSwap,
+    agent_loop: &mut AgentLoop,
+    model: &mut Model,
+    config_path: &Path,
+) {
+    if let Some(profile) = provider_swap.active_profile_mut() {
+        profile.model = model_id.clone();
+    }
+    agent_loop.set_model(model_id.clone());
+    model.status.model = model_id.clone();
+    model.transcript.push(TranscriptItem::Notice(
+        NoticeLevel::Info,
+        format!("modelo: {model_id}"),
+    ));
+    if let Err(error) = config::persist_active_model(config_path, &provider_swap.active, &model_id)
+    {
+        model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Error,
+            format!("não persistiu o modelo: {error:#}"),
+        ));
+    }
+}
+
+/// Apply an `/effort` selection. Effort is baked into the provider at construction, so rebuild and swap it
+/// in. Build with the new effort first; commit (status + cached effort + persist) only if the rebuild
+/// succeeds, so a failure leaves the current provider untouched.
+fn apply_set_effort(
+    effort: Effort,
+    provider_swap: &mut ProviderSwap,
+    agent_loop: &mut AgentLoop,
+    model: &mut Model,
+    config_path: &Path,
+) {
+    let is_anthropic =
+        provider_swap.active_profile().map(|p| p.kind) == Some(ProviderKind::Anthropic);
+    match provider_swap.rebuild_with_effort(effort) {
+        Ok(provider) => {
+            agent_loop.set_provider(provider);
+            model.status.effort = effort;
+            // The Anthropic adapter ignores effort today — surface that rather than
+            // silently appearing to change nothing.
+            let note = if is_anthropic {
+                format!(
+                    "esforço: {} — nota: ainda não afeta modelos Claude",
+                    effort.label()
+                )
+            } else {
+                format!("esforço: {}", effort.label())
+            };
+            model
+                .transcript
+                .push(TranscriptItem::Notice(NoticeLevel::Info, note));
+            if let Err(error) = config::persist_effort(config_path, effort) {
+                model.transcript.push(TranscriptItem::Notice(
+                    NoticeLevel::Error,
+                    format!("não persistiu o esforço: {error:#}"),
+                ));
+            }
+        }
+        Err(error) => model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Error,
+            format!("não foi possível aplicar o esforço: {error:#}"),
+        )),
+    }
+}
+
+/// Apply a `/provider` switch: rebuild the chosen provider's adapter with its stored credential and swap
+/// it in, also adopting its model. Commit + persist only on success; a missing credential or unknown id is
+/// surfaced, never a silent no-op.
+fn apply_set_provider(
+    id: String,
+    provider_swap: &mut ProviderSwap,
+    agent_loop: &mut AgentLoop,
+    model: &mut Model,
+    config_path: &Path,
+) {
+    match provider_swap.switch_to(&id) {
+        Ok((provider, target_model)) => {
+            agent_loop.set_provider(provider);
+            agent_loop.set_model(target_model.clone());
+            model.status.model = target_model.clone();
+            model.status.provider = id.clone();
+            model.models = provider_swap
+                .active_profile()
+                .map(|p| p.models.clone())
+                .unwrap_or_default();
+            model.transcript.push(TranscriptItem::Notice(
+                NoticeLevel::Info,
+                format!("provider: {id} ({target_model})"),
+            ));
+            if let Err(error) = config::persist_active_provider(config_path, &id) {
+                model.transcript.push(TranscriptItem::Notice(
+                    NoticeLevel::Error,
+                    format!("não persistiu o provider ativo: {error:#}"),
+                ));
+            }
+        }
+        Err(error) => model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Error,
+            format!("não foi possível trocar de provider: {error:#}"),
+        )),
+    }
+}
+
+/// Apply a wizard `SaveProvider`: derive the credential from the profile's `auth` (keyed takes the staged
+/// key; keyless stores nothing), build and store the new provider, make it active, drop the onboarding
+/// submit gate, and persist the profile + active selection. Commit only on success; a missing key (keyed),
+/// an unsupported auth method, or a build/store failure is surfaced. The profile is assembled by the caller
+/// (the wizard fields plus its `auth`), so this stays under the argument-count lint without a context struct.
+fn apply_save_provider(
+    profile: ProviderProfile,
+    provider_swap: &mut ProviderSwap,
+    agent_loop: &mut AgentLoop,
+    model: &mut Model,
+    config_path: &Path,
+) {
+    // Build the credential from the wizard-derived auth (carried on the profile). A keyed save takes the
+    // key staged in `pending_credential`; a keyless save (auth = none) stores nothing.
+    let credential = match &profile.auth {
+        AuthMethod::ApiKey => {
+            let Some(key) = model.pending_credential.take() else {
+                model.transcript.push(TranscriptItem::Notice(
+                    NoticeLevel::Error,
+                    "chave ausente; provider não foi salvo".to_string(),
+                ));
+                return;
+            };
+            Credential::ApiKey { key }
+        }
+        AuthMethod::None => {
+            // Keyless: drop any stray staged secret and store no credential.
+            model.pending_credential = None;
+            Credential::None
+        }
+        other => {
+            // The wizard never emits OAuth or an unrecognized method; guard, never panic.
+            model.pending_credential = None;
+            model.transcript.push(TranscriptItem::Notice(
+                NoticeLevel::Error,
+                format!(
+                    "método de auth não suportado pelo wizard ({other:?}); provider não foi salvo"
+                ),
+            ));
+            return;
+        }
+    };
+    let id = profile.id.clone();
+    match provider_swap.add_and_activate(profile.clone(), credential) {
+        Ok((provider, target_model)) => {
+            agent_loop.set_provider(provider);
+            agent_loop.set_model(target_model.clone());
+            // Onboarding (or a re-add) succeeded: a real adapter is live, so drop the
+            // submit gate and let the user into the normal chat.
+            model.unconfigured = false;
+            model.status.model = target_model;
+            model.status.provider = id.clone();
+            model.models = profile.models.clone();
+            model.providers = provider_swap.provider_ids();
+            model.transcript.push(TranscriptItem::Notice(
+                NoticeLevel::Info,
+                format!("provider '{id}' adicionado e ativo"),
+            ));
+            // Persist the profile (config) and the active selection; the credential
+            // already went to the keyring above.
+            if let Err(error) = config::upsert_provider(config_path, &profile)
+                .and_then(|()| config::persist_active_provider(config_path, &id))
+            {
+                model.transcript.push(TranscriptItem::Notice(
+                    NoticeLevel::Error,
+                    format!("provider ativo, mas não persistiu no config: {error:#}"),
+                ));
+            }
+        }
+        Err(error) => model.transcript.push(TranscriptItem::Notice(
+            NoticeLevel::Error,
+            format!("não foi possível salvar o provider: {error:#}"),
+        )),
+    }
 }
 
 /// Persist the conversation's new tail to the session store, lazily creating the session row on the first
