@@ -22,7 +22,6 @@ use crate::modules::memory::application::distill::Distiller;
 use crate::modules::memory::application::memory_port::MemoryPort;
 use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::domain::project_id::project_id_from_path;
-use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::application::secret_store::SecretStore;
 use crate::modules::provider::infrastructure::factory::{
@@ -30,9 +29,9 @@ use crate::modules::provider::infrastructure::factory::{
 };
 use crate::modules::session::application::session_store::SessionStore;
 use crate::modules::session::domain::session::derive_title;
+use crate::modules::sync::application::git::Git;
 use crate::modules::sync::application::sync_service::SyncService;
-use crate::modules::sync::infrastructure::fs_work_tree::FsSyncWorkTree;
-use crate::modules::sync::infrastructure::git_cli::GitCli;
+use crate::modules::sync::application::work_tree::SyncWorkTree;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tui::application::command::{self, Command};
@@ -96,6 +95,36 @@ struct ProviderSwitch {
     provider: Arc<dyn CompletionProvider>,
     model: String,
     persist_warning: Option<AgentError>,
+}
+
+/// The sync ports + paths, built once in `app::wire` and injected into the front-end so a live `/sync`
+/// push constructs **no** adapter and recomputes **no** path — the runtime is no longer a second
+/// composition root. The concrete git/shared-memory/work-tree adapter *choice* lives only in `wire`;
+/// here they are seen only as ports, and the home/config paths come from `Settings`.
+pub struct SyncContext {
+    git: Arc<dyn Git>,
+    memory: Arc<dyn SharedMemory>,
+    work_tree: Arc<dyn SyncWorkTree>,
+    global_dir: PathBuf,
+    config_path: PathBuf,
+}
+
+impl SyncContext {
+    pub fn new(
+        git: Arc<dyn Git>,
+        memory: Arc<dyn SharedMemory>,
+        work_tree: Arc<dyn SyncWorkTree>,
+        global_dir: PathBuf,
+        config_path: PathBuf,
+    ) -> Self {
+        Self {
+            git,
+            memory,
+            work_tree,
+            global_dir,
+            config_path,
+        }
+    }
 }
 
 impl ProviderSwap {
@@ -258,6 +287,8 @@ pub struct Tui {
     provider_swap: ProviderSwap,
     /// The global config file, written on a live `/models`/`/effort` change.
     config_path: PathBuf,
+    /// The wire-built sync ports + paths for a live `/sync` push, so the front-end constructs no adapter.
+    sync_context: SyncContext,
     /// Persists the conversation across runs. Inert (`is_available() == false`) when sessions are
     /// disabled or the store failed to initialize — every call is then a graceful no-op.
     session_store: Arc<dyn SessionStore>,
@@ -276,6 +307,7 @@ impl Tui {
         seed: Option<String>,
         provider_swap: ProviderSwap,
         config_path: PathBuf,
+        sync_context: SyncContext,
         needs_onboarding: bool,
         session_store: Arc<dyn SessionStore>,
         memory: Arc<dyn MemoryPort>,
@@ -303,6 +335,7 @@ impl Tui {
             system_prompt,
             provider_swap,
             config_path,
+            sync_context,
             session_store,
             memory,
             project_id,
@@ -319,6 +352,7 @@ impl Tui {
             system_prompt,
             mut provider_swap,
             config_path,
+            sync_context,
             session_store,
             memory,
             mut project_id,
@@ -499,7 +533,7 @@ impl Tui {
                         list_sessions(session_store.as_ref(), &project_id, &mut model).await;
                     }
                     Effect::SyncPush => {
-                        sync_push(&config_path, &mut model, &mut terminal).await;
+                        sync_push(&sync_context, &mut model, &mut terminal).await;
                     }
                     Effect::ResumeLast => {
                         // On an inert store (init never ran, so no `sessions` table) latest_for_project
@@ -1371,15 +1405,9 @@ fn rebuild_transcript(messages: &[Message]) -> Transcript {
 
 /// Push the portable profile (config + shared memory) to the configured private repo via `/sync`. Shows
 /// a "syncing" notice and draws it before the (network-bound, timeout-bounded) push, then reports the
-/// result. The global dir is derived from the global config path (`~/.kiri/config.toml`).
-async fn sync_push(config_path: &Path, model: &mut Model, terminal: &mut DefaultTerminal) {
-    let Some(global_dir) = config_path.parent().map(Path::to_path_buf) else {
-        model.transcript.push(TranscriptItem::Notice(
-            NoticeLevel::Error,
-            "caminho de config inválido para sync".to_string(),
-        ));
-        return;
-    };
+/// result. Constructs no adapter and recomputes no path — the ports and the home/config paths come from
+/// the wire-built [`SyncContext`], so the front-end is not a composition root.
+async fn sync_push(ctx: &SyncContext, model: &mut Model, terminal: &mut DefaultTerminal) {
     model.transcript.push(TranscriptItem::Notice(
         NoticeLevel::Info,
         "sincronizando (push)…".to_string(),
@@ -1387,36 +1415,12 @@ async fn sync_push(config_path: &Path, model: &mut Model, terminal: &mut Default
     model.render_at = Some(Instant::now());
     let _ = draw_and_copy(terminal, model);
 
-    let shared_db = global_dir.join("memory").join("shared.db");
-    // Open a handle to the shared store and inject it as the port. A store failure surfaces as a
-    // Notice rather than aborting the session.
-    let memory = match SqliteSharedMemory::new(shared_db) {
-        Ok(store) => match store.init().await {
-            Ok(()) => store,
-            Err(error) => {
-                model.transcript.push(TranscriptItem::Notice(
-                    NoticeLevel::Error,
-                    format!("sync falhou: {error}"),
-                ));
-                return;
-            }
-        },
-        Err(error) => {
-            model.transcript.push(TranscriptItem::Notice(
-                NoticeLevel::Error,
-                format!("sync falhou: {error}"),
-            ));
-            return;
-        }
-    };
-    let git = GitCli;
-    let work_tree = FsSyncWorkTree;
     let service = SyncService::new(
-        &git,
-        global_dir,
-        config_path.to_path_buf(),
-        &memory,
-        &work_tree,
+        ctx.git.as_ref(),
+        ctx.global_dir.clone(),
+        ctx.config_path.clone(),
+        ctx.memory.as_ref(),
+        ctx.work_tree.as_ref(),
     );
     match service.push().await {
         Ok(summary) => model.transcript.push(TranscriptItem::Notice(
@@ -1664,6 +1668,24 @@ mod tests {
     use crate::shared::kernel::approval_mode::ApprovalMode;
     use crate::shared::kernel::conversation::Conversation;
     use crate::shared::kernel::message::Message;
+
+    // The front-end must not be a composition root: the sync adapter *choice* and the shared-DB path now
+    // live only in `app::wire`. Guard that runtime.rs constructs no sync adapter and recomputes no path.
+    #[test]
+    fn runtime_has_no_sync_adapter_construction() {
+        let source = include_str!("runtime.rs");
+        // Build needles by concatenation so this guard's own literals do not self-match the file.
+        for needle in [
+            concat!("Sqlite", "SharedMemory"),
+            concat!("Git", "Cli"),
+            concat!("join(\"memory\")", ".join(\"shared.db\")"),
+        ] {
+            assert!(
+                !source.contains(needle),
+                "runtime.rs must not construct sync adapters or recompute the shared-db path: {needle:?}"
+            );
+        }
+    }
 
     fn has_error_notice(model: &Model) -> bool {
         model

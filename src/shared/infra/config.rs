@@ -680,6 +680,9 @@ pub struct Settings {
     pub sessions_db: PathBuf,
     /// The credential-store fallback file when no OS keyring is reachable. `~/.kiri/credentials.json`.
     pub credentials_file: PathBuf,
+    /// The harness home (`~/.kiri`). The single source every consumer reads instead of re-deriving it
+    /// from `config_path.parent()`; the sync work-tree lives at `<global_dir>/sync`.
+    pub global_dir: PathBuf,
     /// The global config file (`~/.kiri/config.toml`). The runtime writes live `/models`/`/effort`
     /// changes back here (the trusted layer only).
     pub config_path: PathBuf,
@@ -789,6 +792,7 @@ impl Settings {
             shared_memory_db: global_dir.join("memory").join("shared.db"),
             sessions_db: global_dir.join("sessions.db"),
             credentials_file: global_dir.join("credentials.json"),
+            global_dir: global_dir.clone(),
             config_path: global_path,
             providers,
             active_provider: active,

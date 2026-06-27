@@ -1,3 +1,11 @@
+//! The composition root (ADR 0003). `wire` assembles the interactive TUI and `wire_sync` the headless
+//! `kiri sync` route — the *only* places concrete adapters are chosen. For sync, both build the
+//! git/shared-memory/work-tree adapters here and inject them as ports: `wire` packages them into a
+//! [`SyncContext`] handed to the runtime (so a live `/sync` push constructs no adapter and recomputes no
+//! path), and `wire_sync` runs the action directly. `build_sync_memory` opens the shared store with a
+//! non-fatal init (mirroring `build_memory`); it opens `shared.db` even when memory is disabled because
+//! sync owns the shared store as its own data source (ADR 0015 / the wave-2 Open Questions).
+
 use std::io::IsTerminal;
 use std::sync::Arc;
 
@@ -26,6 +34,9 @@ use crate::modules::provider::infrastructure::secrets::default_secret_store;
 use crate::modules::provider::infrastructure::unconfigured::UnconfiguredProvider;
 use crate::modules::session::application::session_store::SessionStore;
 use crate::modules::session::infrastructure::sqlite_session_store::SqliteSessionStore;
+use crate::modules::sync::application::sync_service::SyncService;
+use crate::modules::sync::infrastructure::fs_work_tree::FsSyncWorkTree;
+use crate::modules::sync::infrastructure::git_cli::GitCli;
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::Tool;
 use crate::modules::tools::infrastructure::confine;
@@ -33,8 +44,8 @@ use crate::modules::tools::infrastructure::control::present_plan::PresentPlan;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tools::infrastructure::sensitive::load_sensitive_matcher;
-use crate::modules::tui::infrastructure::runtime::{ProviderSwap, Tui};
-use crate::shared::infra::config::Settings;
+use crate::modules::tui::infrastructure::runtime::{ProviderSwap, SyncContext, Tui};
+use crate::shared::infra::config::{Settings, SyncAction, ensure_private_dir};
 use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile};
 
 /// Caps for the start-of-session memory digest injected into the system prompt: how many entries to
@@ -151,6 +162,16 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         format!("{}\n\n{}", settings.system_prompt, memory_digest)
     };
 
+    // Build the sync ports here (the single composition root) and inject them, so a live `/sync` push
+    // constructs no adapter and recomputes no path. The adapter choice lives only here. Built before the
+    // provider swap consumes `settings.providers`/`active_provider`.
+    let sync_context = SyncContext::new(
+        Arc::new(GitCli),
+        build_sync_memory(&settings).await?,
+        Arc::new(FsSyncWorkTree),
+        settings.global_dir.clone(),
+        settings.config_path.clone(),
+    );
     let provider_swap = ProviderSwap::new(
         client,
         secrets,
@@ -167,11 +188,63 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         settings.seed,
         provider_swap,
         settings.config_path,
+        sync_context,
         needs_onboarding,
         session_store,
         memory,
         project_id,
     ))
+}
+
+/// The headless `kiri sync …` route, wired through the single composition root: harden the harness home,
+/// build the sync ports over the paths single-sourced from `Settings`, run the action, and print the
+/// one-line summary. Never needs a terminal, so it works over SSH and in scripts.
+pub async fn wire_sync(settings: &Settings, action: SyncAction) -> Result<()> {
+    // Harden the harness home before any store opens it (carried from the former main.rs::run_sync): the
+    // interactive boot hardens ~/.kiri (0700) via Settings::resolve, so the headless route must too, or it
+    // would create ~/.kiri world-traversable (0755).
+    ensure_private_dir(&settings.global_dir)?;
+    let memory = build_sync_memory(settings).await?;
+    let git = GitCli;
+    let work_tree = FsSyncWorkTree;
+    let service = SyncService::new(
+        &git,
+        settings.global_dir.clone(),
+        settings.config_path.clone(),
+        memory.as_ref(),
+        &work_tree,
+    );
+    let summary = match action {
+        SyncAction::Init { url } => service.init(&url).await,
+        SyncAction::Push => service.push().await,
+        SyncAction::Pull { force } => service.pull(force).await,
+        SyncAction::Status => service.status().await,
+    }?;
+    println!("kiri sync: {summary}");
+    Ok(())
+}
+
+/// Open the shared-memory store for sync as a port, mirroring `build_memory`'s non-fatal init: a failed
+/// init leaves the store inert rather than aborting (sync then degrades, never crashes the boot). It is a
+/// second SQLite handle to the same file as the memory tools — safe, exactly what the prior on-demand open
+/// did transiently. wire opens `shared.db` for sync even when memory is disabled (`KIRI_MEMORY=off`):
+/// sync owns the shared store as its own data source (ADR 0015), at the cost of one cheap SQLite open.
+async fn build_sync_memory(settings: &Settings) -> Result<Arc<dyn SharedMemory>> {
+    let memory = match SqliteSharedMemory::new(settings.shared_memory_db.clone()) {
+        Ok(memory) => memory,
+        Err(error) => {
+            eprintln!(
+                "kiri: shared memory for sync unavailable ({error}); continuing with an inert store"
+            );
+            SqliteSharedMemory::in_memory()?
+        }
+    };
+    if let Err(error) = memory.init().await {
+        eprintln!(
+            "kiri: shared memory for sync init failed ({error}); continuing with an inert store"
+        );
+    }
+    Ok(Arc::new(memory))
 }
 
 /// Wire the memory contexts (project file store + shared SQLite store) and the docs library, returning
@@ -427,12 +500,13 @@ fn resolve_credential(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_credential;
+    use super::{Settings, resolve_credential, wire_sync};
     use crate::modules::provider::application::secret_store::SecretStore;
     use crate::shared::kernel::error::AgentError;
     use crate::shared::kernel::provider::{
         AuthMethod, Credential, ProviderKind, ProviderProfile, Secret,
     };
+    use std::sync::Arc;
 
     /// A `SecretStore` double returning a fixed stored credential (or none).
     struct FakeStore(Option<Credential>);
@@ -523,6 +597,78 @@ mod tests {
         assert!(
             sandbox.resolve_create(".env").is_err(),
             "the matcher built in wire must still refuse a .env path"
+        );
+    }
+
+    /// A `Settings` whose harness-data paths all descend from `global_dir` (`Settings::resolve` itself is
+    /// not unit-driven because it touches the real `$HOME`). The `shared_memory_db` uses a distinctive
+    /// name a real resolve would never produce, so the `wire_sync` test proves it opened *that* path
+    /// rather than a recomputed default. Lets `wire_sync` be driven against a temp dir.
+    fn settings_at(global_dir: std::path::PathBuf) -> Settings {
+        use crate::shared::kernel::provider::Effort;
+        use crate::shared::kernel::sandbox::NetworkPolicy;
+        use std::time::Duration;
+
+        Settings {
+            system_prompt: "",
+            path: global_dir.clone(),
+            seed: None,
+            checkpoint_budget: Duration::from_secs(1),
+            max_tool_calls: 1,
+            plan_blacklist: Arc::from(Vec::new()),
+            sandbox_enabled: false,
+            require_confinement: false,
+            sandbox_network: NetworkPolicy::Deny,
+            net_allow: Arc::from(Vec::new()),
+            extra_ro: Arc::from(Vec::new()),
+            extra_rw: Arc::from(Vec::new()),
+            connect_timeout: Duration::from_secs(1),
+            read_timeout: Duration::from_secs(1),
+            thinking: false,
+            memory_enabled: true,
+            docs_path: global_dir.join("docs"),
+            shared_memory_db: global_dir.join("sync-test-shared.db"),
+            sessions_db: global_dir.join("sessions.db"),
+            credentials_file: global_dir.join("credentials.json"),
+            global_dir: global_dir.clone(),
+            config_path: global_dir.join("config.toml"),
+            providers: vec![],
+            active_provider: String::new(),
+            effort: Effort::High,
+            embeddings: None,
+        }
+    }
+
+    #[test]
+    fn settings_exposes_global_dir() {
+        // The single-source contract every sync consumer relies on: the data paths descend from one
+        // `global_dir`, never a re-derived `config_path.parent()`.
+        let settings = settings_at(std::path::PathBuf::from("/kiri-test-home"));
+        assert_eq!(
+            settings.global_dir,
+            std::path::PathBuf::from("/kiri-test-home")
+        );
+        assert!(settings.shared_memory_db.starts_with(&settings.global_dir));
+        assert!(settings.sessions_db.starts_with(&settings.global_dir));
+        assert_eq!(
+            settings.config_path.parent(),
+            Some(settings.global_dir.as_path())
+        );
+    }
+
+    #[tokio::test]
+    async fn wire_sync_uses_settings_shared_memory_db() {
+        use crate::shared::infra::config::SyncAction;
+        let dir = tempfile::TempDir::new().unwrap();
+        let settings = settings_at(dir.path().to_path_buf());
+        // Status on an uninitialized tree errors ("not initialized"): proves wire_sync derived the sync
+        // dir from settings.global_dir and never reconstructed a path by hand (ROOT-01 stale-DB lock).
+        let err = wire_sync(&settings, SyncAction::Status).await.unwrap_err();
+        assert!(format!("{err:#}").contains("not initialized"), "{err:#}");
+        // And it opened the DB at settings.shared_memory_db (creating it), not a recomputed location.
+        assert!(
+            settings.shared_memory_db.exists(),
+            "wire_sync must open the Settings-provided shared.db"
         );
     }
 }
