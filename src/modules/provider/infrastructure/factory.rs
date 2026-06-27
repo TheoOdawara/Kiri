@@ -10,6 +10,7 @@ use super::openai::embeddings::OpenAiEmbeddingProvider;
 use super::openai::provider::OpenAiProvider;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
+use crate::modules::provider::application::secret_store::SecretStore;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::{
     AuthMethod, Credential, Effort, ProviderKind, ProviderProfile, Secret,
@@ -130,6 +131,70 @@ pub fn api_key_from_env(profile: &ProviderProfile) -> Option<Secret> {
         .find_map(|key| std::env::var(key).ok().and_then(secret_from_env_value))
 }
 
+/// The outcome of resolving a provider's credential. Single-sources the *policy* (keyless short-circuit
+/// → stored → one-time env import → absent) while leaving *reporting* and *absent-handling* to each
+/// caller, so the composition root (`app::wire`) and the live `/provider` swap (`ProviderSwap`) cannot
+/// drift. It lives here, beside `api_key_from_env`/`SecretStore`, because the env/keyring access it
+/// orchestrates is a binary-edge credential-acquisition concern, not domain policy.
+pub enum CredentialResolution {
+    /// `auth = "none"` → [`Credential::None`]; the secret store is never consulted.
+    Keyless,
+    /// Found in the secret store.
+    Stored(Credential),
+    /// A one-time import from the legacy/CI env var. `persisted` carries the best-effort `secrets.set`
+    /// outcome so *both* callers can surface a persist failure instead of swallowing it (ERR-02).
+    Imported {
+        credential: Credential,
+        persisted: Result<(), AgentError>,
+    },
+    /// Nothing configured (no stored key, no env var) — a first-run signal, never a fatal abort.
+    Absent,
+}
+
+/// Resolve a provider's credential by the single security-sensitive rule shared by boot and the live
+/// `/provider` switch: a keyless provider short-circuits (the store is never consulted); else a stored
+/// credential; else, *only* for an [`AuthMethod::ApiKey`] provider, a one-time import from the env var
+/// (with the best-effort persist outcome returned, never swallowed); else absent. Never logs the secret.
+pub fn resolve_credential(
+    profile: &ProviderProfile,
+    secrets: &dyn SecretStore,
+) -> Result<CredentialResolution, AgentError> {
+    resolve_credential_with_env(profile, secrets, api_key_from_env)
+}
+
+/// The testable core of [`resolve_credential`]: the env lookup is injected so the import path can be
+/// exercised without mutating process env (the crate forbids `unsafe`, so `set_var` is unavailable in
+/// tests). Production passes [`api_key_from_env`].
+fn resolve_credential_with_env(
+    profile: &ProviderProfile,
+    secrets: &dyn SecretStore,
+    env_key: impl Fn(&ProviderProfile) -> Option<Secret>,
+) -> Result<CredentialResolution, AgentError> {
+    // Keyless: the key-presence decision was recorded in `profile.auth` at save time, so never consult
+    // the store/env and ignore any stale key left from a prior keyed config of this id.
+    if profile.auth == AuthMethod::None {
+        return Ok(CredentialResolution::Keyless);
+    }
+    if let Some(credential) = secrets.get(&profile.id)? {
+        return Ok(CredentialResolution::Stored(credential));
+    }
+    // Gate the env import on ApiKey auth (the stricter convergence of the two former copies): an OAuth or
+    // forward-version auth never imports a bare env key.
+    if profile.auth == AuthMethod::ApiKey
+        && let Some(key) = env_key(profile)
+    {
+        let credential = Credential::ApiKey { key };
+        // Best-effort persist so later sessions need no env var; the Result is *returned*, not swallowed,
+        // so each caller can surface a failure (boot via eprintln, the live swap via a transcript Notice).
+        let persisted = secrets.set(&profile.id, &credential);
+        return Ok(CredentialResolution::Imported {
+            credential,
+            persisted,
+        });
+    }
+    Ok(CredentialResolution::Absent)
+}
+
 /// Treat a blank value as absent (so a set-but-blank var never shadows a real one) and wrap a real value
 /// in a [`Secret`], so the env key lives only inside zeroized, Debug-redacted memory — never a plain
 /// `String` the caller must remember to wrap.
@@ -183,10 +248,147 @@ fn optional_key(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_provider, secret_from_env_value};
+    use super::{
+        CredentialResolution, build_provider, resolve_credential_with_env, secret_from_env_value,
+    };
+    use crate::modules::provider::application::secret_store::SecretStore;
+    use crate::shared::kernel::error::AgentError;
     use crate::shared::kernel::provider::{
         AuthMethod, Credential, Effort, OauthTokens, ProviderKind, ProviderProfile, Secret,
     };
+
+    /// A `SecretStore` double: a fixed stored credential (or none), a toggle to fail `set`, and a guard
+    /// that panics if `get` is consulted (to prove the keyless short-circuit never reaches the store).
+    struct FakeStore {
+        stored: Option<Credential>,
+        set_fails: bool,
+        forbid_get: bool,
+    }
+    impl FakeStore {
+        fn empty() -> Self {
+            Self {
+                stored: None,
+                set_fails: false,
+                forbid_get: false,
+            }
+        }
+    }
+    impl SecretStore for FakeStore {
+        fn get(&self, _id: &str) -> Result<Option<Credential>, AgentError> {
+            assert!(
+                !self.forbid_get,
+                "the secret store must not be consulted here"
+            );
+            Ok(self.stored.clone())
+        }
+        fn set(&self, _id: &str, _credential: &Credential) -> Result<(), AgentError> {
+            if self.set_fails {
+                Err(AgentError::Secret("store offline".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+        fn delete(&self, _id: &str) -> Result<(), AgentError> {
+            Ok(())
+        }
+    }
+
+    fn env_some(_p: &ProviderProfile) -> Option<Secret> {
+        Some(Secret::new("env-key"))
+    }
+    fn env_none(_p: &ProviderProfile) -> Option<Secret> {
+        None
+    }
+
+    #[test]
+    fn resolves_keyless_to_keyless_resolution() {
+        // auth = none short-circuits to Keyless without ever consulting the store (forbid_get panics).
+        let store = FakeStore {
+            forbid_get: true,
+            ..FakeStore::empty()
+        };
+        let p = profile(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            AuthMethod::None,
+            "m",
+        );
+        assert!(matches!(
+            resolve_credential_with_env(&p, &store, env_some).unwrap(),
+            CredentialResolution::Keyless
+        ));
+    }
+
+    #[test]
+    fn resolves_stored_credential() {
+        let store = FakeStore {
+            stored: Some(Credential::ApiKey {
+                key: Secret::new("stored"),
+            }),
+            ..FakeStore::empty()
+        };
+        let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
+        match resolve_credential_with_env(&p, &store, env_none).unwrap() {
+            CredentialResolution::Stored(Credential::ApiKey { key }) => {
+                assert_eq!(key.expose(), "stored");
+            }
+            _ => panic!("expected Stored(ApiKey)"),
+        }
+    }
+
+    #[test]
+    fn resolves_env_import_and_reports_persist_ok() {
+        let store = FakeStore::empty();
+        let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
+        match resolve_credential_with_env(&p, &store, env_some).unwrap() {
+            CredentialResolution::Imported {
+                credential: Credential::ApiKey { key },
+                persisted,
+            } => {
+                assert_eq!(key.expose(), "env-key");
+                assert!(persisted.is_ok());
+            }
+            _ => panic!("expected Imported(ApiKey)"),
+        }
+    }
+
+    #[test]
+    fn resolves_env_import_surfaces_persist_failure() {
+        // ERR-02 regression lock: a failed persist is *returned* in `Imported.persisted`, never swallowed.
+        let store = FakeStore {
+            set_fails: true,
+            ..FakeStore::empty()
+        };
+        let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
+        match resolve_credential_with_env(&p, &store, env_some).unwrap() {
+            CredentialResolution::Imported { persisted, .. } => {
+                assert!(matches!(persisted, Err(AgentError::Secret(_))));
+            }
+            _ => panic!("expected Imported"),
+        }
+    }
+
+    #[test]
+    fn resolves_absent_when_nothing_configured() {
+        let store = FakeStore::empty();
+        let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
+        assert!(matches!(
+            resolve_credential_with_env(&p, &store, env_none).unwrap(),
+            CredentialResolution::Absent
+        ));
+    }
+
+    #[test]
+    fn env_import_is_gated_on_api_key_auth() {
+        // A non-ApiKey auth must never import from env: pass an env closure that would panic if called.
+        let store = FakeStore::empty();
+        let p = profile("gpt", ProviderKind::Openai, AuthMethod::Oauth, "m");
+        let resolution = resolve_credential_with_env(&p, &store, |_| {
+            panic!("env must not be consulted for non-api-key auth")
+        })
+        .unwrap();
+        assert!(matches!(resolution, CredentialResolution::Absent));
+    }
 
     fn profile(id: &str, kind: ProviderKind, auth: AuthMethod, model: &str) -> ProviderProfile {
         ProviderProfile {

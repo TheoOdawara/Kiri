@@ -19,7 +19,8 @@ use crate::modules::provider::application::completion_provider::CompletionProvid
 use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
 use crate::modules::provider::application::secret_store::SecretStore;
 use crate::modules::provider::infrastructure::factory::{
-    api_key_from_env, build_embedding_provider, build_provider,
+    CredentialResolution, build_embedding_provider, build_provider,
+    resolve_credential as resolve_credential_policy,
 };
 use crate::modules::provider::infrastructure::secrets::default_secret_store;
 use crate::modules::provider::infrastructure::unconfigured::UnconfiguredProvider;
@@ -395,38 +396,33 @@ fn resolve_credential(
     profile: &ProviderProfile,
     secrets: &dyn SecretStore,
 ) -> Result<Option<Credential>> {
-    // A keyless provider (auth = "none") needs no secret: the key-presence decision was recorded in
-    // profile.auth at save time, so do not consult the keyring/env and ignore any stale key left from a
-    // prior keyed config of this id. The OpenAI-compatible adapter omits Authorization for Credential::None.
-    if profile.auth == AuthMethod::None {
-        return Ok(Some(Credential::None));
-    }
-    if let Some(credential) = secrets.get(&profile.id)? {
-        return Ok(Some(credential));
-    }
-    if profile.auth == AuthMethod::ApiKey
-        && let Some(key) = api_key_from_env(profile)
-    {
-        let credential = Credential::ApiKey { key };
-        // Persist so later sessions don't need the env var. A store failure is non-fatal: use the key
-        // for this session and tell the user it was not saved.
-        match secrets.set(&profile.id, &credential) {
-            Ok(()) => eprintln!(
-                "kiri: imported the API key for provider '{}' from the environment and saved it to the \
-                 OS credential store (keyring, or the ~/.kiri/credentials.json fallback); it now \
-                 persists across sessions on this machine. To undo this, remove the stored credential \
-                 (a /provider logout flow is planned) — unsetting the env var does NOT delete the \
-                 saved copy.",
-                profile.id
-            ),
-            Err(error) => eprintln!(
-                "kiri: could not persist the credential for '{}' ({error}); using it this session only",
-                profile.id
-            ),
+    // Delegate the policy to the single resolver; this adapter only maps it to the boot shape
+    // (`Option<Credential>`, where `None` routes to onboarding) and reports an env-import persist outcome.
+    match resolve_credential_policy(profile, secrets)? {
+        CredentialResolution::Keyless => Ok(Some(Credential::None)),
+        CredentialResolution::Stored(credential) => Ok(Some(credential)),
+        CredentialResolution::Imported {
+            credential,
+            persisted,
+        } => {
+            match persisted {
+                Ok(()) => eprintln!(
+                    "kiri: imported the API key for provider '{}' from the environment and saved it to \
+                     the OS credential store (keyring, or the ~/.kiri/credentials.json fallback); it now \
+                     persists across sessions on this machine. To undo this, remove the stored credential \
+                     (a /provider logout flow is planned) — unsetting the env var does NOT delete the \
+                     saved copy.",
+                    profile.id
+                ),
+                Err(error) => eprintln!(
+                    "kiri: could not persist the credential for '{}' ({error}); using it this session only",
+                    profile.id
+                ),
+            }
+            Ok(Some(credential))
         }
-        return Ok(Some(credential));
+        CredentialResolution::Absent => Ok(None),
     }
-    Ok(None)
 }
 
 #[cfg(test)]

@@ -25,7 +25,9 @@ use crate::modules::memory::domain::project_id::project_id_from_path;
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::application::secret_store::SecretStore;
-use crate::modules::provider::infrastructure::factory::{api_key_from_env, build_provider};
+use crate::modules::provider::infrastructure::factory::{
+    CredentialResolution, build_provider, resolve_credential as resolve_credential_policy,
+};
 use crate::modules::session::application::session_store::SessionStore;
 use crate::modules::session::domain::session::derive_title;
 use crate::modules::sync::application::sync_service::SyncService;
@@ -86,6 +88,15 @@ pub struct ProviderSwap {
     effort: Effort,
 }
 
+/// The outcome of a live `/provider` switch: the rebuilt adapter, its model, and an optional persist
+/// warning — `Some` when a one-time env-import key failed to save — so `apply_set_provider` can surface
+/// it as a transcript Notice instead of swallowing it (ERR-02).
+struct ProviderSwitch {
+    provider: Arc<dyn CompletionProvider>,
+    model: String,
+    persist_warning: Option<AgentError>,
+}
+
 impl ProviderSwap {
     pub fn new(
         client: reqwest::Client,
@@ -138,30 +149,26 @@ impl ProviderSwap {
         )
     }
 
-    /// Resolve a provider's credential: the stored one if present, else an env-var key (the same
-    /// migration/CI path as startup, e.g. `NVIDIA_API_KEY` / `ANTHROPIC_API_KEY` / `KIRI_<ID>_API_KEY`).
-    /// Without this fallback a provider whose key lives only in an env var could not be switched to live.
-    fn resolve_credential(&self, profile: &ProviderProfile) -> Result<Credential, AgentError> {
-        // A keyless provider (auth = "none") needs no secret: the adapter omits Authorization. Short-
-        // circuit before the keyring/env lookup so switching to a local endpoint never errors for a
-        // missing credential, and any stale key from a prior keyed config of this id is ignored.
-        if profile.auth == AuthMethod::None {
-            return Ok(Credential::None);
+    /// Resolve a provider's credential via the single shared resolver (the same keyless → stored →
+    /// env-import policy as boot), returning the credential plus any env-import persist warning — `Some`
+    /// when a one-time env key failed to save — so the caller can surface it instead of swallowing it.
+    /// A keyless provider yields `Credential::None`; a provider with nothing configured is a clear error.
+    fn resolve_credential(
+        &self,
+        profile: &ProviderProfile,
+    ) -> Result<(Credential, Option<AgentError>), AgentError> {
+        match resolve_credential_policy(profile, self.secrets.as_ref())? {
+            CredentialResolution::Keyless => Ok((Credential::None, None)),
+            CredentialResolution::Stored(credential) => Ok((credential, None)),
+            CredentialResolution::Imported {
+                credential,
+                persisted,
+            } => Ok((credential, persisted.err())),
+            CredentialResolution::Absent => Err(AgentError::Provider(format!(
+                "no credential for provider '{}'. Configure it via /provider or set its API-key env var.",
+                profile.id
+            ))),
         }
-        if let Some(credential) = self.secrets.get(&profile.id)? {
-            return Ok(credential);
-        }
-        if let Some(key) = api_key_from_env(profile) {
-            let credential = Credential::ApiKey { key };
-            // Best-effort persist so a later switch needs no env var; a store failure is non-fatal —
-            // the credential still works for this swap.
-            let _ = self.secrets.set(&profile.id, &credential);
-            return Ok(credential);
-        }
-        Err(AgentError::Provider(format!(
-            "no credential for provider '{}'. Configure it via /provider or set its API-key env var.",
-            profile.id
-        )))
     }
 
     /// Rebuild the active provider with a new `effort`, committing the effort only on success. Without a
@@ -184,21 +191,26 @@ impl ProviderSwap {
         Ok(provider)
     }
 
-    /// Switch the active provider to `id`: look up its profile + stored credential, build the adapter,
-    /// and commit (active id + cached credential) only on success. Returns the new adapter and the
-    /// target model id. An unknown id or a missing credential is a clear error.
-    fn switch_to(&mut self, id: &str) -> Result<(Arc<dyn CompletionProvider>, String), AgentError> {
+    /// Switch the active provider to `id`: look up its profile + credential, build the adapter, and
+    /// commit (active id + cached credential) only on success. Returns the new adapter, the target model
+    /// id, and any env-import persist warning so the caller can surface it. An unknown id or a missing
+    /// credential is a clear error.
+    fn switch_to(&mut self, id: &str) -> Result<ProviderSwitch, AgentError> {
         let profile = self
             .providers
             .iter()
             .find(|p| p.id == id)
             .ok_or_else(|| AgentError::Provider(format!("provider '{id}' is not configured")))?
             .clone();
-        let credential = self.resolve_credential(&profile)?;
+        let (credential, persist_warning) = self.resolve_credential(&profile)?;
         let provider = self.build(&profile, &credential, self.effort)?;
         self.active = id.to_string();
         self.credential = Some(credential);
-        Ok((provider, profile.model))
+        Ok(ProviderSwitch {
+            provider,
+            model: profile.model,
+            persist_warning,
+        })
     }
 
     /// Store a new provider's credential, build its adapter, add-or-replace it in the catalog, and make
@@ -1035,7 +1047,11 @@ fn apply_set_provider(
     config_path: &Path,
 ) {
     match provider_swap.switch_to(&id) {
-        Ok((provider, target_model)) => {
+        Ok(ProviderSwitch {
+            provider,
+            model: target_model,
+            persist_warning,
+        }) => {
             agent_loop.set_provider(provider);
             agent_loop.set_model(target_model.clone());
             model.status.model = target_model.clone();
@@ -1048,6 +1064,14 @@ fn apply_set_provider(
                 NoticeLevel::Info,
                 format!("provider: {id} ({target_model})"),
             ));
+            // Surface a one-time env-import persist failure (closes the former swallowed `let _ =`): the
+            // switch still succeeded for this session, but the key was not saved for the next one.
+            if let Some(warning) = persist_warning {
+                model.transcript.push(TranscriptItem::Notice(
+                    NoticeLevel::Error,
+                    format!("a chave importada do ambiente não foi salva: {warning:#}"),
+                ));
+            }
             if let Err(error) = config::persist_active_provider(config_path, &id) {
                 model.transcript.push(TranscriptItem::Notice(
                     NoticeLevel::Error,
@@ -1745,8 +1769,12 @@ mod tests {
                 "nvidia",
                 &[("claude", api_key())],
             );
-            let (_, model) = s.switch_to("claude").unwrap();
-            assert_eq!(model, "claude-opus-4-8");
+            let switch = s.switch_to("claude").unwrap();
+            assert_eq!(switch.model, "claude-opus-4-8");
+            assert!(
+                switch.persist_warning.is_none(),
+                "a stored credential needs no env import, so no persist warning"
+            );
             assert_eq!(s.active, "claude");
         }
 
@@ -1831,10 +1859,9 @@ mod tests {
                 &[("nvidia", api_key())],
             );
             let p = keyless_profile("lmstudio", ProviderKind::OpenAiCompatible, "gemma");
-            assert!(matches!(
-                s.resolve_credential(&p).unwrap(),
-                Credential::None
-            ));
+            let (credential, persist_warning) = s.resolve_credential(&p).unwrap();
+            assert!(matches!(credential, Credential::None));
+            assert!(persist_warning.is_none(), "keyless needs no env import");
         }
 
         #[test]
@@ -1849,10 +1876,11 @@ mod tests {
                 "nvidia",
                 &[("nvidia", api_key())],
             );
-            let (_, model) = s
+            let switch = s
                 .switch_to("lmstudio")
                 .expect("a keyless switch needs no credential");
-            assert_eq!(model, "gemma");
+            assert_eq!(switch.model, "gemma");
+            assert!(switch.persist_warning.is_none());
             assert_eq!(s.active, "lmstudio");
         }
 
