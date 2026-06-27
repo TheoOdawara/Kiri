@@ -57,8 +57,10 @@ impl<'a> SyncService<'a> {
     }
 
     /// Initialize the sync work-tree and point it at `remote_url`. Idempotent: re-running updates the
-    /// remote URL rather than failing.
+    /// remote URL rather than failing. The URL is validated before it reaches `git remote add` (which
+    /// has no `--` end-of-options marker), so a hostile transport cannot smuggle command execution.
     pub async fn init(&self, remote_url: &str) -> Result<String> {
+        validate_remote_url(remote_url)?;
         let dir = self.sync_dir();
         fs::create_dir_all(&dir).await?;
         if !dir.join(".git").exists() {
@@ -228,6 +230,37 @@ impl<'a> SyncService<'a> {
             )))
         }
     }
+}
+
+/// Validate a `kiri sync init` remote URL before it reaches `git remote add`. `git` treats some "URLs"
+/// as code-execution transports (`ext::sh -c …`, `fab::…`) or as options (a leading `-`, e.g.
+/// `-oProxyCommand=…`, and a `file://-…` dash-path), any of which turns an attacker-controlled URL into a
+/// command-injection vector. `git remote add` takes no `--` end-of-options marker, so this validation is
+/// the defense: reject those dangerous shapes; accept the ordinary transports (https/http/ssh, scp-like
+/// `git@host:path`) and an ordinary local path.
+fn validate_remote_url(url: &str) -> Result<()> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err(AgentError::Sync("sync remote URL is empty".to_string()));
+    }
+    if url.starts_with('-') {
+        return Err(AgentError::Sync(format!(
+            "refusing remote URL parsed by git as an option (leading '-'): {url}"
+        )));
+    }
+    if url.starts_with("file://-") {
+        return Err(AgentError::Sync(format!(
+            "refusing file:// URL with a leading-dash path: {url}"
+        )));
+    }
+    for transport in ["ext::", "fab::"] {
+        if url.starts_with(transport) {
+            return Err(AgentError::Sync(format!(
+                "refusing remote transport '{transport}' (arbitrary command execution): {url}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The first non-empty line of stderr, falling back to stdout, for a compact error message.
@@ -637,6 +670,24 @@ base_url = "https://evil.example/v1"
     fn unreadable_current_config_is_treated_as_risky() {
         let risks = risky_config_changes("this is = = not toml", "[sandbox]\nmode = \"os\"\n");
         assert!(!risks.is_empty());
+    }
+
+    #[test]
+    fn validate_remote_url_rejects_ext_and_dash() {
+        assert!(validate_remote_url("ext::sh -c 'rm -rf ~'").is_err());
+        assert!(validate_remote_url("fab::evil").is_err());
+        assert!(validate_remote_url("-oProxyCommand=evil").is_err());
+        assert!(validate_remote_url("file://-evil").is_err());
+        assert!(validate_remote_url("   ").is_err());
+    }
+
+    #[test]
+    fn validate_remote_url_accepts_https_ssh_and_local() {
+        assert!(validate_remote_url("https://github.com/me/profile.git").is_ok());
+        assert!(validate_remote_url("http://example.test/p.git").is_ok());
+        assert!(validate_remote_url("ssh://git@host/me/profile.git").is_ok());
+        assert!(validate_remote_url("git@github.com:me/profile.git").is_ok());
+        assert!(validate_remote_url("/home/me/profiles/p.git").is_ok());
     }
 
     // End-to-end pull: FakeGit's `reset` materializes the remote's config + memory into the work-tree,
