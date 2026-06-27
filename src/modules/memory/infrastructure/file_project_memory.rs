@@ -203,7 +203,7 @@ impl FileProjectMemory {
         };
 
         let entry = if let Some(fm) = front_matter {
-            serde_yaml::from_str(fm).map_err(mem)?
+            serde_yaml_ng::from_str(fm).map_err(mem)?
         } else {
             // Fallback for a file without front-matter: treat the whole body as a Fact.
             MemoryEntry::new(MemoryKind::Fact, body.to_string(), HashSet::new(), None)
@@ -213,7 +213,7 @@ impl FileProjectMemory {
     }
 
     fn render_markdown_file(&self, entry: &MemoryEntry) -> Result<String> {
-        let front_matter = serde_yaml::to_string(entry).map_err(mem)?;
+        let front_matter = serde_yaml_ng::to_string(entry).map_err(mem)?;
         Ok(format!("---\n{}---\n\n{}", front_matter, entry.content))
     }
 }
@@ -408,6 +408,29 @@ mod tests {
         assert_eq!(loaded.content, entry.content);
         assert!(loaded.tags.contains("rust"));
         assert!(loaded.tags.contains("style"));
+    }
+
+    #[test]
+    fn front_matter_round_trips_after_crate_swap() {
+        // BUILD-05 regression lock: the maintained YAML crate must (de)serialize the entry
+        // front-matter so existing `.kiri/memory/*.md` files still parse after the swap.
+        let memory = FileProjectMemory::new(std::path::PathBuf::from("/unused"));
+        let entry = MemoryEntry::new(
+            MemoryKind::Pattern,
+            "Prefer guard clauses".into(),
+            ["rust", "style"].into_iter().map(String::from).collect(),
+            None,
+        );
+        let rendered = memory.render_markdown_file(&entry).unwrap();
+        assert!(rendered.starts_with("---\n"));
+        let parsed = memory
+            .parse_markdown_file(std::path::Path::new("entry.md"), &rendered)
+            .unwrap();
+        assert_eq!(parsed.id, entry.id);
+        assert_eq!(parsed.kind, MemoryKind::Pattern);
+        assert_eq!(parsed.content, entry.content);
+        assert!(parsed.tags.contains("rust"));
+        assert!(parsed.tags.contains("style"));
     }
 
     #[tokio::test]
