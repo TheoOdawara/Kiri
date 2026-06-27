@@ -5,10 +5,10 @@ use anyhow::{Context, Result, bail};
 
 use crate::modules::agent::application::agent_loop::AgentLoop;
 use crate::modules::memory::application::memory_port::{MemoryPort, MemoryPortImpl};
+use crate::modules::memory::application::project_memory::ProjectMemory;
+use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::domain::entry::MemoryEntry;
-use crate::modules::memory::domain::project_memory::{
-    ProjectMemory, SharedMemory, project_id_from_path,
-};
+use crate::modules::memory::domain::project_id::project_id_from_path;
 use crate::modules::memory::infrastructure::docs_library::DocsLibrary;
 use crate::modules::memory::infrastructure::file_project_memory::FileProjectMemory;
 use crate::modules::memory::infrastructure::file_project_store::FileProjectStore;
@@ -62,7 +62,11 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // Memory & docs: a degraded store (init failure) is surfaced and left inert, never fatal.
     let (memory_tools, memory_digest, memory) = build_memory(&settings, embedder).await?;
     // Session persistence shares the same degrade-never-abort contract as memory.
-    let project_id = project_id_from_path(&settings.path);
+    let canonical_path = settings
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| settings.path.clone());
+    let project_id = project_id_from_path(&canonical_path);
     let session_store = build_session(&settings).await?;
     let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
     let sandbox = Sandbox::with_confinement(
@@ -159,7 +163,11 @@ async fn build_memory(
     if !settings.memory_enabled {
         return Ok((Vec::new(), String::new(), inert_memory_port(settings)?));
     }
-    let project_id = project_id_from_path(&settings.path);
+    let canonical_path = settings
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| settings.path.clone());
+    let project_id = project_id_from_path(&canonical_path);
 
     // Project memory: Markdown files under <workspace>/.kiri/memory.
     let project_memory = FileProjectMemory::new(settings.path.join(".kiri").join("memory"));

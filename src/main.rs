@@ -7,7 +7,7 @@ mod characterization;
 
 use clap::Parser;
 
-use crate::modules::memory::domain::project_memory::SharedMemory;
+use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::modules::sync::application::sync_service::SyncService;
 use crate::modules::sync::infrastructure::git_cli::GitCli;

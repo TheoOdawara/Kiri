@@ -6,7 +6,8 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use crate::modules::memory::application::memory_port::{MemoryPort, MemoryPortImpl};
-use crate::modules::memory::domain::project_memory::{ProjectMemory, SharedMemory};
+use crate::modules::memory::application::project_memory::ProjectMemory;
+use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::infrastructure::file_project_memory::FileProjectMemory;
 use crate::modules::memory::infrastructure::file_project_store::FileProjectStore;
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;

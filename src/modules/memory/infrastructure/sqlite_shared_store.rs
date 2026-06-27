@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 
+use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::application::shared_store::SharedStore;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
-use crate::modules::memory::domain::project_memory::SharedMemory;
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::shared::kernel::error::AgentError;
 

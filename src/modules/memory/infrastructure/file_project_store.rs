@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 
+use crate::modules::memory::application::project_memory::ProjectMemory;
 use crate::modules::memory::application::project_store::ProjectStore;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
-use crate::modules::memory::domain::project_memory::ProjectMemory;
 use crate::modules::memory::infrastructure::file_project_memory::FileProjectMemory;
 use crate::shared::kernel::error::AgentError;
 

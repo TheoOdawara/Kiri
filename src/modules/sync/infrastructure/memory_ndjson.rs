@@ -2,8 +2,8 @@ use std::path::Path;
 
 use tokio::fs;
 
+use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::domain::entry::MemoryEntry;
-use crate::modules::memory::domain::project_memory::SharedMemory;
 use crate::modules::sync::domain::merge::incoming_wins;
 use crate::shared::kernel::error::AgentError;
 

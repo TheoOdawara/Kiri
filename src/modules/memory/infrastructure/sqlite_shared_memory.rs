@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use rusqlite::{Connection, Row, params};
 use tokio::task::spawn_blocking;
 
+use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
-use crate::modules::memory::domain::project_memory::SharedMemory;
 use crate::shared::kernel::error::AgentError;
 
 type Result<T> = std::result::Result<T, AgentError>;

@@ -23,7 +23,8 @@ use crate::modules::agent::domain::message::Message;
 use crate::modules::agent::domain::role::Role;
 use crate::modules::memory::application::distill::Distiller;
 use crate::modules::memory::application::memory_port::MemoryPort;
-use crate::modules::memory::domain::project_memory::{SharedMemory, project_id_from_path};
+use crate::modules::memory::application::shared_memory::SharedMemory;
+use crate::modules::memory::domain::project_id::project_id_from_path;
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::application::secret_store::SecretStore;
@@ -563,7 +564,10 @@ impl Tui {
                             // Sessions are keyed by workspace: the current one belongs to the old
                             // project, so detach and re-key. The next turn starts a fresh session under
                             // the new project_id.
-                            project_id = project_id_from_path(new_sandbox.root());
+                            let root = new_sandbox.root();
+                            let canonical_root =
+                                root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+                            project_id = project_id_from_path(&canonical_root);
                             session_id = None;
                             persisted_len = 0;
                             sandbox = new_sandbox;

@@ -1,5 +1,5 @@
+use crate::modules::memory::application::project_memory::ProjectMemory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
-use crate::modules::memory::domain::project_memory::ProjectMemory;
 use crate::shared::kernel::error::AgentError;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};

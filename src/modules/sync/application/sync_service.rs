@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use tokio::fs;
 
-use crate::modules::memory::domain::project_memory::SharedMemory;
+use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::sync::application::git::Git;
 use crate::modules::sync::infrastructure::memory_ndjson;
 use crate::shared::infra::config;
