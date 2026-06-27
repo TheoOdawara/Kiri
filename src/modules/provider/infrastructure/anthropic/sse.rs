@@ -10,6 +10,7 @@ use super::wire::{BlockDeltaDto, ContentBlockStartDto, MessageDeltaDto, StreamEv
 use crate::modules::provider::application::completion_provider::EventSink;
 use crate::modules::provider::infrastructure::MAX_STREAM_BYTES;
 use crate::modules::provider::infrastructure::http_error::bounded_preview;
+use crate::modules::provider::infrastructure::tool_args;
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::stream_event::StreamEvent;
@@ -158,7 +159,7 @@ impl TurnAccumulator {
                 kind: TOOL_CALL_FUNCTION_KIND.to_string(),
                 function: FunctionCall {
                     name: partial.name,
-                    arguments: tool_input_to_arguments(partial.input),
+                    arguments: tool_args::sanitized_string(&partial.input),
                 },
             })
             .collect();
@@ -166,21 +167,6 @@ impl TurnAccumulator {
             content: self.content,
             tool_calls,
         }
-    }
-}
-
-/// A tool call's assembled JSON input as the domain's `arguments` string. An empty input (a tool with
-/// no parameters) becomes `"{}"`; a non-JSON input (a truncated stream) also falls back to `"{}"` so the
-/// turn can never poison a later request.
-fn tool_input_to_arguments(input: String) -> String {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return "{}".to_string();
-    }
-    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
-        input
-    } else {
-        "{}".to_string()
     }
 }
 

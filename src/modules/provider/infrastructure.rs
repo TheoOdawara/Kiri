@@ -3,6 +3,7 @@ pub mod factory;
 pub mod http_error;
 pub mod openai;
 pub mod secrets;
+pub(crate) mod tool_args;
 pub mod unconfigured;
 
 #[cfg(test)]
