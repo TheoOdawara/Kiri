@@ -187,15 +187,7 @@ fn tool_input_to_arguments(input: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[derive(Default)]
-    struct CollectSink(Vec<StreamEvent>);
-    impl EventSink for CollectSink {
-        fn on_event(&mut self, event: StreamEvent) -> Result<(), AgentError> {
-            self.0.push(event);
-            Ok(())
-        }
-    }
+    use crate::modules::provider::infrastructure::test_support::CollectSink;
 
     /// Run a sequence of event payloads through the accumulator and return the collected live events
     /// plus the assembled turn.

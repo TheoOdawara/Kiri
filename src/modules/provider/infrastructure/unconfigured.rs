@@ -38,15 +38,7 @@ impl CompletionProvider for UnconfiguredProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::kernel::stream_event::StreamEvent;
-
-    /// An `EventSink` double that accepts every event — the null provider must error before it streams.
-    struct NullSink;
-    impl EventSink for NullSink {
-        fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
-            Ok(())
-        }
-    }
+    use crate::modules::provider::application::completion_provider::NullSink;
 
     #[tokio::test]
     async fn complete_always_errors_with_a_provider_message() {

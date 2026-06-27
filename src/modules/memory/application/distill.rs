@@ -7,24 +7,13 @@ use serde::Deserialize;
 use crate::modules::memory::application::memory_port::MemoryPort;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::modules::provider::application::completion_provider::{
-    CompletionProvider, EventSink, TurnRequest,
+    CompletionProvider, NullSink, TurnRequest,
 };
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::message::Message;
 use crate::shared::kernel::role::Role;
-use crate::shared::kernel::stream_event::StreamEvent;
 
 type Result<T> = std::result::Result<T, AgentError>;
-
-/// An `EventSink` that discards every streamed delta. The distillation runs headless: its only output is
-/// the final assembled content, so there is no UI to feed.
-struct NullSink;
-
-impl EventSink for NullSink {
-    fn on_event(&mut self, _event: StreamEvent) -> Result<()> {
-        Ok(())
-    }
-}
 
 /// One entry the model proposes to remember, parsed from its JSON output.
 #[derive(Deserialize)]
@@ -274,6 +263,7 @@ fn leading_words(text: &str, n: usize) -> String {
 mod tests {
     use super::*;
     use crate::modules::memory::infrastructure::test_support::temp_port;
+    use crate::modules::provider::application::completion_provider::EventSink;
     use crate::shared::kernel::completed_turn::CompletedTurn;
     use async_trait::async_trait;
     use tempfile::TempDir;

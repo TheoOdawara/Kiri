@@ -121,20 +121,12 @@ impl CompletionProvider for OpenAiProvider {
 mod tests {
     use super::OpenAiProvider;
     use crate::modules::provider::application::completion_provider::{
-        CompletionProvider, EventSink, TurnRequest,
+        CompletionProvider, NullSink, TurnRequest,
     };
     use crate::shared::kernel::error::AgentError;
     use crate::shared::kernel::message::Message;
     use crate::shared::kernel::provider::{Effort, Secret};
-    use crate::shared::kernel::stream_event::StreamEvent;
     use std::time::Duration;
-
-    struct NullSink;
-    impl EventSink for NullSink {
-        fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
-            Ok(())
-        }
-    }
 
     /// Run-to-verify of the timeout fix: a local listener that ACCEPTS the connection but never sends a
     /// byte models a provider that hangs after connect — the reported "first message does nothing, no

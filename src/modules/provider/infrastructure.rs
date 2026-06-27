@@ -5,6 +5,9 @@ pub mod openai;
 pub mod secrets;
 pub mod unconfigured;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 /// Cap on the bytes a single streamed turn may accumulate (streamed content + tool-call arguments).
 /// Provider responses are untrusted input, and `read_timeout` only bounds idle time between chunks (it
 /// resets on each chunk), so a misbehaving provider streaming continuously could otherwise grow memory

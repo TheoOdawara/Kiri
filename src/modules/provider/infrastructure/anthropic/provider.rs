@@ -121,8 +121,8 @@ impl CompletionProvider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::provider::application::completion_provider::NullSink;
     use crate::shared::kernel::message::Message;
-    use crate::shared::kernel::stream_event::StreamEvent;
     use serde_json::{Value, json};
     use std::time::Duration;
 
@@ -177,13 +177,6 @@ mod tests {
         let with_tools = body_value(&provider(), &[Message::user("hi")], &tools);
         assert_eq!(with_tools["tools"][0]["name"], "read_file");
         assert_eq!(with_tools["tools"][0]["input_schema"]["type"], "object");
-    }
-
-    struct NullSink;
-    impl EventSink for NullSink {
-        fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
-            Ok(())
-        }
     }
 
     /// A 4xx from the Messages API (e.g. an unknown model, an over-cap `max_tokens`) must surface as

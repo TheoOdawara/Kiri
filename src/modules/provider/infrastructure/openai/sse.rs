@@ -214,22 +214,13 @@ impl TurnAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::provider::infrastructure::test_support::CollectSink;
 
     /// Parse one event payload into events (test seam over `parse_chunk` + `events_from_delta`).
     fn events_from_data(data: &str) -> Vec<StreamEvent> {
         match parse_chunk(data) {
             Some(choice) => events_from_delta(choice.delta),
             None => Vec::new(),
-        }
-    }
-
-    #[derive(Default)]
-    struct CollectSink(Vec<StreamEvent>);
-
-    impl EventSink for CollectSink {
-        fn on_event(&mut self, event: StreamEvent) -> Result<(), AgentError> {
-            self.0.push(event);
-            Ok(())
         }
     }
 
