@@ -13,8 +13,9 @@ use crate::shared::kernel::provider::Credential;
 pub trait SecretStore: Send + Sync {
     fn get(&self, provider_id: &str) -> Result<Option<Credential>, AgentError>;
     fn set(&self, provider_id: &str, credential: &Credential) -> Result<(), AgentError>;
-    /// Remove a provider's stored credential. Exercised by the file-store unit test and used by the
-    /// `/provider` remove/logout flow (a later phase); kept here so the port models the full contract.
-    #[allow(dead_code)]
+    /// Remove a provider's stored credential. Live on the keyless path: boot (`app::wire`) and the
+    /// runtime provider swap clear any stale key when an active or newly-added provider is keyless
+    /// (`AuthMethod::None`), so a migrated keyed-to-keyless config leaves no orphaned secret behind. A
+    /// missing-key delete is a harmless no-op, so both call sites can ignore the result best-effort.
     fn delete(&self, provider_id: &str) -> Result<(), AgentError>;
 }
