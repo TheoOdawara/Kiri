@@ -31,6 +31,7 @@ use crate::modules::provider::infrastructure::factory::{
 use crate::modules::session::application::session_store::SessionStore;
 use crate::modules::session::domain::session::derive_title;
 use crate::modules::sync::application::sync_service::SyncService;
+use crate::modules::sync::infrastructure::fs_work_tree::FsSyncWorkTree;
 use crate::modules::sync::infrastructure::git_cli::GitCli;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
@@ -1409,7 +1410,14 @@ async fn sync_push(config_path: &Path, model: &mut Model, terminal: &mut Default
         }
     };
     let git = GitCli;
-    let service = SyncService::new(&git, global_dir, config_path.to_path_buf(), &memory);
+    let work_tree = FsSyncWorkTree;
+    let service = SyncService::new(
+        &git,
+        global_dir,
+        config_path.to_path_buf(),
+        &memory,
+        &work_tree,
+    );
     match service.push().await {
         Ok(summary) => model.transcript.push(TranscriptItem::Notice(
             NoticeLevel::Info,
