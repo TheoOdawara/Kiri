@@ -5,16 +5,12 @@ use super::arguments::normalize_arguments;
 use super::wire::StreamChoice;
 use super::wire::{ChatStreamChunk, Delta, StreamError, ToolCallFragment};
 use crate::modules::provider::application::completion_provider::EventSink;
+use crate::modules::provider::infrastructure::MAX_STREAM_BYTES;
+use crate::modules::provider::infrastructure::http_error::bounded_preview;
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::stream_event::StreamEvent;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
-
-/// Cap on the bytes a single turn may accumulate (streamed content + tool-call arguments). Provider
-/// responses are untrusted input, and `read_timeout` only bounds idle time between chunks (it resets on
-/// each chunk), so a misbehaving provider streaming continuously could otherwise grow memory without
-/// bound. Generous — far above any real turn — purely a safety ceiling.
-const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 
 /// Feed one parsed SSE event's `data` payload into the accumulator (content/tool-calls) and the live
 /// `on_event` callback (reasoning/content). The `[DONE]` sentinel and malformed JSON are ignored. Line
@@ -72,14 +68,16 @@ pub(crate) fn handle_event(
     Ok(())
 }
 
-/// Render an in-band stream error as a human-readable message. `code` may be a string or a number.
+/// Render an in-band stream error as a human-readable message. `code` may be a string or a number; the
+/// provider's `message` is untrusted text, so it is bounded before reaching the transcript.
 fn format_stream_error(error: &StreamError) -> String {
     let message = error
         .message
         .as_deref()
         .map(str::trim)
         .filter(|message| !message.is_empty())
-        .unwrap_or("unknown error");
+        .map(bounded_preview)
+        .unwrap_or_else(|| "unknown error".to_string());
     match error.code.as_ref().filter(|code| !code.is_null()) {
         Some(code) => {
             let code = code
@@ -344,6 +342,22 @@ mod tests {
         // abort the turn — its content still flows.
         let turn = accumulate(&[r#"{"error":null,"choices":[{"delta":{"content":"Hi"}}]}"#]);
         assert_eq!(turn.content, "Hi");
+    }
+
+    #[test]
+    fn in_band_error_message_is_bounded() {
+        // An oversized in-band error message must be capped via `bounded_preview` before it reaches the
+        // transcript, just like an HTTP error body.
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        let data = serde_json::json!({ "error": { "message": "x".repeat(5_000), "code": 500 } })
+            .to_string();
+        let error = handle_event(&data, &mut accumulator, &mut sink)
+            .expect_err("an in-band error event must fail the turn");
+        assert!(
+            error.to_string().contains("… (truncated)"),
+            "oversized in-band error must be bounded: {error}"
+        );
     }
 
     #[test]

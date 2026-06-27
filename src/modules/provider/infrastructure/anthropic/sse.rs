@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 
 use super::wire::{BlockDeltaDto, ContentBlockStartDto, MessageDeltaDto, StreamEventDto};
 use crate::modules::provider::application::completion_provider::EventSink;
+use crate::modules::provider::infrastructure::MAX_STREAM_BYTES;
+use crate::modules::provider::infrastructure::http_error::bounded_preview;
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::stream_event::StreamEvent;
@@ -27,7 +29,8 @@ pub(crate) fn handle_event(
     match event {
         StreamEventDto::Error { error } => Err(AgentError::Provider(format!(
             "stream error from provider: {} ({})",
-            error.message, error.kind
+            bounded_preview(&error.message),
+            error.kind
         ))),
         StreamEventDto::ContentBlockStart {
             index,
@@ -61,6 +64,7 @@ fn apply_delta(
 ) -> Result<(), AgentError> {
     match delta {
         BlockDeltaDto::TextDelta { text } if !text.is_empty() => {
+            accumulator.bound_streamed_bytes(text.len())?;
             accumulator.content.push_str(&text);
             sink.on_event(StreamEvent::Content(text))
         }
@@ -68,6 +72,7 @@ fn apply_delta(
             sink.on_event(StreamEvent::Reasoning(thinking))
         }
         BlockDeltaDto::InputJsonDelta { partial_json } => {
+            accumulator.bound_streamed_bytes(partial_json.len())?;
             accumulator.push_tool_input(index, &partial_json);
             Ok(())
         }
@@ -82,6 +87,8 @@ fn apply_delta(
 pub(crate) struct TurnAccumulator {
     content: String,
     tool_uses: BTreeMap<u32, PartialToolUse>,
+    /// Running total of streamed text + tool-input bytes, bounded by `MAX_STREAM_BYTES`.
+    streamed_bytes: usize,
     /// The message's `stop_reason`; `"max_tokens"` means the output cap truncated the turn.
     stop_reason: Option<String>,
 }
@@ -100,6 +107,19 @@ impl TurnAccumulator {
         self.stop_reason.as_deref() == Some("max_tokens")
             && self.content.is_empty()
             && self.tool_uses.is_empty()
+    }
+
+    /// Bound the running total of streamed text + tool-input bytes before absorbing more, so an
+    /// unbounded stream fails fast instead of OOMing (`read_timeout` only bounds idle time between
+    /// chunks). Mirrors the OpenAI accumulator's ceiling against the single shared `MAX_STREAM_BYTES`.
+    fn bound_streamed_bytes(&mut self, delta: usize) -> Result<(), AgentError> {
+        self.streamed_bytes = self.streamed_bytes.saturating_add(delta);
+        if self.streamed_bytes > MAX_STREAM_BYTES {
+            return Err(AgentError::Provider(format!(
+                "provider stream exceeded the maximum response size ({MAX_STREAM_BYTES} bytes)"
+            )));
+        }
+        Ok(())
     }
 
     fn start_tool_use(&mut self, index: u32, id: String, name: String) {
@@ -304,6 +324,96 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("Overloaded"), "message lost: {message}");
         assert!(message.contains("overloaded_error"), "kind lost: {message}");
+    }
+
+    #[test]
+    fn in_band_error_message_is_bounded() {
+        // An oversized in-band error message must be capped via `bounded_preview` before it reaches the
+        // transcript, just like an HTTP error body.
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        let data = serde_json::json!({
+            "type": "error",
+            "error": { "type": "overloaded_error", "message": "x".repeat(5_000) }
+        })
+        .to_string();
+        let error = handle_event(&data, &mut accumulator, &mut sink)
+            .expect_err("an error event must fail the turn");
+        assert!(
+            error.to_string().contains("… (truncated)"),
+            "oversized in-band error must be bounded: {error}"
+        );
+    }
+
+    /// Drive the given event through the accumulator repeatedly until it errors, returning that error.
+    /// Used to cross `MAX_STREAM_BYTES` with a handful of large chunks without allocating the whole cap.
+    fn accumulate_until_error(payload: &str) -> AgentError {
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        for _ in 0..16 {
+            if let Err(error) = handle_event(payload, &mut accumulator, &mut sink) {
+                return error;
+            }
+        }
+        panic!("a stream past MAX_STREAM_BYTES must fail");
+    }
+
+    #[test]
+    fn anthropic_stream_exceeding_cap_fails() {
+        let chunk = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": "a".repeat(1024 * 1024) }
+        })
+        .to_string();
+        let error = accumulate_until_error(&chunk);
+        assert!(
+            error.to_string().contains("maximum response size"),
+            "text-delta cap error expected: {error}"
+        );
+    }
+
+    #[test]
+    fn anthropic_stream_exceeding_cap_fails_on_tool_input() {
+        // The tool-use block must be started so its input slot exists; then oversized input deltas hit
+        // the same ceiling.
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        handle_event(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"a","name":"write_file","input":{}}}"#,
+            &mut accumulator,
+            &mut sink,
+        )
+        .unwrap();
+        let chunk = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "input_json_delta", "partial_json": "a".repeat(1024 * 1024) }
+        })
+        .to_string();
+        let mut error = None;
+        for _ in 0..16 {
+            if let Err(err) = handle_event(&chunk, &mut accumulator, &mut sink) {
+                error = Some(err);
+                break;
+            }
+        }
+        let error = error.expect("tool-input past MAX_STREAM_BYTES must fail");
+        assert!(
+            error.to_string().contains("maximum response size"),
+            "tool-input cap error expected: {error}"
+        );
+    }
+
+    #[test]
+    fn anthropic_normal_turn_under_cap_ok() {
+        let (events, turn) = run(&[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ]);
+        assert_eq!(events, vec![StreamEvent::Content("Hello".to_string())]);
+        assert_eq!(turn.content, "Hello");
     }
 
     #[test]
