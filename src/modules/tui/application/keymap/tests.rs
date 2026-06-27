@@ -1,5 +1,5 @@
 use super::*;
-use crate::modules::tui::domain::view_state::{PendingApproval, PendingPlan};
+use crate::modules::tui::domain::modal::{PendingApproval, PendingPlan};
 
 fn press(code: Key) -> KeyPress {
     KeyPress {

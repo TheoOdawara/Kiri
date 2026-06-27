@@ -1,7 +1,7 @@
 use super::view;
+use crate::modules::tui::domain::modal::PendingApproval;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::TranscriptItem;
-use crate::modules::tui::domain::view_state::PendingApproval;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -133,7 +133,7 @@ fn meta_rule_shows_the_active_approval_mode() {
 
 #[test]
 fn pending_plan_renders_the_plan_box_below_the_transcript() {
-    use crate::modules::tui::domain::view_state::PendingPlan;
+    use crate::modules::tui::domain::modal::PendingPlan;
     let mut model = Model::new("m".to_string(), "/w".to_string());
     model
         .transcript
@@ -162,7 +162,7 @@ fn pending_plan_renders_the_plan_box_below_the_transcript() {
 
 #[test]
 fn plan_box_shows_all_options_on_a_short_terminal() {
-    use crate::modules::tui::domain::view_state::PendingPlan;
+    use crate::modules::tui::domain::modal::PendingPlan;
     let mut model = Model::new("m".to_string(), "/w".to_string());
     model.pending_plan = Some(PendingPlan::default());
     // On a short terminal the box takes priority over the transcript, so every option the user
@@ -287,7 +287,7 @@ fn render_buffer(model: &Model, w: u16, h: u16) -> ratatui::buffer::Buffer {
 
 #[test]
 fn a_screen_selection_highlights_buffer_cells() {
-    use crate::modules::tui::domain::view_state::{Granularity, ScreenSelection};
+    use crate::modules::tui::domain::selection::{Granularity, ScreenSelection};
     use crate::modules::tui::infrastructure::theme;
     let mut model = Model::new("m".to_string(), "/w".to_string());
     model
@@ -309,7 +309,7 @@ fn a_screen_selection_highlights_buffer_cells() {
 #[test]
 fn a_stable_selection_keeps_the_frame_byte_identical_across_time() {
     use crate::modules::tui::domain::model::Motion;
-    use crate::modules::tui::domain::view_state::{Granularity, ScreenSelection};
+    use crate::modules::tui::domain::selection::{Granularity, ScreenSelection};
     use std::time::{Duration, Instant};
     let mut model = Model::new("m".to_string(), "/w".to_string());
     model

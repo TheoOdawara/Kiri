@@ -17,7 +17,7 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// ADR 0017: `InputBuffer` (its home is `tui/domain/view_state.rs`) is the *only* sanctioned
+/// ADR 0017: `InputBuffer` (its home is `tui/domain/input_buffer.rs`) is the *only* sanctioned
 /// `domain → UI-crate` coupling. Walk every `*.rs` under each `src/modules/*/domain/` recursively — so a
 /// future nested `domain/<sub>/foo.rs` cannot silently re-breach — and assert none except that one file
 /// imports `ratatui`/`tui_textarea`.
@@ -39,9 +39,8 @@ fn only_input_buffer_couples_domain_to_ui_crates() {
         "expected to find domain files under src/modules/*/domain"
     );
 
-    // The single sanctioned exception (ADR 0017). When Wave 3 (TUIC-02) renames it to
-    // `tui/domain/input_buffer.rs`, update this allow-list to the new path.
-    let allowed = Path::new("tui").join("domain").join("view_state.rs");
+    // The single sanctioned exception (ADR 0017): `InputBuffer`'s home, `tui/domain/input_buffer.rs`.
+    let allowed = Path::new("tui").join("domain").join("input_buffer.rs");
     for file in &domain_files {
         let source = std::fs::read_to_string(file).expect("read domain file");
         // Match the bare crate-path tokens, not just the `use` forms, so a fully-qualified

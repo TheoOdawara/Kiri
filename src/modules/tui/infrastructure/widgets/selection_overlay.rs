@@ -7,7 +7,7 @@ use ratatui::buffer::{Buffer, CellWidth};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use crate::modules::tui::domain::view_state::{Granularity, ScreenSelection};
+use crate::modules::tui::domain::selection::{Granularity, ScreenSelection};
 
 /// Paint the selection highlight onto the rendered buffer. Changes only each cell's style (never its
 /// symbol), so a later scrape still reads the original glyphs, and reads no clock, so a stable selection

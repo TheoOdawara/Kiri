@@ -4,7 +4,7 @@ use arboard::Clipboard;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
-use crate::modules::tui::domain::view_state::ImageAttachment;
+use crate::modules::tui::domain::input_buffer::ImageAttachment;
 use crate::shared::kernel::error::AgentError;
 
 /// What the OS clipboard held when read: an image (encoded as a PNG data URL ready for the provider's

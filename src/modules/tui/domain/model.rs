@@ -4,11 +4,14 @@ use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::provider::{Effort, Secret};
 
 use super::command_menu::CommandMenu;
+use super::history::History;
+use super::input_buffer::{ImageAttachment, InputBuffer};
+use super::modal::{PendingApproval, PendingPlan};
+use super::picker::Picker;
+use super::scroll::Scroll;
+use super::selection::ScreenSelection;
 use super::transcript::{NoticeLevel, Transcript, TranscriptItem};
-use super::view_state::{
-    History, ImageAttachment, InputBuffer, PendingApproval, PendingPlan, Picker, ProviderWizard,
-    ScreenSelection, Scroll,
-};
+use super::wizard::ProviderWizard;
 
 /// Whether motion is fully expressed or frozen to its final frame. The session preference is resolved
 /// once from the environment by the runtime (the I/O stays out of the domain); the view additionally

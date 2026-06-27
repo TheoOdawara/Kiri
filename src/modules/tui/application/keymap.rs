@@ -5,12 +5,12 @@ use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::msg::{Key, KeyPress, MouseKind};
 use crate::modules::tui::domain::command_menu::CommandMenu;
+use crate::modules::tui::domain::modal::{APPROVAL_OPTIONS, PLAN_OPTIONS};
 use crate::modules::tui::domain::model::Model;
+use crate::modules::tui::domain::picker::{Picker, PickerKind};
+use crate::modules::tui::domain::selection::{Granularity, ScreenSelection, SelectionState};
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
-use crate::modules::tui::domain::view_state::{
-    ADD_PROVIDER_LABEL, APPROVAL_OPTIONS, Granularity, PLAN_OPTIONS, Picker, PickerKind,
-    ProviderWizard, ScreenSelection, SelectionState, WizardStep,
-};
+use crate::modules::tui::domain::wizard::{ADD_PROVIDER_LABEL, ProviderWizard, WizardStep};
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::provider::{AuthMethod, Effort, Secret};
 use tui_textarea::{Input, Key as TaKey};

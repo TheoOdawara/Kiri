@@ -187,7 +187,7 @@ mod tests {
 
     // --- screen selection invalidation --------------------------------------------
 
-    use crate::modules::tui::domain::view_state::{Granularity, ScreenSelection};
+    use crate::modules::tui::domain::selection::{Granularity, ScreenSelection};
 
     /// A non-empty three-cell character selection.
     fn a_selection() -> ScreenSelection {
@@ -214,7 +214,7 @@ mod tests {
         // Regression: a pasted API key (the common way keys are entered) must land in the wizard's
         // masked, Secret-staged field — never in the plaintext composer, where it would be unmasked,
         // survive the modal, and could be sent to the provider as a prompt.
-        use crate::modules::tui::domain::view_state::{ProviderWizard, WizardStep};
+        use crate::modules::tui::domain::wizard::{ProviderWizard, WizardStep};
         let mut wizard = ProviderWizard::new();
         wizard.step = WizardStep::ApiKey;
         let mut m = Model {

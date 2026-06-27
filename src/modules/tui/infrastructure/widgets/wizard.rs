@@ -7,7 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
-use crate::modules::tui::domain::view_state::{ProviderWizard, WIZARD_KINDS, WizardStep};
+use crate::modules::tui::domain::wizard::{ProviderWizard, WIZARD_KINDS, WizardStep};
 use crate::modules::tui::infrastructure::theme;
 use crate::shared::kernel::provider::ProviderKind;
 

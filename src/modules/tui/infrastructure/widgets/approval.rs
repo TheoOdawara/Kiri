@@ -3,9 +3,10 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
-use crate::modules::tui::domain::view_state::{
-    APPROVAL_OPTIONS, PLAN_OPTIONS, PendingApproval, PendingPlan, Picker,
+use crate::modules::tui::domain::modal::{
+    APPROVAL_OPTIONS, PLAN_OPTIONS, PendingApproval, PendingPlan,
 };
+use crate::modules::tui::domain::picker::Picker;
 use crate::modules::tui::infrastructure::markdown;
 use crate::modules::tui::infrastructure::theme;
 

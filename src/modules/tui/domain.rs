@@ -1,4 +1,10 @@
 pub mod command_menu;
+pub mod history;
+pub mod input_buffer;
+pub mod modal;
 pub mod model;
+pub mod picker;
+pub mod scroll;
+pub mod selection;
 pub mod transcript;
-pub mod view_state;
+pub mod wizard;

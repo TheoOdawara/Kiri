@@ -8,9 +8,9 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::modules::tui::domain::input_buffer::InputBuffer;
 use crate::modules::tui::domain::model::{Model, Motion};
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
-use crate::modules::tui::domain::view_state::InputBuffer;
 use crate::modules::tui::infrastructure::text::display_width;
 use crate::modules::tui::infrastructure::theme::{self, GateState};
 

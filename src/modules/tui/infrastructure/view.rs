@@ -2,8 +2,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::Block;
 
+use crate::modules::tui::domain::modal::APPROVAL_OPTIONS;
 use crate::modules::tui::domain::model::Model;
-use crate::modules::tui::domain::view_state::APPROVAL_OPTIONS;
 use crate::modules::tui::infrastructure::layout::{Regions, frame_layout, h_pad};
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
