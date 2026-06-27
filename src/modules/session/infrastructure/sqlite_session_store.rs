@@ -17,12 +17,17 @@ use crate::shared::kernel::time::now_rfc3339;
 /// runs on a blocking thread bounded by `DB_OP_TIMEOUT`, so a slow disk never stalls the TUI runtime.
 pub struct SqliteSessionStore {
     conn: Arc<Mutex<Connection>>,
+    /// Whether `new` (not `in_memory_inert`) backed this store. Surfaced via `is_available()`, the
+    /// canonical inert-store signal this tree converges on — the sibling memory store adopts the same
+    /// model once its SQLite harness is unified.
     available: bool,
 }
 
 impl SqliteSessionStore {
     /// Open (creating it and its parent directory if needed) the sessions database. Call `init` for the
-    /// schema. A store opened this way reports available.
+    /// schema. A store opened this way reports available. An open/IO-class failure here (missing parent,
+    /// permissions, a locked file) surfaces as `AgentError::session` — that constructor deliberately also
+    /// carries SQLite-open failures, not only the non-IO query errors, rather than add a separate IO class.
     pub fn new(db_path: PathBuf) -> AgentResult<Self> {
         let conn = open_with_parent(&db_path, AgentError::session)?;
         // ~/.kiri/sessions.db is global across every workspace and terminal, so a second running Kiri
@@ -113,6 +118,7 @@ impl SessionStore for SqliteSessionStore {
                     created_at: now.clone(),
                     updated_at: now,
                     messages: Vec::new(),
+                    skipped_messages: 0,
                 })
             },
             AgentError::session,
@@ -309,13 +315,17 @@ impl SessionStore for SqliteSessionStore {
                     })
                     .map_err(AgentError::session)?;
                 let mut messages = Vec::new();
+                let mut skipped = 0usize;
                 for row in rows {
-                    // Skip a corrupt row, and a row with an unrecognized role, rather than abort the load.
-                    if let Some(message) = row
+                    // Skip a corrupt row (unparseable images/tool_calls) or one with an unrecognized role
+                    // rather than abort the load; count the drops so the resume path can surface that the
+                    // conversation was silently shortened instead of losing turns invisibly.
+                    match row
                         .map_err(AgentError::session)?
                         .and_then(StoredMessage::into_domain)
                     {
-                        messages.push(message);
+                        Some(message) => messages.push(message),
+                        None => skipped += 1,
                     }
                 }
                 Ok(Some(Session {
@@ -325,6 +335,7 @@ impl SessionStore for SqliteSessionStore {
                     created_at,
                     updated_at,
                     messages,
+                    skipped_messages: skipped,
                 }))
             },
             AgentError::session,
@@ -605,5 +616,37 @@ mod tests {
     async fn inert_store_reports_unavailable() {
         let store = SqliteSessionStore::in_memory_inert().unwrap();
         assert!(!store.is_available());
+    }
+
+    #[tokio::test]
+    async fn load_reports_skipped_corrupt_rows() {
+        let dir = TempDir::new().unwrap();
+        let store = store(&dir).await;
+        let session = store.create("proj-a").await.unwrap();
+        store
+            .append_messages(&session.id, &[Message::user("intact")])
+            .await
+            .unwrap();
+
+        // Plant a corrupt row: `tool_calls` is not valid JSON, so load must drop it (never abort) and
+        // report the drop instead of silently shortening the conversation.
+        {
+            let guard = lock(&store.conn, AgentError::session).unwrap();
+            guard
+                .execute(
+                    "INSERT INTO messages (session_id, ordinal, role, content, images, tool_calls)
+                     VALUES (?1, 1, 'assistant', 'broken', '[]', 'not-json')",
+                    params![session.id],
+                )
+                .unwrap();
+        }
+
+        let loaded = store.load(&session.id).await.unwrap().unwrap();
+        assert_eq!(
+            loaded.skipped_messages, 1,
+            "the corrupt row must be counted as skipped"
+        );
+        assert_eq!(loaded.messages.len(), 1, "the intact message survives");
+        assert_eq!(loaded.messages[0].content.as_deref(), Some("intact"));
     }
 }

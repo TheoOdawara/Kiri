@@ -2,7 +2,7 @@
 //! tail, open/resume a session, list sessions for the picker, change workspace, and start a new session.
 
 use crate::modules::memory::domain::project_id::project_id_from_path;
-use crate::modules::session::domain::session::derive_title;
+use crate::modules::session::domain::session::{UNTITLED_SESSION_LABEL, derive_title};
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tui::domain::picker::{Picker, PickerKind};
 use crate::modules::tui::domain::transcript::{NoticeLevel, Transcript, TranscriptItem};
@@ -137,7 +137,7 @@ impl RunLoop {
                     .iter()
                     .map(|s| {
                         let title = if s.title.trim().is_empty() {
-                            "(sem título)"
+                            UNTITLED_SESSION_LABEL
                         } else {
                             s.title.trim()
                         };
@@ -211,11 +211,17 @@ impl RunLoop {
                 self.model.attachments.clear();
                 self.model.scroll.pin();
                 let title = if session.title.trim().is_empty() {
-                    "(sem título)".to_string()
+                    UNTITLED_SESSION_LABEL.to_string()
                 } else {
                     session.title.clone()
                 };
                 self.model.notify_info(format!("sessão retomada: {title}"));
+                if session.skipped_messages > 0 {
+                    self.model.notify_error(format!(
+                        "{} mensagem(ns) corrompida(s) ignorada(s) ao retomar a sessão",
+                        session.skipped_messages
+                    ));
+                }
                 self.conversation = fresh;
                 self.cursor.session_id = Some(session.id);
                 self.cursor.persisted_len = session.messages.len();
