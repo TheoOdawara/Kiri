@@ -1,15 +1,14 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rusqlite::{Connection, params};
-use tokio::task::spawn_blocking;
 use uuid::Uuid;
 
 use crate::modules::session::application::session_store::SessionStore;
 use crate::modules::session::domain::session::{Session, SessionSummary};
 use crate::modules::session::infrastructure::message_dto::StoredMessage;
+use crate::shared::infra::sqlite::{DB_OP_TIMEOUT, lock, open_with_parent, run_blocking};
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::message::Message;
 use crate::shared::kernel::time::now_rfc3339;
@@ -28,10 +27,7 @@ impl SqliteSessionStore {
     /// Open (creating it and its parent directory if needed) the sessions database. Call `init` for the
     /// schema. A store opened this way reports available.
     pub fn new(db_path: PathBuf) -> Result<Self> {
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let conn = Connection::open(&db_path).map_err(AgentError::session)?;
+        let conn = open_with_parent(&db_path, AgentError::session)?;
         // ~/.kiri/sessions.db is global across every workspace and terminal, so a second running Kiri
         // can contend for a write. SQLITE_BUSY returns instantly (the op timeout cannot wait it out), so
         // a busy_timeout lets brief cross-process contention be waited out instead of failing. WAL is a
@@ -57,35 +53,12 @@ impl SqliteSessionStore {
     }
 }
 
-fn lock(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
-    conn.lock()
-        .map_err(|error| AgentError::Session(format!("sqlite mutex poisoned: {error}")))
-}
-
-/// Upper bound for a single blocking database operation, so a wedged lock or pathological query surfaces
-/// as a clear error instead of hanging the runtime.
-const DB_OP_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Run a blocking database closure on the blocking pool, bounded by `DB_OP_TIMEOUT`.
-async fn run_blocking<T, F>(op: F) -> Result<T>
-where
-    F: FnOnce() -> Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    match tokio::time::timeout(DB_OP_TIMEOUT, spawn_blocking(op)).await {
-        Ok(joined) => joined.map_err(AgentError::session)?,
-        Err(_) => Err(AgentError::Session(
-            "database operation timed out".to_string(),
-        )),
-    }
-}
-
 #[async_trait]
 impl SessionStore for SqliteSessionStore {
     async fn init(&self) -> Result<()> {
         let conn = self.conn.clone();
         run_blocking(move || -> Result<()> {
-            let conn = lock(&conn)?;
+            let conn = lock(&conn, AgentError::session)?;
             // foreign_keys is per-connection; set it so the messages cascade on session delete.
             conn.execute_batch(
                 "PRAGMA foreign_keys = ON;
@@ -118,32 +91,35 @@ impl SessionStore for SqliteSessionStore {
             )
             .map_err(AgentError::session)?;
             Ok(())
-        })
+        }, AgentError::session)
         .await
     }
 
     async fn create(&self, project_id: &str) -> Result<Session> {
         let conn = self.conn.clone();
         let project_id = project_id.to_string();
-        run_blocking(move || -> Result<Session> {
-            let id = Uuid::now_v7().to_string();
-            let now = now_rfc3339();
-            let conn = lock(&conn)?;
-            conn.execute(
-                "INSERT INTO sessions (id, project_id, title, created_at, updated_at)
+        run_blocking(
+            move || -> Result<Session> {
+                let id = Uuid::now_v7().to_string();
+                let now = now_rfc3339();
+                let conn = lock(&conn, AgentError::session)?;
+                conn.execute(
+                    "INSERT INTO sessions (id, project_id, title, created_at, updated_at)
                  VALUES (?1, ?2, '', ?3, ?3)",
-                params![id, project_id, now],
-            )
-            .map_err(AgentError::session)?;
-            Ok(Session {
-                id,
-                project_id,
-                title: String::new(),
-                created_at: now.clone(),
-                updated_at: now,
-                messages: Vec::new(),
-            })
-        })
+                    params![id, project_id, now],
+                )
+                .map_err(AgentError::session)?;
+                Ok(Session {
+                    id,
+                    project_id,
+                    title: String::new(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                    messages: Vec::new(),
+                })
+            },
+            AgentError::session,
+        )
         .await
     }
 
@@ -164,50 +140,53 @@ impl SessionStore for SqliteSessionStore {
                 Ok((dto.role, dto.content, images, tool_calls, dto.tool_call_id))
             })
             .collect::<Result<_>>()?;
-        run_blocking(move || -> Result<()> {
-            let now = now_rfc3339();
-            let mut guard = lock(&conn)?;
-            // IMMEDIATE takes the write lock before the MAX(ordinal) read, so a second process cannot read
-            // the same MAX and assign a duplicate ordinal. The RAII transaction rolls back on any `?`
-            // early-return (no stranded transaction on the shared connection).
-            let tx = guard
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(AgentError::session)?;
-            let base: i64 = tx
-                .query_row(
-                    "SELECT COALESCE(MAX(ordinal), -1) + 1 FROM messages WHERE session_id = ?1",
-                    params![session_id],
-                    |row| row.get(0),
-                )
-                .map_err(AgentError::session)?;
-            for (offset, (role, content, images, tool_calls, tool_call_id)) in
-                rows.iter().enumerate()
-            {
-                let ordinal = base + offset as i64;
-                tx.execute(
-                    "INSERT INTO messages
+        run_blocking(
+            move || -> Result<()> {
+                let now = now_rfc3339();
+                let mut guard = lock(&conn, AgentError::session)?;
+                // IMMEDIATE takes the write lock before the MAX(ordinal) read, so a second process cannot read
+                // the same MAX and assign a duplicate ordinal. The RAII transaction rolls back on any `?`
+                // early-return (no stranded transaction on the shared connection).
+                let tx = guard
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(AgentError::session)?;
+                let base: i64 = tx
+                    .query_row(
+                        "SELECT COALESCE(MAX(ordinal), -1) + 1 FROM messages WHERE session_id = ?1",
+                        params![session_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(AgentError::session)?;
+                for (offset, (role, content, images, tool_calls, tool_call_id)) in
+                    rows.iter().enumerate()
+                {
+                    let ordinal = base + offset as i64;
+                    tx.execute(
+                        "INSERT INTO messages
                         (session_id, ordinal, role, content, images, tool_calls, tool_call_id)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        session_id,
-                        ordinal,
-                        role,
-                        content,
-                        images,
-                        tool_calls,
-                        tool_call_id
-                    ],
+                        params![
+                            session_id,
+                            ordinal,
+                            role,
+                            content,
+                            images,
+                            tool_calls,
+                            tool_call_id
+                        ],
+                    )
+                    .map_err(AgentError::session)?;
+                }
+                tx.execute(
+                    "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
+                    params![session_id, now],
                 )
                 .map_err(AgentError::session)?;
-            }
-            tx.execute(
-                "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
-                params![session_id, now],
-            )
-            .map_err(AgentError::session)?;
-            tx.commit().map_err(AgentError::session)?;
-            Ok(())
-        })
+                tx.commit().map_err(AgentError::session)?;
+                Ok(())
+            },
+            AgentError::session,
+        )
         .await
     }
 
@@ -215,15 +194,18 @@ impl SessionStore for SqliteSessionStore {
         let conn = self.conn.clone();
         let session_id = session_id.to_string();
         let title = title.to_string();
-        run_blocking(move || -> Result<()> {
-            let conn = lock(&conn)?;
-            conn.execute(
-                "UPDATE sessions SET title = ?2 WHERE id = ?1",
-                params![session_id, title],
-            )
-            .map_err(AgentError::session)?;
-            Ok(())
-        })
+        run_blocking(
+            move || -> Result<()> {
+                let conn = lock(&conn, AgentError::session)?;
+                conn.execute(
+                    "UPDATE sessions SET title = ?2 WHERE id = ?1",
+                    params![session_id, title],
+                )
+                .map_err(AgentError::session)?;
+                Ok(())
+            },
+            AgentError::session,
+        )
         .await
     }
 
@@ -239,131 +221,140 @@ impl SessionStore for SqliteSessionStore {
     ) -> Result<Vec<SessionSummary>> {
         let conn = self.conn.clone();
         let project_id = project_id.to_string();
-        run_blocking(move || -> Result<Vec<SessionSummary>> {
-            let conn = lock(&conn)?;
-            let mut stmt = conn
-                .prepare(
-                    "SELECT s.id, s.title, s.updated_at,
+        run_blocking(
+            move || -> Result<Vec<SessionSummary>> {
+                let conn = lock(&conn, AgentError::session)?;
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT s.id, s.title, s.updated_at,
                             (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id)
                      FROM sessions s
                      WHERE s.project_id = ?1
                      ORDER BY s.updated_at DESC
                      LIMIT ?2",
-                )
-                .map_err(AgentError::session)?;
-            let rows = stmt
-                .query_map(params![project_id, limit as i64], |row| {
-                    Ok(SessionSummary {
-                        id: row.get(0)?,
-                        title: row.get(1)?,
-                        updated_at: row.get(2)?,
-                        message_count: row.get::<_, i64>(3)? as usize,
+                    )
+                    .map_err(AgentError::session)?;
+                let rows = stmt
+                    .query_map(params![project_id, limit as i64], |row| {
+                        Ok(SessionSummary {
+                            id: row.get(0)?,
+                            title: row.get(1)?,
+                            updated_at: row.get(2)?,
+                            message_count: row.get::<_, i64>(3)? as usize,
+                        })
                     })
-                })
-                .map_err(AgentError::session)?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row.map_err(AgentError::session)?);
-            }
-            Ok(out)
-        })
+                    .map_err(AgentError::session)?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(AgentError::session)?);
+                }
+                Ok(out)
+            },
+            AgentError::session,
+        )
         .await
     }
 
     async fn load(&self, session_id: &str) -> Result<Option<Session>> {
         let conn = self.conn.clone();
         let session_id = session_id.to_string();
-        run_blocking(move || -> Result<Option<Session>> {
-            let conn = lock(&conn)?;
-            let header = match conn.query_row(
-                "SELECT project_id, title, created_at, updated_at FROM sessions WHERE id = ?1",
-                params![session_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            ) {
-                Ok(header) => header,
-                // Absent session is `Ok(None)`; a real DB error (locked/corrupt/IO) must surface, not be
-                // reported to the user as "session not found".
-                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-                Err(error) => return Err(AgentError::session(error)),
-            };
-            let (project_id, title, created_at, updated_at) = header;
-            let mut stmt = conn
-                .prepare(
-                    "SELECT role, content, images, tool_calls, tool_call_id
+        run_blocking(
+            move || -> Result<Option<Session>> {
+                let conn = lock(&conn, AgentError::session)?;
+                let header = match conn.query_row(
+                    "SELECT project_id, title, created_at, updated_at FROM sessions WHERE id = ?1",
+                    params![session_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                ) {
+                    Ok(header) => header,
+                    // Absent session is `Ok(None)`; a real DB error (locked/corrupt/IO) must surface, not be
+                    // reported to the user as "session not found".
+                    Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                    Err(error) => return Err(AgentError::session(error)),
+                };
+                let (project_id, title, created_at, updated_at) = header;
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT role, content, images, tool_calls, tool_call_id
                      FROM messages WHERE session_id = ?1 ORDER BY ordinal",
-                )
-                .map_err(AgentError::session)?;
-            let rows = stmt
-                .query_map(params![session_id], |row| {
-                    let images_raw: String = row.get(2)?;
-                    let tool_calls_raw: String = row.get(3)?;
-                    // A corrupt images/tool_calls column makes the row unsafe to keep: silently emptying
-                    // tool_calls would leave an assistant message whose calls vanished while its answers
-                    // (Role::Tool rows) still reference them — an orphaned exchange the provider rejects.
-                    // Skip the whole message instead (returned as None, dropped below).
-                    let images = match serde_json::from_str(&images_raw) {
-                        Ok(value) => value,
-                        Err(_) => return Ok(None),
-                    };
-                    let tool_calls = match serde_json::from_str(&tool_calls_raw) {
-                        Ok(value) => value,
-                        Err(_) => return Ok(None),
-                    };
-                    Ok(Some(StoredMessage {
-                        role: row.get(0)?,
-                        content: row.get(1)?,
-                        images,
-                        tool_calls,
-                        tool_call_id: row.get(4)?,
-                    }))
-                })
-                .map_err(AgentError::session)?;
-            let mut messages = Vec::new();
-            for row in rows {
-                // Skip a corrupt row, and a row with an unrecognized role, rather than abort the load.
-                if let Some(message) = row
-                    .map_err(AgentError::session)?
-                    .and_then(StoredMessage::into_domain)
-                {
-                    messages.push(message);
+                    )
+                    .map_err(AgentError::session)?;
+                let rows = stmt
+                    .query_map(params![session_id], |row| {
+                        let images_raw: String = row.get(2)?;
+                        let tool_calls_raw: String = row.get(3)?;
+                        // A corrupt images/tool_calls column makes the row unsafe to keep: silently emptying
+                        // tool_calls would leave an assistant message whose calls vanished while its answers
+                        // (Role::Tool rows) still reference them — an orphaned exchange the provider rejects.
+                        // Skip the whole message instead (returned as None, dropped below).
+                        let images = match serde_json::from_str(&images_raw) {
+                            Ok(value) => value,
+                            Err(_) => return Ok(None),
+                        };
+                        let tool_calls = match serde_json::from_str(&tool_calls_raw) {
+                            Ok(value) => value,
+                            Err(_) => return Ok(None),
+                        };
+                        Ok(Some(StoredMessage {
+                            role: row.get(0)?,
+                            content: row.get(1)?,
+                            images,
+                            tool_calls,
+                            tool_call_id: row.get(4)?,
+                        }))
+                    })
+                    .map_err(AgentError::session)?;
+                let mut messages = Vec::new();
+                for row in rows {
+                    // Skip a corrupt row, and a row with an unrecognized role, rather than abort the load.
+                    if let Some(message) = row
+                        .map_err(AgentError::session)?
+                        .and_then(StoredMessage::into_domain)
+                    {
+                        messages.push(message);
+                    }
                 }
-            }
-            Ok(Some(Session {
-                id: session_id,
-                project_id,
-                title,
-                created_at,
-                updated_at,
-                messages,
-            }))
-        })
+                Ok(Some(Session {
+                    id: session_id,
+                    project_id,
+                    title,
+                    created_at,
+                    updated_at,
+                    messages,
+                }))
+            },
+            AgentError::session,
+        )
         .await
     }
 
     async fn delete(&self, session_id: &str) -> Result<bool> {
         let conn = self.conn.clone();
         let session_id = session_id.to_string();
-        run_blocking(move || -> Result<bool> {
-            let conn = lock(&conn)?;
-            // Delete child rows explicitly: ON DELETE CASCADE needs the per-connection PRAGMA, which is
-            // only guaranteed on the init connection — this is unconditionally correct.
-            conn.execute(
-                "DELETE FROM messages WHERE session_id = ?1",
-                params![session_id],
-            )
-            .map_err(AgentError::session)?;
-            let affected = conn
-                .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
+        run_blocking(
+            move || -> Result<bool> {
+                let conn = lock(&conn, AgentError::session)?;
+                // Delete child rows explicitly: ON DELETE CASCADE needs the per-connection PRAGMA, which is
+                // only guaranteed on the init connection — this is unconditionally correct.
+                conn.execute(
+                    "DELETE FROM messages WHERE session_id = ?1",
+                    params![session_id],
+                )
                 .map_err(AgentError::session)?;
-            Ok(affected > 0)
-        })
+                let affected = conn
+                    .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
+                    .map_err(AgentError::session)?;
+                Ok(affected > 0)
+            },
+            AgentError::session,
+        )
         .await
     }
 
@@ -452,7 +443,7 @@ mod tests {
             .await
             .unwrap();
 
-        let guard = lock(&store.conn).unwrap();
+        let guard = lock(&store.conn, AgentError::session).unwrap();
         let mut stmt = guard
             .prepare("SELECT ordinal FROM messages WHERE session_id = ?1 ORDER BY ordinal")
             .unwrap();
@@ -470,7 +461,7 @@ mod tests {
         let store = store(&dir).await;
         let session = store.create("proj-a").await.unwrap();
 
-        let guard = lock(&store.conn).unwrap();
+        let guard = lock(&store.conn, AgentError::session).unwrap();
         guard
             .execute(
                 "INSERT INTO messages (session_id, ordinal, role, content) VALUES (?1, 0, 'user', 'a')",
@@ -505,7 +496,7 @@ mod tests {
         // duplicate-ordinal insert that violates the unique index. Dropping the uncommitted transaction
         // must discard the valid insert too (atomicity) and leave the shared connection usable.
         {
-            let mut guard = lock(&store.conn).unwrap();
+            let mut guard = lock(&store.conn, AgentError::session).unwrap();
             let tx = guard
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .unwrap();

@@ -1,13 +1,12 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rusqlite::{Connection, Row, params};
-use tokio::task::spawn_blocking;
 
 use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
+use crate::shared::infra::sqlite::{lock, open_with_parent, run_blocking};
 use crate::shared::kernel::error::AgentError;
 
 type Result<T> = std::result::Result<T, AgentError>;
@@ -26,10 +25,7 @@ impl SqliteSharedMemory {
     /// Open (creating it and its parent directory if needed) the shared database. Does not yet create
     /// the schema — call `init` for that.
     pub fn new(db_path: PathBuf) -> Result<Self> {
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let conn = Connection::open(&db_path).map_err(AgentError::memory)?;
+        let conn = open_with_parent(&db_path, AgentError::memory)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -51,17 +47,20 @@ impl SqliteSharedMemory {
         let model = model.to_string();
         let dim = vector.len() as i64;
         let blob = vec_to_blob(vector);
-        run_blocking(move || -> Result<()> {
-            let conn = lock(&conn)?;
-            conn.execute(
-                "INSERT INTO entry_embeddings (entry_id, model, dim, vector)
+        run_blocking(
+            move || -> Result<()> {
+                let conn = lock(&conn, AgentError::memory)?;
+                conn.execute(
+                    "INSERT INTO entry_embeddings (entry_id, model, dim, vector)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(entry_id) DO UPDATE SET model = ?2, dim = ?3, vector = ?4",
-                params![entry_id, model, dim, blob],
-            )
-            .map_err(AgentError::memory)?;
-            Ok(())
-        })
+                    params![entry_id, model, dim, blob],
+                )
+                .map_err(AgentError::memory)?;
+                Ok(())
+            },
+            AgentError::memory,
+        )
         .await
     }
 
@@ -75,30 +74,33 @@ impl SqliteSharedMemory {
     ) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
         let conn = self.conn.clone();
         let model = model.to_string();
-        run_blocking(move || -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
-            let conn = lock(&conn)?;
-            let mut stmt = conn
-                .prepare(
-                    "SELECT e.id, e.kind, e.content, e.tags, e.project_id, e.created_at, \
+        run_blocking(
+            move || -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+                let conn = lock(&conn, AgentError::memory)?;
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT e.id, e.kind, e.content, e.tags, e.project_id, e.created_at, \
                      e.updated_at, emb.vector \
                      FROM entries e JOIN entry_embeddings emb ON emb.entry_id = e.id \
                      WHERE emb.model = ?1 \
                      ORDER BY e.updated_at DESC LIMIT ?2",
-                )
-                .map_err(AgentError::memory)?;
-            let rows = stmt
-                .query_map(params![model, limit as i64], |row| {
-                    let entry = row_to_entry(row)?;
-                    let blob: Vec<u8> = row.get("vector")?;
-                    Ok((entry, blob_to_vec(&blob)))
-                })
-                .map_err(AgentError::memory)?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row.map_err(AgentError::memory)?);
-            }
-            Ok(out)
-        })
+                    )
+                    .map_err(AgentError::memory)?;
+                let rows = stmt
+                    .query_map(params![model, limit as i64], |row| {
+                        let entry = row_to_entry(row)?;
+                        let blob: Vec<u8> = row.get("vector")?;
+                        Ok((entry, blob_to_vec(&blob)))
+                    })
+                    .map_err(AgentError::memory)?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(AgentError::memory)?);
+                }
+                Ok(out)
+            },
+            AgentError::memory,
+        )
         .await
     }
 }
@@ -113,30 +115,6 @@ fn blob_to_vec(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
-}
-
-fn lock(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
-    conn.lock()
-        .map_err(|error| AgentError::Memory(format!("sqlite mutex poisoned: {error}")))
-}
-
-/// Upper bound for a single blocking database operation, so a wedged lock or pathological query
-/// surfaces as a clear error instead of hanging the runtime.
-const DB_OP_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Run a blocking database closure on the blocking pool, bounded by `DB_OP_TIMEOUT`. Centralizes the
-/// spawn-blocking, timeout, and join-error handling every query shares.
-async fn run_blocking<T, F>(op: F) -> Result<T>
-where
-    F: FnOnce() -> Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    match tokio::time::timeout(DB_OP_TIMEOUT, spawn_blocking(op)).await {
-        Ok(joined) => joined.map_err(AgentError::memory)?,
-        Err(_) => Err(AgentError::Memory(
-            "database operation timed out".to_string(),
-        )),
-    }
 }
 
 /// Map a SQLite row to a `MemoryEntry`. Unknown kinds fall back to `Fact` and unparseable tags to an
@@ -161,19 +139,22 @@ async fn query_entries(
     sql: String,
     bind: Vec<Box<dyn rusqlite::ToSql + Send>>,
 ) -> Result<Vec<MemoryEntry>> {
-    run_blocking(move || -> Result<Vec<MemoryEntry>> {
-        let conn = lock(&conn)?;
-        let mut stmt = conn.prepare(&sql).map_err(AgentError::memory)?;
-        let params = rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref()));
-        let rows = stmt
-            .query_map(params, row_to_entry)
-            .map_err(AgentError::memory)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(AgentError::memory)?);
-        }
-        Ok(out)
-    })
+    run_blocking(
+        move || -> Result<Vec<MemoryEntry>> {
+            let conn = lock(&conn, AgentError::memory)?;
+            let mut stmt = conn.prepare(&sql).map_err(AgentError::memory)?;
+            let params = rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref()));
+            let rows = stmt
+                .query_map(params, row_to_entry)
+                .map_err(AgentError::memory)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(AgentError::memory)?);
+            }
+            Ok(out)
+        },
+        AgentError::memory,
+    )
     .await
 }
 
@@ -181,10 +162,11 @@ async fn query_entries(
 impl SharedMemory for SqliteSharedMemory {
     async fn init(&self) -> Result<()> {
         let conn = self.conn.clone();
-        run_blocking(move || -> Result<()> {
-            let conn = lock(&conn)?;
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS entries (
+        run_blocking(
+            move || -> Result<()> {
+                let conn = lock(&conn, AgentError::memory)?;
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS entries (
                     id          TEXT PRIMARY KEY,
                     kind        TEXT NOT NULL,
                     content     TEXT NOT NULL,
@@ -201,20 +183,23 @@ impl SharedMemory for SqliteSharedMemory {
                     dim      INTEGER NOT NULL,
                     vector   BLOB NOT NULL
                 );",
-            )
-            .map_err(AgentError::memory)?;
-            Ok(())
-        })
+                )
+                .map_err(AgentError::memory)?;
+                Ok(())
+            },
+            AgentError::memory,
+        )
         .await
     }
 
     async fn save(&self, entry: &MemoryEntry) -> Result<()> {
         let conn = self.conn.clone();
         let entry = entry.clone();
-        run_blocking(move || -> Result<()> {
-            let tags = serde_json::to_string(&entry.tags).map_err(AgentError::memory)?;
-            let conn = lock(&conn)?;
-            conn.execute(
+        run_blocking(
+            move || -> Result<()> {
+                let tags = serde_json::to_string(&entry.tags).map_err(AgentError::memory)?;
+                let conn = lock(&conn, AgentError::memory)?;
+                conn.execute(
                 "INSERT INTO entries (id, kind, content, tags, project_id, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(id) DO UPDATE SET
@@ -230,40 +215,48 @@ impl SharedMemory for SqliteSharedMemory {
                 ],
             )
             .map_err(AgentError::memory)?;
-            Ok(())
-        })
+                Ok(())
+            },
+            AgentError::memory,
+        )
         .await
     }
 
     async fn load(&self, id: &str) -> Result<Option<MemoryEntry>> {
         let conn = self.conn.clone();
         let id = id.to_string();
-        run_blocking(move || -> Result<Option<MemoryEntry>> {
-            let conn = lock(&conn)?;
-            let mut stmt = conn
-                .prepare(&format!("SELECT {SELECT_COLUMNS} WHERE id = ?1"))
-                .map_err(AgentError::memory)?;
-            let mut rows = stmt
-                .query_map(params![id], row_to_entry)
-                .map_err(AgentError::memory)?;
-            match rows.next() {
-                Some(row) => Ok(Some(row.map_err(AgentError::memory)?)),
-                None => Ok(None),
-            }
-        })
+        run_blocking(
+            move || -> Result<Option<MemoryEntry>> {
+                let conn = lock(&conn, AgentError::memory)?;
+                let mut stmt = conn
+                    .prepare(&format!("SELECT {SELECT_COLUMNS} WHERE id = ?1"))
+                    .map_err(AgentError::memory)?;
+                let mut rows = stmt
+                    .query_map(params![id], row_to_entry)
+                    .map_err(AgentError::memory)?;
+                match rows.next() {
+                    Some(row) => Ok(Some(row.map_err(AgentError::memory)?)),
+                    None => Ok(None),
+                }
+            },
+            AgentError::memory,
+        )
         .await
     }
 
     async fn delete(&self, id: &str) -> Result<bool> {
         let conn = self.conn.clone();
         let id = id.to_string();
-        run_blocking(move || -> Result<bool> {
-            let conn = lock(&conn)?;
-            let affected = conn
-                .execute("DELETE FROM entries WHERE id = ?1", params![id])
-                .map_err(AgentError::memory)?;
-            Ok(affected > 0)
-        })
+        run_blocking(
+            move || -> Result<bool> {
+                let conn = lock(&conn, AgentError::memory)?;
+                let affected = conn
+                    .execute("DELETE FROM entries WHERE id = ?1", params![id])
+                    .map_err(AgentError::memory)?;
+                Ok(affected > 0)
+            },
+            AgentError::memory,
+        )
         .await
     }
 
@@ -322,30 +315,36 @@ impl SharedMemory for SqliteSharedMemory {
 
     async fn count(&self) -> Result<usize> {
         let conn = self.conn.clone();
-        run_blocking(move || -> Result<usize> {
-            let conn = lock(&conn)?;
-            let count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
-                .map_err(AgentError::memory)?;
-            Ok(count as usize)
-        })
+        run_blocking(
+            move || -> Result<usize> {
+                let conn = lock(&conn, AgentError::memory)?;
+                let count: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+                    .map_err(AgentError::memory)?;
+                Ok(count as usize)
+            },
+            AgentError::memory,
+        )
         .await
     }
 
     async fn count_by_project(&self, project_id: &str) -> Result<usize> {
         let conn = self.conn.clone();
         let project_id = project_id.to_string();
-        run_blocking(move || -> Result<usize> {
-            let conn = lock(&conn)?;
-            let count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM entries WHERE project_id = ?1",
-                    params![project_id],
-                    |row| row.get(0),
-                )
-                .map_err(AgentError::memory)?;
-            Ok(count as usize)
-        })
+        run_blocking(
+            move || -> Result<usize> {
+                let conn = lock(&conn, AgentError::memory)?;
+                let count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM entries WHERE project_id = ?1",
+                        params![project_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(AgentError::memory)?;
+                Ok(count as usize)
+            },
+            AgentError::memory,
+        )
         .await
     }
 }
