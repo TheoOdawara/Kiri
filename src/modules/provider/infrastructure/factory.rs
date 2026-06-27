@@ -16,12 +16,14 @@ use crate::shared::kernel::provider::{
 };
 
 /// Construct the provider adapter for `profile` + `credential`. Two adapters cover every supported
-/// provider, all by API key: the Anthropic Messages API adapter for `Anthropic`, and the
-/// OpenAI-compatible chat-completions adapter for NVIDIA, generic compatible endpoints, custom
-/// endpoints, and OpenAI proper. Subscription OAuth (Claude Pro/Max, ChatGPT Plus/Pro) is intentionally
-/// unsupported — the vendors restrict those tokens to their own clients, so it would require
-/// impersonation that risks the user's account (see the provider-auth ADR); an `Oauth` profile fails
-/// fast with that rationale.
+/// provider: the Anthropic Messages API adapter for `Anthropic`, and the OpenAI-compatible
+/// chat-completions adapter for NVIDIA, generic compatible endpoints, custom endpoints, and OpenAI
+/// proper. The OpenAI-compatible adapter also serves keyless local endpoints (Ollama / LM Studio): an
+/// `auth = "none"` profile builds with no key and the adapter omits the `Authorization` header. Vendor
+/// kinds always require a key, so a keyless vendor profile fails fast. Subscription OAuth (Claude
+/// Pro/Max, ChatGPT Plus/Pro) is intentionally unsupported — the vendors restrict those tokens to their
+/// own clients, so it would require impersonation that risks the user's account (see the provider-auth
+/// ADR); an `Oauth` profile fails fast with that rationale.
 pub fn build_provider(
     client: reqwest::Client,
     profile: &ProviderProfile,
@@ -36,13 +38,27 @@ pub fn build_provider(
             profile.id
         )));
     }
-    match (profile.kind, profile.auth) {
+    match (profile.kind, &profile.auth) {
+        // An auth value this build does not recognize leaves the provider inert with an actionable error,
+        // rather than silently falling through to the OpenAI adapter via the catch-all below.
+        (_, AuthMethod::Unknown(method)) => Err(AgentError::Provider(format!(
+            "provider '{}' has an unrecognized auth method '{method}'; update Kiri or fix `auth` in ~/.kiri/config.toml",
+            profile.id
+        ))),
         (ProviderKind::Anthropic, AuthMethod::Oauth) => Err(AgentError::Provider(format!(
             "provider '{}' uses Anthropic subscription OAuth, which Kiri does not support — Anthropic restricts Pro/Max OAuth tokens to its own clients. Configure an Anthropic Console API key instead.",
             profile.id
         ))),
         (ProviderKind::Openai, AuthMethod::Oauth) => Err(AgentError::Provider(format!(
             "provider '{}' uses ChatGPT subscription OAuth, which Kiri does not support — a ChatGPT subscription does not include API access. Configure a platform.openai.com API key instead.",
+            profile.id
+        ))),
+        // Vendor endpoints have no anonymous mode (NVIDIA/OpenAI need a Bearer key, Anthropic an
+        // x-api-key); a keyless vendor profile (hand-edited or synced) fails fast instead of issuing
+        // unauthenticated requests that 401 with a worse message. `requires_api_key` is the single
+        // source of truth shared with the wizard, so the two cannot drift.
+        (kind, AuthMethod::None) if kind.requires_api_key() => Err(AgentError::Provider(format!(
+            "provider '{}' requires an API key but is configured with auth = \"none\"; only generic OpenAI-compatible / custom endpoints (e.g. Ollama, LM Studio) may be keyless",
             profile.id
         ))),
         (ProviderKind::Anthropic, AuthMethod::ApiKey) => {
@@ -53,8 +69,10 @@ pub fn build_provider(
                 key,
             )))
         }
+        // NVIDIA / OpenAI / OpenAI-compatible / custom over the chat-completions adapter. The key is
+        // optional: a keyless local endpoint (Ollama / LM Studio) builds with `None`, omitting the header.
         _ => {
-            let key = api_key_of(credential, profile)?;
+            let key = optional_key(credential, profile)?;
             Ok(Arc::new(OpenAiProvider::new(
                 client,
                 profile.base_url.clone(),
@@ -86,7 +104,7 @@ pub fn build_embedding_provider(
             profile.id
         )));
     }
-    let key = api_key_of(credential, profile)?;
+    let key = optional_key(credential, profile)?;
     Ok(Arc::new(OpenAiEmbeddingProvider::new(
         client,
         profile.base_url.clone(),
@@ -124,11 +142,31 @@ pub fn generic_env_key(profile: &ProviderProfile) -> String {
     )
 }
 
-/// Extract the API key from a credential, failing if the profile somehow carries an OAuth credential
-/// (Kiri only supports API-key auth). Shared by every adapter branch.
+/// Extract a *required* API key, failing if the credential is absent or OAuth. Used by the Anthropic
+/// branch (no anonymous mode) — a `None` credential here is a configuration error.
 fn api_key_of(credential: Credential, profile: &ProviderProfile) -> Result<Secret, AgentError> {
     match credential {
         Credential::ApiKey { key } => Ok(key),
+        Credential::None => Err(AgentError::Provider(format!(
+            "provider '{}' requires an API key but none is configured",
+            profile.id
+        ))),
+        Credential::Oauth(_) => Err(AgentError::Provider(format!(
+            "provider '{}' has an OAuth credential, but Kiri only supports API-key credentials",
+            profile.id
+        ))),
+    }
+}
+
+/// Extract an *optional* API key for the OpenAI-compatible adapters: `None` for a keyless endpoint
+/// (the adapter omits `Authorization`), the key for an API-key credential, and a hard error for OAuth.
+fn optional_key(
+    credential: Credential,
+    profile: &ProviderProfile,
+) -> Result<Option<Secret>, AgentError> {
+    match credential {
+        Credential::None => Ok(None),
+        Credential::ApiKey { key } => Ok(Some(key)),
         Credential::Oauth(_) => Err(AgentError::Provider(format!(
             "provider '{}' has an OAuth credential, but Kiri only supports API-key credentials",
             profile.id
@@ -215,5 +253,61 @@ mod tests {
         let client = reqwest::Client::new();
         let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "");
         assert!(build_provider(client, &p, api_key(), true, Effort::High).is_err());
+    }
+
+    #[test]
+    fn builds_keyless_openai_compatible_and_custom() {
+        // The reported LM Studio / Ollama case: a generic compatible (or custom) endpoint with no key.
+        let client = reqwest::Client::new();
+        for kind in [ProviderKind::OpenAiCompatible, ProviderKind::Custom] {
+            let p = profile("local", kind, AuthMethod::None, "m");
+            assert!(
+                build_provider(client.clone(), &p, Credential::None, true, Effort::High).is_ok(),
+                "{kind:?} keyless should build"
+            );
+        }
+    }
+
+    #[test]
+    fn builds_keyed_openai_compatible() {
+        // A remote OpenAI-compatible like OpenRouter still needs a key — presence of the key decides.
+        let client = reqwest::Client::new();
+        let p = profile(
+            "openrouter",
+            ProviderKind::OpenAiCompatible,
+            AuthMethod::ApiKey,
+            "m",
+        );
+        assert!(build_provider(client, &p, api_key(), true, Effort::High).is_ok());
+    }
+
+    #[test]
+    fn rejects_keyless_vendor_kinds() {
+        // Vendor endpoints have no anonymous mode; a keyless vendor profile must fail fast.
+        let client = reqwest::Client::new();
+        for kind in [
+            ProviderKind::Nvidia,
+            ProviderKind::Openai,
+            ProviderKind::Anthropic,
+        ] {
+            let p = profile("vendor", kind, AuthMethod::None, "m");
+            assert!(
+                build_provider(client.clone(), &p, Credential::None, true, Effort::High).is_err(),
+                "{kind:?} keyless should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unrecognized_auth_method() {
+        // A forward-version auth value leaves the provider inert rather than building keyless by accident.
+        let client = reqwest::Client::new();
+        let p = profile(
+            "future",
+            ProviderKind::OpenAiCompatible,
+            AuthMethod::Unknown("magic".to_string()),
+            "m",
+        );
+        assert!(build_provider(client, &p, Credential::None, true, Effort::High).is_err());
     }
 }

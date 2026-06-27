@@ -37,17 +37,70 @@ impl ProviderKind {
             ProviderKind::OpenAiCompatible | ProviderKind::Custom => "",
         }
     }
+
+    /// Whether this kind mandates an API key. Vendor endpoints (NVIDIA / OpenAI / Anthropic) always do;
+    /// generic OpenAI-compatible and custom endpoints may be keyless (Ollama / LM Studio), so the key is
+    /// optional there and its presence decides the auth method. Shared by the `/provider` wizard and the
+    /// factory so the rule lives in one place.
+    pub fn requires_api_key(self) -> bool {
+        match self {
+            ProviderKind::Nvidia | ProviderKind::Openai | ProviderKind::Anthropic => true,
+            ProviderKind::OpenAiCompatible | ProviderKind::Custom => false,
+        }
+    }
 }
 
-/// How a provider authenticates. `ApiKey` is the only wired method. `Oauth` is a modeled extension
-/// point, not implemented: subscription OAuth (Claude Pro/Max, ChatGPT Plus/Pro) is intentionally
-/// unsupported because the vendors restrict those tokens to their own clients (see the provider-auth
-/// ADR); it is kept in the type so a future sanctioned flow can slot in without a schema change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// How a provider authenticates, selecting which credential the adapter sends.
+///
+/// - `ApiKey` — the primary wired method (`Bearer` for OpenAI-compatible, `x-api-key` for Anthropic).
+/// - `None` — no authentication: keyless OpenAI-compatible endpoints (Ollama / LM Studio) that need no
+///   key. The adapter omits the `Authorization` header entirely. The presence of a key at save time
+///   decides the method per provider (see [`ProviderKind::requires_api_key`]).
+/// - `Oauth` — a modeled extension point, not implemented: subscription OAuth (Claude Pro/Max, ChatGPT
+///   Plus/Pro) is intentionally unsupported because the vendors restrict those tokens to their own
+///   clients (see the provider-auth ADR); kept so a future sanctioned flow can slot in.
+/// - `Unknown(String)` — an auth value this build does not recognize (e.g. written by a newer Kiri).
+///   It carries the original text so reading a forward-version config never aborts the boot and
+///   rewriting it never corrupts the value; the factory leaves such a provider inert.
+///
+/// Serde is hand-written (not derived) so an unrecognized value maps to `Unknown` instead of failing —
+/// the forward-compatibility guarantee. Known values use kebab-case (`api-key` / `none` / `oauth`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthMethod {
     ApiKey,
+    None,
     Oauth,
+    Unknown(String),
+}
+
+impl AuthMethod {
+    /// The wire token for the known variants; `Unknown` carries its original (unrecognized) text.
+    fn as_wire(&self) -> &str {
+        match self {
+            AuthMethod::ApiKey => "api-key",
+            AuthMethod::None => "none",
+            AuthMethod::Oauth => "oauth",
+            AuthMethod::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl Serialize for AuthMethod {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthMethod {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "api-key" => AuthMethod::ApiKey,
+            "none" => AuthMethod::None,
+            "oauth" => AuthMethod::Oauth,
+            _ => AuthMethod::Unknown(raw),
+        })
+    }
 }
 
 /// Reasoning / output effort. A provider-agnostic dial each adapter maps to its native parameter
@@ -114,7 +167,13 @@ pub struct ProviderProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Credential {
-    ApiKey { key: Secret },
+    ApiKey {
+        key: Secret,
+    },
+    /// No credential: a keyless provider (`auth = "none"`). The composition root synthesizes this to
+    /// build an adapter that omits the `Authorization` header; it is not normally persisted, since a
+    /// keyless provider stores nothing in the keyring.
+    None,
     Oauth(OauthTokens),
 }
 
@@ -218,5 +277,45 @@ mod tests {
         assert_eq!(serde_json::to_string(&Effort::Xhigh).unwrap(), "\"xhigh\"");
         let e: Effort = serde_json::from_str("\"max\"").unwrap();
         assert_eq!(e, Effort::Max);
+    }
+
+    #[test]
+    fn auth_method_known_variants_round_trip() {
+        for (value, wire) in [
+            (AuthMethod::ApiKey, "\"api-key\""),
+            (AuthMethod::None, "\"none\""),
+            (AuthMethod::Oauth, "\"oauth\""),
+        ] {
+            assert_eq!(serde_json::to_string(&value).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<AuthMethod>(wire).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn auth_method_unknown_round_trips_losslessly() {
+        // A value written by a newer Kiri must deserialize without error (never aborting the boot) and
+        // re-serialize byte-identically, so rewriting the config does not corrupt the original token.
+        let back: AuthMethod = serde_json::from_str("\"future-method\"").unwrap();
+        assert_eq!(back, AuthMethod::Unknown("future-method".to_string()));
+        assert_eq!(serde_json::to_string(&back).unwrap(), "\"future-method\"");
+    }
+
+    #[test]
+    fn credential_none_round_trips_as_typed_none() {
+        let json = serde_json::to_string(&Credential::None).unwrap();
+        assert!(json.contains("\"type\":\"none\""), "got {json}");
+        assert!(matches!(
+            serde_json::from_str::<Credential>(&json).unwrap(),
+            Credential::None
+        ));
+    }
+
+    #[test]
+    fn requires_api_key_is_true_only_for_vendor_kinds() {
+        assert!(ProviderKind::Nvidia.requires_api_key());
+        assert!(ProviderKind::Openai.requires_api_key());
+        assert!(ProviderKind::Anthropic.requires_api_key());
+        assert!(!ProviderKind::OpenAiCompatible.requires_api_key());
+        assert!(!ProviderKind::Custom.requires_api_key());
     }
 }

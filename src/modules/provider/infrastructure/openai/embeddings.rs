@@ -11,8 +11,9 @@ use crate::shared::kernel::provider::Secret;
 pub struct OpenAiEmbeddingProvider {
     client: reqwest::Client,
     base_url: String,
-    /// Held as a `Secret` (zeroized on drop, redacted in Debug), exposed only at the auth-header site.
-    api_key: Secret,
+    /// Optional API key (`Some` held as a `Secret`: zeroized on drop, redacted in Debug, exposed only at
+    /// the auth-header site). `None` for a keyless local endpoint, in which case `embed` omits the header.
+    api_key: Option<Secret>,
     model: String,
 }
 
@@ -20,7 +21,7 @@ impl OpenAiEmbeddingProvider {
     pub fn new(
         client: reqwest::Client,
         base_url: impl Into<String>,
-        api_key: Secret,
+        api_key: Option<Secret>,
         model: impl Into<String>,
     ) -> Self {
         Self {
@@ -75,10 +76,13 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
             return Ok(Vec::new());
         }
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
-        let response = self
-            .client
-            .post(&url)
-            .bearer_auth(self.api_key.expose())
+        let mut request = self.client.post(&url);
+        // Omit Authorization for a keyless endpoint (see the chat adapter); `Bearer ` empty is rejected
+        // by some local servers.
+        if let Some(key) = &self.api_key {
+            request = request.bearer_auth(key.expose());
+        }
+        let response = request
             .json(&EmbeddingsRequest {
                 model: &self.model,
                 input: texts,
@@ -111,7 +115,9 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{EmbeddingDatum, align_embeddings};
+    use super::{EmbeddingDatum, OpenAiEmbeddingProvider, align_embeddings};
+    use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
+    use std::time::Duration;
 
     #[test]
     fn align_reorders_by_index_and_checks_count() {
@@ -138,5 +144,53 @@ mod tests {
             embedding: vec![1.0],
         }];
         assert!(align_embeddings(data, 2).is_err());
+    }
+
+    /// A keyless embeddings endpoint (local LM Studio / Ollama) must omit the `Authorization` header,
+    /// mirroring the chat adapter — `None` key sends no header at all.
+    #[tokio::test]
+    async fn keyless_embeddings_omits_authorization_header() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let captured = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let body = "stop";
+                let response = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+                let _ = tx.send(captured);
+            }
+        });
+
+        let provider = OpenAiEmbeddingProvider::new(
+            reqwest::Client::new(),
+            format!("http://{addr}/v1"),
+            None,
+            "embed-model",
+        );
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.embed(&["hello".to_string()]),
+        )
+        .await;
+        let captured = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("server should capture the request")
+            .expect("capture channel should deliver");
+        assert!(
+            !captured.to_ascii_lowercase().contains("authorization"),
+            "keyless embeddings request must omit Authorization; got:\n{captured}"
+        );
     }
 }

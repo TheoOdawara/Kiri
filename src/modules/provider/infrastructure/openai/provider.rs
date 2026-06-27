@@ -18,10 +18,10 @@ use crate::shared::kernel::provider::{Effort, Secret};
 pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
-    /// Held as a `Secret` (zeroized on drop, redacted in Debug) rather than a plain `String`, so the
-    /// key bytes are wiped when the adapter is dropped on a live `/provider` swap; exposed only at the
-    /// auth-header call site.
-    api_key: Secret,
+    /// Optional API key. `Some` for an authenticated endpoint (held as a `Secret`: zeroized on drop,
+    /// redacted in Debug, exposed only at the auth-header site). `None` for a keyless local endpoint
+    /// (Ollama / LM Studio), in which case `complete` omits the `Authorization` header entirely.
+    api_key: Option<Secret>,
     /// Whether the model accepts `chat_template_kwargs.thinking` at all; off for one that rejects/stalls
     /// on it. Gated further by `effort` — `Effort::Off` suppresses reasoning even when this is true.
     thinking: bool,
@@ -35,7 +35,7 @@ impl OpenAiProvider {
     pub fn new(
         client: reqwest::Client,
         base_url: impl Into<String>,
-        api_key: Secret,
+        api_key: Option<Secret>,
         thinking: bool,
         effort: Effort,
     ) -> Self {
@@ -73,14 +73,16 @@ impl CompletionProvider for OpenAiProvider {
         };
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let response = self
-            .client
-            .post(&url)
-            .bearer_auth(self.api_key.expose())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| AgentError::Provider(format!("failed to reach provider: {error}")))?;
+        let mut request = self.client.post(&url);
+        // Omit the Authorization header entirely for a keyless endpoint — sending `Bearer ` (empty) makes
+        // some local servers (LM Studio / Ollama) reject the request.
+        if let Some(key) = &self.api_key {
+            request = request.bearer_auth(key.expose());
+        }
+        let response =
+            request.json(&body).send().await.map_err(|error| {
+                AgentError::Provider(format!("failed to reach provider: {error}"))
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -123,6 +125,7 @@ mod tests {
     };
     use crate::shared::kernel::error::AgentError;
     use crate::shared::kernel::message::Message;
+    use crate::shared::kernel::provider::{Effort, Secret};
     use crate::shared::kernel::stream_event::StreamEvent;
     use std::time::Duration;
 
@@ -158,7 +161,7 @@ mod tests {
         let provider = OpenAiProvider::new(
             client,
             format!("http://{addr}/v1"),
-            crate::shared::kernel::provider::Secret::new("k"),
+            Some(crate::shared::kernel::provider::Secret::new("k")),
             false,
             crate::shared::kernel::provider::Effort::Off,
         );
@@ -211,7 +214,7 @@ mod tests {
         let provider = OpenAiProvider::new(
             client,
             format!("http://{addr}/v1"),
-            crate::shared::kernel::provider::Secret::new("k"),
+            Some(crate::shared::kernel::provider::Secret::new("k")),
             false,
             crate::shared::kernel::provider::Effort::Off,
         );
@@ -236,5 +239,81 @@ mod tests {
             }
             other => panic!("expected ProviderRejected(400), got {other:?}"),
         }
+    }
+
+    /// Drive one `complete` against a loopback server that captures the raw request bytes, then returns
+    /// the captured request text (headers + start of body). The server replies 400 so `complete` returns
+    /// promptly; the assertion is on what was sent, not the response.
+    async fn capture_request(api_key: Option<Secret>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let captured = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let body = "stop";
+                let response = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+                let _ = tx.send(captured);
+            }
+        });
+
+        let client = reqwest::Client::builder().build().unwrap();
+        let provider = OpenAiProvider::new(
+            client,
+            format!("http://{addr}/v1"),
+            api_key,
+            false,
+            Effort::Off,
+        );
+        let messages = vec![Message::user("hi")];
+        let request = TurnRequest {
+            messages: &messages,
+            model: "m",
+            tools: &[],
+        };
+        let mut sink = NullSink;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.complete(request, &mut sink),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("server should capture the request")
+            .expect("capture channel should deliver")
+    }
+
+    /// Regression lock for the LM Studio / Ollama fix: a keyless adapter must send NO `Authorization`
+    /// header — not even `Bearer ` (empty), which some local servers reject.
+    #[tokio::test]
+    async fn keyless_provider_omits_authorization_header() {
+        let captured = capture_request(None).await;
+        assert!(
+            !captured.to_ascii_lowercase().contains("authorization"),
+            "keyless request must omit Authorization; got:\n{captured}"
+        );
+    }
+
+    /// The dual: a keyed adapter must send `Authorization: Bearer <key>`.
+    #[tokio::test]
+    async fn keyed_provider_sends_bearer_authorization() {
+        let captured = capture_request(Some(Secret::new("k"))).await;
+        assert!(
+            captured
+                .to_ascii_lowercase()
+                .contains("authorization: bearer k"),
+            "keyed request must send Bearer; got:\n{captured}"
+        );
     }
 }
