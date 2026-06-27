@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -367,7 +368,9 @@ fn update_global_config(config_path: &Path, mutate: impl FnOnce(&mut RawConfig))
     let body =
         toml::to_string_pretty(&config).map_err(|e| anyhow!("failed to encode config: {e}"))?;
     if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)
+        // Route every `~/.kiri` creation through `ensure_private_dir` so the dir holding the config (and
+        // the co-located `credentials.json`) is owner-only, never a plain `0755` from `create_dir_all`.
+        ensure_private_dir(parent)
             .map_err(|e| anyhow!("failed to create {}: {e}", parent.display()))?;
     }
     std::fs::write(config_path, body)
@@ -502,12 +505,18 @@ fn load_net_allow() -> Result<Arc<[Regex]>> {
 
 /// Expand a leading `~`/`~/…` to `$HOME`; any other path is taken as given.
 fn expand_home(path: &str) -> PathBuf {
+    expand_home_with(path, std::env::var_os("HOME").as_ref())
+}
+
+/// Pure tilde expansion against an explicit `home`: `~` and `~/…` expand when `home` is `Some`, else
+/// (and for any non-tilde path) the input is taken verbatim. The env read lives in `expand_home`.
+fn expand_home_with(path: &str, home: Option<&OsString>) -> PathBuf {
     if path == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = home {
             return PathBuf::from(home);
         }
     } else if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
+        && let Some(home) = home
     {
         return PathBuf::from(home).join(rest);
     }
@@ -523,31 +532,48 @@ fn load_extra_paths(env: &str, defaults: &[&str]) -> Arc<[PathBuf]> {
     Arc::from(paths)
 }
 
-/// Compile a newline-separated regex list from `env` (with `#` comments) or the given default, failing
-/// fast on an invalid pattern.
-fn compile_patterns(env: &str, defaults: &[&str]) -> Result<Arc<[Regex]>> {
-    let raw = std::env::var(env).ok();
-    let patterns: Vec<&str> = match &raw {
+/// The non-blank, non-comment lines of a newline-separated override, trimmed.
+fn usable_pattern_lines(value: &str) -> Vec<&str> {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
+}
+
+/// Select the effective pattern list from a raw override value: a non-empty override's usable lines,
+/// else the `defaults`. Pure (the env read lives in `compile_patterns`) so it is unit-testable. A
+/// non-empty override that filters to zero usable lines (e.g. only comments) falls back to `defaults`
+/// rather than silently disabling a safety list (a blacklist that would then block nothing).
+fn select_patterns<'a>(raw: Option<&'a str>, defaults: &[&'a str]) -> Vec<&'a str> {
+    match raw {
         Some(value) if !value.is_empty() => {
-            let filtered: Vec<&str> = value
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                .collect();
-            // A non-empty override that filters to zero patterns (e.g. all comments) would silently
-            // disable a safety list (the plan-mode blacklist would then block nothing). Fall back to the
-            // defaults rather than accept "silently empty".
+            let filtered = usable_pattern_lines(value);
             if filtered.is_empty() {
-                eprintln!(
-                    "kiri: {env} has no usable patterns after stripping blank/comment lines; using defaults"
-                );
                 defaults.to_vec()
             } else {
                 filtered
             }
         }
         _ => defaults.to_vec(),
-    };
+    }
+}
+
+/// Compile a newline-separated regex list from `env` (with `#` comments) or the given default, failing
+/// fast on an invalid pattern.
+fn compile_patterns(env: &str, defaults: &[&str]) -> Result<Arc<[Regex]>> {
+    let raw = std::env::var(env).ok();
+    let patterns = select_patterns(raw.as_deref(), defaults);
+    // Warn here, where the env name is known, when a present override emptied to nothing and we fell
+    // back to defaults — so a user who tried to override a safety list is not silently ignored.
+    if raw
+        .as_deref()
+        .is_some_and(|value| !value.is_empty() && usable_pattern_lines(value).is_empty())
+    {
+        eprintln!(
+            "kiri: {env} has no usable patterns after stripping blank/comment lines; using defaults"
+        );
+    }
     let regexes: Result<Vec<Regex>, regex::Error> =
         patterns.iter().map(|p| Regex::new(p)).collect();
     let regexes = regexes.map_err(|e| anyhow!("invalid regex in {env}: {e}"))?;
@@ -675,9 +701,15 @@ impl Settings {
             .unwrap_or_else(|| PathBuf::from("."));
 
         let global_dir = kiri_global_dir();
-        // Best-effort: keep the kiri dir owner-only so the non-secret config.toml is not
-        // world-readable. A real failure surfaces later when writing config or credentials.
-        let _ = ensure_private_dir(&global_dir);
+        // Keep the kiri dir owner-only so the non-secret config.toml (co-located with credentials.json)
+        // is not world-readable. Best-effort, but surfaced: a pre-existing `0755` dir that cannot be
+        // coerced down is a real security signal — warn rather than swallow it — while still booting.
+        if let Err(error) = ensure_private_dir(&global_dir) {
+            eprintln!(
+                "kiri: warning: could not make {} owner-only ({error}); it may be world-readable",
+                global_dir.display()
+            );
+        }
         let global_path = global_dir.join("config.toml");
         let project_path = path.join(".kiri").join("config.toml");
         let had_global = global_path.exists();
@@ -1053,5 +1085,86 @@ read_timeout_ms = 99000
         // Non-targeted sections survived the read-modify-write (not lossy).
         assert_eq!(config.sandbox.mode.as_deref(), Some("require"));
         assert_eq!(config.http.read_timeout_ms, Some(99000));
+    }
+
+    #[test]
+    fn resolve_sandbox_mode_maps_config_values() {
+        // The config branch is pure (a `Some` config short-circuits the env read), so these never touch
+        // the process env — safe under edition-2024 parallel tests.
+        assert_eq!(resolve_sandbox_mode(Some("off")), (false, false));
+        assert_eq!(resolve_sandbox_mode(Some("os")), (true, false));
+        assert_eq!(resolve_sandbox_mode(Some("require")), (true, true));
+        // Unknown maps to the os default — never a silent downgrade to off.
+        assert_eq!(resolve_sandbox_mode(Some("bogus")), (true, false));
+    }
+
+    #[test]
+    fn resolve_sandbox_network_maps_config_values() {
+        assert_eq!(resolve_sandbox_network(Some("allow")), NetworkPolicy::Allow);
+        assert_eq!(resolve_sandbox_network(Some("deny")), NetworkPolicy::Deny);
+        // Unknown maps to deny — never a silent widening.
+        assert_eq!(resolve_sandbox_network(Some("bogus")), NetworkPolicy::Deny);
+    }
+
+    #[test]
+    fn select_patterns_falls_back_when_override_empties() {
+        let defaults = ["alpha", "beta"];
+        // An override of only blank/comment lines falls back to defaults (never a silently empty list).
+        assert_eq!(
+            select_patterns(Some("# x\n   \n# y\n"), &defaults),
+            vec!["alpha", "beta"]
+        );
+        // A real override is used verbatim (trimmed, comments stripped).
+        assert_eq!(
+            select_patterns(Some("foo\n# c\nbar\n"), &defaults),
+            vec!["foo", "bar"]
+        );
+        // Absent or empty → defaults.
+        assert_eq!(select_patterns(None, &defaults), vec!["alpha", "beta"]);
+        assert_eq!(select_patterns(Some(""), &defaults), vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn resolve_timeout_config_wins() {
+        // A positive config value wins and never consults the env (the pure branch).
+        assert_eq!(
+            resolve_timeout(Some(5000), "KIRI_UNUSED_TEST_KEY", Duration::from_secs(1)),
+            Duration::from_millis(5000)
+        );
+    }
+
+    #[test]
+    fn expand_home_with_cases() {
+        let home = OsString::from("/home/alice");
+        assert_eq!(
+            expand_home_with("~", Some(&home)),
+            PathBuf::from("/home/alice")
+        );
+        assert_eq!(
+            expand_home_with("~/x/y", Some(&home)),
+            PathBuf::from("/home/alice/x/y")
+        );
+        // No home → the tilde is not expanded (taken verbatim).
+        assert_eq!(expand_home_with("~", None), PathBuf::from("~"));
+        assert_eq!(expand_home_with("~/x", None), PathBuf::from("~/x"));
+        // A non-tilde path is unchanged regardless of home.
+        assert_eq!(
+            expand_home_with("/abs/path", Some(&home)),
+            PathBuf::from("/abs/path")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_global_config_creates_owner_only_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let kiri_dir = tmp.path().join("sub").join(".kiri");
+        let config_path = kiri_dir.join("config.toml");
+        // Any global-config writer creates the parent through `ensure_private_dir`.
+        persist_effort(&config_path, Effort::High).unwrap();
+        assert!(config_path.exists());
+        let mode = std::fs::metadata(&kiri_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "created kiri dir must be 0700, got {mode:o}");
     }
 }
