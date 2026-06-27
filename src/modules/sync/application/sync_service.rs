@@ -87,7 +87,7 @@ impl<'a> SyncService<'a> {
             && !commit.stdout.contains("nothing to commit")
             && !commit.stderr.contains("nothing to commit")
         {
-            return Err(AgentError::Provider(format!(
+            return Err(AgentError::Sync(format!(
                 "git commit failed: {}",
                 first_line(&commit.stderr, &commit.stdout)
             )));
@@ -97,7 +97,7 @@ impl<'a> SyncService<'a> {
             .run(&["push", "-u", "origin", SYNC_BRANCH], &dir)
             .await?;
         if !push.success {
-            return Err(AgentError::Provider(format!(
+            return Err(AgentError::Sync(format!(
                 "git push failed: {}",
                 first_line(&push.stderr, &push.stdout)
             )));
@@ -179,7 +179,7 @@ impl<'a> SyncService<'a> {
             .run(&["status", "--short", "--branch"], &dir)
             .await?;
         if !output.success {
-            return Err(AgentError::Provider(format!(
+            return Err(AgentError::Sync(format!(
                 "git status failed: {}",
                 first_line(&output.stderr, &output.stdout)
             )));
@@ -211,7 +211,7 @@ impl<'a> SyncService<'a> {
     async fn require_initialized(&self) -> Result<PathBuf> {
         let dir = self.sync_dir();
         if !dir.join(".git").exists() {
-            return Err(AgentError::Provider(
+            return Err(AgentError::Sync(
                 "sync not initialized — run `kiri sync init <repo-url>` first".to_string(),
             ));
         }
@@ -223,7 +223,7 @@ impl<'a> SyncService<'a> {
         if output.success {
             Ok(())
         } else {
-            Err(AgentError::Provider(format!(
+            Err(AgentError::Sync(format!(
                 "git {} failed: {}",
                 args.first().copied().unwrap_or(""),
                 first_line(&output.stderr, &output.stdout)

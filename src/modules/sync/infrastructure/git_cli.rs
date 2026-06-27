@@ -29,16 +29,17 @@ impl Git for GitCli {
             .kill_on_drop(true);
 
         let child = command.spawn().map_err(|error| {
-            AgentError::Provider(format!(
+            AgentError::Sync(format!(
                 "could not run git (is it installed and on PATH?): {error}"
             ))
         })?;
 
         let output = match tokio::time::timeout(GIT_TIMEOUT, child.wait_with_output()).await {
-            Ok(result) => result
-                .map_err(|error| AgentError::Provider(format!("git failed to run: {error}")))?,
+            Ok(result) => {
+                result.map_err(|error| AgentError::Sync(format!("git failed to run: {error}")))?
+            }
             Err(_) => {
-                return Err(AgentError::Provider(format!(
+                return Err(AgentError::Sync(format!(
                     "git timed out after {}s",
                     GIT_TIMEOUT.as_secs()
                 )));

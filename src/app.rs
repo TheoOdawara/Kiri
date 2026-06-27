@@ -247,9 +247,18 @@ fn build_embedder(
     };
     let credential = match resolve_credential(profile, secrets) {
         Ok(Some(credential)) => credential,
-        _ => {
+        Ok(None) => {
             eprintln!(
                 "kiri: no credential for embeddings provider '{}'; semantic recall disabled",
+                config.provider_id
+            );
+            return None;
+        }
+        // Distinguish a genuine keyring/store fault from "not logged in", so a broken credential store
+        // is diagnosable rather than silently reported as a missing credential.
+        Err(error) => {
+            eprintln!(
+                "kiri: embeddings credential store error for '{}' ({error}); semantic recall disabled",
                 config.provider_id
             );
             return None;

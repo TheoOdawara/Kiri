@@ -28,4 +28,8 @@ pub enum AgentError {
     /// (de)serializing a provider's secret material. Never carries the secret itself.
     #[error("credential store error: {0}")]
     Secret(String),
+    /// A profile-sync failure in the `sync` context (a `git` invocation, or applying a pulled config).
+    /// Distinct from `Provider` so it is not mistaken for a retryable transport failure.
+    #[error("sync error: {0}")]
+    Sync(String),
 }

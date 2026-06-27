@@ -63,8 +63,10 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
 shells out to `git` to reach the user's profile repo (ADR 0015); filesystem I/O only in
 `tools/infrastructure` (the sandbox is the single path chokepoint) — **except** the `memory`, `session`,
 and `sync` contexts, which own their data dirs (`.kiri/memory`, `~/.kiri/memory`, `~/.kiri/sessions.db`,
-`~/.kiri/sync`) and do their own file/SQLite I/O for harness-owned storage, never for agent-supplied
-paths (ref ADRs 0010/0013/0015); `domain` has no I/O; the engine never touches stdin/stdout
+`~/.kiri/sync`), plus `provider/infrastructure/secrets` (the keyring/`0600` credentials file) and
+`shared/infra/config` (the `~/.kiri/config.toml` + dir creation) — all do their own file/SQLite I/O for
+harness-owned storage, never for agent-supplied paths (ref ADRs 0010/0013/0015); `domain` has no I/O;
+the engine never touches stdin/stdout
 directly (all UI via the engine ports). Ports return `AgentError`; `anyhow` only at the binary edge.
 
 **Extending:** a new tool = one file under `tools/infrastructure/fs/` implementing `Tool`, registered in

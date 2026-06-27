@@ -329,6 +329,23 @@ fn read_config_file(path: &Path) -> Result<RawConfig> {
     }
 }
 
+/// Read the UNTRUSTED project layer (`<workspace>/.kiri/config.toml`) leniently: a malformed file must
+/// not abort the boot, or a cloned repo could ship a broken config as an availability DoS in that
+/// directory. Only `effort` is taken from this layer anyway, so on a parse error we warn and fall back
+/// to defaults. The trusted global config keeps `read_config_file`'s fail-fast.
+fn read_project_config_lenient(path: &Path) -> RawConfig {
+    match read_config_file(path) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!(
+                "kiri: ignoring invalid project config at {} ({error})",
+                path.display()
+            );
+            RawConfig::default()
+        }
+    }
+}
+
 /// Validate a config string against the real `RawConfig` schema (not just "is it TOML"). Used by
 /// `sync pull` to refuse an incoming config that is valid TOML but invalid against the schema (e.g.
 /// `effort = "bogus"`), which would otherwise be written and brick the next boot when it fails to
@@ -508,11 +525,24 @@ fn load_extra_paths(env: &str, defaults: &[&str]) -> Arc<[PathBuf]> {
 fn compile_patterns(env: &str, defaults: &[&str]) -> Result<Arc<[Regex]>> {
     let raw = std::env::var(env).ok();
     let patterns: Vec<&str> = match &raw {
-        Some(value) if !value.is_empty() => value
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .collect(),
+        Some(value) if !value.is_empty() => {
+            let filtered: Vec<&str> = value
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect();
+            // A non-empty override that filters to zero patterns (e.g. all comments) would silently
+            // disable a safety list (the plan-mode blacklist would then block nothing). Fall back to the
+            // defaults rather than accept "silently empty".
+            if filtered.is_empty() {
+                eprintln!(
+                    "kiri: {env} has no usable patterns after stripping blank/comment lines; using defaults"
+                );
+                defaults.to_vec()
+            } else {
+                filtered
+            }
+        }
         _ => defaults.to_vec(),
     };
     let regexes: Result<Vec<Regex>, regex::Error> =
@@ -652,7 +682,7 @@ impl Settings {
         // (project) layer contributes only the `effort` preference. See `resolve_layers`.
         let (config, effort) = resolve_layers(
             read_config_file(&global_path)?,
-            read_config_file(&project_path)?,
+            read_project_config_lenient(&project_path),
         );
 
         let (mut providers, mut active) =
@@ -928,6 +958,17 @@ mod tests {
         std::fs::write(&bad, "this is = not valid = toml [[[").unwrap();
         let err = read_config_file(&bad).unwrap_err().to_string();
         assert!(err.contains("invalid TOML"), "got: {err}");
+    }
+
+    #[test]
+    fn project_config_is_lenient_on_malformed_input() {
+        // The untrusted project layer must NOT abort the boot on a malformed file (a repo could ship one
+        // as a DoS); a parse error degrades to defaults rather than propagating.
+        let dir = tempfile::TempDir::new().unwrap();
+        let bad = dir.path().join("project.toml");
+        std::fs::write(&bad, "this is = not valid = toml [[[").unwrap();
+        let parsed = read_project_config_lenient(&bad);
+        assert!(parsed.providers.is_empty() && parsed.effort.is_none());
     }
 
     #[test]
