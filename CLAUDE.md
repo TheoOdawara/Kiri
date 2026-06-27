@@ -126,6 +126,7 @@ that is surfaced is a failure you can fix; a swallowed one costs hours).
 ## Project rules / gotchas
 
 - **Code-only style:** clear names, minimal comments (why, not what), no teaching prose.
+- **Module convention:** declare submodules from the sibling `<name>.rs`, never an inner `mod.rs` (edition-2024 default, matches the whole tree).
 - **clap is the convention** — record any deviation as an ADR (`docs/decisions/`).
 - Keep the provider base URL / model / key configurable; never hardcode.
 - A PostToolUse hook auto-runs `cargo fmt` (+ clippy feedback) on `.rs` edits — see `docs/claude-tooling.md`.
