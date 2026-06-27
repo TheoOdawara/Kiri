@@ -160,9 +160,13 @@ impl Tool for RunCommand {
                     },
                     "timeout_ms": {
                         "type": "integer",
-                        "description": format!("Timeout in milliseconds. Defaults to {RUN_COMMAND_DEFAULT_TIMEOUT_MS}."),
+                        "description": format!(
+                            "Timeout in milliseconds, clamped to [{RUN_COMMAND_MIN_TIMEOUT_MS}, \
+                             {RUN_COMMAND_MAX_TIMEOUT_MS}]. Defaults to {RUN_COMMAND_DEFAULT_TIMEOUT_MS}."
+                        ),
                         "default": RUN_COMMAND_DEFAULT_TIMEOUT_MS,
-                        "minimum": 1000
+                        "minimum": RUN_COMMAND_MIN_TIMEOUT_MS,
+                        "maximum": RUN_COMMAND_MAX_TIMEOUT_MS
                     }
                 }
             }),
@@ -451,6 +455,23 @@ mod tests {
     }
 
     #[test]
+    fn schema_advertises_the_enforced_timeout_bounds() {
+        // The advertised minimum/maximum must equal the consts the `effective_timeout_ms` clamp
+        // enforces, so the model never reads a range the harness silently overrides.
+        let rc = run_command_with_allow(&[]);
+        let schema = rc.schema();
+        let timeout = &schema["function"]["parameters"]["properties"]["timeout_ms"];
+        assert_eq!(
+            timeout["minimum"].as_u64(),
+            Some(RUN_COMMAND_MIN_TIMEOUT_MS)
+        );
+        assert_eq!(
+            timeout["maximum"].as_u64(),
+            Some(RUN_COMMAND_MAX_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
     fn schema_description_reflects_the_limit_constants() {
         let rc = run_command_with_allow(&[]);
         let schema = rc.schema();
@@ -579,7 +600,7 @@ mod tests {
         let sb = sandbox(&dir);
         let reg = registry();
 
-        // Generate enough output to exceed RUN_COMMAND_MAX_BYTES. The shell loop syntax differs
+        // Generate enough output to exceed exec::EXEC_MAX_BYTES. The shell loop syntax differs
         // between bash and cmd — the assertion only cares about the truncation marker.
         #[cfg(unix)]
         let spam = "for i in $(seq 1 50000); do echo $i; done";

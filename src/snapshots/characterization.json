@@ -343,7 +343,8 @@
             },
             "timeout_ms": {
               "default": 30000,
-              "description": "Timeout in milliseconds. Defaults to 30000.",
+              "description": "Timeout in milliseconds, clamped to [1000, 600000]. Defaults to 30000.",
+              "maximum": 600000,
               "minimum": 1000,
               "type": "integer"
             }
