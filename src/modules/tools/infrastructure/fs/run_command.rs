@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,6 +39,27 @@ fn introduces_another_command(command: &str) -> bool {
         || command.contains('\n')
         || command.contains('\r')
         || command.trim_end().ends_with('&')
+}
+
+/// Best-effort scan of a `run_command` string for a token naming a sensitive file or a credential
+/// directory, so the confirmation can warn before the user approves. Returns the first offending token.
+///
+/// **Not a security control.** It only whitespace-tokenizes, so trivial obfuscation (`c''at $E""NV`,
+/// base64, indirect reads, a heredoc) evades it — the OS confinement layer (ADR 0009) is the real
+/// boundary, and this must never be sold as a guarantee (security theater is a defect). It only makes an
+/// already-confirmed action scarier; it never allows nor denies on its own (the default stays decline).
+fn references_sensitive_path(command: &str, sandbox: &dyn Sandbox) -> Option<String> {
+    for token in command.split_whitespace() {
+        let path = Path::new(token);
+        let sensitive_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| sandbox.is_sensitive_name(name));
+        if sensitive_name || sandbox.secret_dir_component(path).is_some() {
+            return Some(token.to_string());
+        }
+    }
+    None
 }
 
 /// Bounds for a `run_command` timeout, so the model cannot pin a process slot for hours nor request a
@@ -138,7 +160,17 @@ impl Tool for RunCommand {
 
     fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let cmd = self.command_line(sandbox, call)?;
-        let action = format!("Executar comando no shell. Aprova executar: {cmd}?");
+        let args: RunCommandArgs = parse_args(call).ok()?;
+        let mut action = format!("Executar comando no shell. Aprova executar: {cmd}?");
+        // Defense-in-depth UX (see `references_sensitive_path`): when the command text references a
+        // sensitive path, prepend a loud warning so the user reviews before approving. Best-effort only
+        // — the OS sandbox is the real control — and it never flips the default, which stays decline.
+        if let Some(reference) = references_sensitive_path(&args.command, sandbox) {
+            action = format!(
+                "ATENÇÃO: este comando referencia um caminho sensível ('{reference}'). O sandbox do SO \
+                 é a proteção real; revise antes de aprovar. {action}"
+            );
+        }
         // run_command is the single highest-blast-radius tool (a full shell), so it always
         // default-declines ([s/N]) regardless of the cwd — a stray Enter must never run an arbitrary
         // command. The cwd location says where it runs, not how dangerous it is.
@@ -242,6 +274,14 @@ mod tests {
         FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap()
     }
 
+    fn guarded_sandbox(dir: &TempDir) -> FsSandbox {
+        FsSandbox::new(
+            dir.path(),
+            SensitiveMatcher::new(&[".env", "id_rsa", "*.pem"]).unwrap(),
+        )
+        .unwrap()
+    }
+
     fn call(name: &str, args: serde_json::Value) -> ToolCall {
         ToolCall {
             id: "c".to_string(),
@@ -337,6 +377,41 @@ mod tests {
             )
             .unwrap();
         assert!(!confirmation.default_accept);
+    }
+
+    #[test]
+    fn references_sensitive_path_flags_env_and_secret_dir() {
+        let dir = TempDir::new().unwrap();
+        let sb = guarded_sandbox(&dir);
+        // A sensitive *name* by the file-name guard.
+        assert_eq!(
+            references_sensitive_path("cat .env", &sb).as_deref(),
+            Some(".env")
+        );
+        // A non-sensitive name inside a credential *dir* — caught by the secret-dir component check.
+        assert!(references_sensitive_path("cat ~/.aws/credentials", &sb).is_some());
+        // A benign build command flags nothing.
+        assert_eq!(references_sensitive_path("cargo build", &sb), None);
+    }
+
+    #[test]
+    fn confirmation_warns_on_sensitive_reference() {
+        let dir = TempDir::new().unwrap();
+        let sb = guarded_sandbox(&dir);
+        let rc = run_command_with_allow(&[]);
+        let confirmation = rc
+            .confirmation(&sb, &call("run_command", json!({"command": "cat .env"})))
+            .unwrap();
+        assert!(
+            confirmation.prompt.contains("sensível"),
+            "expected the sensitive-path warning in the prompt: {}",
+            confirmation.prompt
+        );
+        // The warning must escalate scrutiny, never relax the default — it stays decline.
+        assert!(
+            !confirmation.default_accept,
+            "the sensitive-path warning must not flip the default to accept"
+        );
     }
 
     #[test]

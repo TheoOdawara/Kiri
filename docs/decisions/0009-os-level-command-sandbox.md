@@ -58,6 +58,25 @@ session can widen it with `KIRI_SANDBOX_NETWORK=allow`. File tools always deny n
 `cargo build` / `npm install` fluid while blocking arbitrary exfiltration by default. The residual
 supply-chain exposure (a dev command's own build scripts run with network) is accepted and tracked.
 
+**run_command secret boundary.** File tools route every path through the sensitive-name + secret-dir
+chokepoint, but `run_command` runs arbitrary shell text, so `cat .env` / `cat ~/.aws/credentials` would
+return exactly the material that guard exists to block. The boundary is, in order of strength:
+
+1. **OS confinement (the real control).** The macOS Seatbelt profile read-denies the *single-sourced*
+   credential set — the credential dirs (`SECRET_DIRS`), the harness's own `~/.kiri` (holding
+   `credentials.json`), and the well-known home credential files (`~/.netrc`, `~/.git-credentials`, …) —
+   all derived from one `tools::infrastructure::secret_paths` source shared with the file-tool guard, so
+   the two layers cannot drift apart.
+2. **Mandatory confirmation.** `run_command` always default-declines, even in `auto` and even in-root.
+3. **A best-effort command-text heuristic (UX, not a control).** `references_sensitive_path`
+   whitespace-tokenizes the command and, on a hit, prepends a loud warning to the confirmation. It is
+   trivially evaded (obfuscation, base64, indirect reads) and **is not sold as a guarantee**; it only
+   makes an already-confirmed action scarier and never allows nor denies on its own.
+
+On platforms without OS confinement (Linux/Windows today), `run_command` is **not** secret-guarded at
+the OS level: the mandatory confirmation is the sole control, and the heuristic is the only secrets-aware
+cue. This is the residual the Linux/Windows adapters (tracked below) will close.
+
 **`unsafe_code = "forbid"` is preserved** via the wrapper binary (and, for Linux, the `landlock`
 crate, which encapsulates its own `unsafe`) rather than a hand-written `pre_exec` hook. If `forbid`
 ever trips, a single documented `#[allow(unsafe_code)]` scoped to one adapter module only — never
