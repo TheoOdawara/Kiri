@@ -4,5 +4,6 @@ pub mod control;
 pub mod exec;
 pub mod fs;
 pub mod sandbox;
+pub mod secret_paths;
 pub mod sensitive;
 pub mod support;

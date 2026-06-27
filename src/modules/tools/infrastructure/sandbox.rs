@@ -11,12 +11,10 @@ use crate::modules::tools::application::sandbox::{CreateResolution, Sandbox};
 use crate::modules::tools::infrastructure::confine::noop::NoConfinement;
 use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
 
-/// Directory names that hold credentials/keys. Every path resolution refuses to operate *inside* one
-/// of these, since the file-name sensitive guard matches files, not directories — without this,
-/// `search` could recurse into `~/.ssh` and print `id_rsa` line by line, and `read_file` could read
-/// `~/.aws/config` (a non-sensitive *name* in a secret *dir*). Exposed so `search`/`list_dir` can also
-/// exclude these directories from their own recursion. Compared case-insensitively (macOS APFS).
-pub(crate) const SECRET_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker"];
+/// The credential-directory names guarded by both the path-resolution refusal here and the macOS
+/// Seatbelt read-deny. Single-sourced in `secret_paths` and re-exported so existing importers
+/// (`search.rs`, `run_command.rs`) keep resolving `sandbox::SECRET_DIRS` unchanged.
+pub(crate) use crate::modules::tools::infrastructure::secret_paths::SECRET_DIRS;
 
 /// Confines every file operation to a canonicalized root directory, and refuses CRUD on files
 /// whose name matches a sensitive pattern (secrets, keys, credentials). All file tools resolve
@@ -460,6 +458,24 @@ mod tests {
             sb.secret_dir_component(Path::new("/home/u/.Docker/config.json")),
             Some(".docker")
         );
+    }
+
+    // Lock the wiring: the resolution guard (`secret_dir_component`) must flag every directory name in
+    // the single-sourced `secret_paths::SECRET_DIRS`, so a future edit to the shared list cannot
+    // silently bypass the guard (and the Seatbelt layer that shares the same source).
+    #[test]
+    fn secret_paths_dirs_match_resolution_guard() {
+        use crate::modules::tools::infrastructure::secret_paths;
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        for name in secret_paths::SECRET_DIRS {
+            let path = PathBuf::from("/home/u").join(name).join("file");
+            assert_eq!(
+                sb.secret_dir_component(&path),
+                Some(*name),
+                "secret_dir_component must flag the single-sourced dir '{name}'"
+            );
+        }
     }
 
     // The sensitive-file guard is the secrets chokepoint, yet every other test builds the sandbox with
