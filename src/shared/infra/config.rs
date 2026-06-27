@@ -23,12 +23,25 @@ mod tests {
     // module. Guard the invariant structurally so a future edit cannot silently re-introduce the edge.
     #[test]
     fn config_has_no_module_imports() {
-        let source = include_str!("config.rs");
-        // Build the needle by concatenation so this guard's own literal does not self-match the file.
+        // Scan the facade AND every submodule: the imports live in the submodules after the split, so a
+        // facade-only scan would pass tautologically and let the leaf-module invariant rot silently.
+        let sources = [
+            include_str!("config.rs"),
+            include_str!("config/system_prompt.rs"),
+            include_str!("config/defaults.rs"),
+            include_str!("config/raw.rs"),
+            include_str!("config/resolve.rs"),
+            include_str!("config/writers.rs"),
+            include_str!("config/cli.rs"),
+            include_str!("config/settings.rs"),
+        ];
+        // Build the needle by concatenation so this guard's own literal does not self-match.
         let needle = concat!("use crate", "::modules::");
-        assert!(
-            !source.contains(needle),
-            "shared/infra/config.rs must not import from any module"
-        );
+        for source in sources {
+            assert!(
+                !source.contains(needle),
+                "shared/infra/config (incl. submodules) must not import from any module"
+            );
+        }
     }
 }

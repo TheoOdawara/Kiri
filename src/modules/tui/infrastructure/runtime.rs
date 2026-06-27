@@ -394,17 +394,29 @@ mod tests {
     // live only in `app::wire`. Guard that runtime.rs constructs no sync adapter and recomputes no path.
     #[test]
     fn runtime_has_no_sync_adapter_construction() {
-        let source = include_str!("runtime.rs");
-        // Build needles by concatenation so this guard's own literals do not self-match the file.
-        for needle in [
-            concat!("Sqlite", "SharedMemory"),
-            concat!("Git", "Cli"),
-            concat!("join(\"memory\")", ".join(\"shared.db\")"),
-        ] {
-            assert!(
-                !source.contains(needle),
-                "runtime.rs must not construct sync adapters or recompute the shared-db path: {needle:?}"
-            );
+        // Scan the facade AND every runtime submodule: `sync_push` now lives in `runtime/sync.rs`, so a
+        // facade-only scan would no longer cover the relocated sync code and the guard would rot.
+        let sources = [
+            include_str!("runtime.rs"),
+            include_str!("runtime/provider_swap.rs"),
+            include_str!("runtime/turn.rs"),
+            include_str!("runtime/session_ops.rs"),
+            include_str!("runtime/distill.rs"),
+            include_str!("runtime/sync.rs"),
+            include_str!("runtime/render.rs"),
+        ];
+        // Build needles by concatenation so this guard's own literals do not self-match.
+        for source in sources {
+            for needle in [
+                concat!("Sqlite", "SharedMemory"),
+                concat!("Git", "Cli"),
+                concat!("join(\"memory\")", ".join(\"shared.db\")"),
+            ] {
+                assert!(
+                    !source.contains(needle),
+                    "runtime (incl. submodules) must not construct sync adapters or recompute the shared-db path: {needle:?}"
+                );
+            }
         }
     }
 

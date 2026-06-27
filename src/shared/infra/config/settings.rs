@@ -23,8 +23,9 @@ use super::system_prompt::SYSTEM_PROMPT;
 use super::writers::{default_provider, ensure_private_dir, write_starter_config};
 
 /// The kiri global config/state directory (`~/.kiri`). Houses `config.toml`, the credentials fallback
-/// file, and the shared-memory database.
-pub fn kiri_global_dir() -> PathBuf {
+/// file, and the shared-memory database. Private: only `Settings::resolve` (this file) derives it; every
+/// consumer reads the resolved `Settings::global_dir` field, the single harness-home source (ADR 0015).
+fn kiri_global_dir() -> PathBuf {
     expand_home("~/.kiri")
 }
 
