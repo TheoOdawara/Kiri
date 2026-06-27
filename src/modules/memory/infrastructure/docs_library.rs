@@ -94,7 +94,12 @@ impl DocsLibrary {
             };
             while let Some(entry) = reader.next_entry().await? {
                 let path = entry.path();
-                if path.is_dir() {
+                // `file_type` reads the entry's own type without traversing a symlink, so a symlinked
+                // file or dir under `docs/` is skipped — `consult_docs` cannot follow it out of the root.
+                let file_type = entry.file_type().await?;
+                if file_type.is_symlink() {
+                    continue;
+                } else if file_type.is_dir() {
                     dirs.push(path);
                 } else if is_markdown(&path) {
                     files.push(path);
@@ -234,5 +239,30 @@ mod tests {
         write(&docs_root, "a.md", "content").await;
         let docs = DocsLibrary::new(docs_root);
         assert!(docs.search("   ", 5).await.unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn docs_walk_skips_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let docs_root = dir.path().join("docs");
+        write(&docs_root, "real.md", "architecture lives in this doc").await;
+
+        // A secret outside the docs root, reachable only via a symlink placed inside it.
+        let outside = dir.path().join("outside");
+        write(
+            &outside,
+            "secret.md",
+            "architecture secret outside the docs root",
+        )
+        .await;
+        symlink(&outside, docs_root.join("linked")).unwrap();
+
+        let docs = DocsLibrary::new(docs_root);
+        let hits = docs.search("architecture", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "real.md");
     }
 }

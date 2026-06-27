@@ -3,7 +3,7 @@ use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::shared::kernel::error::AgentError;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::RwLock;
@@ -16,13 +16,32 @@ fn mem<E: std::fmt::Display>(error: E) -> AgentError {
 }
 
 /// Write `content` to `path` atomically: a temp sibling then rename. A crash mid-write can otherwise
-/// truncate `index.json`/`embeddings.json`, and the next `load_index` then fails to parse and makes the
-/// whole project store inert.
+/// truncate `index.json`/`embeddings.json` (the next `load_index` then fails to parse and makes the whole
+/// project store inert) or leave a half-written entry body. The temp name appends a `.kiri-tmp` suffix to
+/// the full file name — a sibling in the same directory (so the rename stays atomic) that also works for
+/// the `.md` bodies, not only the JSON files.
 async fn write_atomic(path: &Path, content: &str) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".kiri-tmp");
+    let tmp = PathBuf::from(tmp);
     fs::write(&tmp, content).await?;
     fs::rename(&tmp, path).await?;
     Ok(())
+}
+
+/// Lexically join `rel` onto `root`, returning `None` if `rel` is absolute or contains a `..` component.
+/// A corrupted or merged `index.json` could carry a path that escapes the memory dir; this keeps `load`
+/// and `search` from reading outside `root`. Lexical (mirrors the sandbox's `join_checked`) and total —
+/// it never touches the filesystem and never panics.
+fn contained_join(root: &Path, rel: &str) -> Option<PathBuf> {
+    for component in Path::new(rel).components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            // ParentDir escapes the root; RootDir/Prefix are absolute — reject all of them.
+            _ => return None,
+        }
+    }
+    Some(root.join(rel))
 }
 
 /// Markdown-based project memory storage with YAML front-matter.
@@ -216,7 +235,10 @@ impl ProjectMemory for FileProjectMemory {
             fs::create_dir_all(parent).await?;
         }
 
-        fs::write(&path, content).await?;
+        // Write the body atomically, then update the index. The body-before-index ordering is the
+        // recovery contract: a crash after the body but before the index leaves an orphan file that
+        // `search` simply never reaches (it walks the index), never a truncated/half-written entry.
+        write_atomic(&path, &content).await?;
 
         // Update the index. The path is built by joining `root`, so stripping it back cannot fail; the
         // fallback to the full path keeps this total without an `unwrap`.
@@ -241,7 +263,11 @@ impl ProjectMemory for FileProjectMemory {
         let Some(index_entry) = index.entries.get(id) else {
             return Ok(None);
         };
-        let path = self.root.join(&index_entry.path);
+        // Re-validate the stored path stays under `root`; an escaping path (corrupt/merged index) is
+        // treated as absent rather than read from outside the memory dir.
+        let Some(path) = contained_join(&self.root, &index_entry.path) else {
+            return Ok(None);
+        };
         drop(index);
 
         let content = fs::read_to_string(&path).await?;
@@ -272,7 +298,9 @@ impl ProjectMemory for FileProjectMemory {
             index
                 .entries
                 .values()
-                .map(|index_entry| self.root.join(&index_entry.path))
+                // Skip an entry whose stored path escapes the memory root (corrupt/merged index) rather
+                // than reading outside the dir; one bad entry must not blank out every other match.
+                .filter_map(|index_entry| contained_join(&self.root, &index_entry.path))
                 .collect()
         };
 
@@ -510,5 +538,73 @@ mod tests {
         let candidates = memory.embedded_candidates("model-a", 10).await.unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0.id, a.id);
+    }
+
+    /// Hand-write an index whose stored path escapes the memory root, with a real file at the escaped
+    /// location, so the only thing keeping it out of reach is the containment check.
+    async fn seed_escaping_index(dir: &TempDir, root: &Path, leak_body: &str) {
+        FileProjectMemory::new(root.to_path_buf())
+            .init()
+            .await
+            .unwrap();
+        fs::write(dir.path().join(".kiri").join("escape.md"), leak_body)
+            .await
+            .unwrap();
+        let index_json = r#"{"entries":{"evil":{"path":"../escape.md","kind":"fact","tags":[],"updated_at":"2026-01-01T00:00:00Z"}}}"#;
+        fs::write(root.join("index.json"), index_json)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_skips_escaping_index_path() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        seed_escaping_index(&dir, &root, "leaked secret").await;
+
+        let memory = FileProjectMemory::new(root);
+        memory.init().await.unwrap();
+        assert!(memory.load("evil").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn search_skips_escaping_index_path() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        seed_escaping_index(&dir, &root, "leaked secret token").await;
+
+        let memory = FileProjectMemory::new(root);
+        memory.init().await.unwrap();
+        assert!(memory.search("leaked", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn entry_body_written_atomically() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        let memory = FileProjectMemory::new(root.clone());
+        memory.init().await.unwrap();
+
+        let entry = MemoryEntry::new(
+            MemoryKind::Pattern,
+            "atomic body content".into(),
+            HashSet::new(),
+            None,
+        );
+        memory.save(&entry).await.unwrap();
+
+        // A successful save leaves no temp sibling behind (the rename consumed it).
+        let mut reader = fs::read_dir(&root).await.unwrap();
+        while let Some(e) = reader.next_entry().await.unwrap() {
+            let name = e.file_name();
+            assert!(
+                !name.to_string_lossy().ends_with(".kiri-tmp"),
+                "leftover temp file: {}",
+                name.to_string_lossy()
+            );
+        }
+
+        let loaded = memory.load(&entry.id).await.unwrap().unwrap();
+        assert_eq!(loaded.content, entry.content);
     }
 }
