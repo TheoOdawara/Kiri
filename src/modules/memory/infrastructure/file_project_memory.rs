@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 
 type Result<T> = std::result::Result<T, AgentError>;
@@ -29,10 +30,14 @@ async fn write_atomic(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Largest entry body read into memory, mirroring `docs_library`'s `MAX_FILE_BYTES`. Caps a single read
+/// so a symlinked `/dev/zero` or an over-sized committed `.md` cannot exhaust memory.
+const MAX_ENTRY_BYTES: u64 = 256 * 1024;
+
 /// Lexically join `rel` onto `root`, returning `None` if `rel` is absolute or contains a `..` component.
-/// A corrupted or merged `index.json` could carry a path that escapes the memory dir; this keeps `load`
-/// and `search` from reading outside `root`. Lexical (mirrors the sandbox's `join_checked`) and total —
-/// it never touches the filesystem and never panics.
+/// A corrupted or merged `index.json` could carry a path that escapes the memory dir. This is only the
+/// lexical first stage (mirrors the sandbox's `join_checked`); `resolve_contained` adds the canonicalize
+/// backstop that also defeats a symlink escape. Total — it never touches the filesystem and never panics.
 fn contained_join(root: &Path, rel: &str) -> Option<PathBuf> {
     for component in Path::new(rel).components() {
         match component {
@@ -42,6 +47,27 @@ fn contained_join(root: &Path, rel: &str) -> Option<PathBuf> {
         }
     }
     Some(root.join(rel))
+}
+
+/// Resolve a stored index path to a real, symlink-resolved path asserted to stay inside the memory root,
+/// returning `None` when it is absent or escapes. `contained_join` rejects the lexical `..`/absolute case;
+/// canonicalizing both sides then closes the symlink hole — an `index.json` entry of all-`Normal`
+/// components plus a hostile committed symlink to `~/.ssh/id_rsa` would otherwise be followed by the read.
+/// Mirrors the sandbox's `resolve_existing` (lexical join → canonicalize → assert within root).
+async fn resolve_contained(root: &Path, rel: &str) -> Option<PathBuf> {
+    let candidate = contained_join(root, rel)?;
+    let real_root = fs::canonicalize(root).await.ok()?;
+    let real = fs::canonicalize(&candidate).await.ok()?;
+    real.starts_with(&real_root).then_some(real)
+}
+
+/// Read at most `MAX_ENTRY_BYTES` of `path` as lossy UTF-8. The bounded read — not a post-hoc slice — is
+/// what caps memory even for an endless source such as `/dev/zero`.
+async fn read_capped(path: &Path) -> Result<String> {
+    let file = fs::File::open(path).await?;
+    let mut buf = Vec::new();
+    file.take(MAX_ENTRY_BYTES).read_to_end(&mut buf).await?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Markdown-based project memory storage with YAML front-matter.
@@ -203,7 +229,7 @@ impl FileProjectMemory {
         };
 
         let entry = if let Some(fm) = front_matter {
-            serde_yaml_ng::from_str(fm).map_err(mem)?
+            serde_norway::from_str(fm).map_err(mem)?
         } else {
             // Fallback for a file without front-matter: treat the whole body as a Fact.
             MemoryEntry::new(MemoryKind::Fact, body.to_string(), HashSet::new(), None)
@@ -213,7 +239,7 @@ impl FileProjectMemory {
     }
 
     fn render_markdown_file(&self, entry: &MemoryEntry) -> Result<String> {
-        let front_matter = serde_yaml_ng::to_string(entry).map_err(mem)?;
+        let front_matter = serde_norway::to_string(entry).map_err(mem)?;
         Ok(format!("---\n{}---\n\n{}", front_matter, entry.content))
     }
 }
@@ -259,31 +285,39 @@ impl ProjectMemory for FileProjectMemory {
     }
 
     async fn load(&self, id: &str) -> Result<Option<MemoryEntry>> {
-        let index = self.index.read().await;
-        let Some(index_entry) = index.entries.get(id) else {
-            return Ok(None);
+        let rel = {
+            let index = self.index.read().await;
+            let Some(index_entry) = index.entries.get(id) else {
+                return Ok(None);
+            };
+            index_entry.path.clone()
         };
-        // Re-validate the stored path stays under `root`; an escaping path (corrupt/merged index) is
-        // treated as absent rather than read from outside the memory dir.
-        let Some(path) = contained_join(&self.root, &index_entry.path) else {
-            return Ok(None);
-        };
-        drop(index);
 
-        let content = fs::read_to_string(&path).await?;
+        // Re-validate the stored path resolves to a real file under `root`; an escaping or symlinked path
+        // (corrupt/merged index, or a hostile committed symlink) is treated as absent rather than read
+        // from outside the memory dir.
+        let Some(path) = resolve_contained(&self.root, &rel).await else {
+            return Ok(None);
+        };
+
+        let content = read_capped(&path).await?;
         let entry = self.parse_markdown_file(&path, &content)?;
         Ok(Some(entry))
     }
 
     async fn delete(&self, id: &str) -> Result<bool> {
-        let mut index = self.index.write().await;
-        let Some(index_entry) = index.entries.remove(id) else {
-            return Ok(false);
+        let rel = {
+            let mut index = self.index.write().await;
+            let Some(index_entry) = index.entries.remove(id) else {
+                return Ok(false);
+            };
+            index_entry.path.clone()
         };
-        let path = self.root.join(&index_entry.path);
-        drop(index);
 
-        if path.exists() {
+        // Only touch the filesystem for a path that stays inside the memory root; an escaping or symlinked
+        // index path is dropped from the in-memory index without becoming an out-of-root delete primitive.
+        // The index is still persisted and the entry reported gone.
+        if let Some(path) = resolve_contained(&self.root, &rel).await {
             fs::remove_file(&path).await?;
         }
         self.save_index().await?;
@@ -293,25 +327,24 @@ impl ProjectMemory for FileProjectMemory {
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
         // Snapshot the candidate paths under the lock, then release it before any file I/O so a long
         // read can never block a concurrent writer (matches `list`/`list_by_kind`).
-        let paths: Vec<PathBuf> = {
+        let rels: Vec<String> = {
             let index = self.index.read().await;
-            index
-                .entries
-                .values()
-                // Skip an entry whose stored path escapes the memory root (corrupt/merged index) rather
-                // than reading outside the dir; one bad entry must not blank out every other match.
-                .filter_map(|index_entry| contained_join(&self.root, &index_entry.path))
-                .collect()
+            index.entries.values().map(|e| e.path.clone()).collect()
         };
 
         let mut results = Vec::new();
-        for path in paths {
+        for rel in rels {
             if results.len() >= limit {
                 break;
             }
+            // Skip an entry whose stored path escapes the memory root (corrupt/merged index or a hostile
+            // symlink) rather than reading outside the dir; one bad entry must not blank out other matches.
+            let Some(path) = resolve_contained(&self.root, &rel).await else {
+                continue;
+            };
             // Deliberately skip an unreadable entry rather than fail the whole search: one corrupt or
             // racing file must not blank out every other match.
-            if let Ok(content) = fs::read_to_string(&path).await
+            if let Ok(content) = read_capped(&path).await
                 && let Ok(entry) = self.parse_markdown_file(&path, &content)
                 && entry.matches_query(query)
             {
@@ -629,5 +662,62 @@ mod tests {
 
         let loaded = memory.load(&entry.id).await.unwrap().unwrap();
         assert_eq!(loaded.content, entry.content);
+    }
+
+    #[tokio::test]
+    async fn write_atomic_writes_overwrites_and_leaves_no_temp() {
+        // Directly lock the temp-then-rename contract the body write depends on: reverting `write_atomic`
+        // to a plain non-atomic `fs::write` would break the overwrite/no-temp guarantees asserted here.
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("index.json");
+
+        // Writes content to a fresh path.
+        write_atomic(&target, "first").await.unwrap();
+        assert_eq!(fs::read_to_string(&target).await.unwrap(), "first");
+
+        // Overwrites an existing file in place.
+        write_atomic(&target, "second").await.unwrap();
+        assert_eq!(fs::read_to_string(&target).await.unwrap(), "second");
+
+        // No `.kiri-tmp` sibling remains once the rename has consumed the temp.
+        let mut reader = fs::read_dir(dir.path()).await.unwrap();
+        while let Some(e) = reader.next_entry().await.unwrap() {
+            assert!(
+                !e.file_name().to_string_lossy().ends_with(".kiri-tmp"),
+                "leftover temp file after write_atomic"
+            );
+        }
+    }
+
+    /// Hand-write an index whose stored path is a plain in-root name that is actually a symlink pointing
+    /// OUTSIDE the memory root, with a real secret at the link target. The path passes the lexical guard;
+    /// only the canonicalize backstop keeps the read inside `root`.
+    #[cfg(unix)]
+    async fn seed_symlinked_index(dir: &TempDir, root: &Path, secret_body: &str) {
+        FileProjectMemory::new(root.to_path_buf())
+            .init()
+            .await
+            .unwrap();
+        let secret = dir.path().join("secret.txt");
+        fs::write(&secret, secret_body).await.unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("leak.md")).unwrap();
+        let index_json = r#"{"entries":{"evil":{"path":"leak.md","kind":"fact","tags":[],"updated_at":"2026-01-01T00:00:00Z"}}}"#;
+        fs::write(root.join("index.json"), index_json)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_and_search_skip_symlinked_index_path() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        seed_symlinked_index(&dir, &root, "PRIVATE KEY MATERIAL").await;
+
+        let memory = FileProjectMemory::new(root);
+        memory.init().await.unwrap();
+        // The symlinked entry resolves outside the memory root, so both readers must skip it.
+        assert!(memory.load("evil").await.unwrap().is_none());
+        assert!(memory.search("PRIVATE", 10).await.unwrap().is_empty());
     }
 }
