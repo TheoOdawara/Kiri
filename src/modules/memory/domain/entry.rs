@@ -25,7 +25,7 @@ pub enum MemoryKind {
 
 impl MemoryKind {
     /// All kinds, for enumeration (e.g. a kind picker in the planned memory-management UI).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn all() -> &'static [MemoryKind] {
         &[
             MemoryKind::Decision,
@@ -112,18 +112,11 @@ impl MemoryEntry {
         }
     }
 
-    /// Update the content and the last-update timestamp. Used by tests and reserved for the future
-    /// memory-editing UI.
-    #[allow(dead_code)]
+    /// Update the content and the last-update timestamp. Exercised by the store tests; reserved for the
+    /// future memory-editing UI.
+    #[cfg(test)]
     pub fn update_content(&mut self, content: String) {
         self.content = content;
-        self.updated_at = now_rfc3339();
-    }
-
-    /// Add tags. Reserved for the future memory-management UI.
-    #[allow(dead_code)]
-    pub fn add_tags(&mut self, tags: impl IntoIterator<Item = String>) {
-        self.tags.extend(tags);
         self.updated_at = now_rfc3339();
     }
 
