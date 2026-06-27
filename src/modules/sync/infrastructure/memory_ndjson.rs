@@ -30,10 +30,6 @@ pub struct MergeReport {
     pub skipped: usize,
 }
 
-fn ser<E: std::fmt::Display>(error: E) -> AgentError {
-    AgentError::Memory(error.to_string())
-}
-
 /// Export the shared memory to deterministic NDJSON (one entry per line, sorted by id) so the synced repo
 /// diffs cleanly and merges by line. Embedding vectors are NOT exported — they are machine-local derived
 /// data, re-derivable from content on each machine.
@@ -42,7 +38,7 @@ pub async fn export(memory: &dyn SharedMemory, path: &Path) -> Result<usize> {
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     let mut body = String::new();
     for entry in &entries {
-        body.push_str(&serde_json::to_string(entry).map_err(ser)?);
+        body.push_str(&serde_json::to_string(entry).map_err(AgentError::memory)?);
         body.push('\n');
     }
     // The exported memory is personal/preference content: create it owner-only up front (`0600` on Unix)
@@ -103,7 +99,7 @@ pub async fn import(memory: &dyn SharedMemory, path: &Path) -> Result<MergeRepor
     };
     // Belt-and-suspenders over the `take` ceiling: surface a clear over-cap error instead of a silent EOF.
     let mut bytes_read: u64 = 0;
-    while let Some(line) = lines.next_line().await.map_err(ser)? {
+    while let Some(line) = lines.next_line().await.map_err(AgentError::memory)? {
         // `next_line` strips the terminator; count it back so the running total tracks the on-disk size.
         bytes_read = bytes_read.saturating_add(line.len() as u64 + 1);
         if bytes_read > MAX_IMPORT_BYTES {

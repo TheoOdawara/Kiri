@@ -11,11 +11,6 @@ use tokio::sync::RwLock;
 
 type Result<T> = std::result::Result<T, AgentError>;
 
-/// Map a serialization/format failure into the kernel's memory error variant.
-fn mem<E: std::fmt::Display>(error: E) -> AgentError {
-    AgentError::Memory(error.to_string())
-}
-
 /// Write `content` to `path` atomically: a temp sibling then rename. A crash mid-write can otherwise
 /// truncate `index.json`/`embeddings.json` (the next `load_index` then fails to parse and makes the whole
 /// project store inert) or leave a half-written entry body. The temp name appends a `.kiri-tmp` suffix to
@@ -126,7 +121,7 @@ impl FileProjectMemory {
         let path = self.index_path();
         if path.exists() {
             let content = fs::read_to_string(&path).await?;
-            let index: ProjectIndex = serde_json::from_str(&content).map_err(mem)?;
+            let index: ProjectIndex = serde_json::from_str(&content).map_err(AgentError::memory)?;
             *self.index.write().await = index;
         }
         Ok(())
@@ -134,7 +129,7 @@ impl FileProjectMemory {
 
     async fn save_index(&self) -> Result<()> {
         let index = self.index.read().await.clone();
-        let content = serde_json::to_string_pretty(&index).map_err(mem)?;
+        let content = serde_json::to_string_pretty(&index).map_err(AgentError::memory)?;
         write_atomic(&self.index_path(), &content).await?;
         Ok(())
     }
@@ -149,7 +144,7 @@ impl FileProjectMemory {
             return Ok(HashMap::new());
         }
         let content = fs::read_to_string(&path).await?;
-        serde_json::from_str(&content).map_err(mem)
+        serde_json::from_str(&content).map_err(AgentError::memory)
     }
 
     /// Persist (or replace) the embedding vector for an entry in the sidecar cache.
@@ -162,7 +157,7 @@ impl FileProjectMemory {
                 vector: vector.to_vec(),
             },
         );
-        let content = serde_json::to_string(&sidecar).map_err(mem)?;
+        let content = serde_json::to_string(&sidecar).map_err(AgentError::memory)?;
         write_atomic(&self.embeddings_path(), &content).await?;
         Ok(())
     }
@@ -235,7 +230,7 @@ impl FileProjectMemory {
         };
 
         let entry = if let Some(fm) = front_matter {
-            serde_norway::from_str(fm).map_err(mem)?
+            serde_norway::from_str(fm).map_err(AgentError::memory)?
         } else {
             // Fallback for a file without front-matter: treat the whole body as a Fact.
             MemoryEntry::new(MemoryKind::Fact, body.to_string(), HashSet::new(), None)
@@ -245,7 +240,7 @@ impl FileProjectMemory {
     }
 
     fn render_markdown_file(&self, entry: &MemoryEntry) -> Result<String> {
-        let front_matter = serde_norway::to_string(entry).map_err(mem)?;
+        let front_matter = serde_norway::to_string(entry).map_err(AgentError::memory)?;
         Ok(format!("---\n{}---\n\n{}", front_matter, entry.content))
     }
 }

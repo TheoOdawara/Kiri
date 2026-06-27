@@ -40,3 +40,59 @@ pub enum AgentError {
     #[error("config error: {0}")]
     Config(String),
 }
+
+impl AgentError {
+    /// Build an [`AgentError::Memory`] from any `Display` source. The single constructor the memory
+    /// adapters (SQLite + file) and the sync NDJSON (de)serializer map their non-IO failures through, so
+    /// the "stringify into this variant" rule lives here instead of being re-hand-rolled per adapter. It
+    /// also gives the shared SQLite harness one canonical `fn(String) -> AgentError` to parameterize on.
+    pub fn memory(error: impl std::fmt::Display) -> Self {
+        Self::Memory(error.to_string())
+    }
+
+    /// Build an [`AgentError::Session`] from any `Display` source. The single constructor the session
+    /// store maps its non-IO failures through (mirrors [`AgentError::memory`]).
+    pub fn session(error: impl std::fmt::Display) -> Self {
+        Self::Session(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_constructor_builds_memory_variant() {
+        let error = AgentError::memory("disk full");
+        assert!(matches!(&error, AgentError::Memory(message) if message == "disk full"));
+    }
+
+    #[test]
+    fn session_constructor_builds_session_variant() {
+        let error = AgentError::session("locked");
+        assert!(matches!(&error, AgentError::Session(message) if message == "locked"));
+    }
+
+    #[test]
+    fn constructor_accepts_any_display_source() {
+        // A bare `&str`.
+        assert!(matches!(AgentError::memory("plain"), AgentError::Memory(_)));
+
+        // A real `io::Error` (one of the `Display` sources the adapters pass).
+        let from_io = AgentError::memory(std::io::Error::other("io boom"));
+        assert!(matches!(&from_io, AgentError::Memory(message) if message.contains("io boom")));
+
+        // A rusqlite-style error stand-in: any `Display` type the SQLite adapters thread through.
+        #[derive(Debug)]
+        struct SqliteLike;
+        impl std::fmt::Display for SqliteLike {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("sqlite failure")
+            }
+        }
+        let from_sqlite = AgentError::session(SqliteLike);
+        assert!(
+            matches!(&from_sqlite, AgentError::Session(message) if message == "sqlite failure")
+        );
+    }
+}

@@ -16,11 +16,6 @@ use crate::shared::kernel::message::Message;
 
 type Result<T> = std::result::Result<T, AgentError>;
 
-/// Map any non-IO failure (SQLite, serde, join, lock) into the kernel's session error variant.
-fn sess<E: std::fmt::Display>(error: E) -> AgentError {
-    AgentError::Session(error.to_string())
-}
-
 /// RFC3339 timestamp for "now". Formatting a valid UTC instant cannot fail in practice; the empty
 /// fallback keeps this runtime path total without an `unwrap` (forbidden outside tests).
 fn now_rfc3339() -> String {
@@ -44,12 +39,13 @@ impl SqliteSessionStore {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(&db_path).map_err(sess)?;
+        let conn = Connection::open(&db_path).map_err(AgentError::session)?;
         // ~/.kiri/sessions.db is global across every workspace and terminal, so a second running Kiri
         // can contend for a write. SQLITE_BUSY returns instantly (the op timeout cannot wait it out), so
         // a busy_timeout lets brief cross-process contention be waited out instead of failing. WAL is a
         // best-effort throughput win that also reduces reader/writer contention.
-        conn.busy_timeout(DB_OP_TIMEOUT).map_err(sess)?;
+        conn.busy_timeout(DB_OP_TIMEOUT)
+            .map_err(AgentError::session)?;
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -61,7 +57,7 @@ impl SqliteSessionStore {
     /// cannot be opened or initialized — the harness still wires a (unavailable) store instead of
     /// failing to start. Reports `is_available() == false`.
     pub fn in_memory_inert() -> Result<Self> {
-        let conn = Connection::open_in_memory().map_err(sess)?;
+        let conn = Connection::open_in_memory().map_err(AgentError::session)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             available: false,
@@ -85,7 +81,7 @@ where
     T: Send + 'static,
 {
     match tokio::time::timeout(DB_OP_TIMEOUT, spawn_blocking(op)).await {
-        Ok(joined) => joined.map_err(sess)?,
+        Ok(joined) => joined.map_err(AgentError::session)?,
         Err(_) => Err(AgentError::Session(
             "database operation timed out".to_string(),
         )),
@@ -128,7 +124,7 @@ impl SessionStore for SqliteSessionStore {
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_ordinal
                     ON messages(session_id, ordinal);",
             )
-            .map_err(sess)?;
+            .map_err(AgentError::session)?;
             Ok(())
         })
         .await
@@ -146,7 +142,7 @@ impl SessionStore for SqliteSessionStore {
                  VALUES (?1, ?2, '', ?3, ?3)",
                 params![id, project_id, now],
             )
-            .map_err(sess)?;
+            .map_err(AgentError::session)?;
             Ok(Session {
                 id,
                 project_id,
@@ -170,8 +166,9 @@ impl SessionStore for SqliteSessionStore {
             .iter()
             .map(|message| {
                 let dto = StoredMessage::from(message);
-                let images = serde_json::to_string(&dto.images).map_err(sess)?;
-                let tool_calls = serde_json::to_string(&dto.tool_calls).map_err(sess)?;
+                let images = serde_json::to_string(&dto.images).map_err(AgentError::session)?;
+                let tool_calls =
+                    serde_json::to_string(&dto.tool_calls).map_err(AgentError::session)?;
                 Ok((dto.role, dto.content, images, tool_calls, dto.tool_call_id))
             })
             .collect::<Result<_>>()?;
@@ -183,14 +180,14 @@ impl SessionStore for SqliteSessionStore {
             // early-return (no stranded transaction on the shared connection).
             let tx = guard
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(sess)?;
+                .map_err(AgentError::session)?;
             let base: i64 = tx
                 .query_row(
                     "SELECT COALESCE(MAX(ordinal), -1) + 1 FROM messages WHERE session_id = ?1",
                     params![session_id],
                     |row| row.get(0),
                 )
-                .map_err(sess)?;
+                .map_err(AgentError::session)?;
             for (offset, (role, content, images, tool_calls, tool_call_id)) in
                 rows.iter().enumerate()
             {
@@ -209,14 +206,14 @@ impl SessionStore for SqliteSessionStore {
                         tool_call_id
                     ],
                 )
-                .map_err(sess)?;
+                .map_err(AgentError::session)?;
             }
             tx.execute(
                 "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
                 params![session_id, now],
             )
-            .map_err(sess)?;
-            tx.commit().map_err(sess)?;
+            .map_err(AgentError::session)?;
+            tx.commit().map_err(AgentError::session)?;
             Ok(())
         })
         .await
@@ -232,7 +229,7 @@ impl SessionStore for SqliteSessionStore {
                 "UPDATE sessions SET title = ?2 WHERE id = ?1",
                 params![session_id, title],
             )
-            .map_err(sess)?;
+            .map_err(AgentError::session)?;
             Ok(())
         })
         .await
@@ -261,7 +258,7 @@ impl SessionStore for SqliteSessionStore {
                      ORDER BY s.updated_at DESC
                      LIMIT ?2",
                 )
-                .map_err(sess)?;
+                .map_err(AgentError::session)?;
             let rows = stmt
                 .query_map(params![project_id, limit as i64], |row| {
                     Ok(SessionSummary {
@@ -271,10 +268,10 @@ impl SessionStore for SqliteSessionStore {
                         message_count: row.get::<_, i64>(3)? as usize,
                     })
                 })
-                .map_err(sess)?;
+                .map_err(AgentError::session)?;
             let mut out = Vec::new();
             for row in rows {
-                out.push(row.map_err(sess)?);
+                out.push(row.map_err(AgentError::session)?);
             }
             Ok(out)
         })
@@ -302,7 +299,7 @@ impl SessionStore for SqliteSessionStore {
                 // Absent session is `Ok(None)`; a real DB error (locked/corrupt/IO) must surface, not be
                 // reported to the user as "session not found".
                 Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-                Err(error) => return Err(sess(error)),
+                Err(error) => return Err(AgentError::session(error)),
             };
             let (project_id, title, created_at, updated_at) = header;
             let mut stmt = conn
@@ -310,7 +307,7 @@ impl SessionStore for SqliteSessionStore {
                     "SELECT role, content, images, tool_calls, tool_call_id
                      FROM messages WHERE session_id = ?1 ORDER BY ordinal",
                 )
-                .map_err(sess)?;
+                .map_err(AgentError::session)?;
             let rows = stmt
                 .query_map(params![session_id], |row| {
                     let images_raw: String = row.get(2)?;
@@ -335,11 +332,14 @@ impl SessionStore for SqliteSessionStore {
                         tool_call_id: row.get(4)?,
                     }))
                 })
-                .map_err(sess)?;
+                .map_err(AgentError::session)?;
             let mut messages = Vec::new();
             for row in rows {
                 // Skip a corrupt row, and a row with an unrecognized role, rather than abort the load.
-                if let Some(message) = row.map_err(sess)?.and_then(StoredMessage::into_domain) {
+                if let Some(message) = row
+                    .map_err(AgentError::session)?
+                    .and_then(StoredMessage::into_domain)
+                {
                     messages.push(message);
                 }
             }
@@ -366,10 +366,10 @@ impl SessionStore for SqliteSessionStore {
                 "DELETE FROM messages WHERE session_id = ?1",
                 params![session_id],
             )
-            .map_err(sess)?;
+            .map_err(AgentError::session)?;
             let affected = conn
                 .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
-                .map_err(sess)?;
+                .map_err(AgentError::session)?;
             Ok(affected > 0)
         })
         .await

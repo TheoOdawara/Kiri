@@ -12,11 +12,6 @@ use crate::shared::kernel::error::AgentError;
 
 type Result<T> = std::result::Result<T, AgentError>;
 
-/// Map any non-IO failure (SQLite, serde, join, lock) into the kernel's memory error variant.
-fn mem<E: std::fmt::Display>(error: E) -> AgentError {
-    AgentError::Memory(error.to_string())
-}
-
 const SELECT_COLUMNS: &str =
     "id, kind, content, tags, project_id, created_at, updated_at FROM entries";
 
@@ -34,7 +29,7 @@ impl SqliteSharedMemory {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(&db_path).map_err(mem)?;
+        let conn = Connection::open(&db_path).map_err(AgentError::memory)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -43,7 +38,7 @@ impl SqliteSharedMemory {
     /// Open an ephemeral in-memory database. Used as an inert fallback when the on-disk store cannot
     /// be opened, so the harness still wires a (unavailable) store instead of failing to start.
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().map_err(mem)?;
+        let conn = Connection::open_in_memory().map_err(AgentError::memory)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -64,7 +59,7 @@ impl SqliteSharedMemory {
                  ON CONFLICT(entry_id) DO UPDATE SET model = ?2, dim = ?3, vector = ?4",
                 params![entry_id, model, dim, blob],
             )
-            .map_err(mem)?;
+            .map_err(AgentError::memory)?;
             Ok(())
         })
         .await
@@ -90,17 +85,17 @@ impl SqliteSharedMemory {
                      WHERE emb.model = ?1 \
                      ORDER BY e.updated_at DESC LIMIT ?2",
                 )
-                .map_err(mem)?;
+                .map_err(AgentError::memory)?;
             let rows = stmt
                 .query_map(params![model, limit as i64], |row| {
                     let entry = row_to_entry(row)?;
                     let blob: Vec<u8> = row.get("vector")?;
                     Ok((entry, blob_to_vec(&blob)))
                 })
-                .map_err(mem)?;
+                .map_err(AgentError::memory)?;
             let mut out = Vec::new();
             for row in rows {
-                out.push(row.map_err(mem)?);
+                out.push(row.map_err(AgentError::memory)?);
             }
             Ok(out)
         })
@@ -137,7 +132,7 @@ where
     T: Send + 'static,
 {
     match tokio::time::timeout(DB_OP_TIMEOUT, spawn_blocking(op)).await {
-        Ok(joined) => joined.map_err(mem)?,
+        Ok(joined) => joined.map_err(AgentError::memory)?,
         Err(_) => Err(AgentError::Memory(
             "database operation timed out".to_string(),
         )),
@@ -168,12 +163,14 @@ async fn query_entries(
 ) -> Result<Vec<MemoryEntry>> {
     run_blocking(move || -> Result<Vec<MemoryEntry>> {
         let conn = lock(&conn)?;
-        let mut stmt = conn.prepare(&sql).map_err(mem)?;
+        let mut stmt = conn.prepare(&sql).map_err(AgentError::memory)?;
         let params = rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref()));
-        let rows = stmt.query_map(params, row_to_entry).map_err(mem)?;
+        let rows = stmt
+            .query_map(params, row_to_entry)
+            .map_err(AgentError::memory)?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(row.map_err(mem)?);
+            out.push(row.map_err(AgentError::memory)?);
         }
         Ok(out)
     })
@@ -205,7 +202,7 @@ impl SharedMemory for SqliteSharedMemory {
                     vector   BLOB NOT NULL
                 );",
             )
-            .map_err(mem)?;
+            .map_err(AgentError::memory)?;
             Ok(())
         })
         .await
@@ -215,7 +212,7 @@ impl SharedMemory for SqliteSharedMemory {
         let conn = self.conn.clone();
         let entry = entry.clone();
         run_blocking(move || -> Result<()> {
-            let tags = serde_json::to_string(&entry.tags).map_err(mem)?;
+            let tags = serde_json::to_string(&entry.tags).map_err(AgentError::memory)?;
             let conn = lock(&conn)?;
             conn.execute(
                 "INSERT INTO entries (id, kind, content, tags, project_id, created_at, updated_at)
@@ -232,7 +229,7 @@ impl SharedMemory for SqliteSharedMemory {
                     entry.updated_at,
                 ],
             )
-            .map_err(mem)?;
+            .map_err(AgentError::memory)?;
             Ok(())
         })
         .await
@@ -245,10 +242,12 @@ impl SharedMemory for SqliteSharedMemory {
             let conn = lock(&conn)?;
             let mut stmt = conn
                 .prepare(&format!("SELECT {SELECT_COLUMNS} WHERE id = ?1"))
-                .map_err(mem)?;
-            let mut rows = stmt.query_map(params![id], row_to_entry).map_err(mem)?;
+                .map_err(AgentError::memory)?;
+            let mut rows = stmt
+                .query_map(params![id], row_to_entry)
+                .map_err(AgentError::memory)?;
             match rows.next() {
-                Some(row) => Ok(Some(row.map_err(mem)?)),
+                Some(row) => Ok(Some(row.map_err(AgentError::memory)?)),
                 None => Ok(None),
             }
         })
@@ -262,7 +261,7 @@ impl SharedMemory for SqliteSharedMemory {
             let conn = lock(&conn)?;
             let affected = conn
                 .execute("DELETE FROM entries WHERE id = ?1", params![id])
-                .map_err(mem)?;
+                .map_err(AgentError::memory)?;
             Ok(affected > 0)
         })
         .await
@@ -327,7 +326,7 @@ impl SharedMemory for SqliteSharedMemory {
             let conn = lock(&conn)?;
             let count: i64 = conn
                 .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
-                .map_err(mem)?;
+                .map_err(AgentError::memory)?;
             Ok(count as usize)
         })
         .await
@@ -344,7 +343,7 @@ impl SharedMemory for SqliteSharedMemory {
                     params![project_id],
                     |row| row.get(0),
                 )
-                .map_err(mem)?;
+                .map_err(AgentError::memory)?;
             Ok(count as usize)
         })
         .await
