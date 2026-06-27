@@ -1,3 +1,4 @@
+use crate::modules::tui::domain::command_menu::COMMANDS;
 use crate::shared::kernel::approval_mode::ApprovalMode;
 
 /// A slash command parsed from a submitted input line. A line that does not start with `/` is a model
@@ -62,27 +63,28 @@ pub fn parse(line: &str) -> Option<Command> {
     Some(command)
 }
 
-/// The one-screen help shown by `/help`, listing every command and the mode shortcut.
+/// The one-screen help shown by `/help`. The per-command rows are derived from the single `COMMANDS`
+/// catalog so the help and the live preview menu can never list different commands or blurbs; only the
+/// header, the mode shortcut, and the editing hint are help-specific framing. Command names are ASCII, so
+/// `len()` is their display width for the alignment padding (no infra `display_width` dependency from this
+/// application-layer module).
 pub fn help_text() -> String {
-    [
-        "Comandos:",
-        "  /new           descarta a conversa e começa uma nova sessão",
-        "  /resume        retoma a sessão mais recente deste workspace",
-        "  /sessions      escolhe uma sessão anterior para retomar",
-        "  /sync          envia config + memória ao seu repo privado (push)",
-        "  /plan          modo plan (só leitura; planeja e executa após aprovação)",
-        "  /auto          modo auto (executa tudo sem pedir aprovação)",
-        "  /default       modo default (pede aprovação para cada ação)",
-        "  /cd [caminho]  mostra ou muda o workspace ativo",
-        "  /provider      troca o provider ativo (ou adiciona um novo)",
-        "  /models        troca o modelo ativo",
-        "  /effort        troca o nível de esforço (reasoning)",
-        "  /help          mostra esta ajuda",
-        "  /exit          encerra a sessão",
-        "Shift+Tab alterna entre os modos (default → auto → plan).",
-        "Edição: setas/Home/End, Ctrl+setas (palavra), Shift+seleção, Ctrl+A/C/X/V, Ctrl+Z/Y.",
-    ]
-    .join("\n")
+    let name_width = COMMANDS
+        .iter()
+        .map(|spec| spec.name.len())
+        .max()
+        .unwrap_or(0);
+    let mut lines = vec!["Comandos:".to_string()];
+    for spec in COMMANDS {
+        let pad = " ".repeat(name_width - spec.name.len());
+        lines.push(format!("  {}{pad}  {}", spec.name, spec.blurb));
+    }
+    lines.push("Shift+Tab alterna entre os modos (default → auto → plan).".to_string());
+    lines.push(
+        "Edição: setas/Home/End, Ctrl+setas (palavra), Shift+seleção, Ctrl+A/C/X/V, Ctrl+Z/Y."
+            .to_string(),
+    );
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -154,6 +156,78 @@ mod tests {
         assert_eq!(parse("/esforco"), Some(Command::Effort));
         assert_eq!(parse("/provider"), Some(Command::Provider));
         assert_eq!(parse("/providers"), Some(Command::Provider));
+    }
+
+    #[test]
+    fn help_text_is_derived_from_catalog() {
+        let help = help_text();
+        for spec in COMMANDS {
+            assert!(help.contains(spec.name), "help omits {}", spec.name);
+            assert!(
+                help.contains(spec.blurb),
+                "help omits the blurb for {}",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_aliases_match_parser() {
+        use std::collections::BTreeSet;
+
+        // Every catalog token (canonical name + aliases) must be a real parser synonym mapping to the
+        // same command as its name, so the menu never advertises a token the parser would reject.
+        for spec in COMMANDS {
+            let canonical = parse(spec.name).expect("catalog name parses");
+            assert!(!matches!(canonical, Command::Unknown));
+            for alias in spec.aliases {
+                assert_eq!(
+                    parse(alias),
+                    Some(canonical.clone()),
+                    "alias {alias} desynced from {}",
+                    spec.name
+                );
+            }
+        }
+
+        // The catalog token set must equal the parser's arm set. This list mirrors the `parse` match
+        // arms; comparing it to the catalog locks the two against drift (an alias added to one but not the
+        // other fails here — the guard TUIC-06 asks for while the parser keeps its explicit arms).
+        let catalog: BTreeSet<&str> = COMMANDS
+            .iter()
+            .flat_map(|spec| std::iter::once(spec.name).chain(spec.aliases.iter().copied()))
+            .collect();
+        let parser_arms: BTreeSet<&str> = [
+            "/exit",
+            "/sair",
+            "/quit",
+            "/new",
+            "/novo",
+            "/help",
+            "/ajuda",
+            "/plan",
+            "/auto",
+            "/default",
+            "/normal",
+            "/cd",
+            "/models",
+            "/modelos",
+            "/effort",
+            "/esforco",
+            "/provider",
+            "/providers",
+            "/resume",
+            "/retomar",
+            "/sessions",
+            "/sessoes",
+            "/sync",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            catalog, parser_arms,
+            "catalog tokens and parser arms drifted"
+        );
     }
 
     #[test]

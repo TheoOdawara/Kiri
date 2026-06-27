@@ -40,12 +40,12 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "/plan",
         aliases: &[],
-        blurb: "modo plan (planeja e executa após aprovação)",
+        blurb: "modo plan (só leitura; planeja e executa após aprovação)",
     },
     CommandSpec {
         name: "/auto",
         aliases: &[],
-        blurb: "modo auto (executa sem pedir aprovação)",
+        blurb: "modo auto (executa tudo sem pedir aprovação)",
     },
     CommandSpec {
         name: "/default",
