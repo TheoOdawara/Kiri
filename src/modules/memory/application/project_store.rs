@@ -1,11 +1,10 @@
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::shared::kernel::error::AgentError;
-use async_trait::async_trait;
 
 type Result<T> = std::result::Result<T, AgentError>;
 
 /// Use cases for project memory. Implemented by `FileProjectStore` (adapter over `FileProjectMemory`).
-#[async_trait]
+#[async_trait::async_trait]
 pub trait ProjectStore: Send + Sync {
     /// Save an entry (create or update).
     async fn save(&self, entry: MemoryEntry) -> Result<()>;
@@ -64,7 +63,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[async_trait::async_trait]
     impl ProjectStore for InMemoryProjectStore {
         async fn save(&self, entry: MemoryEntry) -> Result<()> {
             self.entries.lock().unwrap().push(entry);

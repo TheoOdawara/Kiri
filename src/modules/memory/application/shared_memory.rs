@@ -1,6 +1,5 @@
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::shared::kernel::error::AgentError;
-use async_trait::async_trait;
 
 type Result<T> = std::result::Result<T, AgentError>;
 
@@ -9,7 +8,7 @@ type Result<T> = std::result::Result<T, AgentError>;
 /// Full CRUD+query contract; the methods not yet called by the agent loop are exercised by tests and
 /// reserved for the future memory-management UI.
 #[allow(dead_code)]
-#[async_trait]
+#[async_trait::async_trait]
 pub trait SharedMemory: Send + Sync {
     /// Initialize the storage (create DB, tables, indexes).
     async fn init(&self) -> Result<()>;

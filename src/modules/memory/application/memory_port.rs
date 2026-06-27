@@ -6,7 +6,6 @@ use crate::modules::memory::domain::entry::MemoryEntry;
 use crate::modules::memory::domain::similarity::rank_by_similarity;
 use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
 use crate::shared::kernel::error::AgentError;
-use async_trait::async_trait;
 
 type Result<T> = std::result::Result<T, AgentError>;
 
@@ -47,7 +46,7 @@ fn merge_dedup(
 }
 
 /// Unified memory port for the AgentLoop. Combines access to project memory and shared memory.
-#[async_trait]
+#[async_trait::async_trait]
 pub trait MemoryPort: Send + Sync {
     /// Recall project memories relevant to the query.
     async fn recall_project(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
@@ -129,7 +128,7 @@ async fn semantic_pick(
         .collect()
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl<P, S> MemoryPort for MemoryPortImpl<P, S>
 where
     P: crate::modules::memory::application::project_store::ProjectStore + Send + Sync,
@@ -240,7 +239,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[async_trait::async_trait]
     impl crate::modules::memory::application::project_store::ProjectStore for MockProjectStore {
         async fn save(&self, entry: MemoryEntry) -> Result<()> {
             self.entries.lock().unwrap().push(entry);
@@ -296,7 +295,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[async_trait::async_trait]
     impl crate::modules::memory::application::shared_store::SharedStore for MockSharedStore {
         async fn save(&self, entry: MemoryEntry) -> Result<()> {
             self.entries.lock().unwrap().push(entry);
@@ -411,7 +410,7 @@ mod tests {
 
         struct FakeEmbedder;
 
-        #[async_trait]
+        #[async_trait::async_trait]
         impl EmbeddingProvider for FakeEmbedder {
             async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
                 Ok(texts.iter().map(|t| presence_vector(t)).collect())
@@ -425,7 +424,7 @@ mod tests {
         /// is out of scope for this embedder's recall.
         struct OtherModelEmbedder;
 
-        #[async_trait]
+        #[async_trait::async_trait]
         impl EmbeddingProvider for OtherModelEmbedder {
             async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
                 Ok(texts.iter().map(|t| presence_vector(t)).collect())
@@ -437,7 +436,7 @@ mod tests {
 
         struct FailEmbedder;
 
-        #[async_trait]
+        #[async_trait::async_trait]
         impl EmbeddingProvider for FailEmbedder {
             async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>> {
                 Err(AgentError::Provider("embed boom".into()))

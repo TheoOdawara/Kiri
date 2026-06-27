@@ -1,7 +1,5 @@
 use std::path::Path;
 
-use async_trait::async_trait;
-
 use crate::shared::kernel::error::AgentError;
 
 /// Port: every filesystem touch the sync use-case needs on its work-tree and the live config, behind one
@@ -9,7 +7,7 @@ use crate::shared::kernel::error::AgentError;
 /// holds no inline `tokio::fs` or `.exists()`. The adapter (`infrastructure::fs_work_tree::FsSyncWorkTree`)
 /// owns the I/O; it refuses to write through a non-regular existing target, so a hostile-remote-
 /// materialized symlink in the tree cannot redirect a write out of it.
-#[async_trait]
+#[async_trait::async_trait]
 pub trait SyncWorkTree: Send + Sync {
     /// Create `dir` and any missing parents (the work-tree root).
     async fn ensure_dir(&self, dir: &Path) -> Result<(), AgentError>;

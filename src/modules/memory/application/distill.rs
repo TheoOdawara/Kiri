@@ -265,7 +265,6 @@ mod tests {
     use crate::modules::memory::infrastructure::test_support::temp_port;
     use crate::modules::provider::application::completion_provider::EventSink;
     use crate::shared::kernel::completed_turn::CompletedTurn;
-    use async_trait::async_trait;
     use tempfile::TempDir;
 
     #[test]
@@ -293,7 +292,7 @@ mod tests {
         content: String,
     }
 
-    #[async_trait(?Send)]
+    #[async_trait::async_trait(?Send)]
     impl CompletionProvider for ScriptedProvider {
         async fn complete(
             &self,

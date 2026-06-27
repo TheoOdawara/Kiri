@@ -1,5 +1,3 @@
-use async_trait::async_trait;
-
 use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::application::shared_store::SharedStore;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
@@ -21,7 +19,7 @@ impl SqliteSharedStore {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl SharedStore for SqliteSharedStore {
     async fn save(&self, entry: MemoryEntry) -> Result<()> {
         self.inner.save(&entry).await

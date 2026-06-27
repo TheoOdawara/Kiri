@@ -1,12 +1,11 @@
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::shared::kernel::error::AgentError;
-use async_trait::async_trait;
 
 type Result<T> = std::result::Result<T, AgentError>;
 
 /// Use cases for shared memory across projects. Implemented by `SqliteSharedStore` (adapter over
 /// `SqliteSharedMemory`).
-#[async_trait]
+#[async_trait::async_trait]
 pub trait SharedStore: Send + Sync {
     /// Save an entry (create or update).
     async fn save(&self, entry: MemoryEntry) -> Result<()>;
@@ -68,7 +67,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[async_trait::async_trait]
     impl SharedStore for InMemorySharedStore {
         async fn save(&self, entry: MemoryEntry) -> Result<()> {
             self.entries.lock().unwrap().push(entry);

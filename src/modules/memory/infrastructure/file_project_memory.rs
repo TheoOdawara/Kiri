@@ -2,7 +2,6 @@ use crate::modules::memory::application::project_memory::ProjectMemory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::shared::infra::fs::write_atomic;
 use crate::shared::kernel::error::AgentError;
-use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -232,7 +231,7 @@ impl FileProjectMemory {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ProjectMemory for FileProjectMemory {
     async fn init(&self) -> Result<()> {
         self.ensure_dirs()?;

@@ -319,7 +319,6 @@ mod tests {
     use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
     use crate::modules::sync::application::git::GitOutput;
     use crate::modules::sync::infrastructure::fs_work_tree::FsSyncWorkTree;
-    use async_trait::async_trait;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -375,7 +374,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[async_trait::async_trait]
     impl Git for FakeGit {
         async fn run(&self, args: &[&str], cwd: &Path) -> Result<GitOutput> {
             self.calls.lock().unwrap().push(args.join(" "));

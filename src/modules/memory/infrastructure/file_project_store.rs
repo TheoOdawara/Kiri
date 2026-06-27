@@ -1,5 +1,3 @@
-use async_trait::async_trait;
-
 use crate::modules::memory::application::project_memory::ProjectMemory;
 use crate::modules::memory::application::project_store::ProjectStore;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
@@ -22,7 +20,7 @@ impl FileProjectStore {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ProjectStore for FileProjectStore {
     async fn save(&self, entry: MemoryEntry) -> Result<()> {
         self.inner.save(&entry).await

@@ -2,7 +2,6 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use tokio::process::Command;
 
 use crate::modules::sync::application::git::{Git, GitOutput};
@@ -16,7 +15,7 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 /// authenticates to the remote, so Kiri never handles repo credentials itself.
 pub struct GitCli;
 
-#[async_trait]
+#[async_trait::async_trait]
 impl Git for GitCli {
     async fn run(&self, args: &[&str], cwd: &Path) -> Result<GitOutput, AgentError> {
         let mut command = Command::new("git");

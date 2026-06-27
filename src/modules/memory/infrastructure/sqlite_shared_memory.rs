@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use rusqlite::{Connection, Row, params};
 
 use crate::modules::memory::application::shared_memory::SharedMemory;
@@ -158,7 +157,7 @@ async fn query_entries(
     .await
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl SharedMemory for SqliteSharedMemory {
     async fn init(&self) -> Result<()> {
         let conn = self.conn.clone();

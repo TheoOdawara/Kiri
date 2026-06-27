@@ -1,5 +1,3 @@
-use async_trait::async_trait;
-
 use crate::modules::session::domain::session::{Session, SessionSummary};
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::message::Message;
@@ -10,7 +8,7 @@ type Result<T> = std::result::Result<T, AgentError>;
 /// (`~/.kiri/sessions.db`). Sessions are keyed by `project_id` so a workspace lists only its own.
 /// `init/create/append_messages/set_title/latest_for_project/list_for_project/load` are used by the
 /// TUI runtime; `delete` prunes empty/aborted sessions.
-#[async_trait]
+#[async_trait::async_trait]
 pub trait SessionStore: Send + Sync {
     /// Initialize storage (create the database and schema).
     async fn init(&self) -> Result<()>;

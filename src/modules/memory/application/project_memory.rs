@@ -1,6 +1,5 @@
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::shared::kernel::error::AgentError;
-use async_trait::async_trait;
 
 type Result<T> = std::result::Result<T, AgentError>;
 
@@ -10,7 +9,7 @@ type Result<T> = std::result::Result<T, AgentError>;
 /// and the tools, while the rest (load/delete/count/list_by_*) are exercised by tests and reserved for
 /// the future memory-management UI.
 #[allow(dead_code)]
-#[async_trait]
+#[async_trait::async_trait]
 pub trait ProjectMemory: Send + Sync {
     /// Initialize the storage (create directories, index, etc.).
     async fn init(&self) -> Result<()>;

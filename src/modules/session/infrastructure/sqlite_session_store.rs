@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use rusqlite::{Connection, params};
 use uuid::Uuid;
 
@@ -53,7 +52,7 @@ impl SqliteSessionStore {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl SessionStore for SqliteSessionStore {
     async fn init(&self) -> Result<()> {
         let conn = self.conn.clone();

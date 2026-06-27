@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use async_trait::async_trait;
 use tokio::fs;
 
 use crate::modules::sync::application::work_tree::SyncWorkTree;
@@ -13,7 +12,7 @@ use crate::shared::kernel::error::AgentError;
 /// `memory.ndjson`) cannot redirect that write outside the tree.
 pub struct FsSyncWorkTree;
 
-#[async_trait]
+#[async_trait::async_trait]
 impl SyncWorkTree for FsSyncWorkTree {
     async fn ensure_dir(&self, dir: &Path) -> Result<(), AgentError> {
         fs::create_dir_all(dir).await.map_err(sync_err)
