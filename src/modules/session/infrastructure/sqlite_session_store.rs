@@ -119,7 +119,14 @@ impl SessionStore for SqliteSessionStore {
                     tool_call_id TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, updated_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, ordinal);",
+                -- Drop the prior non-unique index and replace it with a UNIQUE one on the same columns:
+                -- it doubles as the lookup index and the belt-and-suspenders that fails an insert if a
+                -- cross-process race ever produced a duplicate ordinal. Pre-1.0 caveat: a legacy DB that
+                -- already holds duplicate (session_id, ordinal) rows would fail this creation; no migration
+                -- is shipped (no released versions to upgrade from).
+                DROP INDEX IF EXISTS idx_messages_session;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_ordinal
+                    ON messages(session_id, ordinal);",
             )
             .map_err(sess)?;
             Ok(())
@@ -170,8 +177,13 @@ impl SessionStore for SqliteSessionStore {
             .collect::<Result<_>>()?;
         run_blocking(move || -> Result<()> {
             let now = now_rfc3339();
-            let conn = lock(&conn)?;
-            let tx = conn.unchecked_transaction().map_err(sess)?;
+            let mut guard = lock(&conn)?;
+            // IMMEDIATE takes the write lock before the MAX(ordinal) read, so a second process cannot read
+            // the same MAX and assign a duplicate ordinal. The RAII transaction rolls back on any `?`
+            // early-return (no stranded transaction on the shared connection).
+            let tx = guard
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(sess)?;
             let base: i64 = tx
                 .query_row(
                     "SELECT COALESCE(MAX(ordinal), -1) + 1 FROM messages WHERE session_id = ?1",
@@ -428,6 +440,117 @@ mod tests {
             .map(|m| m.content.clone().unwrap())
             .collect();
         assert_eq!(contents, vec!["first", "second", "third"]);
+    }
+
+    #[tokio::test]
+    async fn append_assigns_contiguous_ordinals() {
+        let dir = TempDir::new().unwrap();
+        let store = store(&dir).await;
+        let session = store.create("proj-a").await.unwrap();
+
+        store
+            .append_messages(
+                &session.id,
+                &[Message::user("a"), Message::assistant_text("b")],
+            )
+            .await
+            .unwrap();
+        store
+            .append_messages(&session.id, &[Message::user("c")])
+            .await
+            .unwrap();
+
+        let guard = lock(&store.conn).unwrap();
+        let mut stmt = guard
+            .prepare("SELECT ordinal FROM messages WHERE session_id = ?1 ORDER BY ordinal")
+            .unwrap();
+        let ordinals: Vec<i64> = stmt
+            .query_map(params![session.id], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(ordinals, vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn duplicate_ordinal_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let store = store(&dir).await;
+        let session = store.create("proj-a").await.unwrap();
+
+        let guard = lock(&store.conn).unwrap();
+        guard
+            .execute(
+                "INSERT INTO messages (session_id, ordinal, role, content) VALUES (?1, 0, 'user', 'a')",
+                params![session.id],
+            )
+            .unwrap();
+        let duplicate = guard.execute(
+            "INSERT INTO messages (session_id, ordinal, role, content) VALUES (?1, 0, 'user', 'b')",
+            params![session.id],
+        );
+        assert!(
+            duplicate.is_err(),
+            "a second row at the same (session_id, ordinal) must violate the unique index"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_error_rolls_back() {
+        let dir = TempDir::new().unwrap();
+        let store = store(&dir).await;
+        let session = store.create("proj-a").await.unwrap();
+        store
+            .append_messages(
+                &session.id,
+                &[Message::user("a"), Message::assistant_text("b")],
+            )
+            .await
+            .unwrap();
+
+        // `append_messages` never self-collides (MAX(ordinal)+1 is always free), so the rollback path
+        // is forced here by driving the same IMMEDIATE RAII transaction: a valid insert followed by a
+        // duplicate-ordinal insert that violates the unique index. Dropping the uncommitted transaction
+        // must discard the valid insert too (atomicity) and leave the shared connection usable.
+        {
+            let mut guard = lock(&store.conn).unwrap();
+            let tx = guard
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute(
+                "INSERT INTO messages (session_id, ordinal, role, content) VALUES (?1, 2, 'user', 'x')",
+                params![session.id],
+            )
+            .unwrap();
+            let duplicate = tx.execute(
+                "INSERT INTO messages (session_id, ordinal, role, content) VALUES (?1, 0, 'user', 'y')",
+                params![session.id],
+            );
+            assert!(
+                duplicate.is_err(),
+                "the colliding insert must fail mid-batch"
+            );
+            // `tx` drops here without commit -> rollback discards the ordinal-2 insert.
+        }
+
+        let loaded = store.load(&session.id).await.unwrap().unwrap();
+        assert_eq!(
+            loaded.messages.len(),
+            2,
+            "the rolled-back insert must not persist"
+        );
+
+        // The connection must not be stranded in an open transaction: the next append still works.
+        store
+            .append_messages(&session.id, &[Message::user("c")])
+            .await
+            .unwrap();
+        let loaded = store.load(&session.id).await.unwrap().unwrap();
+        assert_eq!(
+            loaded.messages.len(),
+            3,
+            "the connection stays usable after the rollback"
+        );
     }
 
     #[tokio::test]
