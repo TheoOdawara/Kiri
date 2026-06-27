@@ -79,7 +79,8 @@ impl DocsLibrary {
         Ok(matches)
     }
 
-    /// Collect Markdown files under the docs root, breadth-first, capped at `MAX_FILES_SCANNED`.
+    /// Collect Markdown files under the docs root (depth-first via a LIFO stack), capped at
+    /// `MAX_FILES_SCANNED`.
     async fn collect_markdown_files(&self) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
         let mut dirs = vec![self.root.clone()];

@@ -15,6 +15,16 @@ fn mem<E: std::fmt::Display>(error: E) -> AgentError {
     AgentError::Memory(error.to_string())
 }
 
+/// Write `content` to `path` atomically: a temp sibling then rename. A crash mid-write can otherwise
+/// truncate `index.json`/`embeddings.json`, and the next `load_index` then fails to parse and makes the
+/// whole project store inert.
+async fn write_atomic(path: &Path, content: &str) -> Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, content).await?;
+    fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
 /// Markdown-based project memory storage with YAML front-matter.
 /// Structure:
 ///   .kiri/memory/
@@ -74,7 +84,7 @@ impl FileProjectMemory {
     async fn save_index(&self) -> Result<()> {
         let index = self.index.read().await.clone();
         let content = serde_json::to_string_pretty(&index).map_err(mem)?;
-        fs::write(self.index_path(), content).await?;
+        write_atomic(&self.index_path(), &content).await?;
         Ok(())
     }
 
@@ -102,7 +112,7 @@ impl FileProjectMemory {
             },
         );
         let content = serde_json::to_string(&sidecar).map_err(mem)?;
-        fs::write(self.embeddings_path(), content).await?;
+        write_atomic(&self.embeddings_path(), &content).await?;
         Ok(())
     }
 
@@ -129,7 +139,11 @@ impl FileProjectMemory {
         ids.truncate(limit);
         let mut out = Vec::new();
         for (id, _) in ids {
-            if let (Some(entry), Some(embedding)) = (self.load(&id).await?, sidecar.get(&id)) {
+            // Skip a missing/corrupt candidate file rather than failing the whole semantic set, matching
+            // search()'s per-file resilience (one bad entry must not disable semantic recall entirely).
+            if let Ok(Some(entry)) = self.load(&id).await
+                && let Some(embedding) = sidecar.get(&id)
+            {
                 out.push((entry, embedding.vector.clone()));
             }
         }
@@ -154,7 +168,7 @@ impl FileProjectMemory {
     }
 
     fn parse_markdown_file(&self, _path: &Path, content: &str) -> Result<MemoryEntry> {
-        // Extrai front-matter YAML (entre --- e ---)
+        // Extract the YAML front-matter (between the leading `---` fences).
         let (front_matter, body) = match content.strip_prefix("---\n") {
             Some(after) => match after.find("\n---\n") {
                 Some(end) => (Some(&after[..end]), &after[end + 5..]),

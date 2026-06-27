@@ -93,6 +93,11 @@ impl Tool for RecallMemory {
             Ok(args) => args,
             Err(out) => return out,
         };
+        // A blank query matches everything (substring of "" is always true), letting the model dump the
+        // whole store; reject it, mirroring the guard DocsLibrary already has.
+        if args.query.trim().is_empty() {
+            return ToolOutcome::Error("query must not be empty".to_string());
+        }
         let scope = args.scope.as_str();
         if !matches!(scope, "project" | "shared" | "both") {
             return ToolOutcome::Error(format!(

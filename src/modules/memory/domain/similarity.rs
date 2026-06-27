@@ -18,16 +18,20 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Rank `candidates` (entry-id paired with its vector) against `query` by descending cosine similarity,
-/// returning the ids of the top `limit`. A pure projection over the scoring, so the hybrid recall can
-/// own candidate fetching and entry hydration separately.
+/// returning the ids of the top `limit` that score strictly above `floor`. The floor drops weak matches
+/// (e.g. cosine ≈ 0) so a query that matches nothing semantically yields nothing here rather than the
+/// most-recent embedded entries surfaced as if relevant. A pure projection over the scoring, so the
+/// hybrid recall can own candidate fetching and entry hydration separately.
 pub fn rank_by_similarity<'a>(
     query: &[f32],
     candidates: impl IntoIterator<Item = (&'a str, &'a [f32])>,
     limit: usize,
+    floor: f32,
 ) -> Vec<String> {
     let mut scored: Vec<(f32, &str)> = candidates
         .into_iter()
         .map(|(id, vector)| (cosine(query, vector), id))
+        .filter(|(score, _)| *score > floor)
         .collect();
     // Descending score; a stable order on ties keeps results deterministic.
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -64,11 +68,30 @@ mod tests {
         let query = [1.0, 0.0];
         let near: Vec<f32> = vec![0.9, 0.1];
         let far: Vec<f32> = vec![-1.0, 0.0];
+        // A floor below -1 keeps both, so this only checks ordering.
         let ranked = rank_by_similarity(
             &query,
             [("near", near.as_slice()), ("far", far.as_slice())],
             10,
+            -2.0,
         );
         assert_eq!(ranked, vec!["near", "far"]);
+    }
+
+    #[test]
+    fn floor_drops_weak_matches() {
+        let query = [1.0, 0.0];
+        let near: Vec<f32> = vec![0.9, 0.1];
+        let orthogonal: Vec<f32> = vec![0.0, 1.0]; // cosine 0 — irrelevant
+        let ranked = rank_by_similarity(
+            &query,
+            [
+                ("near", near.as_slice()),
+                ("orthogonal", orthogonal.as_slice()),
+            ],
+            10,
+            0.1,
+        );
+        assert_eq!(ranked, vec!["near"], "a ~0 cosine match must be dropped");
     }
 }

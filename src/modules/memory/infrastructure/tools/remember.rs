@@ -100,11 +100,17 @@ impl Tool for Remember {
                 args.kind
             ));
         };
+        // A shared (cross-project) entry is global — `None` — not stamped with the originating project.
+        let project_id = if args.scope.as_str() == "shared" {
+            None
+        } else {
+            Some(self.project_id.clone())
+        };
         let entry = MemoryEntry::new(
             kind,
             args.content,
             args.tags.into_iter().collect(),
-            Some(self.project_id.clone()),
+            project_id,
         );
 
         let result = match args.scope.as_str() {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +17,35 @@ const SEMANTIC_CANDIDATES: usize = 200;
 /// Upper bound on the query-embedding call, so a slow/unreachable embeddings endpoint falls back to
 /// keyword recall promptly instead of stalling.
 const EMBED_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Minimum cosine similarity for a semantic hit to count. Below this a match is treated as noise (a
+/// query that matches nothing semantically yields no semantic hits rather than the most-recent embedded
+/// entries surfaced as if relevant). It also blunts cross-model vector mismatch: vectors produced by a
+/// different embedding model rarely clear the floor against the current query, so recall degrades to
+/// keyword instead of ranking on meaningless cosines.
+const MIN_SIMILARITY: f32 = 0.15;
+
+/// Merge `primary` (semantic hits) with `secondary` (keyword hits), deduplicated by id and capped at
+/// `limit`. Semantic hits come first; keyword fills the remainder, which both covers entries that have
+/// no embedding (so they are never unreachable) and adds keyword matches the semantic floor excluded.
+fn merge_dedup(
+    primary: Vec<MemoryEntry>,
+    secondary: Vec<MemoryEntry>,
+    limit: usize,
+) -> Vec<MemoryEntry> {
+    let mut seen: HashSet<String> = primary.iter().map(|entry| entry.id.clone()).collect();
+    let mut out = primary;
+    for entry in secondary {
+        if out.len() >= limit {
+            break;
+        }
+        if seen.insert(entry.id.clone()) {
+            out.push(entry);
+        }
+    }
+    out.truncate(limit);
+    out
+}
 
 /// Unified memory port for the AgentLoop. Combines access to project memory and shared memory.
 #[async_trait]
@@ -74,30 +103,31 @@ async fn embed_query(embedder: &dyn EmbeddingProvider, text: &str) -> Option<Vec
     }
 }
 
-/// Rank embedded candidates against `query` and hydrate the top entries. Returns `None` to signal "fall
-/// back to keyword" — no candidates, or the query embedding failed.
+/// Rank embedded candidates against `query` (cosine, above `MIN_SIMILARITY`) and hydrate the top
+/// entries. Returns an empty vec when there are no candidates, the query embedding failed, or nothing
+/// clears the floor — the caller then fills from keyword search.
 async fn semantic_pick(
     embedder: &dyn EmbeddingProvider,
     candidates: Vec<(MemoryEntry, Vec<f32>)>,
     query: &str,
     limit: usize,
-) -> Option<Vec<MemoryEntry>> {
+) -> Vec<MemoryEntry> {
     if candidates.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let query_vec = embed_query(embedder, query).await?;
+    let Some(query_vec) = embed_query(embedder, query).await else {
+        return Vec::new();
+    };
     let refs = candidates
         .iter()
         .map(|(entry, vector)| (entry.id.as_str(), vector.as_slice()));
-    let ranked = rank_by_similarity(&query_vec, refs, limit);
+    let ranked = rank_by_similarity(&query_vec, refs, limit, MIN_SIMILARITY);
     let by_id: HashMap<&str, &MemoryEntry> =
         candidates.iter().map(|(e, _)| (e.id.as_str(), e)).collect();
-    Some(
-        ranked
-            .iter()
-            .filter_map(|id| by_id.get(id.as_str()).map(|e| (*e).clone()))
-            .collect(),
-    )
+    ranked
+        .iter()
+        .filter_map(|id| by_id.get(id.as_str()).map(|e| (*e).clone()))
+        .collect()
 }
 
 #[async_trait]
@@ -107,35 +137,45 @@ where
     S: crate::modules::memory::application::shared_store::SharedStore + Send + Sync,
 {
     async fn recall_project(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
-        if let Some(embedder) = &self.embedder {
-            let candidates = self
-                .project_store
-                .embedded_candidates(SEMANTIC_CANDIDATES)
-                .await
-                .unwrap_or_default();
-            if let Some(hits) = semantic_pick(embedder.as_ref(), candidates, query, limit).await
-                && !hits.is_empty()
-            {
-                return Ok(hits);
+        let semantic = match &self.embedder {
+            Some(embedder) => {
+                // Best-effort: a candidate-fetch failure degrades this recall to keyword search.
+                let candidates = self
+                    .project_store
+                    .embedded_candidates(SEMANTIC_CANDIDATES)
+                    .await
+                    .unwrap_or_default();
+                semantic_pick(embedder.as_ref(), candidates, query, limit).await
             }
+            None => Vec::new(),
+        };
+        if semantic.len() >= limit {
+            return Ok(semantic);
         }
-        self.project_store.search(query, limit).await
+        // Union with keyword recall so a strong keyword match — or an entry that has no embedding — is
+        // never shadowed by the semantic set, and the floor's rejects are backfilled.
+        let keyword = self.project_store.search(query, limit).await?;
+        Ok(merge_dedup(semantic, keyword, limit))
     }
 
     async fn recall_shared(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
-        if let Some(embedder) = &self.embedder {
-            let candidates = self
-                .shared_store
-                .embedded_candidates(SEMANTIC_CANDIDATES)
-                .await
-                .unwrap_or_default();
-            if let Some(hits) = semantic_pick(embedder.as_ref(), candidates, query, limit).await
-                && !hits.is_empty()
-            {
-                return Ok(hits);
+        let semantic = match &self.embedder {
+            Some(embedder) => {
+                // Best-effort: a candidate-fetch failure degrades this recall to keyword search.
+                let candidates = self
+                    .shared_store
+                    .embedded_candidates(SEMANTIC_CANDIDATES)
+                    .await
+                    .unwrap_or_default();
+                semantic_pick(embedder.as_ref(), candidates, query, limit).await
             }
+            None => Vec::new(),
+        };
+        if semantic.len() >= limit {
+            return Ok(semantic);
         }
-        self.shared_store.search(query, limit).await
+        let keyword = self.shared_store.search(query, limit).await?;
+        Ok(merge_dedup(semantic, keyword, limit))
     }
 
     async fn remember_project(&self, entry: MemoryEntry) -> Result<()> {
@@ -464,6 +504,30 @@ mod tests {
             let hits = port.recall_project("beta", 1).await.unwrap();
             assert_eq!(hits.len(), 1);
             assert!(hits[0].content.contains("beta"));
+        }
+
+        #[tokio::test]
+        async fn an_unrelated_query_returns_nothing_not_recent_entries() {
+            let dir = TempDir::new().unwrap();
+            let port = MemoryPortImpl::new(project_store(&dir).await, shared_store(&dir).await)
+                .with_embedder(Arc::new(FakeEmbedder));
+            port.remember_shared(MemoryEntry::new(
+                MemoryKind::Fact,
+                "an alpha subject".into(),
+                HashSet::new(),
+                Some("p".into()),
+            ))
+            .await
+            .unwrap();
+
+            // "delta" is none of the embedder's keywords → an all-zero query vector → cosine 0 with the
+            // stored entry (below the floor) → no semantic hit; "delta" is no keyword match either. The
+            // floor must keep this empty rather than surfacing the most-recent embedded entry.
+            let hits = port.recall_shared("delta", 5).await.unwrap();
+            assert!(
+                hits.is_empty(),
+                "an unrelated query must not surface recent entries: {hits:?}"
+            );
         }
 
         #[tokio::test]

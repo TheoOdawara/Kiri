@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -153,11 +154,18 @@ impl Distiller {
         if self.is_duplicate(&raw.content, scope).await {
             return false;
         }
+        // A shared (cross-project) entry is global by definition — `None` — not stamped with the
+        // originating project, which would mis-scope it and make the 'global' branch dead.
+        let project_id = if scope == "shared" {
+            None
+        } else {
+            Some(self.project_id.clone())
+        };
         let entry = MemoryEntry::new(
             kind,
             raw.content,
             raw.tags.into_iter().collect(),
-            Some(self.project_id.clone()),
+            project_id,
         );
         let result = match scope {
             "shared" => self.memory.remember_shared(entry).await,
@@ -183,12 +191,29 @@ impl Distiller {
             // proceed (the worst case is one redundant entry, never lost knowledge).
             return false;
         };
-        let target = normalize(content);
-        hits.iter().any(|hit| {
-            let existing = normalize(&hit.content);
-            existing == target || existing.contains(&target) || target.contains(&existing)
-        })
+        hits.iter()
+            .any(|hit| is_near_duplicate(&hit.content, content))
     }
+}
+
+/// Whether two entries are the same fact (normalized equality or a high token-overlap reword). Crucially
+/// NOT plain substring containment: a terse older entry that is a substring of a richer new one is a
+/// strict superset, not a duplicate, so the more-informative entry is kept rather than dropped.
+fn is_near_duplicate(a: &str, b: &str) -> bool {
+    let na = normalize(a);
+    let nb = normalize(b);
+    if na == nb {
+        return true;
+    }
+    let ta: HashSet<&str> = na.split_whitespace().collect();
+    let tb: HashSet<&str> = nb.split_whitespace().collect();
+    if ta.is_empty() || tb.is_empty() {
+        return false;
+    }
+    let intersection = ta.intersection(&tb).count();
+    let union = ta.union(&tb).count();
+    // Jaccard ≥ 0.8 ⇒ essentially the same fact reworded; a strict superset scores lower and survives.
+    (intersection as f32 / union as f32) >= 0.8
 }
 
 /// Render a bounded transcript: user and assistant text only (system and tool noise dropped), keeping the
@@ -252,6 +277,26 @@ mod tests {
     use crate::modules::memory::infrastructure::test_support::temp_port;
     use async_trait::async_trait;
     use tempfile::TempDir;
+
+    #[test]
+    fn near_duplicate_catches_rewords_but_keeps_a_richer_superset() {
+        // Case-only difference normalizes equal → duplicate.
+        assert!(is_near_duplicate(
+            "Always use tabs for indentation",
+            "always use tabs for indentation"
+        ));
+        // A high-overlap reword (one extra token) → duplicate.
+        assert!(is_near_duplicate(
+            "always use tabs for indentation",
+            "always use tabs for indentation here"
+        ));
+        // A terse fact that is a substring of a much richer one is a SUPERSET, not a duplicate — the
+        // richer entry must be kept (the regression: plain containment dropped it).
+        assert!(!is_near_duplicate(
+            "use tabs",
+            "always use tabs for indentation in rust source files"
+        ));
+    }
 
     /// A provider that returns a fixed `content` once, ignoring the request.
     struct ScriptedProvider {
