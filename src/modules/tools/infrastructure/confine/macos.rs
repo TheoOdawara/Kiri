@@ -219,6 +219,64 @@ mod tests {
         assert!(profile.contains("/Users/fake/.ssh"));
     }
 
+    #[test]
+    fn home_credential_denies_survive_an_empty_read_extra_but_a_home_ancestor_overrides_them() {
+        // Regression (TOOL-07): read-only tools used to route their per-call cwd through `extra_ro`,
+        // which `build_profile` emits LAST (last-match-wins). When the workspace root was a home
+        // ancestor (e.g. after `/cd ~`), the emitted `(allow file-read* (subpath $HOME))` overrode the
+        // credential denies, so a confined `search`/`read_file` could read `~/.kiri/credentials.json`.
+        // The fix makes read-only tools pass an empty `extra_ro`, so no overriding allow is emitted.
+        let Some(home) = std::env::var_os("HOME") else {
+            return; // headless/CI edge: no per-user home whose credential denies exist
+        };
+        let home = PathBuf::from(home);
+
+        // The exact deny/allow fragments `build_profile` emits, built via the same helpers so the match
+        // is byte-identical rather than a hand-rolled approximation.
+        let mut kiri_deny = String::new();
+        push_deny_read(&mut kiri_deny, &home.join(HARNESS_PRIVATE_DIR));
+        let kiri_deny = kiri_deny.trim_end();
+        let mut home_allow = String::new();
+        push_allow_read(&mut home_allow, &home);
+        let home_allow = home_allow.trim_end();
+
+        // Fixed read-only shape (empty extra_ro): the `~/.kiri` deny stands, with no overriding allow.
+        let fixed = build_profile(&SandboxPolicy {
+            root: home.clone(),
+            network: NetworkPolicy::Deny,
+            extra_ro: Vec::new(),
+            extra_rw: Vec::new(),
+        });
+        assert!(
+            fixed.contains(kiri_deny),
+            "the ~/.kiri credential deny must be present"
+        );
+        assert!(
+            !fixed.contains(home_allow),
+            "no read-allow may override the credential deny when extra_ro is empty"
+        );
+
+        // Old buggy shape (per-call cwd == home ancestor fed through extra_ro): the override returns —
+        // the home read-allow is emitted AFTER the deny, so the credential file becomes readable. This
+        // is exactly the path the call-site fix removed.
+        let buggy = build_profile(&SandboxPolicy {
+            root: home.clone(),
+            network: NetworkPolicy::Deny,
+            extra_ro: vec![home.clone()],
+            extra_rw: Vec::new(),
+        });
+        let deny_at = buggy
+            .find(kiri_deny)
+            .expect("deny present in the buggy shape");
+        let allow_at = buggy
+            .find(home_allow)
+            .expect("override allow present in the buggy shape");
+        assert!(
+            allow_at > deny_at,
+            "the buggy shape emits the overriding allow after the deny (last-match-wins)"
+        );
+    }
+
     #[tokio::test]
     async fn confine_wraps_the_command_in_sandbox_exec() {
         let adapter = MacosSeatbelt;

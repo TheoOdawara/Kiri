@@ -62,6 +62,16 @@ fn references_sensitive_path(command: &str, sandbox: &dyn Sandbox) -> Option<Str
     None
 }
 
+/// The shell-invocation string shown in the confirmation prompt. Single-sourced so `command_line` and
+/// `confirmation` render it identically from one parse instead of re-deriving (and re-parsing) it.
+fn shell_display(command: &str) -> String {
+    if cfg!(windows) {
+        format!("$ cmd /C \"{command}\"")
+    } else {
+        format!("$ sh -c '{command}'")
+    }
+}
+
 /// Bounds for a `run_command` timeout, so the model cannot pin a process slot for hours nor request a
 /// sub-second deadline that kills every command. The applied value is clamped into `[1s, 10min]`.
 const RUN_COMMAND_MIN_TIMEOUT_MS: u64 = 1_000;
@@ -151,17 +161,17 @@ impl Tool for RunCommand {
 
     fn command_line(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         let args: RunCommandArgs = parse_args(call).ok()?;
-        if cfg!(windows) {
-            Some(format!("$ cmd /C \"{}\"", args.command))
-        } else {
-            Some(format!("$ sh -c '{}'", args.command))
-        }
+        Some(shell_display(&args.command))
     }
 
     fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        let cmd = self.command_line(sandbox, call)?;
+        // Parse once and derive both the display string and the sensitive-path scan from it (the
+        // confirmation used to parse twice — once here and again inside `command_line`).
         let args: RunCommandArgs = parse_args(call).ok()?;
-        let mut action = format!("Executar comando no shell. Aprova executar: {cmd}?");
+        let mut action = format!(
+            "Executar comando no shell. Aprova executar: {}?",
+            shell_display(&args.command)
+        );
         // Defense-in-depth UX (see `references_sensitive_path`): when the command text references a
         // sensitive path, prepend a loud warning so the user reviews before approving. Best-effort only
         // — the OS sandbox is the real control — and it never flips the default, which stays decline.

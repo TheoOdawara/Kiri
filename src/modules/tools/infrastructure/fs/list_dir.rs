@@ -79,7 +79,10 @@ impl Tool for ListDir {
                 &[("QUOTING_STYLE", OsStr::new("literal"))],
                 exec::DEFAULT_TIMEOUT,
                 sandbox.confiner(),
-                &sandbox.command_policy(NetworkPolicy::Deny, &[&cwd], &[]),
+                // Read-only: pass no extras. The cwd read-allow is redundant under the macOS
+                // `(allow default)` base and, emitted last, would override the home-credential denies
+                // when the workspace root is a home ancestor (TOOL-07) — a least-privilege regression.
+                &sandbox.command_policy(NetworkPolicy::Deny, &[], &[]),
             )
             .await
             {

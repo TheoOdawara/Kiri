@@ -129,7 +129,10 @@ impl Tool for Search {
                 &[],
                 exec::DEFAULT_TIMEOUT,
                 sandbox.confiner(),
-                &sandbox.command_policy(NetworkPolicy::Deny, &[&start], &[]),
+                // Read-only: pass no extras. The start-dir read-allow is redundant under the macOS
+                // `(allow default)` base and, emitted last, would override the home-credential denies
+                // when the workspace root is a home ancestor (TOOL-07) — a least-privilege regression.
+                &sandbox.command_policy(NetworkPolicy::Deny, &[], &[]),
             )
             .await
             {

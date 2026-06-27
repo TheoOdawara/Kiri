@@ -14,10 +14,15 @@ pub(crate) const SECRET_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".ku
 /// Well-known credential files directly under the user's home, denied to confined children by the macOS
 /// Seatbelt profile. They mirror names already in `DEFAULT_SENSITIVE_PATTERNS`, but that file-name guard
 /// only covers the file tools — `run_command`'s free-form shell reaches these through the OS layer alone.
+// Only consumed by the `#[cfg(target_os = "macos")]` Seatbelt adapter, so it is dead on other targets
+// (the Linux-CI `clippy --all-targets -D warnings` gate would otherwise reject it).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) const HOME_SECRET_FILES: &[&str] =
     &[".netrc", ".npmrc", ".pypirc", ".pgpass", ".git-credentials"];
 
 /// The harness's own private directory under home (`~/.kiri`), which holds `credentials.json` (the
 /// `0600` API-key fallback) and other state. Denied to confined children so a `run_command` cannot read
 /// it back to the model.
+// Only consumed by the `#[cfg(target_os = "macos")]` Seatbelt adapter, so it is dead on other targets.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) const HARNESS_PRIVATE_DIR: &str = ".kiri";
