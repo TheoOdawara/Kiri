@@ -4,11 +4,11 @@ use tokio_stream::StreamExt;
 use super::message_dto::{build_messages, translate_tools};
 use super::sse::{TurnAccumulator, handle_event};
 use super::wire::MessagesRequest;
-use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
 use crate::modules::provider::infrastructure::http_error::error_from_status;
+use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::Secret;
 
@@ -121,8 +121,8 @@ impl CompletionProvider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::agent::domain::message::Message;
-    use crate::modules::agent::domain::stream_event::StreamEvent;
+    use crate::shared::kernel::message::Message;
+    use crate::shared::kernel::stream_event::StreamEvent;
     use serde_json::{Value, json};
     use std::time::Duration;
 

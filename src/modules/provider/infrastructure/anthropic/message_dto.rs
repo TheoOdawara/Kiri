@@ -7,8 +7,8 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::modules::agent::domain::message::Message;
-use crate::modules::agent::domain::role::Role;
+use crate::shared::kernel::message::Message;
+use crate::shared::kernel::role::Role;
 
 /// One Anthropic message: a `user`/`assistant` role and its content blocks. Built owned (rather than
 /// borrowing the domain messages) because translation merges messages and parses tool inputs into JSON

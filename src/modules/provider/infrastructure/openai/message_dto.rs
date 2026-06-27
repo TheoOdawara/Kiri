@@ -4,8 +4,8 @@ use serde::ser::SerializeSeq;
 use serde::{Serialize, Serializer};
 
 use super::arguments::escape_control_chars_in_strings;
-use crate::modules::agent::domain::message::Message;
-use crate::modules::agent::domain::role::Role;
+use crate::shared::kernel::message::Message;
+use crate::shared::kernel::role::Role;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// The OpenAI-compatible wire shape of a chat message, built from a domain `Message`. The provider's

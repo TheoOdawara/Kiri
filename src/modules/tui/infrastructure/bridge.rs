@@ -10,12 +10,12 @@ use crate::modules::agent::application::approval_policy::{
 };
 use crate::modules::agent::application::presenter::Presenter;
 use crate::modules::agent::application::tool_observer::ToolObserver;
-use crate::modules::agent::domain::stream_event::StreamEvent;
 use crate::modules::provider::application::completion_provider::EventSink;
 use crate::modules::tools::application::tool::{Confirmation, ToolOutcome};
 use crate::modules::tui::domain::transcript::{ToolDiff, ToolStatus};
 use crate::modules::tui::domain::view_state::PendingApproval;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::stream_event::StreamEvent;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// What the engine ports emit to the TUI runtime over the channel. An approval carries its reply

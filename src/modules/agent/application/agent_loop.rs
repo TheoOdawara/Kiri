@@ -6,8 +6,6 @@ use crate::modules::agent::application::approval_policy::{
 };
 use crate::modules::agent::application::presenter::Presenter;
 use crate::modules::agent::application::tool_observer::ToolObserver;
-use crate::modules::agent::domain::conversation::Conversation;
-use crate::modules::agent::domain::message::Message;
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
@@ -16,7 +14,9 @@ use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::ToolOutcome;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::approval_mode::ApprovalMode;
+use crate::shared::kernel::conversation::Conversation;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::message::Message;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// Whether a user turn ran to completion, proposed a plan for approval, or the user ended the session
@@ -369,12 +369,12 @@ mod tests {
     use crate::modules::agent::application::approval_policy::ApprovalPolicy;
     use crate::modules::agent::application::presenter::Presenter;
     use crate::modules::agent::application::tool_observer::ToolObserver;
-    use crate::modules::agent::domain::completed_turn::CompletedTurn;
-    use crate::modules::agent::domain::role::Role;
-    use crate::modules::agent::domain::stream_event::StreamEvent;
     use crate::modules::provider::application::completion_provider::EventSink;
     use crate::modules::tools::application::tool::Confirmation;
     use crate::modules::tools::infrastructure::fs::default_fs_tools;
+    use crate::shared::kernel::completed_turn::CompletedTurn;
+    use crate::shared::kernel::role::Role;
+    use crate::shared::kernel::stream_event::StreamEvent;
     use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
     use regex::Regex;
@@ -1358,8 +1358,8 @@ mod tests {
     /// spinner / streaming on. A regression here is exactly "first message does nothing, no spinner".
     #[tokio::test]
     async fn run_through_the_real_bridge_emits_began_first_then_content() {
-        use crate::modules::agent::domain::stream_event::StreamEvent;
         use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
+        use crate::shared::kernel::stream_event::StreamEvent;
         use tokio::sync::mpsc;
 
         // A provider that streams one content delta through the sink, then finishes (no tools).

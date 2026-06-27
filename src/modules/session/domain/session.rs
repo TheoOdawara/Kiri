@@ -1,4 +1,4 @@
-use crate::modules::agent::domain::message::Message;
+use crate::shared::kernel::message::Message;
 
 /// A persisted conversation: the ordered messages of one chat, scoped to a project. Reuses the agent
 /// domain's `Message` directly (the session context depends on `agent`, one-directionally); the system

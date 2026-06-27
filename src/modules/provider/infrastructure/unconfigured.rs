@@ -7,10 +7,10 @@
 //! profile can ever select it; only `app::wire` constructs it. The submit gate in the TUI normally keeps
 //! a turn from reaching it at all — this is the defense-in-depth backstop behind that gate.
 
-use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
+use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -38,7 +38,7 @@ impl CompletionProvider for UnconfiguredProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::agent::domain::stream_event::StreamEvent;
+    use crate::shared::kernel::stream_event::StreamEvent;
 
     /// An `EventSink` double that accepts every event — the null provider must error before it streams.
     struct NullSink;

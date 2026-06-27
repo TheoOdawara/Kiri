@@ -4,11 +4,11 @@ use tokio_stream::StreamExt;
 use super::message_dto::MessageDto;
 use super::sse::{TurnAccumulator, handle_event};
 use super::wire::{ChatRequest, ChatTemplateKwargs};
-use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
 use crate::modules::provider::infrastructure::http_error::error_from_status;
+use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::{Effort, Secret};
 
@@ -118,12 +118,12 @@ impl CompletionProvider for OpenAiProvider {
 #[cfg(test)]
 mod tests {
     use super::OpenAiProvider;
-    use crate::modules::agent::domain::message::Message;
-    use crate::modules::agent::domain::stream_event::StreamEvent;
     use crate::modules::provider::application::completion_provider::{
         CompletionProvider, EventSink, TurnRequest,
     };
     use crate::shared::kernel::error::AgentError;
+    use crate::shared::kernel::message::Message;
+    use crate::shared::kernel::stream_event::StreamEvent;
     use std::time::Duration;
 
     struct NullSink;

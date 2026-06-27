@@ -8,11 +8,11 @@ use time::OffsetDateTime;
 use tokio::task::spawn_blocking;
 use uuid::Uuid;
 
-use crate::modules::agent::domain::message::Message;
 use crate::modules::session::application::session_store::SessionStore;
 use crate::modules::session::domain::session::{Session, SessionSummary};
 use crate::modules::session::infrastructure::message_dto::StoredMessage;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::message::Message;
 
 type Result<T> = std::result::Result<T, AgentError>;
 

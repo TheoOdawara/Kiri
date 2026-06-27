@@ -99,8 +99,8 @@ fn string_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<S
 #[cfg(test)]
 mod tests {
     use super::{ChatRequest, ChatTemplateKwargs, Delta, ToolCallFragment};
-    use crate::modules::agent::domain::message::Message;
     use crate::modules::provider::infrastructure::openai::message_dto::MessageDto;
+    use crate::shared::kernel::message::Message;
 
     #[test]
     fn chat_request_serializes_expected_shape() {

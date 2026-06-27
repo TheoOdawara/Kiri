@@ -38,8 +38,9 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
 - **Layers, depending inward:** `domain/` = pure data/rules, no I/O · `application/` = use-cases + the
   **ports** they need, as **traits** (named by capability, no `I` prefix) · `infrastructure/` = **adapters**
   implementing the ports.
-- **Modules (bounded contexts):** `agent` (conversation domain + the `AgentLoop` + the UI
-  ports `Presenter`/`ApprovalPolicy`, plus the provider's `EventSink`), `provider` (the `CompletionProvider`
+- **Modules (bounded contexts):** `agent` (the `AgentLoop` + the UI
+  ports `Presenter`/`ApprovalPolicy`, plus the provider's `EventSink`; the conversation types it drives
+  live in shared/kernel), `provider` (the `CompletionProvider`
   port + two API-key adapters — `openai` (chat-completions: NVIDIA / compatible / custom / OpenAI) and
   `anthropic` (Messages API) — plus the `SecretStore` port with `keyring`/`0600`-file adapters and the
   `factory` that picks the adapter from `(kind, auth)`; see ADRs 0011/0012), `tools` (the `Tool` trait + `ToolRegistry`
@@ -54,10 +55,12 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
   domain + `SessionStore` port + `SqliteSessionStore`, driving `/resume` and `/sessions`; ADR 0013),
   `sync` (portable-profile sync to a private git repo: the `Git` port + `GitCli` + NDJSON export/merge +
   `SyncService`, behind `kiri sync …` and `/sync`; ADR 0015). Planned: a memory-management GUI.
-- **shared/kernel:** cross-cutting primitives — `ToolCall`/`FunctionCall`, `AgentError` (thiserror), and
-  `ApprovalMode`, and the provider primitives (`ProviderKind`/`AuthMethod`/`Effort`/`ProviderProfile`/
-  `Credential`/`Secret`), shared by `provider`, `config`, and `tui`. **shared/infra:** `config` (layered
-  TOML + env + CLI → `Settings`, plus the global-config writers).
+- **shared/kernel:** cross-cutting primitives — `ToolCall`/`FunctionCall`, `AgentError` (thiserror),
+  `ApprovalMode`, the conversation types (`Message`/`Role`/`StreamEvent`/`CompletedTurn`/`Conversation`,
+  the shared data between `agent` and `provider` — their home here is what breaks the agent↔provider cycle),
+  and the provider primitives (`ProviderKind`/`AuthMethod`/`Effort`/`ProviderProfile`/`Credential`/`Secret`),
+  shared across `agent`, `provider`, `session`, `memory`, `config`, and `tui`. **shared/infra:** `config`
+  (layered TOML + env + CLI → `Settings`, plus the global-config writers).
 
 **Invariants:** network I/O only in `provider/infrastructure` — **except** `sync/infrastructure`, which
 shells out to `git` to reach the user's profile repo (ADR 0015); filesystem I/O only in

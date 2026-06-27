@@ -4,10 +4,10 @@ use super::arguments::normalize_arguments;
 #[cfg(test)]
 use super::wire::StreamChoice;
 use super::wire::{ChatStreamChunk, Delta, StreamError, ToolCallFragment};
-use crate::modules::agent::domain::completed_turn::CompletedTurn;
-use crate::modules::agent::domain::stream_event::StreamEvent;
 use crate::modules::provider::application::completion_provider::EventSink;
+use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::stream_event::StreamEvent;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
 /// Cap on the bytes a single turn may accumulate (streamed content + tool-call arguments). Provider

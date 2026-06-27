@@ -7,10 +7,10 @@
 use std::collections::BTreeMap;
 
 use super::wire::{BlockDeltaDto, ContentBlockStartDto, MessageDeltaDto, StreamEventDto};
-use crate::modules::agent::domain::completed_turn::CompletedTurn;
-use crate::modules::agent::domain::stream_event::StreamEvent;
 use crate::modules::provider::application::completion_provider::EventSink;
+use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::stream_event::StreamEvent;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
 /// Feed one parsed SSE event's `data` payload into the accumulator and the live `sink`. A non-JSON

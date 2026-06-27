@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 
-use crate::modules::agent::domain::message::Message;
 use crate::modules::session::domain::session::{Session, SessionSummary};
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::message::Message;
 
 type Result<T> = std::result::Result<T, AgentError>;
 

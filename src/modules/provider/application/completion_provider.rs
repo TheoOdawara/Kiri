@@ -1,9 +1,9 @@
 use serde_json::Value;
 
-use crate::modules::agent::domain::completed_turn::CompletedTurn;
-use crate::modules::agent::domain::message::Message;
-use crate::modules::agent::domain::stream_event::StreamEvent;
+use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::message::Message;
+use crate::shared::kernel::stream_event::StreamEvent;
 
 /// What a provider needs to stream one assistant turn: the conversation so far (domain messages), the
 /// model id, and the tool schemas to advertise (opaque JSON the registry produced, passed verbatim).

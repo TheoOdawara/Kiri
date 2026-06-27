@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::modules::agent::domain::message::Message;
-use crate::modules::agent::domain::role::Role;
+use crate::shared::kernel::message::Message;
+use crate::shared::kernel::role::Role;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// Serde mirror of the agent-domain `Message`, owned by this infrastructure layer so the domain stays

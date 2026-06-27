@@ -4,15 +4,15 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::modules::agent::domain::message::Message;
-use crate::modules::agent::domain::role::Role;
-use crate::modules::agent::domain::stream_event::StreamEvent;
 use crate::modules::memory::application::memory_port::MemoryPort;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::message::Message;
+use crate::shared::kernel::role::Role;
+use crate::shared::kernel::stream_event::StreamEvent;
 
 type Result<T> = std::result::Result<T, AgentError>;
 
@@ -273,8 +273,8 @@ fn leading_words(text: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::agent::domain::completed_turn::CompletedTurn;
     use crate::modules::memory::infrastructure::test_support::temp_port;
+    use crate::shared::kernel::completed_turn::CompletedTurn;
     use async_trait::async_trait;
     use tempfile::TempDir;
 

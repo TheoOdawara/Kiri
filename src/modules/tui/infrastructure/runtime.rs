@@ -18,9 +18,6 @@ use tokio_stream::StreamExt;
 
 use crate::modules::agent::application::agent_loop::{AgentLoop, TurnOutcome};
 use crate::modules::agent::application::approval_policy::Approval;
-use crate::modules::agent::domain::conversation::Conversation;
-use crate::modules::agent::domain::message::Message;
-use crate::modules::agent::domain::role::Role;
 use crate::modules::memory::application::distill::Distiller;
 use crate::modules::memory::application::memory_port::MemoryPort;
 use crate::modules::memory::application::shared_memory::SharedMemory;
@@ -51,10 +48,13 @@ use crate::modules::tui::infrastructure::view::{frame_regions, view};
 use crate::modules::tui::infrastructure::widgets::{editor, selection_overlay};
 use crate::shared::infra::config;
 use crate::shared::kernel::approval_mode::ApprovalMode;
+use crate::shared::kernel::conversation::Conversation;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::message::Message;
 use crate::shared::kernel::provider::{
     AuthMethod, Credential, Effort, ProviderKind, ProviderProfile, Secret,
 };
+use crate::shared::kernel::role::Role;
 
 /// The agent-turn future, boxed and `!Send`. Driven as a `select!` arm — never spawned — so no
 /// `Send`/`'static` bound is needed and the engine borrows stay plain references.
@@ -1536,11 +1536,11 @@ fn turn_produced_nothing(conversation: &Conversation) -> bool {
 mod tests {
     use super::{on_turn_end, turn_produced_nothing};
     use crate::modules::agent::application::agent_loop::TurnOutcome;
-    use crate::modules::agent::domain::conversation::Conversation;
-    use crate::modules::agent::domain::message::Message;
     use crate::modules::tui::domain::model::Model;
     use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
     use crate::shared::kernel::approval_mode::ApprovalMode;
+    use crate::shared::kernel::conversation::Conversation;
+    use crate::shared::kernel::message::Message;
 
     fn has_error_notice(model: &Model) -> bool {
         model
