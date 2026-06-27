@@ -48,6 +48,10 @@ pub(crate) struct StreamError {
 #[derive(Debug, Deserialize)]
 pub(crate) struct StreamChoice {
     pub delta: Delta,
+    /// Why the model stopped: `"stop"`, `"tool_calls"`, or `"length"` (the output token cap was hit).
+    /// Used to surface a silent truncation instead of returning a turn that did nothing.
+    #[serde(default)]
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

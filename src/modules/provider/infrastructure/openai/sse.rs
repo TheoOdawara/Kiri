@@ -59,6 +59,9 @@ pub(crate) fn handle_event(
         )));
     }
 
+    if let Some(reason) = &choice.finish_reason {
+        accumulator.finish_reason = Some(reason.clone());
+    }
     accumulator.absorb_tool_fragments(&choice.delta.tool_calls);
     if let Some(content) = &choice.delta.content {
         accumulator.content.push_str(content);
@@ -128,6 +131,8 @@ pub(crate) struct TurnAccumulator {
     tool_calls: BTreeMap<u32, PartialToolCall>,
     /// Running total of streamed content + tool-call argument bytes, bounded by `MAX_STREAM_BYTES`.
     streamed_bytes: usize,
+    /// The last `finish_reason` seen; `"length"` means the output token cap was hit (truncation).
+    finish_reason: Option<String>,
 }
 
 #[derive(Default)]
@@ -139,6 +144,15 @@ struct PartialToolCall {
 }
 
 impl TurnAccumulator {
+    /// Whether the stream was cut off by the output token limit (`finish_reason == "length"`) before
+    /// producing anything usable. The provider surfaces this as an error rather than returning a turn
+    /// that silently did nothing (the truncated case the user otherwise gets no feedback on).
+    pub(crate) fn hit_empty_output_limit(&self) -> bool {
+        self.finish_reason.as_deref() == Some("length")
+            && self.content.is_empty()
+            && self.tool_calls.is_empty()
+    }
+
     fn absorb_tool_fragments(&mut self, fragments: &[ToolCallFragment]) {
         for fragment in fragments {
             let slot = self.tool_calls.entry(fragment.index).or_default();
@@ -276,6 +290,32 @@ mod tests {
     #[test]
     fn done_sentinel_yields_nothing() {
         assert!(events_from_data("[DONE]").is_empty());
+    }
+
+    #[test]
+    fn length_finish_with_no_output_is_flagged_as_truncated() {
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        handle_event(
+            r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+            &mut accumulator,
+            &mut sink,
+        )
+        .unwrap();
+        assert!(accumulator.hit_empty_output_limit());
+    }
+
+    #[test]
+    fn length_finish_with_partial_content_is_not_flagged_as_empty() {
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        handle_event(
+            r#"{"choices":[{"delta":{"content":"partial"},"finish_reason":"length"}]}"#,
+            &mut accumulator,
+            &mut sink,
+        )
+        .unwrap();
+        assert!(!accumulator.hit_empty_output_limit());
     }
 
     #[test]

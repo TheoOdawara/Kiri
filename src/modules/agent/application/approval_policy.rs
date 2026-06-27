@@ -1,5 +1,15 @@
 use crate::modules::tools::application::tool::Confirmation;
 
+/// Why the runaway checkpoint fired, so the prompt states the real cause instead of always phrasing it
+/// as elapsed minutes (which read as "~0min" when it was actually the tool-call count that tripped it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointReason {
+    /// The wall-clock budget elapsed; carries the minutes the turn has run.
+    Elapsed { minutes: u64 },
+    /// The tool-call count since the last check-in reached the cap; carries that count.
+    CallCount { calls: usize },
+}
+
 /// The user's decision on a tool call (or the runaway checkpoint).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Approval {
@@ -18,6 +28,6 @@ pub enum Approval {
 pub trait ApprovalPolicy {
     /// Present a tool confirmation and decide.
     async fn decide(&mut self, confirmation: &Confirmation) -> Approval;
-    /// The wall-clock runaway checkpoint: after a long turn, keep going?
-    async fn confirm_continue(&mut self, minutes: u64) -> Approval;
+    /// The runaway checkpoint (elapsed time or tool-call count): keep going?
+    async fn confirm_continue(&mut self, reason: CheckpointReason) -> Approval;
 }

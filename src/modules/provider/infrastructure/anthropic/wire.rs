@@ -38,12 +38,23 @@ pub(crate) enum StreamEventDto {
         index: u32,
         delta: BlockDeltaDto,
     },
+    /// The end-of-message delta, carrying `stop_reason` (`"max_tokens"` means the output cap truncated
+    /// the turn). Modeled so a silent truncation can be surfaced.
+    MessageDelta {
+        delta: MessageDeltaDto,
+    },
     /// An in-stream error the API can deliver on an otherwise-200 SSE response.
     Error {
         error: ApiErrorDto,
     },
     #[serde(other)]
     Other,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct MessageDeltaDto {
+    #[serde(default)]
+    pub stop_reason: Option<String>,
 }
 
 /// The opening descriptor of a content block. Only `tool_use` carries data we need (its id + name);
@@ -155,7 +166,6 @@ mod tests {
         for raw in [
             r#"{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant"}}"#,
             r#"{"type":"content_block_stop","index":0}"#,
-            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}"#,
             r#"{"type":"message_stop"}"#,
             r#"{"type":"ping"}"#,
         ] {
@@ -165,6 +175,20 @@ mod tests {
                 "should ignore {raw}"
             );
         }
+    }
+
+    #[test]
+    fn message_delta_carries_the_stop_reason() {
+        let event: StreamEventDto = serde_json::from_str(
+            r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":3}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            event,
+            StreamEventDto::MessageDelta {
+                delta: MessageDeltaDto { stop_reason: Some(reason) }
+            } if reason == "max_tokens"
+        ));
     }
 
     #[test]

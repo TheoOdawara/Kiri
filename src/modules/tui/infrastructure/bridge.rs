@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::modules::agent::application::approval_policy::{Approval, ApprovalPolicy};
+use crate::modules::agent::application::approval_policy::{
+    Approval, ApprovalPolicy, CheckpointReason,
+};
 use crate::modules::agent::application::presenter::Presenter;
 use crate::modules::agent::application::tool_observer::ToolObserver;
 use crate::modules::agent::domain::stream_event::StreamEvent;
@@ -167,8 +169,15 @@ impl ApprovalPolicy for Bridge {
             .await
     }
 
-    async fn confirm_continue(&mut self, minutes: u64) -> Approval {
-        self.request(format!("Execução já dura ~{minutes}min. Continuar?"), true)
-            .await
+    async fn confirm_continue(&mut self, reason: CheckpointReason) -> Approval {
+        let prompt = match reason {
+            CheckpointReason::Elapsed { minutes } => {
+                format!("Execução já dura ~{minutes}min. Continuar?")
+            }
+            CheckpointReason::CallCount { calls } => {
+                format!("Já são {calls} chamadas de ferramenta neste turno. Continuar?")
+            }
+        };
+        self.request(prompt, true).await
     }
 }

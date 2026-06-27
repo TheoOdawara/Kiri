@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::modules::agent::application::approval_policy::{Approval, ApprovalPolicy};
+use crate::modules::agent::application::approval_policy::{
+    Approval, ApprovalPolicy, CheckpointReason,
+};
 use crate::modules::agent::application::presenter::Presenter;
 use crate::modules::agent::application::tool_observer::ToolObserver;
 use crate::modules::agent::domain::conversation::Conversation;
@@ -15,6 +17,7 @@ use crate::modules::tools::application::tool::ToolOutcome;
 use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::tool_call::ToolCall;
 
 /// Whether a user turn ran to completion, proposed a plan for approval, or the user ended the session
 /// at a prompt.
@@ -36,6 +39,15 @@ async fn timed<Fut: std::future::Future<Output = ToolOutcome>>(
     let start = Instant::now();
     let outcome = run.await;
     (outcome, start.elapsed())
+}
+
+/// Push a tool result for every call in `calls`, so a round that ends early (user abort or a declined
+/// runaway checkpoint) still leaves the assistant `tool_calls` message fully answered — a valid,
+/// persistable OpenAI tool exchange that `/resume` can replay without the provider rejecting it (400).
+fn answer_unanswered(conversation: &mut Conversation, calls: &[ToolCall], message: &str) {
+    for call in calls {
+        conversation.push(Message::tool_result(call.id.as_str(), message.to_string()));
+    }
 }
 
 /// The agent loop. For one user turn: stream the assistant, then while it requests tools, confirm each
@@ -163,7 +175,46 @@ impl AgentLoop {
                 return Ok(TurnOutcome::PlanProposed(plan));
             }
 
-            for call in &calls {
+            for (index, call) in calls.iter().enumerate() {
+                // Runaway call-cap checkpoint, enforced WITHIN the round. A single assistant message can
+                // carry an unbounded number of tool calls; checking only between rounds would let one
+                // round run them all (unattended in auto — e.g. a prompt-injected burst of write_file)
+                // before any pause. When the cap is reached, confirm before executing the next call.
+                if calls_since_checkpoint >= self.max_tool_calls {
+                    match io
+                        .confirm_continue(CheckpointReason::CallCount {
+                            calls: calls_since_checkpoint,
+                        })
+                        .await
+                    {
+                        Approval::Approved => {
+                            checkpoint = Instant::now();
+                            calls_since_checkpoint = 0;
+                        }
+                        Approval::ApprovedAuto => {
+                            mode = ApprovalMode::Auto;
+                            checkpoint = Instant::now();
+                            calls_since_checkpoint = 0;
+                        }
+                        Approval::Declined => {
+                            answer_unanswered(
+                                conversation,
+                                &calls[index..],
+                                "ignorada: execução interrompida no checkpoint",
+                            );
+                            return Ok(TurnOutcome::Completed);
+                        }
+                        Approval::Aborted => {
+                            answer_unanswered(
+                                conversation,
+                                &calls[index..],
+                                "ignorada: sessão encerrada",
+                            );
+                            return Ok(TurnOutcome::Aborted);
+                        }
+                    }
+                }
+
                 // The display command for this call, shown in every mode so the user sees each action
                 // even under auto. Falls back to the tool name if the args do not parse.
                 let command = self
@@ -172,9 +223,10 @@ impl AgentLoop {
                     .unwrap_or_else(|| call.function.name.clone());
 
                 // `tool_started` is emitted just before running (paired with `tool_finished`), so the
-                // transcript records every attempt — including declined and plan-blocked calls. The
-                // `Aborted` arm fires neither: the turn ends and the UI resets via `TurnEnded`.
-                let (outcome, elapsed) = match mode {
+                // transcript records every attempt — including declined and plan-blocked calls. A `None`
+                // result means the user aborted at this call: the turn ends after answering the
+                // remaining calls (below) so the exchange stays valid.
+                let result: Option<(ToolOutcome, Duration)> = match mode {
                     // Auto: run calls without asking — EXCEPT high-blast-radius tools (run_command,
                     // delete_*, move_path) and any out-of-root target, which still require a live
                     // confirmation. This is what keeps an unattended turn — including a prompt-injected
@@ -190,18 +242,18 @@ impl AgentLoop {
                                 // destructive calls keep being confirmed for the rest of the turn.
                                 Approval::Approved | Approval::ApprovedAuto => {
                                     io.tool_started(call, &command);
-                                    timed(self.registry.execute(sandbox, call)).await
+                                    Some(timed(self.registry.execute(sandbox, call)).await)
                                 }
                                 Approval::Declined => {
                                     io.tool_started(call, &command);
-                                    (ToolOutcome::Declined, Duration::ZERO)
+                                    Some((ToolOutcome::Declined, Duration::ZERO))
                                 }
-                                Approval::Aborted => return Ok(TurnOutcome::Aborted),
+                                Approval::Aborted => None,
                             }
                         }
                         _ => {
                             io.tool_started(call, &command);
-                            timed(self.registry.execute(sandbox, call)).await
+                            Some(timed(self.registry.execute(sandbox, call)).await)
                         }
                     },
                     // Plan: non-plannable tools are withheld from the schema; if the model still names
@@ -209,21 +261,21 @@ impl AgentLoop {
                     // run_command) run directly so the agent can investigate while drafting its plan.
                     ApprovalMode::Plan if !self.registry.is_plannable(&call.function.name) => {
                         io.tool_started(call, &command);
-                        (
+                        Some((
                             ToolOutcome::Error(format!(
                                 "'{}' is blocked in plan mode (not available for planning)",
                                 call.function.name
                             )),
                             Duration::ZERO,
-                        )
+                        ))
                     }
                     ApprovalMode::Plan => {
                         if let Some(reason) = self.registry.plan_check(sandbox, call) {
                             io.tool_started(call, &command);
-                            (ToolOutcome::Error(reason), Duration::ZERO)
+                            Some((ToolOutcome::Error(reason), Duration::ZERO))
                         } else {
                             io.tool_started(call, &command);
-                            timed(self.registry.execute(sandbox, call)).await
+                            Some(timed(self.registry.execute(sandbox, call)).await)
                         }
                     }
                     // Default: confirm each call through the UI before running it.
@@ -231,43 +283,63 @@ impl AgentLoop {
                         Some(confirmation) => match io.decide(&confirmation).await {
                             Approval::Approved => {
                                 io.tool_started(call, &command);
-                                timed(self.registry.execute(sandbox, call)).await
+                                Some(timed(self.registry.execute(sandbox, call)).await)
                             }
                             // "Approve and don't ask again": run this call, then switch the rest of the
                             // turn to auto so the following calls no longer prompt.
                             Approval::ApprovedAuto => {
                                 mode = ApprovalMode::Auto;
                                 io.tool_started(call, &command);
-                                timed(self.registry.execute(sandbox, call)).await
+                                Some(timed(self.registry.execute(sandbox, call)).await)
                             }
                             Approval::Declined => {
                                 io.tool_started(call, &command);
-                                (ToolOutcome::Declined, Duration::ZERO)
+                                Some((ToolOutcome::Declined, Duration::ZERO))
                             }
-                            Approval::Aborted => return Ok(TurnOutcome::Aborted),
+                            Approval::Aborted => None,
                         },
                         None => {
                             io.tool_started(call, &command);
-                            timed(self.registry.execute(sandbox, call)).await
+                            Some(timed(self.registry.execute(sandbox, call)).await)
                         }
                     },
                 };
+
+                let Some((outcome, elapsed)) = result else {
+                    // The user aborted at this call: answer it and every remaining call so the assistant
+                    // `tool_calls` message stays a fully-answered (valid, persistable) exchange, then end.
+                    answer_unanswered(
+                        conversation,
+                        &calls[index..],
+                        "ignorada: interrompida pelo usuário",
+                    );
+                    return Ok(TurnOutcome::Aborted);
+                };
+
                 io.tool_finished(call, &outcome, elapsed);
                 conversation.push(Message::tool_result(
                     call.id.as_str(),
                     outcome.into_message_content(),
                 ));
+                calls_since_checkpoint += 1;
             }
 
-            // The runaway checkpoint fires on either guard: a long wall-clock turn, or too many tool
-            // calls since the last check-in. The call cap bounds an unattended (auto) runaway even when
-            // every call is fast enough that the time budget never trips.
-            calls_since_checkpoint += calls.len();
+            // After the round, fire on either guard: a long wall-clock turn, or the tool-call count
+            // since the last check-in. The call-cap leg here catches accumulation ACROSS rounds; the
+            // same cap is also enforced WITHIN the loop above so one oversized round cannot bypass it.
             if checkpoint.elapsed() >= self.checkpoint_budget
                 || calls_since_checkpoint >= self.max_tool_calls
             {
-                let minutes = checkpoint.elapsed().as_secs() / 60;
-                match io.confirm_continue(minutes).await {
+                let reason = if calls_since_checkpoint >= self.max_tool_calls {
+                    CheckpointReason::CallCount {
+                        calls: calls_since_checkpoint,
+                    }
+                } else {
+                    CheckpointReason::Elapsed {
+                        minutes: checkpoint.elapsed().as_secs() / 60,
+                    }
+                };
+                match io.confirm_continue(reason).await {
                     Approval::Approved => {
                         checkpoint = Instant::now();
                         calls_since_checkpoint = 0;
@@ -351,7 +423,7 @@ mod tests {
         async fn decide(&mut self, _confirmation: &Confirmation) -> Approval {
             self.0
         }
-        async fn confirm_continue(&mut self, _minutes: u64) -> Approval {
+        async fn confirm_continue(&mut self, _reason: CheckpointReason) -> Approval {
             self.0
         }
     }
@@ -387,7 +459,7 @@ mod tests {
             self.decide_calls += 1;
             self.decisions.pop_front().unwrap_or(Approval::Declined)
         }
-        async fn confirm_continue(&mut self, _minutes: u64) -> Approval {
+        async fn confirm_continue(&mut self, _reason: CheckpointReason) -> Approval {
             Approval::Approved
         }
     }
@@ -433,7 +505,7 @@ mod tests {
         async fn decide(&mut self, _confirmation: &Confirmation) -> Approval {
             self.decision
         }
-        async fn confirm_continue(&mut self, _minutes: u64) -> Approval {
+        async fn confirm_continue(&mut self, _reason: CheckpointReason) -> Approval {
             self.decision
         }
     }
@@ -1031,6 +1103,253 @@ mod tests {
         assert_eq!(
             tool_results, 1,
             "the call cap must pause the turn before the second tool round"
+        );
+    }
+
+    fn registry_for_tests() -> ToolRegistry {
+        ToolRegistry::new(default_fs_tools(
+            Arc::from(Vec::<Regex>::new()),
+            Arc::from(Vec::<Regex>::new()),
+            false,
+        ))
+    }
+
+    #[tokio::test]
+    async fn the_call_cap_pauses_within_a_single_oversized_round() {
+        // One assistant message carrying three write_file calls, cap 2, in auto. The cap must trip
+        // WITHIN the round: the first two write, the third is paused-and-declined before executing —
+        // the regression where a single round could run an unbounded burst before any checkpoint.
+        let dir = TempDir::new().unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let provider = Arc::new(ScriptedProvider {
+            turns: Mutex::new(VecDeque::from(vec![CompletedTurn {
+                content: String::new(),
+                tool_calls: vec![
+                    tool_call_id("write_file", r#"{"path":"a.txt","content":"x"}"#, "c0"),
+                    tool_call_id("write_file", r#"{"path":"b.txt","content":"x"}"#, "c1"),
+                    tool_call_id("write_file", r#"{"path":"c.txt","content":"x"}"#, "c2"),
+                ],
+            }])),
+        });
+        let agent_loop = AgentLoop::new(
+            provider,
+            registry_for_tests(),
+            "m".to_string(),
+            Duration::from_secs(3600),
+            2,
+        );
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("write three"));
+        let mut io = ScriptedIo(Approval::Declined);
+
+        let outcome = agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TurnOutcome::Completed);
+        assert!(dir.path().join("a.txt").exists());
+        assert!(dir.path().join("b.txt").exists());
+        assert!(
+            !dir.path().join("c.txt").exists(),
+            "the 3rd call must not run once the cap trips mid-round"
+        );
+        // Every call is still answered, so the exchange stays valid.
+        let tool_results = conversation
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .count();
+        assert_eq!(tool_results, 3);
+    }
+
+    #[tokio::test]
+    async fn aborting_mid_round_answers_every_tool_call() {
+        // The user aborts at the first of two calls; both must still receive a tool_result so the
+        // assistant tool_calls message is a fully-answered (valid, persistable) exchange.
+        let dir = TempDir::new().unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let provider = Arc::new(ScriptedProvider {
+            turns: Mutex::new(VecDeque::from(vec![CompletedTurn {
+                content: String::new(),
+                tool_calls: vec![
+                    tool_call_id("delete_file", r#"{"path":"a.txt"}"#, "c0"),
+                    tool_call_id("delete_file", r#"{"path":"b.txt"}"#, "c1"),
+                ],
+            }])),
+        });
+        let agent_loop = AgentLoop::new(
+            provider,
+            registry_for_tests(),
+            "m".to_string(),
+            Duration::from_secs(3600),
+            100,
+        );
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("delete two"));
+        let mut io = ScriptedIo(Approval::Aborted);
+
+        let outcome = agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TurnOutcome::Aborted);
+        let tool_results = conversation
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .count();
+        assert_eq!(
+            tool_results, 2,
+            "an aborted round must still answer every tool_call"
+        );
+    }
+
+    /// A provider that always fails, to exercise the error path.
+    struct FailingProvider;
+    #[async_trait::async_trait(?Send)]
+    impl CompletionProvider for FailingProvider {
+        async fn complete(
+            &self,
+            _request: TurnRequest<'_>,
+            _sink: &mut dyn EventSink,
+        ) -> Result<CompletedTurn, AgentError> {
+            Err(AgentError::Provider("boom".to_string()))
+        }
+    }
+
+    /// A UI double that counts `finish_turn` calls (and auto-approves everything else).
+    struct FinishCountingIo {
+        finishes: u32,
+    }
+    impl EventSink for FinishCountingIo {
+        fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
+            Ok(())
+        }
+    }
+    impl Presenter for FinishCountingIo {
+        fn begin_turn(&mut self) {}
+        fn finish_turn(&mut self) -> Result<(), AgentError> {
+            self.finishes += 1;
+            Ok(())
+        }
+    }
+    #[async_trait::async_trait(?Send)]
+    impl ApprovalPolicy for FinishCountingIo {
+        async fn decide(&mut self, _confirmation: &Confirmation) -> Approval {
+            Approval::Approved
+        }
+        async fn confirm_continue(&mut self, _reason: CheckpointReason) -> Approval {
+            Approval::Approved
+        }
+    }
+    impl ToolObserver for FinishCountingIo {
+        fn tool_started(&mut self, _call: &ToolCall, _command: &str) {}
+        fn tool_finished(&mut self, _call: &ToolCall, _outcome: &ToolOutcome, _elapsed: Duration) {}
+    }
+
+    #[tokio::test]
+    async fn provider_failure_propagates_after_finishing_the_render() {
+        // The contract requires render cleanup (spinner erase / terminal reset) on the failure path too,
+        // and the error to propagate. A refactor moving finish_turn after `?` would pass every other
+        // test but break this.
+        let dir = TempDir::new().unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let agent_loop = AgentLoop::new(
+            Arc::new(FailingProvider),
+            registry_for_tests(),
+            "m".to_string(),
+            Duration::from_secs(3600),
+            100,
+        );
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("hi"));
+        let mut io = FinishCountingIo { finishes: 0 };
+
+        let result = agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
+            .await;
+
+        assert!(
+            matches!(result, Err(AgentError::Provider(_))),
+            "the provider error must propagate"
+        );
+        assert_eq!(
+            io.finishes, 1,
+            "finish_turn must run exactly once before the error propagates"
+        );
+    }
+
+    /// A UI double that records every checkpoint reason it is shown and answers with a fixed decision.
+    struct ReasonRecordingIo {
+        reasons: Vec<CheckpointReason>,
+        decision: Approval,
+    }
+    impl EventSink for ReasonRecordingIo {
+        fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
+            Ok(())
+        }
+    }
+    impl Presenter for ReasonRecordingIo {
+        fn begin_turn(&mut self) {}
+        fn finish_turn(&mut self) -> Result<(), AgentError> {
+            Ok(())
+        }
+    }
+    #[async_trait::async_trait(?Send)]
+    impl ApprovalPolicy for ReasonRecordingIo {
+        async fn decide(&mut self, _confirmation: &Confirmation) -> Approval {
+            self.decision
+        }
+        async fn confirm_continue(&mut self, reason: CheckpointReason) -> Approval {
+            self.reasons.push(reason);
+            self.decision
+        }
+    }
+    impl ToolObserver for ReasonRecordingIo {
+        fn tool_started(&mut self, _call: &ToolCall, _command: &str) {}
+        fn tool_finished(&mut self, _call: &ToolCall, _outcome: &ToolOutcome, _elapsed: Duration) {}
+    }
+
+    #[tokio::test]
+    async fn wall_clock_checkpoint_fires_with_an_elapsed_reason() {
+        // A zero wall-clock budget trips the time leg after the first round; the cap is large so it is
+        // NOT the call-count leg — the reason shown must be Elapsed, not CallCount.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hi").unwrap();
+        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let provider = Arc::new(ScriptedProvider {
+            turns: Mutex::new(VecDeque::from(vec![CompletedTurn {
+                content: "x".to_string(),
+                tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+            }])),
+        });
+        let agent_loop = AgentLoop::new(
+            provider,
+            registry_for_tests(),
+            "m".to_string(),
+            Duration::ZERO,
+            100,
+        );
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("read"));
+        let mut io = ReasonRecordingIo {
+            reasons: Vec::new(),
+            decision: Approval::Declined,
+        };
+
+        let outcome = agent_loop
+            .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TurnOutcome::Completed);
+        assert_eq!(io.reasons.len(), 1);
+        assert!(
+            matches!(io.reasons[0], CheckpointReason::Elapsed { .. }),
+            "a zero time budget must trip the wall-clock leg, got {:?}",
+            io.reasons[0]
         );
     }
 

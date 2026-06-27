@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use super::wire::{BlockDeltaDto, ContentBlockStartDto, StreamEventDto};
+use super::wire::{BlockDeltaDto, ContentBlockStartDto, MessageDeltaDto, StreamEventDto};
 use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::agent::domain::stream_event::StreamEvent;
 use crate::modules::provider::application::completion_provider::EventSink;
@@ -41,6 +41,14 @@ pub(crate) fn handle_event(
         StreamEventDto::ContentBlockDelta { index, delta } => {
             apply_delta(index, delta, accumulator, sink)
         }
+        StreamEventDto::MessageDelta {
+            delta: MessageDeltaDto { stop_reason },
+        } => {
+            if let Some(reason) = stop_reason {
+                accumulator.stop_reason = Some(reason);
+            }
+            Ok(())
+        }
         StreamEventDto::Other => Ok(()),
     }
 }
@@ -74,6 +82,8 @@ fn apply_delta(
 pub(crate) struct TurnAccumulator {
     content: String,
     tool_uses: BTreeMap<u32, PartialToolUse>,
+    /// The message's `stop_reason`; `"max_tokens"` means the output cap truncated the turn.
+    stop_reason: Option<String>,
 }
 
 #[derive(Default)]
@@ -84,6 +94,14 @@ struct PartialToolUse {
 }
 
 impl TurnAccumulator {
+    /// Whether the output token cap (`stop_reason == "max_tokens"`) truncated the turn before producing
+    /// anything usable. Surfaced by the provider as an error rather than an empty turn.
+    pub(crate) fn hit_empty_output_limit(&self) -> bool {
+        self.stop_reason.as_deref() == Some("max_tokens")
+            && self.content.is_empty()
+            && self.tool_uses.is_empty()
+    }
+
     fn start_tool_use(&mut self, index: u32, id: String, name: String) {
         self.tool_uses.insert(
             index,
@@ -245,6 +263,32 @@ mod tests {
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"p\":"}}"#,
         ]);
         assert_eq!(turn.tool_calls[0].function.arguments, "{}");
+    }
+
+    #[test]
+    fn max_tokens_stop_with_no_output_is_flagged_as_truncated() {
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        handle_event(
+            r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+            &mut accumulator,
+            &mut sink,
+        )
+        .unwrap();
+        assert!(accumulator.hit_empty_output_limit());
+    }
+
+    #[test]
+    fn normal_stop_is_not_flagged_as_truncated() {
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        for data in [
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+        ] {
+            handle_event(data, &mut accumulator, &mut sink).unwrap();
+        }
+        assert!(!accumulator.hit_empty_output_limit());
     }
 
     #[test]

@@ -102,6 +102,15 @@ impl CompletionProvider for OpenAiProvider {
             handle_event(&event.data, &mut accumulator, sink)?;
         }
 
+        // A turn the output token cap truncated before any content or tool call: surface it instead of
+        // returning an empty turn the user gets no feedback on.
+        if accumulator.hit_empty_output_limit() {
+            return Err(AgentError::Provider(
+                "the provider hit the output token limit before producing a response; \
+                 raise the model's max output tokens or shorten the request"
+                    .to_string(),
+            ));
+        }
         Ok(accumulator.into_completed())
     }
 }

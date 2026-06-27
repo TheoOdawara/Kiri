@@ -1442,6 +1442,17 @@ fn on_turn_end(
             model.pending_plan = Some(PendingPlan::default());
         }
         Ok(TurnOutcome::PlanProposed(_)) => {}
+        // A ^C while busy cancels just this turn: `drive_turn` sets the cancel token and synthesizes
+        // `Aborted`, so `cancelled` is true here — show it and drop the dangling user message, but keep
+        // the session alive. Only a genuine input-stream end (`cancelled == false`, e.g. the approval
+        // channel closed) quits.
+        Ok(TurnOutcome::Aborted) if cancelled => {
+            model.transcript.push(TranscriptItem::Notice(
+                NoticeLevel::Info,
+                "⨯ cancelado".to_string(),
+            ));
+            conversation.rollback_dangling_user();
+        }
         Ok(TurnOutcome::Aborted) => model.should_quit = true,
         Err(error) => {
             if cancelled {
@@ -1683,6 +1694,42 @@ mod tests {
             has_error_notice(&model),
             "an empty turn must surface an error notice"
         );
+    }
+
+    #[test]
+    fn a_cancel_aborts_the_turn_without_quitting() {
+        // A single ^C while busy cancels just the turn: drive_turn synthesizes Aborted with the cancel
+        // token set (cancelled == true). The app must NOT quit — only a genuine input-stream end does.
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        model.busy = true;
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("rodar algo demorado"));
+
+        on_turn_end(
+            Ok(TurnOutcome::Aborted),
+            true,
+            &mut model,
+            &mut conversation,
+        );
+
+        assert!(
+            !model.should_quit,
+            "^C must cancel the turn, not quit the app"
+        );
+    }
+
+    #[test]
+    fn a_genuine_abort_quits() {
+        // The approval channel closed (cancelled == false): this is a real session end and must quit.
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        let mut conversation = Conversation::new("system");
+        on_turn_end(
+            Ok(TurnOutcome::Aborted),
+            false,
+            &mut model,
+            &mut conversation,
+        );
+        assert!(model.should_quit, "a genuine abort must quit");
     }
 
     #[test]

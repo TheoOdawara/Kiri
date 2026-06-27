@@ -106,6 +106,14 @@ impl CompletionProvider for AnthropicProvider {
             handle_event(&event.data, &mut accumulator, sink)?;
         }
 
+        // The output cap (max_tokens) truncated the turn before any content or tool call: surface it
+        // rather than returning an empty turn with no feedback.
+        if accumulator.hit_empty_output_limit() {
+            return Err(AgentError::Provider(format!(
+                "the model hit the {MAX_OUTPUT_TOKENS}-token output cap before producing a response; \
+                 shorten the request"
+            )));
+        }
         Ok(accumulator.into_completed())
     }
 }
