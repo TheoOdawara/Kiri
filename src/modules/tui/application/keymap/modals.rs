@@ -2,27 +2,38 @@ use super::*;
 
 /// A resolved approval choice from a key press while a confirmation is pending.
 enum Choice {
-    /// Pick option `usize` from `APPROVAL_OPTIONS`.
-    Option(usize),
+    /// Pick a named option from [`ApprovalOption::ALL`].
+    Option(ApprovalOption),
     /// Decline just this call (Esc / 'n').
     Decline,
     /// End the whole session (Ctrl+C).
     Abort,
 }
 
-/// Answer the pending confirmation: arrows move the highlight, Enter takes the highlighted option,
-/// digits/letters jump straight to one, Esc declines this call, and Ctrl+C aborts the session. Option 2
-/// ("Sim, e não perguntar de novo") also switches the session to auto mode.
+/// Map a typed digit ('1'..) to the option at that 1-based position, if it is in range. Driven by
+/// `ALL.len()` so adding or removing an option keeps the shortcuts aligned with the rendered list.
+fn approval_option_for_digit(c: char) -> Option<ApprovalOption> {
+    let digit = c.to_digit(10)? as usize;
+    if (1..=ApprovalOption::ALL.len()).contains(&digit) {
+        ApprovalOption::from_index(digit - 1)
+    } else {
+        None
+    }
+}
+
+/// Answer the pending confirmation: arrows move the highlight (wrapping, like every modal), Enter takes
+/// the highlighted option, digits/letters jump straight to one, Esc declines this call, and Ctrl+C aborts
+/// the session. `ApproveAuto` ("Sim, e não perguntar de novo") also switches the session to auto mode.
 pub(super) fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     // Navigation moves the highlight without answering.
     if let Some(pending) = model.pending_approval.as_mut() {
         match key.code {
             Key::Up => {
-                pending.selected = pending.selected.saturating_sub(1);
+                pending.selected = wrapping_step(pending.selected, -1, ApprovalOption::ALL.len());
                 return vec![];
             }
             Key::Down => {
-                pending.selected = (pending.selected + 1).min(APPROVAL_OPTIONS.len() - 1);
+                pending.selected = wrapping_step(pending.selected, 1, ApprovalOption::ALL.len());
                 return vec![];
             }
             _ => {}
@@ -33,12 +44,10 @@ pub(super) fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     let choice = match key.code {
         Key::Char('c') if key.ctrl => Some(Choice::Abort),
         Key::Esc => Some(Choice::Decline),
-        Key::Enter => Some(Choice::Option(selected)),
-        Key::Char('1') => Some(Choice::Option(0)),
-        Key::Char('2') => Some(Choice::Option(1)),
-        Key::Char('3') => Some(Choice::Option(2)),
+        Key::Enter => ApprovalOption::from_index(selected).map(Choice::Option),
+        Key::Char(c) if c.is_ascii_digit() => approval_option_for_digit(c).map(Choice::Option),
         Key::Char(c) => match c.to_ascii_lowercase() {
-            's' | 'y' => Some(Choice::Option(0)),
+            's' | 'y' => Some(Choice::Option(ApprovalOption::Approve)),
             'n' => Some(Choice::Decline),
             _ => None,
         },
@@ -54,9 +63,9 @@ pub(super) fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     let (decision, switch_auto) = match choice {
         Choice::Abort => (Approval::Aborted, false),
         Choice::Decline => (Approval::Declined, false),
-        Choice::Option(0) => (Approval::Approved, false),
-        Choice::Option(1) => (Approval::ApprovedAuto, true),
-        Choice::Option(_) => (Approval::Declined, false),
+        Choice::Option(ApprovalOption::Approve) => (Approval::Approved, false),
+        Choice::Option(ApprovalOption::ApproveAuto) => (Approval::ApprovedAuto, true),
+        Choice::Option(ApprovalOption::Decline) => (Approval::Declined, false),
     };
     let (level, label) = match decision {
         Approval::Approved | Approval::ApprovedAuto => {
@@ -85,11 +94,11 @@ pub(super) fn on_plan_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     if let Some(plan) = model.pending_plan.as_mut() {
         match key.code {
             Key::Up => {
-                plan.selected = plan.selected.saturating_sub(1);
+                plan.selected = wrapping_step(plan.selected, -1, PlanOption::ALL.len());
                 return vec![];
             }
             Key::Down => {
-                plan.selected = (plan.selected + 1).min(PLAN_OPTIONS.len() - 1);
+                plan.selected = wrapping_step(plan.selected, 1, PlanOption::ALL.len());
                 return vec![];
             }
             _ => {}
@@ -103,30 +112,37 @@ pub(super) fn on_plan_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     }
 
     let selected = model.pending_plan.as_ref().map_or(0, |p| p.selected);
-    let index = match key.code {
-        Key::Enter => selected,
-        Key::Char('1') => 0,
-        Key::Char('2') => 1,
-        Key::Char('3') => 2,
-        Key::Char('4') => 3,
-        Key::Esc => 3,
+    let option = match key.code {
+        Key::Enter => PlanOption::from_index(selected),
+        Key::Char(c) if c.is_ascii_digit() => plan_option_for_digit(c),
+        Key::Esc => Some(PlanOption::Cancel),
         _ => return vec![],
+    };
+    let Some(option) = option else {
+        return vec![];
     };
 
     model.pending_plan = None;
-    match index {
-        // Execute the plan confirming each step: the runtime leaves plan mode for default mode.
-        0 => vec![Effect::ApprovePlan(ApprovalMode::Default)],
-        // Execute the plan unattended: the runtime leaves plan mode for auto mode.
-        1 => vec![Effect::ApprovePlan(ApprovalMode::Auto)],
-        // Keep planning: close the box and stay in plan mode for more input.
-        2 => vec![],
-        // Cancel: leave plan mode without executing.
-        _ => {
+    match option {
+        PlanOption::Execute => vec![Effect::ApprovePlan(ApprovalMode::Default)],
+        PlanOption::ExecuteAuto => vec![Effect::ApprovePlan(ApprovalMode::Auto)],
+        PlanOption::KeepPlanning => vec![],
+        PlanOption::Cancel => {
             model.approval_mode = ApprovalMode::Default;
             model.notify_info("modo plan cancelado");
             vec![]
         }
+    }
+}
+
+/// Map a typed digit ('1'..) to the plan option at that 1-based position, if it is in range. Driven by
+/// `ALL.len()` so the shortcuts stay aligned with the rendered list.
+fn plan_option_for_digit(c: char) -> Option<PlanOption> {
+    let digit = c.to_digit(10)? as usize;
+    if (1..=PlanOption::ALL.len()).contains(&digit) {
+        PlanOption::from_index(digit - 1)
+    } else {
+        None
     }
 }
 

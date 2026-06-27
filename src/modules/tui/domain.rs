@@ -3,6 +3,7 @@ pub mod history;
 pub mod input_buffer;
 pub mod modal;
 pub mod model;
+pub mod nav;
 pub mod picker;
 pub mod scroll;
 pub mod selection;

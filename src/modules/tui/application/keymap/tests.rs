@@ -598,6 +598,88 @@ fn approval_arrows_move_selection_then_enter_confirms_and_switches_to_auto() {
 }
 
 #[test]
+fn all_modals_wrap_on_up_at_top() {
+    // Deliberate UX change (S19): the approval and plan boxes now wrap on Up at the top instead of
+    // clamping, so every single-choice modal behaves the same way. Lock both newly-wrapping modals.
+    let mut approval = Model {
+        pending_approval: Some(PendingApproval::new("p".to_string(), true)),
+        ..Model::default()
+    };
+    assert_eq!(approval.pending_approval.as_ref().unwrap().selected, 0);
+    on_key(&mut approval, press(Key::Up));
+    assert_eq!(
+        approval.pending_approval.as_ref().unwrap().selected,
+        ApprovalOption::ALL.len() - 1,
+        "approval Up at the top must wrap to the last option"
+    );
+
+    let mut plan = Model {
+        pending_plan: Some(PendingPlan::default()),
+        ..Model::default()
+    };
+    assert_eq!(plan.pending_plan.as_ref().unwrap().selected, 0);
+    on_key(&mut plan, press(Key::Up));
+    assert_eq!(
+        plan.pending_plan.as_ref().unwrap().selected,
+        PlanOption::ALL.len() - 1,
+        "plan Up at the top must wrap to the last option"
+    );
+}
+
+#[test]
+fn approval_digit_selection_follows_options_len() {
+    // Digits 1..=len pick the option at that 1-based position; a digit past the list is ignored.
+    let answer = |digit: char| {
+        let mut m = Model {
+            pending_approval: Some(PendingApproval::new("p".to_string(), true)),
+            ..Model::default()
+        };
+        on_key(&mut m, press(Key::Char(digit)))
+    };
+    assert_eq!(
+        answer('1'),
+        vec![Effect::AnswerApproval(Approval::Approved)]
+    );
+    assert_eq!(
+        answer('2'),
+        vec![Effect::AnswerApproval(Approval::ApprovedAuto)]
+    );
+    assert_eq!(
+        answer('3'),
+        vec![Effect::AnswerApproval(Approval::Declined)]
+    );
+    // '4' is past the three options: no answer, the approval stays pending.
+    let mut m = Model {
+        pending_approval: Some(PendingApproval::new("p".to_string(), true)),
+        ..Model::default()
+    };
+    assert!(on_key(&mut m, press(Key::Char('4'))).is_empty());
+    assert!(m.pending_approval.is_some());
+}
+
+#[test]
+fn reordering_approval_options_keeps_semantics() {
+    use crate::shared::kernel::approval_mode::ApprovalMode;
+    // The decision is bound to the named variant, not a positional index: selecting the row whose option
+    // is `ApproveAuto` always switches to auto, wherever that variant sits in `ALL`.
+    let auto_index = ApprovalOption::ALL
+        .iter()
+        .position(|o| *o == ApprovalOption::ApproveAuto)
+        .expect("ApproveAuto is in ALL");
+    let mut m = Model {
+        pending_approval: Some(PendingApproval::new("p".to_string(), true)),
+        ..Model::default()
+    };
+    m.pending_approval.as_mut().unwrap().selected = auto_index;
+    let effects = on_key(&mut m, press(Key::Enter));
+    assert_eq!(
+        effects,
+        vec![Effect::AnswerApproval(Approval::ApprovedAuto)]
+    );
+    assert_eq!(m.approval_mode, ApprovalMode::Auto);
+}
+
+#[test]
 fn esc_declines_without_aborting_the_session() {
     let mut m = Model {
         pending_approval: Some(PendingApproval::new("p".to_string(), true)),

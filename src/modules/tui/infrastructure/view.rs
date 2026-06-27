@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::Block;
 
-use crate::modules::tui::domain::modal::APPROVAL_OPTIONS;
+use crate::modules::tui::domain::modal::ApprovalOption;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::infrastructure::layout::{Regions, frame_layout, h_pad};
 use crate::modules::tui::infrastructure::theme;
@@ -72,7 +72,7 @@ pub fn frame_regions(area: Rect, model: &Model) -> Regions {
     let box_h = if model.pending_plan.is_some() {
         approval::box_dims(content, approval::PLAN_ACTION, approval::plan_options_len()).1
     } else if let Some(pending) = &model.pending_approval {
-        approval::box_dims(content, pending.action(), APPROVAL_OPTIONS.len()).1
+        approval::box_dims(content, pending.action(), ApprovalOption::ALL.len()).1
     } else if let Some(picker) = &model.picker {
         approval::box_dims(content, &picker.action, picker.options.len()).1
     } else if let Some(provider_wizard) = &model.wizard {

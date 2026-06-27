@@ -1,3 +1,5 @@
+use crate::modules::tui::domain::nav::wrapping_step;
+
 /// Which setting a generic picker chooses, so the keymap maps the highlighted row to the right effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerKind {
@@ -40,11 +42,6 @@ impl Picker {
 
     /// Move the highlight by `delta` rows, wrapping within the options.
     pub fn move_cursor(&mut self, delta: i32) {
-        if self.options.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let len = self.options.len() as i32;
-        self.selected = (self.selected as i32 + delta).rem_euclid(len) as usize;
+        self.selected = wrapping_step(self.selected, delta, self.options.len());
     }
 }

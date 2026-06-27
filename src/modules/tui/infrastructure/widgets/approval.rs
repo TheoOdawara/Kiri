@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use crate::modules::tui::domain::modal::{
-    APPROVAL_OPTIONS, PLAN_OPTIONS, PendingApproval, PendingPlan,
+    ApprovalOption, PendingApproval, PendingPlan, PlanOption,
 };
 use crate::modules::tui::domain::picker::Picker;
 use crate::modules::tui::infrastructure::markdown;
@@ -12,10 +12,11 @@ use crate::modules::tui::infrastructure::theme;
 
 /// Render the tool-call confirmation: the proposed action plus its options.
 pub fn render(pending: &PendingApproval, frame: &mut Frame, area: Rect) {
+    let options: Vec<&str> = ApprovalOption::ALL.iter().map(|o| o.label()).collect();
     render_stanza(
         "aprovação",
         pending.action(),
-        &APPROVAL_OPTIONS,
+        &options,
         pending.selected,
         frame,
         area,
@@ -72,9 +73,9 @@ fn hairline(width: usize) -> String {
 pub const PLAN_ACTION: &str = "Plano pronto. Escolha:";
 
 /// The number of plan options, exposed so the view can size the reserved area without importing the
-/// constant across module boundaries.
+/// enum across module boundaries.
 pub fn plan_options_len() -> usize {
-    PLAN_OPTIONS.len()
+    PlanOption::ALL.len()
 }
 
 /// The width and height the stanza occupies in `area`: full width, and a height of one hairline row, the
@@ -93,14 +94,8 @@ pub fn box_dims(area: Rect, action: &str, option_count: usize) -> (u16, u16) {
 /// Render the plan stanza into its pre-reserved region (the bottom slice just above the input), so the
 /// plan text stays visible above it.
 pub fn render_plan_into(plan: &PendingPlan, frame: &mut Frame, area: Rect) {
-    render_stanza(
-        "plano",
-        PLAN_ACTION,
-        &PLAN_OPTIONS,
-        plan.selected,
-        frame,
-        area,
-    );
+    let options: Vec<&str> = PlanOption::ALL.iter().map(|o| o.label()).collect();
+    render_stanza("plano", PLAN_ACTION, &options, plan.selected, frame, area);
 }
 
 /// Render a generic `/models` / `/effort` picker with the same stanza as the approval/plan boxes.

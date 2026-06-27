@@ -1,5 +1,6 @@
 use zeroize::Zeroize;
 
+use crate::modules::tui::domain::nav::wrapping_step;
 use crate::shared::kernel::provider::ProviderKind;
 
 /// The last row of the `/provider` picker — selecting it opens the add-provider wizard instead of
@@ -192,8 +193,7 @@ impl ProviderWizard {
         if self.step != WizardStep::Kind {
             return;
         }
-        let len = WIZARD_KINDS.len() as i32;
-        self.kind_selected = (self.kind_selected as i32 + delta).rem_euclid(len) as usize;
+        self.kind_selected = wrapping_step(self.kind_selected, delta, WIZARD_KINDS.len());
     }
 }
 

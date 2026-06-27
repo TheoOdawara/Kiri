@@ -1,6 +1,38 @@
-/// The options shown for a tool-call confirmation, in display order. `PendingApproval.selected` indexes
-/// this list; the keymap maps the chosen index to an approval decision (option 1 also switches to auto).
-pub const APPROVAL_OPTIONS: [&str; 3] = ["Sim", "Sim, e não perguntar de novo (modo auto)", "Não"];
+/// The options shown for a tool-call confirmation, in display order. The named variants are the single
+/// source for both the labels and the index→decision mapping, so reordering them can never desync the
+/// digit-key shortcuts from their meaning. `PendingApproval.selected` indexes [`ApprovalOption::ALL`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalOption {
+    /// Approve just this call.
+    Approve,
+    /// Approve this call and switch the session to auto mode (stop prompting).
+    ApproveAuto,
+    /// Decline this call.
+    Decline,
+}
+
+impl ApprovalOption {
+    /// The options in display order; an index into this slice is what `PendingApproval.selected` holds.
+    pub const ALL: [ApprovalOption; 3] = [
+        ApprovalOption::Approve,
+        ApprovalOption::ApproveAuto,
+        ApprovalOption::Decline,
+    ];
+
+    /// The pt-BR label rendered for this option in the confirmation box.
+    pub fn label(self) -> &'static str {
+        match self {
+            ApprovalOption::Approve => "Sim",
+            ApprovalOption::ApproveAuto => "Sim, e não perguntar de novo (modo auto)",
+            ApprovalOption::Decline => "Não",
+        }
+    }
+
+    /// Resolve a highlighted index back to its named option, if in range.
+    pub fn from_index(index: usize) -> Option<ApprovalOption> {
+        ApprovalOption::ALL.get(index).copied()
+    }
+}
 
 /// A tool-call (or runaway-checkpoint) confirmation awaiting the user's answer. Pure data — the reply
 /// channel lives in the runtime, since the engine handles approvals one at a time.
@@ -8,7 +40,7 @@ pub const APPROVAL_OPTIONS: [&str; 3] = ["Sim", "Sim, e não perguntar de novo (
 pub struct PendingApproval {
     pub prompt: String,
     pub default_accept: bool,
-    /// The highlighted option index into `APPROVAL_OPTIONS`.
+    /// The highlighted option index into [`ApprovalOption::ALL`].
     pub selected: usize,
 }
 
@@ -19,7 +51,7 @@ impl PendingApproval {
         let selected = if default_accept {
             0
         } else {
-            APPROVAL_OPTIONS.len() - 1
+            ApprovalOption::ALL.len() - 1
         };
         Self {
             prompt,
@@ -40,18 +72,49 @@ impl PendingApproval {
 }
 
 /// The options shown when a plan-mode turn finishes: run the plan (confirming each step or fully
-/// unattended in auto), keep refining it, or leave plan mode.
-pub const PLAN_OPTIONS: [&str; 4] = [
-    "Executar o plano",
-    "Executar o plano em modo auto",
-    "Continuar planejando",
-    "Cancelar (sair do modo plan)",
-];
+/// unattended in auto), keep refining it, or leave plan mode. Named for the same reason as
+/// [`ApprovalOption`] — the variant, not a positional index, carries the meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanOption {
+    /// Execute the plan confirming each step (leave plan mode for default mode).
+    Execute,
+    /// Execute the plan unattended (leave plan mode for auto mode).
+    ExecuteAuto,
+    /// Close the box and stay in plan mode for more input.
+    KeepPlanning,
+    /// Leave plan mode without executing.
+    Cancel,
+}
+
+impl PlanOption {
+    /// The options in display order; an index into this slice is what `PendingPlan.selected` holds.
+    pub const ALL: [PlanOption; 4] = [
+        PlanOption::Execute,
+        PlanOption::ExecuteAuto,
+        PlanOption::KeepPlanning,
+        PlanOption::Cancel,
+    ];
+
+    /// The pt-BR label rendered for this option in the plan box.
+    pub fn label(self) -> &'static str {
+        match self {
+            PlanOption::Execute => "Executar o plano",
+            PlanOption::ExecuteAuto => "Executar o plano em modo auto",
+            PlanOption::KeepPlanning => "Continuar planejando",
+            PlanOption::Cancel => "Cancelar (sair do modo plan)",
+        }
+    }
+
+    /// Resolve a highlighted index back to its named option, if in range.
+    pub fn from_index(index: usize) -> Option<PlanOption> {
+        PlanOption::ALL.get(index).copied()
+    }
+}
 
 /// A finished plan-mode turn awaiting the user's decision. The plan itself is the assistant's last
 /// transcript item; this only tracks which action is highlighted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PendingPlan {
-    /// The highlighted option index into `PLAN_OPTIONS`.
+    /// The highlighted option index into [`PlanOption::ALL`].
     pub selected: usize,
 }
