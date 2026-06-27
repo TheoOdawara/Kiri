@@ -1,5 +1,6 @@
 use crate::modules::memory::application::project_memory::ProjectMemory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
+use crate::shared::infra::fs::write_atomic;
 use crate::shared::kernel::error::AgentError;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
@@ -10,20 +11,6 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 
 type Result<T> = std::result::Result<T, AgentError>;
-
-/// Write `content` to `path` atomically: a temp sibling then rename. A crash mid-write can otherwise
-/// truncate `index.json`/`embeddings.json` (the next `load_index` then fails to parse and makes the whole
-/// project store inert) or leave a half-written entry body. The temp name appends a `.kiri-tmp` suffix to
-/// the full file name — a sibling in the same directory (so the rename stays atomic) that also works for
-/// the `.md` bodies, not only the JSON files.
-async fn write_atomic(path: &Path, content: &str) -> Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".kiri-tmp");
-    let tmp = PathBuf::from(tmp);
-    fs::write(&tmp, content).await?;
-    fs::rename(&tmp, path).await?;
-    Ok(())
-}
 
 /// Largest entry body read into memory, mirroring `docs_library`'s `MAX_FILE_BYTES`. Caps a single read
 /// so a symlinked `/dev/zero` or an over-sized committed `.md` cannot exhaust memory.
@@ -130,7 +117,7 @@ impl FileProjectMemory {
     async fn save_index(&self) -> Result<()> {
         let index = self.index.read().await.clone();
         let content = serde_json::to_string_pretty(&index).map_err(AgentError::memory)?;
-        write_atomic(&self.index_path(), &content).await?;
+        write_atomic(&self.index_path(), content.as_bytes()).await?;
         Ok(())
     }
 
@@ -158,7 +145,7 @@ impl FileProjectMemory {
             },
         );
         let content = serde_json::to_string(&sidecar).map_err(AgentError::memory)?;
-        write_atomic(&self.embeddings_path(), &content).await?;
+        write_atomic(&self.embeddings_path(), content.as_bytes()).await?;
         Ok(())
     }
 
@@ -265,7 +252,7 @@ impl ProjectMemory for FileProjectMemory {
         // Write the body atomically, then update the index. The body-before-index ordering is the
         // recovery contract: a crash after the body but before the index leaves an orphan file that
         // `search` simply never reaches (it walks the index), never a truncated/half-written entry.
-        write_atomic(&path, &content).await?;
+        write_atomic(&path, content.as_bytes()).await?;
 
         // Update the index. The path is built by joining `root`, so stripping it back cannot fail; the
         // fallback to the full path keeps this total without an `unwrap`.
@@ -669,34 +656,6 @@ mod tests {
 
         let loaded = memory.load(&entry.id).await.unwrap().unwrap();
         assert_eq!(loaded.content, entry.content);
-    }
-
-    #[tokio::test]
-    async fn write_atomic_writes_overwrites_and_leaves_no_temp() {
-        // Guard `write_atomic`'s observable happy-path contract: it writes new content, overwrites in
-        // place, and leaves no `.kiri-tmp` sibling. Crash-mid-write atomicity itself rests on the OS rename
-        // being atomic and is not hermetically testable here; this pins the temp-name/rename plumbing the
-        // body write routes through (a plain `fs::write` would also pass, so this is a plumbing lock, not an
-        // atomicity proof).
-        let dir = TempDir::new().unwrap();
-        let target = dir.path().join("index.json");
-
-        // Writes content to a fresh path.
-        write_atomic(&target, "first").await.unwrap();
-        assert_eq!(fs::read_to_string(&target).await.unwrap(), "first");
-
-        // Overwrites an existing file in place.
-        write_atomic(&target, "second").await.unwrap();
-        assert_eq!(fs::read_to_string(&target).await.unwrap(), "second");
-
-        // No `.kiri-tmp` sibling remains once the rename has consumed the temp.
-        let mut reader = fs::read_dir(dir.path()).await.unwrap();
-        while let Some(e) = reader.next_entry().await.unwrap() {
-            assert!(
-                !e.file_name().to_string_lossy().ends_with(".kiri-tmp"),
-                "leftover temp file after write_atomic"
-            );
-        }
     }
 
     /// Hand-write an index whose stored path is a plain in-root name that is actually a symlink pointing

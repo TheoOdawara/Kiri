@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use tokio::fs;
 
 use crate::modules::sync::application::work_tree::SyncWorkTree;
+use crate::shared::infra::fs as shared_fs;
 use crate::shared::kernel::error::AgentError;
 
 /// The `tokio::fs` adapter for the sync work-tree. Every write refuses an existing non-regular target
@@ -25,14 +26,12 @@ impl SyncWorkTree for FsSyncWorkTree {
 
     async fn write_atomic(&self, path: &Path, contents: &str) -> Result<(), AgentError> {
         refuse_irregular_target(path)?;
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("config.toml");
-        let tmp = path.with_file_name(format!(".{name}.kiri-tmp"));
-        refuse_irregular_target(&tmp)?;
-        fs::write(&tmp, contents).await.map_err(sync_err)?;
-        fs::rename(&tmp, path).await.map_err(sync_err)
+        // Guard the exact temp path `write_atomic` will write to, then delegate the temp-then-rename to the
+        // single shared crash-safe primitive (`shared/infra/fs`). The symlink refusal stays here at the
+        // adapter so a hostile remote's committed symlink — at the target or at the temp — cannot redirect
+        // the write out of the work-tree.
+        refuse_irregular_target(&shared_fs::temp_sibling(path))?;
+        shared_fs::write_atomic(path, contents.as_bytes()).await
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<(), AgentError> {
