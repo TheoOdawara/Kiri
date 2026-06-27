@@ -68,8 +68,9 @@ impl SensitiveMatcher {
         })
     }
 
-    /// A matcher that matches nothing — for tests that don't exercise the sensitive guard.
-    #[allow(dead_code)]
+    /// A matcher that matches nothing — for tests that don't exercise the sensitive guard. Every
+    /// caller is a `#[cfg(test)]` fixture, so it is gated out of the release binary.
+    #[cfg(test)]
     pub fn empty() -> Self {
         Self {
             patterns: Arc::from(Vec::<(String, Regex)>::new()),

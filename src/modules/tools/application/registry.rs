@@ -41,10 +41,10 @@ impl ToolRegistry {
         }
     }
 
-    /// Whether a named tool exists and mutates the filesystem. Currently unused in the engine path
-    /// (plan mode gates on `is_plannable` instead) but kept as a classification test assertion and
-    /// for future use (e.g. destructive-tool warnings in non-plan modes).
-    #[allow(dead_code)]
+    /// Whether a named tool exists and mutates the filesystem. The engine path gates on
+    /// `is_plannable` instead, so the only caller is the classification test; gated `#[cfg(test)]`
+    /// so it never ships in the release binary.
+    #[cfg(test)]
     pub fn is_destructive(&self, name: &str) -> bool {
         self.find(name).is_some_and(|tool| !tool.is_read_only())
     }
