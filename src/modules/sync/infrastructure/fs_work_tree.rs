@@ -31,7 +31,9 @@ impl SyncWorkTree for FsSyncWorkTree {
         // adapter so a hostile remote's committed symlink — at the target or at the temp — cannot redirect
         // the write out of the work-tree.
         refuse_irregular_target(&shared_fs::temp_sibling(path))?;
-        shared_fs::write_atomic(path, contents.as_bytes()).await
+        shared_fs::write_atomic(path, contents.as_bytes())
+            .await
+            .map_err(sync_err)
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<(), AgentError> {

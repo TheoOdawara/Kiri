@@ -14,15 +14,14 @@ pub(crate) fn sanitized_object(raw: &str) -> Value {
     serde_json::from_str(trimmed).unwrap_or_else(|_| json!({}))
 }
 
-/// Sanitize a tool call's raw JSON-string arguments into the domain `arguments` string. Trims only for the
-/// validity check but returns the ORIGINAL untrimmed `raw` on success, so the exact bytes the model
-/// produced are re-sent; an empty or non-JSON input becomes `"{}"`.
+/// Sanitize a tool call's raw JSON-string arguments into the domain `arguments` string: return the
+/// ORIGINAL `raw` (the exact bytes the model produced) when it is valid JSON, else `"{}"`. The validity
+/// check runs on `raw` itself — NOT a trimmed copy — because Rust's `trim` strips Unicode whitespace JSON
+/// does not (e.g. U+00A0), so validating a trimmed value while returning the raw could hand the provider
+/// an invalid-JSON arguments string and re-poison a later request. `serde_json` already tolerates JSON's
+/// own leading/trailing whitespace, so a valid payload with surrounding spaces still round-trips untouched.
 pub(crate) fn sanitized_string(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return "{}".to_string();
-    }
-    if serde_json::from_str::<Value>(trimmed).is_ok() {
+    if serde_json::from_str::<Value>(raw).is_ok() {
         raw.to_string()
     } else {
         "{}".to_string()
@@ -67,5 +66,12 @@ mod tests {
     #[test]
     fn sanitized_string_empty_is_brace_brace() {
         assert_eq!(sanitized_string("   "), "{}");
+    }
+
+    #[test]
+    fn sanitized_string_rejects_a_non_json_whitespace_prefix() {
+        // U+00A0 is whitespace to Rust's `trim` but NOT to JSON, so the returned bytes must be validated
+        // as-is: a payload that is only "valid once trimmed" falls back to `{}` rather than being re-sent.
+        assert_eq!(sanitized_string("\u{a0}{\"p\":\"a\"}"), "{}");
     }
 }

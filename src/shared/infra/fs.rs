@@ -2,8 +2,6 @@ use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
-use crate::shared::kernel::error::AgentError;
-
 /// The temp sibling for an atomic write: `.{file_name}.kiri-tmp` in the same directory as `path`. A
 /// sibling (not a temp-dir file) keeps the follow-up rename on the same filesystem and therefore atomic.
 /// Prefixing the original file name — rather than `with_extension("…tmp")` — stays correct for names that
@@ -26,9 +24,10 @@ pub(crate) fn temp_sibling(path: &Path) -> PathBuf {
 /// Write `content` to `path` atomically: write the temp sibling, then rename it over `path`. The rename is
 /// atomic on a POSIX filesystem, so a crash mid-write leaves either the old bytes or the new ones — never a
 /// truncated or half-written file. The single source for this crash-safety idiom: memory's index/body
-/// writes and the sync work-tree's config write both route through here. The `io::Error`s flow to
-/// `AgentError::Io` via the kernel's `#[from]`.
-pub async fn write_atomic(path: &Path, content: &[u8]) -> Result<(), AgentError> {
+/// writes and the sync work-tree's config write both route through here. Returns the raw `io::Result` so
+/// each caller maps it to its own `AgentError` variant (memory → `Io` via `?`/`#[from]`, sync → `Sync`),
+/// keeping this a pure fs utility with no dependency on the kernel error type.
+pub async fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let tmp = temp_sibling(path);
     fs::write(&tmp, content).await?;
     fs::rename(&tmp, path).await?;

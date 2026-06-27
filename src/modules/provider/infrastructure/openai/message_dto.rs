@@ -148,14 +148,6 @@ mod tests {
     use crate::shared::kernel::tool_call::FunctionCall;
 
     #[test]
-    fn wire_role_maps_all_variants() {
-        assert_eq!(Role::System.as_wire_str(), "system");
-        assert_eq!(Role::User.as_wire_str(), "user");
-        assert_eq!(Role::Assistant.as_wire_str(), "assistant");
-        assert_eq!(Role::Tool.as_wire_str(), "tool");
-    }
-
-    #[test]
     fn system_message_serializes_role_and_content() {
         let value = serde_json::to_value(MessageDto::from(&Message::system("be concise"))).unwrap();
         assert_eq!(value["role"], "system");
