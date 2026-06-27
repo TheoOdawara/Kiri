@@ -76,6 +76,16 @@ impl SensitiveMatcher {
         }
     }
 
+    /// The original glob patterns this matcher was built from (the `(glob, regex)` pairs keep them), so
+    /// the system prompt can render the *live* sensitive list rather than a hardcoded copy that an
+    /// override could make lie (SEC-06).
+    pub fn globs(&self) -> Vec<&str> {
+        self.patterns
+            .iter()
+            .map(|(glob, _)| glob.as_str())
+            .collect()
+    }
+
     /// Check whether a file name matches any sensitive pattern. Returns the matched glob (for
     /// error messages) or `None`.
     pub fn matches(&self, file_name: &str) -> Option<&str> {
@@ -196,5 +206,11 @@ mod tests {
         let m = SensitiveMatcher::empty();
         assert_eq!(m.matches(".env"), None);
         assert_eq!(m.matches("id_rsa"), None);
+    }
+
+    #[test]
+    fn globs_returns_the_original_patterns() {
+        let m = SensitiveMatcher::new(&[".env", "id_rsa", "*.pem"]).unwrap();
+        assert_eq!(m.globs(), vec![".env", "id_rsa", "*.pem"]);
     }
 }

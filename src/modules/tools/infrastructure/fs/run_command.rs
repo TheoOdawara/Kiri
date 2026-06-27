@@ -9,7 +9,9 @@ use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
-use crate::modules::tools::infrastructure::args::{RunCommandArgs, parse_args};
+use crate::modules::tools::infrastructure::args::{
+    RUN_COMMAND_DEFAULT_TIMEOUT_MS, RunCommandArgs, parse_args,
+};
 use crate::modules::tools::infrastructure::exec::{self, ExecError};
 use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
@@ -129,11 +131,19 @@ impl Tool for RunCommand {
     }
 
     fn schema(&self) -> Value {
+        // The output cap and default timeout read their single sources (`EXEC_MAX_BYTES`,
+        // `RUN_COMMAND_DEFAULT_TIMEOUT_MS`), so the schema the model sees and the prompt cannot drift
+        // from what the harness enforces (SEC-06).
         function_schema(
             self.name(),
-            "Run a shell command and return its combined stdout/stderr output. The command runs in the \
-             specified working directory (relative to workspace root, or absolute). Output is truncated \
-             at 64 KiB. A timeout (default 30s) prevents runaway commands.",
+            &format!(
+                "Run a shell command and return its combined stdout/stderr output. The command runs \
+                 in the specified working directory (relative to workspace root, or absolute). Output \
+                 is truncated at {} KiB. A timeout (default {} ms / {}s) prevents runaway commands.",
+                exec::EXEC_MAX_BYTES / 1024,
+                RUN_COMMAND_DEFAULT_TIMEOUT_MS,
+                RUN_COMMAND_DEFAULT_TIMEOUT_MS / 1000
+            ),
             json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -150,8 +160,8 @@ impl Tool for RunCommand {
                     },
                     "timeout_ms": {
                         "type": "integer",
-                        "description": "Timeout in milliseconds. Defaults to 30000.",
-                        "default": 30000,
+                        "description": format!("Timeout in milliseconds. Defaults to {RUN_COMMAND_DEFAULT_TIMEOUT_MS}."),
+                        "default": RUN_COMMAND_DEFAULT_TIMEOUT_MS,
                         "minimum": 1000
                     }
                 }
@@ -430,6 +440,29 @@ mod tests {
         assert_eq!(effective_timeout_ms(500), 1_000);
         assert_eq!(effective_timeout_ms(30_000), 30_000);
         assert_eq!(effective_timeout_ms(u64::MAX), RUN_COMMAND_MAX_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn schema_default_timeout_equals_the_const() {
+        let rc = run_command_with_allow(&[]);
+        let schema = rc.schema();
+        let default = &schema["function"]["parameters"]["properties"]["timeout_ms"]["default"];
+        assert_eq!(default.as_u64(), Some(RUN_COMMAND_DEFAULT_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn schema_description_reflects_the_limit_constants() {
+        let rc = run_command_with_allow(&[]);
+        let schema = rc.schema();
+        let description = schema["function"]["description"].as_str().unwrap();
+        assert!(
+            description.contains(&format!("{} KiB", exec::EXEC_MAX_BYTES / 1024)),
+            "the description must render the EXEC_MAX_BYTES-derived KiB: {description}"
+        );
+        assert!(
+            description.contains(&format!("{}s", RUN_COMMAND_DEFAULT_TIMEOUT_MS / 1000)),
+            "the description must render the RUN_COMMAND_DEFAULT_TIMEOUT_MS-derived seconds: {description}"
+        );
     }
 
     #[tokio::test]

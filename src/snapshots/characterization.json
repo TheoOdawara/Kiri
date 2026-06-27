@@ -327,7 +327,7 @@
     },
     {
       "function": {
-        "description": "Run a shell command and return its combined stdout/stderr output. The command runs in the specified working directory (relative to workspace root, or absolute). Output is truncated at 64 KiB. A timeout (default 30s) prevents runaway commands.",
+        "description": "Run a shell command and return its combined stdout/stderr output. The command runs in the specified working directory (relative to workspace root, or absolute). Output is truncated at 64 KiB. A timeout (default 30000 ms / 30s) prevents runaway commands.",
         "name": "run_command",
         "parameters": {
           "additionalProperties": false,

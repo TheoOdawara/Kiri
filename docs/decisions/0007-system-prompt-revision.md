@@ -153,3 +153,36 @@ call goes through a shell. Status message is portable ("terminated (no exit code
 matching the existing `CompletionProvider` pattern. All 10 tools, the registry, and the agent
 loop migrated. The file tools keep their blocking `std::fs` bodies (microsecond operations);
 only `run_command` actually awaits (the tokio process).
+
+## Update — 2026-06-27 — live-rendered tool/limit/sensitive facts (SHARED-04 / SEC-06)
+
+The prompt's prose used to restate values owned elsewhere and could silently drift: the Security
+section hardcoded the sensitive-name list, the run_command line hardcoded "30s timeout … 64 KiB",
+and Turn mechanics hardcoded "Every ~30 minutes". The security-critical case (SEC-06):
+`KIRI_SENSITIVE_PATTERNS` overrides the live matcher while the prompt kept asserting the defaults —
+so **the prompt lied to the model about what is actually blocked**.
+
+The fully-static `SYSTEM_PROMPT` constant is replaced by a `SYSTEM_PROMPT_TEMPLATE` (the static
+prose, with four placeholders) plus `render_system_prompt(sensitive_globs, default_timeout_ms,
+output_cap_bytes, checkpoint)` in `config/system_prompt.rs`. Each dynamic fragment now derives from
+its **existing** single source — no second copy of any value is introduced:
+
+- **Sensitive list** = the live matcher's globs, via the new `SensitiveMatcher::globs()`. An override
+  is reflected, so the prompt can no longer lie about what the sandbox refuses.
+- **run_command limits** = `EXEC_MAX_BYTES` (the enforced 64 KiB output cap, no new
+  `RUN_COMMAND_OUTPUT_CAP_BYTES`) and the new `RUN_COMMAND_DEFAULT_TIMEOUT_MS` (the one source the
+  serde default, the JSON schema `default`, the tool description, and the prompt all read). The
+  run_command schema description is now a `format!` over those consts, so the schema the model sees
+  and the prompt cannot drift from what is enforced.
+- **Checkpoint** = the effective `settings.checkpoint_budget` (defaults to `TOOL_CHECKPOINT`,
+  overridable), rendered as minutes.
+- **Tool count** — the brittle word "ten" is dropped in favor of "the file tools listed below"; the
+  enumerated list follows, so no count is asserted.
+
+`render_system_prompt` takes the values as **parameters**, so the `shared/infra/config` leaf gains no
+dependency on `tools` (the `config_has_no_module_imports` guard still holds). The composition root
+(`app::wire`) reads the constants and the live `SensitiveMatcher` (built there since the wave-2
+sandbox wiring) and passes them in, then concatenates the memory digest as before. `Settings` loses
+its `system_prompt: &'static str` field. Locked by tests: `system_prompt_reflects_a_sensitive_override`,
+`system_prompt_renders_limits_from_the_named_constants`, `schema_default_timeout_equals_the_const`,
+`sensitive::globs_returns_the_original_patterns`, and `system_prompt_keeps_all_nine_section_headers`.

@@ -19,7 +19,6 @@ use super::resolve::{
     compile_patterns, expand_home, load_extra_paths, load_net_allow, resolve_bool,
     resolve_sandbox_mode, resolve_sandbox_network, resolve_timeout,
 };
-use super::system_prompt::SYSTEM_PROMPT;
 use super::writers::{default_provider, ensure_private_dir, write_starter_config};
 
 /// The kiri global config/state directory (`~/.kiri`). Houses `config.toml`, the credentials fallback
@@ -33,7 +32,6 @@ fn kiri_global_dir() -> PathBuf {
 /// the active model come from the configured [`ProviderProfile`] catalog; the matching secret is
 /// fetched from the credential store at wire time (never stored here).
 pub struct Settings {
-    pub system_prompt: &'static str,
     pub path: PathBuf,
     pub seed: Option<String>,
     pub checkpoint_budget: Duration,
@@ -151,7 +149,6 @@ impl Settings {
             .unwrap_or_else(|| path.join("docs"));
 
         Ok(Self {
-            system_prompt: SYSTEM_PROMPT,
             path,
             seed: cli_prompt,
             checkpoint_budget: TOOL_CHECKPOINT,

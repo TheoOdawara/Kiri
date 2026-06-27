@@ -39,13 +39,17 @@ use crate::modules::sync::infrastructure::fs_work_tree::FsSyncWorkTree;
 use crate::modules::sync::infrastructure::git_cli::GitCli;
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::Tool;
+use crate::modules::tools::infrastructure::args::RUN_COMMAND_DEFAULT_TIMEOUT_MS;
 use crate::modules::tools::infrastructure::confine;
 use crate::modules::tools::infrastructure::control::present_plan::PresentPlan;
+use crate::modules::tools::infrastructure::exec::EXEC_MAX_BYTES;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tools::infrastructure::sensitive::load_sensitive_matcher;
 use crate::modules::tui::infrastructure::runtime::{ProviderSwap, SyncContext, Tui, TuiParams};
-use crate::shared::infra::config::{Settings, SyncAction, ensure_private_dir};
+use crate::shared::infra::config::{
+    Settings, SyncAction, ensure_private_dir, render_system_prompt,
+};
 use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile};
 
 /// Caps for the start-of-session memory digest injected into the system prompt: how many entries to
@@ -85,6 +89,16 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // The composition root owns cross-module wiring: build the sensitive matcher here and inject it into
     // the sandbox, so `Settings`/`config` no longer reaches into the `tools` adapter for it.
     let sensitive = load_sensitive_matcher()?;
+    // Render the system prompt's tool/limit/sensitive facts from live single sources — the active
+    // matcher's globs, the enforced run_command limits, and the checkpoint budget — before `sensitive`
+    // moves into the sandbox, so an override is reflected and the prompt cannot lie about what the
+    // harness blocks/enforces (SEC-06).
+    let base_system_prompt = render_system_prompt(
+        &sensitive.globs(),
+        RUN_COMMAND_DEFAULT_TIMEOUT_MS,
+        EXEC_MAX_BYTES,
+        settings.checkpoint_budget,
+    );
     let sandbox = FsSandbox::with_confinement(
         &settings.path,
         sensitive,
@@ -155,11 +169,11 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         settings.max_tool_calls,
     );
 
-    // The session's system prompt is the static base plus, when present, a digest of recalled memory.
+    // The session's system prompt is the rendered base plus, when present, a digest of recalled memory.
     let system_prompt = if memory_digest.is_empty() {
-        settings.system_prompt.to_string()
+        base_system_prompt
     } else {
-        format!("{}\n\n{}", settings.system_prompt, memory_digest)
+        format!("{base_system_prompt}\n\n{memory_digest}")
     };
 
     // Build the sync ports here (the single composition root) and inject them, so a live `/sync` push
@@ -610,7 +624,6 @@ mod tests {
         use std::time::Duration;
 
         Settings {
-            system_prompt: "",
             path: global_dir.clone(),
             seed: None,
             checkpoint_budget: Duration::from_secs(1),

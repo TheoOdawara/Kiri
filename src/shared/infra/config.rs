@@ -12,6 +12,7 @@ mod writers;
 
 pub use cli::{Cli, CliCommand, SyncAction};
 pub use settings::Settings;
+pub use system_prompt::render_system_prompt;
 pub use writers::{persist_active_model, persist_active_provider, persist_effort, upsert_provider};
 
 pub(crate) use raw::validate_config_str;
