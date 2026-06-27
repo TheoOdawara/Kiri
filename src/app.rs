@@ -408,9 +408,11 @@ fn resolve_credential(
         // for this session and tell the user it was not saved.
         match secrets.set(&profile.id, &credential) {
             Ok(()) => eprintln!(
-                "kiri: imported the API key for provider '{}' from the environment and persisted it \
-                 durably to the OS credential store (keyring, or ~/.kiri/credentials.json fallback). \
-                 It now outlives this shell — unset the env var if you only meant it for this machine.",
+                "kiri: imported the API key for provider '{}' from the environment and saved it to the \
+                 OS credential store (keyring, or the ~/.kiri/credentials.json fallback); it now \
+                 persists across sessions on this machine. To undo this, remove the stored credential \
+                 (a /provider logout flow is planned) — unsetting the env var does NOT delete the \
+                 saved copy.",
                 profile.id
             ),
             Err(error) => eprintln!(

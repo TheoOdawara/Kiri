@@ -303,9 +303,11 @@ fn resolve_layers(global: RawConfig, project: RawConfig) -> (RawConfig, Effort) 
 }
 
 /// Create `path` (recursively) and keep it owner-only (`0700` on Unix), so the non-secret files under
-/// the kiri dir are not world-readable. On Windows the user-profile DACL is the equivalent.
+/// the kiri dir are not world-readable. On Windows the user-profile DACL is the equivalent. The single
+/// private-`~/.kiri`-dir creator — every such dir creation (config here, credentials in the secret store)
+/// routes through this `0700` helper, never a plain `0755` `create_dir_all`.
 #[cfg(unix)]
-fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -316,7 +318,7 @@ fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)
 }
 

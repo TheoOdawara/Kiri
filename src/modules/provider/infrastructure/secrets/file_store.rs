@@ -8,6 +8,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::modules::provider::application::secret_store::SecretStore;
+use crate::shared::infra::config::ensure_private_dir;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::Credential;
 
@@ -35,7 +36,9 @@ impl FileSecretStore {
 
     fn write_all(&self, map: &BTreeMap<String, Credential>) -> Result<(), AgentError> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
+            // Route the credential dir (`~/.kiri`) through the single 0700 private-dir creator so the
+            // directory holding `credentials.json` is owner-only, never a plain 0755 `create_dir_all`.
+            ensure_private_dir(parent)
                 .map_err(|e| AgentError::Secret(format!("create {}: {e}", parent.display())))?;
         }
         let json = serde_json::to_string_pretty(map)
@@ -136,5 +139,25 @@ mod tests {
             .unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "credentials file must be 0600, got {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_all_creates_parent_dir_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        // The parent (a `~/.kiri` analogue) must not pre-exist, so write_all has to create it.
+        let kiri_dir = dir.path().join("kiri");
+        let store = FileSecretStore::new(kiri_dir.join("credentials.json"));
+        store
+            .set(
+                "p",
+                &Credential::ApiKey {
+                    key: Secret::new("k"),
+                },
+            )
+            .unwrap();
+        let mode = fs::metadata(&kiri_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "credential dir must be 0700, got {mode:o}");
     }
 }
