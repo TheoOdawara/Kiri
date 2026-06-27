@@ -4,7 +4,6 @@ use tokio::fs;
 
 use crate::modules::memory::domain::entry::MemoryEntry;
 use crate::modules::memory::domain::project_memory::SharedMemory;
-use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::modules::sync::domain::merge::incoming_wins;
 use crate::shared::kernel::error::AgentError;
 
@@ -30,7 +29,7 @@ fn ser<E: std::fmt::Display>(error: E) -> AgentError {
 /// Export the shared memory to deterministic NDJSON (one entry per line, sorted by id) so the synced repo
 /// diffs cleanly and merges by line. Embedding vectors are NOT exported — they are machine-local derived
 /// data, re-derivable from content on each machine.
-pub async fn export(memory: &SqliteSharedMemory, path: &Path) -> Result<usize> {
+pub async fn export(memory: &dyn SharedMemory, path: &Path) -> Result<usize> {
     let mut entries = memory.list(0, EXPORT_CAP).await?;
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     let mut body = String::new();
@@ -45,7 +44,7 @@ pub async fn export(memory: &SqliteSharedMemory, path: &Path) -> Result<usize> {
 /// Import NDJSON into the shared memory, last-write-wins by `updated_at` per entry id. A missing file is
 /// an empty merge (nothing pulled yet). A malformed line aborts with a clear error rather than silently
 /// dropping knowledge.
-pub async fn import(memory: &SqliteSharedMemory, path: &Path) -> Result<MergeReport> {
+pub async fn import(memory: &dyn SharedMemory, path: &Path) -> Result<MergeReport> {
     if !path.exists() {
         return Ok(MergeReport {
             merged: 0,
@@ -85,6 +84,7 @@ pub async fn import(memory: &SqliteSharedMemory, path: &Path) -> Result<MergeRep
 mod tests {
     use super::*;
     use crate::modules::memory::domain::entry::MemoryKind;
+    use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
     use tempfile::TempDir;
 
     async fn memory(dir: &TempDir, name: &str) -> SqliteSharedMemory {

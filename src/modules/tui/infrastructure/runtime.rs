@@ -23,7 +23,8 @@ use crate::modules::agent::domain::message::Message;
 use crate::modules::agent::domain::role::Role;
 use crate::modules::memory::application::distill::Distiller;
 use crate::modules::memory::application::memory_port::MemoryPort;
-use crate::modules::memory::domain::project_memory::project_id_from_path;
+use crate::modules::memory::domain::project_memory::{SharedMemory, project_id_from_path};
+use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::application::secret_store::SecretStore;
 use crate::modules::provider::infrastructure::factory::{api_key_from_env, build_provider};
@@ -1267,8 +1268,29 @@ async fn sync_push(config_path: &Path, model: &mut Model, terminal: &mut Default
     let _ = draw_and_copy(terminal, model);
 
     let shared_db = global_dir.join("memory").join("shared.db");
+    // Open a handle to the shared store and inject it as the port. A store failure surfaces as a
+    // Notice rather than aborting the session.
+    let memory = match SqliteSharedMemory::new(shared_db) {
+        Ok(store) => match store.init().await {
+            Ok(()) => store,
+            Err(error) => {
+                model.transcript.push(TranscriptItem::Notice(
+                    NoticeLevel::Error,
+                    format!("sync falhou: {error}"),
+                ));
+                return;
+            }
+        },
+        Err(error) => {
+            model.transcript.push(TranscriptItem::Notice(
+                NoticeLevel::Error,
+                format!("sync falhou: {error}"),
+            ));
+            return;
+        }
+    };
     let git = GitCli;
-    let service = SyncService::new(&git, global_dir, config_path.to_path_buf(), shared_db);
+    let service = SyncService::new(&git, global_dir, config_path.to_path_buf(), &memory);
     match service.push().await {
         Ok(summary) => model.transcript.push(TranscriptItem::Notice(
             NoticeLevel::Info,

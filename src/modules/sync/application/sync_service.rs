@@ -5,7 +5,6 @@ use serde::Deserialize;
 use tokio::fs;
 
 use crate::modules::memory::domain::project_memory::SharedMemory;
-use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::modules::sync::application::git::Git;
 use crate::modules::sync::infrastructure::memory_ndjson;
 use crate::shared::infra::config;
@@ -31,8 +30,9 @@ pub struct SyncService<'a> {
     global_dir: PathBuf,
     /// The live global config file (`~/.kiri/config.toml`).
     config_path: PathBuf,
-    /// The shared memory database, exported to / imported from NDJSON.
-    shared_db: PathBuf,
+    /// The shared memory store, exported to / imported from NDJSON. Injected as a port so this
+    /// application service never depends on the concrete SQLite adapter (the caller owns the store).
+    memory: &'a dyn SharedMemory,
 }
 
 impl<'a> SyncService<'a> {
@@ -40,13 +40,13 @@ impl<'a> SyncService<'a> {
         git: &'a dyn Git,
         global_dir: PathBuf,
         config_path: PathBuf,
-        shared_db: PathBuf,
+        memory: &'a dyn SharedMemory,
     ) -> Self {
         Self {
             git,
             global_dir,
             config_path,
-            shared_db,
+            memory,
         }
     }
 
@@ -119,9 +119,7 @@ impl<'a> SyncService<'a> {
             .await?;
 
         // Merge memory (always safe — last-write-wins, never destructive).
-        let memory = SqliteSharedMemory::new(self.shared_db.clone())?;
-        memory.init().await?;
-        let report = memory_ndjson::import(&memory, &dir.join(MEMORY_FILE)).await?;
+        let report = memory_ndjson::import(self.memory, &dir.join(MEMORY_FILE)).await?;
 
         // Apply config under the trust check.
         let incoming_config = dir.join(CONFIG_FILE);
@@ -203,9 +201,7 @@ impl<'a> SyncService<'a> {
         if self.config_path.exists() {
             fs::copy(&self.config_path, dir.join(CONFIG_FILE)).await?;
         }
-        let memory = SqliteSharedMemory::new(self.shared_db.clone())?;
-        memory.init().await?;
-        memory_ndjson::export(&memory, &dir.join(MEMORY_FILE)).await
+        memory_ndjson::export(self.memory, &dir.join(MEMORY_FILE)).await
     }
 
     async fn require_initialized(&self) -> Result<PathBuf> {
@@ -362,6 +358,7 @@ fn risky_config_changes(current: &str, incoming: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
     use crate::modules::sync::application::git::GitOutput;
     use async_trait::async_trait;
     use std::sync::Mutex;
@@ -431,10 +428,11 @@ mod tests {
         let global = dir.path().to_path_buf();
         let config = global.join("config.toml");
         std::fs::write(&config, "[providers.nvidia]\nbase_url = \"https://x/v1\"\n").unwrap();
-        // A shared.db so export has something to read.
-        let shared = global.join("memory").join("shared.db");
+        // A real (empty) shared store so export has a valid port to read.
+        let mem = SqliteSharedMemory::new(global.join("memory").join("shared.db")).unwrap();
+        mem.init().await.unwrap();
         let git = FakeGit::new();
-        let service = SyncService::new(&git, global.clone(), config, shared);
+        let service = SyncService::new(&git, global.clone(), config, &mem);
 
         service.init("git@example:me/profile.git").await.unwrap();
         service.push().await.unwrap();
@@ -453,13 +451,9 @@ mod tests {
     async fn push_before_init_errors() {
         let dir = TempDir::new().unwrap();
         let global = dir.path().to_path_buf();
+        let mem = SqliteSharedMemory::in_memory().unwrap();
         let git = FakeGit::new();
-        let service = SyncService::new(
-            &git,
-            global.clone(),
-            global.join("config.toml"),
-            global.join("memory").join("shared.db"),
-        );
+        let service = SyncService::new(&git, global.clone(), global.join("config.toml"), &mem);
         assert!(service.push().await.is_err());
     }
 
@@ -540,13 +534,13 @@ base_url = "https://evil.example/v1"
     // exercising the apply/refuse decision and the --force override on the security-weighted path.
     fn pull_service<'a>(
         git: &'a FakeGit,
+        memory: &'a dyn SharedMemory,
         global: &Path,
         current_config: &str,
     ) -> (SyncService<'a>, PathBuf) {
         let config = global.join("config.toml");
         std::fs::write(&config, current_config).unwrap();
-        let shared = global.join("memory").join("shared.db");
-        let service = SyncService::new(git, global.to_path_buf(), config.clone(), shared);
+        let service = SyncService::new(git, global.to_path_buf(), config.clone(), memory);
         (service, config)
     }
 
@@ -563,7 +557,9 @@ base_url = "https://evil.example/v1"
             provider_toml("evil", "https://attacker/v1")
         );
         let git = FakeGit::with_fixtures(Some(&incoming), Some(""));
-        let (service, config) = pull_service(&git, dir.path(), &current);
+        let mem = SqliteSharedMemory::in_memory().unwrap();
+        mem.init().await.unwrap();
+        let (service, config) = pull_service(&git, &mem, dir.path(), &current);
         service.init("git@example:me/p.git").await.unwrap();
 
         let summary = service.pull(false).await.unwrap();
@@ -588,7 +584,9 @@ base_url = "https://evil.example/v1"
             provider_toml("evil", "https://attacker/v1")
         );
         let git = FakeGit::with_fixtures(Some(&incoming), Some(""));
-        let (service, config) = pull_service(&git, dir.path(), &current);
+        let mem = SqliteSharedMemory::in_memory().unwrap();
+        mem.init().await.unwrap();
+        let (service, config) = pull_service(&git, &mem, dir.path(), &current);
         service.init("git@example:me/p.git").await.unwrap();
 
         let summary = service.pull(true).await.unwrap();
@@ -605,7 +603,9 @@ base_url = "https://evil.example/v1"
         let dir = TempDir::new().unwrap();
         let config_text = provider_toml("nvidia", "https://nvidia/v1");
         let git = FakeGit::with_fixtures(Some(&config_text), Some(""));
-        let (service, config) = pull_service(&git, dir.path(), &config_text);
+        let mem = SqliteSharedMemory::in_memory().unwrap();
+        mem.init().await.unwrap();
+        let (service, config) = pull_service(&git, &mem, dir.path(), &config_text);
         service.init("git@example:me/p.git").await.unwrap();
 
         let summary = service.pull(false).await.unwrap();
@@ -617,8 +617,14 @@ base_url = "https://evil.example/v1"
     async fn pull_refuses_a_schema_invalid_config() {
         let dir = TempDir::new().unwrap();
         let git = FakeGit::with_fixtures(Some("effort = \"bogus\"\n"), Some(""));
-        let (service, _config) =
-            pull_service(&git, dir.path(), &provider_toml("nvidia", "https://x/v1"));
+        let mem = SqliteSharedMemory::in_memory().unwrap();
+        mem.init().await.unwrap();
+        let (service, _config) = pull_service(
+            &git,
+            &mem,
+            dir.path(),
+            &provider_toml("nvidia", "https://x/v1"),
+        );
         service.init("git@example:me/p.git").await.unwrap();
 
         let summary = service.pull(false).await.unwrap();

@@ -7,6 +7,8 @@ mod characterization;
 
 use clap::Parser;
 
+use crate::modules::memory::domain::project_memory::SharedMemory;
+use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::modules::sync::application::sync_service::SyncService;
 use crate::modules::sync::infrastructure::git_cli::GitCli;
 use crate::shared::infra::config::{Cli, CliCommand, Settings, SyncAction, kiri_global_dir};
@@ -28,8 +30,10 @@ async fn run_sync(action: SyncAction) -> anyhow::Result<()> {
     let global_dir = kiri_global_dir();
     let config_path = global_dir.join("config.toml");
     let shared_db = global_dir.join("memory").join("shared.db");
+    let memory = SqliteSharedMemory::new(shared_db)?;
+    memory.init().await?;
     let git = GitCli;
-    let service = SyncService::new(&git, global_dir, config_path, shared_db);
+    let service = SyncService::new(&git, global_dir, config_path, &memory);
     let summary = match action {
         SyncAction::Init { url } => service.init(&url).await,
         SyncAction::Push => service.push().await,
