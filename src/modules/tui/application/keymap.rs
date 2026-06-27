@@ -12,7 +12,7 @@ use crate::modules::tui::domain::view_state::{
     ProviderWizard, ScreenSelection, SelectionState, WizardStep,
 };
 use crate::shared::kernel::approval_mode::ApprovalMode;
-use crate::shared::kernel::provider::{Effort, Secret};
+use crate::shared::kernel::provider::{AuthMethod, Effort, Secret};
 use tui_textarea::{Input, Key as TaKey};
 
 const SCROLL_STEP: u16 = 5;
@@ -796,10 +796,20 @@ fn on_wizard_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
             Key::Up => wizard.move_kind(-1),
             Key::Down => wizard.move_kind(1),
             Key::Enter => {
-                wizard.step = WizardStep::BaseUrl;
-                // Seed the base URL with the kind's default so the common case is one keystroke (Enter).
-                if wizard.base_url.is_empty() {
-                    wizard.base_url = wizard.kind().default_base_url().to_string();
+                if wizard.key_required() {
+                    // Vendor kinds use a canonical id; go straight to the base URL, seeded with the
+                    // kind's default so the common case is one keystroke (Enter).
+                    wizard.step = WizardStep::BaseUrl;
+                    if wizard.base_url.is_empty() {
+                        wizard.base_url = wizard.kind().default_base_url().to_string();
+                    }
+                } else {
+                    // Keyless-capable kinds let the user name the provider so several can coexist; seed
+                    // the field with the canonical token as an editable suggestion.
+                    wizard.step = WizardStep::ProviderId;
+                    if wizard.id.is_empty() {
+                        wizard.id = wizard.provider_id();
+                    }
                 }
             }
             _ => {}
@@ -837,14 +847,31 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
     };
     match step {
         WizardStep::Kind => vec![],
-        WizardStep::BaseUrl => {
+        WizardStep::ProviderId => {
             if let Some(wizard) = model.wizard.as_mut() {
-                // A custom/compatible endpoint needs a base URL; the vendor kinds default theirs.
+                // The id is sanitized at finalize (provider_id) and falls back to the canonical token, so
+                // a blank field is acceptable here; seed the base URL for the next step.
+                wizard.step = WizardStep::BaseUrl;
                 if wizard.base_url.trim().is_empty() {
                     wizard.base_url = wizard.kind().default_base_url().to_string();
                 }
-                wizard.step = WizardStep::Model;
             }
+            vec![]
+        }
+        WizardStep::BaseUrl => {
+            let Some(wizard) = model.wizard.as_mut() else {
+                return vec![];
+            };
+            if wizard.base_url.trim().is_empty() {
+                // Vendor kinds default their endpoint; compatible/custom have none, so a blank base URL
+                // stays on the step rather than saving an unusable endpoint that POSTs to "/chat/completions".
+                let default = wizard.kind().default_base_url();
+                if default.is_empty() {
+                    return vec![]; // a base URL is required for compatible/custom
+                }
+                wizard.base_url = default.to_string();
+            }
+            wizard.step = WizardStep::Model;
             vec![]
         }
         WizardStep::Model => {
@@ -864,12 +891,19 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
             vec![]
         }
         WizardStep::ApiKey => {
-            if model.wizard.as_ref().is_some_and(|w| w.api_key.is_empty()) {
-                return vec![]; // an API key is required
+            // The key is optional for keyless-capable kinds and required for vendor kinds; its presence
+            // decides the auth method, so the two can never disagree.
+            let has_key = model
+                .wizard
+                .as_ref()
+                .is_some_and(|w| !w.api_key.trim().is_empty());
+            let key_required = model.wizard.as_ref().is_some_and(|w| w.key_required());
+            if !has_key && key_required {
+                return vec![]; // a vendor kind requires a key
             }
-            // Finalize: take the wizard, stage the key as a Secret (out of the effect), emit SaveProvider.
-            // `mem::take` extracts the key without moving the field out of the `Drop` type; the emptied
-            // buffer is then zeroized when `wizard` drops at the end of this scope.
+            // Finalize: take the wizard, stage the key as a Secret (out of the effect) only when present,
+            // emit SaveProvider. `mem::take` extracts the key without moving the field out of the `Drop`
+            // type; the emptied buffer is then zeroized when `wizard` drops at the end of this scope.
             let Some(mut wizard) = model.wizard.take() else {
                 return vec![];
             };
@@ -878,14 +912,22 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
             } else {
                 wizard.base_url.trim().to_string()
             };
+            let auth = if has_key {
+                AuthMethod::ApiKey
+            } else {
+                AuthMethod::None
+            };
             let effect = Effect::SaveProvider {
                 id: wizard.provider_id(),
                 kind: wizard.kind(),
                 base_url,
                 model: wizard.model.trim().to_string(),
                 models: wizard.models(),
+                auth,
             };
-            model.pending_credential = Some(Secret::new(std::mem::take(&mut wizard.api_key)));
+            if has_key {
+                model.pending_credential = Some(Secret::new(std::mem::take(&mut wizard.api_key)));
+            }
             vec![effect]
         }
     }
@@ -988,7 +1030,7 @@ mod tests {
 
     #[test]
     fn wizard_completes_with_staged_secret_out_of_the_effect() {
-        use crate::shared::kernel::provider::ProviderKind;
+        use crate::shared::kernel::provider::{AuthMethod, ProviderKind};
         let mut m = Model {
             wizard: Some(ProviderWizard::new()),
             ..Default::default()
@@ -1014,12 +1056,17 @@ mod tests {
         match effects.as_slice() {
             [
                 Effect::SaveProvider {
-                    id, kind, model, ..
+                    id,
+                    kind,
+                    model,
+                    auth,
+                    ..
                 },
             ] => {
                 assert_eq!(id, "anthropic");
                 assert_eq!(*kind, ProviderKind::Anthropic);
                 assert_eq!(model, "claude-opus-4-8");
+                assert_eq!(*auth, AuthMethod::ApiKey);
             }
             other => panic!("expected SaveProvider, got {other:?}"),
         }
@@ -1072,7 +1119,7 @@ mod tests {
 
     #[test]
     fn onboarding_wizard_completes_to_nvidia_save_provider() {
-        use crate::shared::kernel::provider::ProviderKind;
+        use crate::shared::kernel::provider::{AuthMethod, ProviderKind};
         let mut m = Model::default();
         m.enter_onboarding();
         // Kind (NVIDIA) -> Enter seeds base_url. BaseUrl -> Enter accepts default.
@@ -1094,17 +1141,147 @@ mod tests {
         match effects.as_slice() {
             [
                 Effect::SaveProvider {
-                    id, kind, model, ..
+                    id,
+                    kind,
+                    model,
+                    auth,
+                    ..
                 },
             ] => {
                 assert_eq!(id, "nvidia");
                 assert_eq!(*kind, ProviderKind::Nvidia);
                 assert_eq!(model, "nvidia/some-model");
+                assert_eq!(*auth, AuthMethod::ApiKey);
             }
             other => panic!("expected SaveProvider, got {other:?}"),
         }
         let staged = m.pending_credential.as_ref().expect("the key is staged");
         assert_eq!(staged.expose(), "nvapi-secret");
+    }
+
+    #[test]
+    fn wizard_blank_key_compatible_emits_none_auth_and_no_credential() {
+        use crate::shared::kernel::provider::{AuthMethod, ProviderKind};
+        let mut m = Model {
+            wizard: Some(ProviderWizard::new()),
+            ..Default::default()
+        };
+        // Kind: move to OpenAI-compatible (index 3) and confirm -> ProviderId step.
+        for _ in 0..3 {
+            on_key(&mut m, press(Key::Down));
+        }
+        on_key(&mut m, press(Key::Enter));
+        // ProviderId: accept the seeded id -> BaseUrl.
+        on_key(&mut m, press(Key::Enter));
+        // BaseUrl: a compatible endpoint has no default, so type one.
+        for c in "http://localhost:1234/v1".chars() {
+            on_key(&mut m, press(Key::Char(c)));
+        }
+        on_key(&mut m, press(Key::Enter));
+        // Model: required.
+        for c in "gemma".chars() {
+            on_key(&mut m, press(Key::Char(c)));
+        }
+        on_key(&mut m, press(Key::Enter));
+        // ExtraModels: skip.
+        on_key(&mut m, press(Key::Enter));
+        // ApiKey: leave blank and finalize -> keyless save.
+        let effects = on_key(&mut m, press(Key::Enter));
+        assert!(m.wizard.is_none(), "the wizard closes on finalize");
+        match effects.as_slice() {
+            [
+                Effect::SaveProvider {
+                    kind,
+                    base_url,
+                    model,
+                    auth,
+                    ..
+                },
+            ] => {
+                assert_eq!(*kind, ProviderKind::OpenAiCompatible);
+                assert_eq!(base_url, "http://localhost:1234/v1");
+                assert_eq!(model, "gemma");
+                assert_eq!(*auth, AuthMethod::None);
+            }
+            other => panic!("expected SaveProvider, got {other:?}"),
+        }
+        assert!(
+            m.pending_credential.is_none(),
+            "no key is staged for a keyless save"
+        );
+    }
+
+    #[test]
+    fn wizard_vendor_blank_key_stays_on_step() {
+        let mut m = Model {
+            wizard: Some(ProviderWizard::new()), // NVIDIA (index 0) is a vendor kind
+            ..Default::default()
+        };
+        on_key(&mut m, press(Key::Enter)); // Kind -> BaseUrl (seeded)
+        on_key(&mut m, press(Key::Enter)); // BaseUrl -> Model
+        on_key(&mut m, press(Key::Char('m')));
+        on_key(&mut m, press(Key::Enter)); // Model -> ExtraModels
+        on_key(&mut m, press(Key::Enter)); // ExtraModels -> ApiKey
+        // A vendor kind requires a key: a blank key must not finalize.
+        let effects = on_key(&mut m, press(Key::Enter));
+        assert!(effects.is_empty(), "a vendor kind cannot finalize keyless");
+        assert_eq!(m.wizard.as_ref().map(|w| w.step), Some(WizardStep::ApiKey));
+    }
+
+    #[test]
+    fn wizard_compatible_blank_base_url_stays_on_step() {
+        let mut m = Model {
+            wizard: Some(ProviderWizard::new()),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            on_key(&mut m, press(Key::Down)); // OpenAI-compatible
+        }
+        on_key(&mut m, press(Key::Enter)); // Kind -> ProviderId
+        on_key(&mut m, press(Key::Enter)); // ProviderId -> BaseUrl (no default for compatible)
+        // A compatible endpoint has no default base URL, so a blank one must not advance.
+        let effects = on_key(&mut m, press(Key::Enter));
+        assert!(effects.is_empty());
+        assert_eq!(m.wizard.as_ref().map(|w| w.step), Some(WizardStep::BaseUrl));
+    }
+
+    #[test]
+    fn wizard_names_custom_provider_id() {
+        use crate::shared::kernel::provider::ProviderKind;
+        let mut m = Model {
+            wizard: Some(ProviderWizard::new()),
+            ..Default::default()
+        };
+        for _ in 0..4 {
+            on_key(&mut m, press(Key::Down)); // Custom (index 4)
+        }
+        on_key(&mut m, press(Key::Enter)); // Kind -> ProviderId (seeded with "custom")
+        // Clear the seeded id, then type a free-form name that must be sanitized to a stable token.
+        let seeded = m.wizard.as_ref().map(|w| w.id.chars().count()).unwrap_or(0);
+        for _ in 0..seeded {
+            on_key(&mut m, press(Key::Backspace));
+        }
+        for c in "My LM Studio!".chars() {
+            on_key(&mut m, press(Key::Char(c)));
+        }
+        on_key(&mut m, press(Key::Enter)); // ProviderId -> BaseUrl
+        for c in "http://localhost:1234/v1".chars() {
+            on_key(&mut m, press(Key::Char(c)));
+        }
+        on_key(&mut m, press(Key::Enter)); // BaseUrl -> Model
+        for c in "gemma".chars() {
+            on_key(&mut m, press(Key::Char(c)));
+        }
+        on_key(&mut m, press(Key::Enter)); // Model -> ExtraModels
+        on_key(&mut m, press(Key::Enter)); // ExtraModels -> ApiKey
+        let effects = on_key(&mut m, press(Key::Enter)); // blank key -> keyless finalize
+        match effects.as_slice() {
+            [Effect::SaveProvider { id, kind, .. }] => {
+                assert_eq!(*kind, ProviderKind::Custom);
+                assert_eq!(id, "my-lm-studio", "the id is sanitized to a stable token");
+            }
+            other => panic!("expected SaveProvider, got {other:?}"),
+        }
     }
 
     #[test]

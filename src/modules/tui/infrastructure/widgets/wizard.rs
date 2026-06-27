@@ -59,7 +59,7 @@ pub fn render(wizard: &ProviderWizard, frame: &mut Frame, area: Rect) {
         }
     } else {
         lines.push(Line::styled(
-            format!(" {}", prompt_for(wizard.step)),
+            format!(" {}", wizard_prompt(wizard)),
             theme::strong(),
         ));
         lines.push(Line::from(vec![
@@ -78,22 +78,30 @@ pub fn render(wizard: &ProviderWizard, frame: &mut Frame, area: Rect) {
 }
 
 fn step_label(step: WizardStep) -> &'static str {
+    // No fixed fraction: the `id` step is shown only for keyless-capable kinds, so the total varies.
     match step {
-        WizardStep::Kind => "tipo (1/5)",
-        WizardStep::BaseUrl => "endpoint (2/5)",
-        WizardStep::Model => "modelo (3/5)",
-        WizardStep::ExtraModels => "modelos extras (4/5)",
-        WizardStep::ApiKey => "chave (5/5)",
+        WizardStep::Kind => "tipo",
+        WizardStep::ProviderId => "id",
+        WizardStep::BaseUrl => "endpoint",
+        WizardStep::Model => "modelo",
+        WizardStep::ExtraModels => "modelos extras",
+        WizardStep::ApiKey => "chave",
     }
 }
 
-fn prompt_for(step: WizardStep) -> &'static str {
-    match step {
-        WizardStep::Kind => "",
-        WizardStep::BaseUrl => "Base URL:",
-        WizardStep::Model => "Modelo default:",
-        WizardStep::ExtraModels => "Modelos extras (separados por vírgula, opcional):",
-        WizardStep::ApiKey => "API key:",
+/// The prompt for the current text step, kind-aware: the API-key prompt advertises that the key is
+/// optional for keyless-capable kinds (Ollama / LM Studio).
+fn wizard_prompt(wizard: &ProviderWizard) -> String {
+    match wizard.step {
+        WizardStep::ApiKey if !wizard.key_required() => {
+            "API key (opcional — vazia p/ Ollama / LM Studio):".to_string()
+        }
+        WizardStep::Kind => String::new(),
+        WizardStep::ProviderId => "Identificador (ex.: lmstudio, openrouter):".to_string(),
+        WizardStep::BaseUrl => "Base URL:".to_string(),
+        WizardStep::Model => "Modelo default:".to_string(),
+        WizardStep::ExtraModels => "Modelos extras (separados por vírgula, opcional):".to_string(),
+        WizardStep::ApiKey => "API key:".to_string(),
     }
 }
 
@@ -111,6 +119,7 @@ fn kind_label(kind: ProviderKind) -> &'static str {
 /// screen; an empty field renders blank.
 fn field_display(wizard: &ProviderWizard) -> String {
     match wizard.step {
+        WizardStep::ProviderId => wizard.id.clone(),
         WizardStep::BaseUrl => wizard.base_url.clone(),
         WizardStep::Model => wizard.model.clone(),
         WizardStep::ExtraModels => wizard.extra_models.clone(),

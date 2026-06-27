@@ -71,8 +71,10 @@ const STREAM_FRAME: Duration = Duration::from_millis(33);
 /// `/provider` change: the HTTP client, the secret store, the full provider catalog, the active id, the
 /// active provider's cached credential (so a rebuild needs no keyring round-trip), and the thinking/
 /// effort dials. Effort is captured at adapter construction, so changing effort — or the active
-/// provider — means rebuilding the `Arc`. The credential is `None` during first-run onboarding (the
-/// harness booted with no usable key); it is set the moment a provider is switched to or saved.
+/// provider — means rebuilding the `Arc`. The cached `credential` has three states: `None` during
+/// first-run onboarding (no usable key yet); `Some(Credential::None)` for an active keyless provider
+/// (auth = "none"); and `Some(Credential::ApiKey { .. })` for a keyed one. It is set the moment a
+/// provider is switched to or saved, so a rebuild needs no keyring round-trip.
 pub struct ProviderSwap {
     client: reqwest::Client,
     secrets: Box<dyn SecretStore>,
@@ -139,6 +141,12 @@ impl ProviderSwap {
     /// migration/CI path as startup, e.g. `NVIDIA_API_KEY` / `ANTHROPIC_API_KEY` / `KIRI_<ID>_API_KEY`).
     /// Without this fallback a provider whose key lives only in an env var could not be switched to live.
     fn resolve_credential(&self, profile: &ProviderProfile) -> Result<Credential, AgentError> {
+        // A keyless provider (auth = "none") needs no secret: the adapter omits Authorization. Short-
+        // circuit before the keyring/env lookup so switching to a local endpoint never errors for a
+        // missing credential, and any stale key from a prior keyed config of this id is ignored.
+        if profile.auth == AuthMethod::None {
+            return Ok(Credential::None);
+        }
         if let Some(credential) = self.secrets.get(&profile.id)? {
             return Ok(credential);
         }
@@ -205,7 +213,14 @@ impl ProviderSwap {
         // Build first (validates the profile/credential), then store the secret — so a build failure
         // never leaves an orphaned credential in the keyring for a provider that was not added.
         let provider = self.build(&profile, &credential, self.effort)?;
-        self.secrets.set(&profile.id, &credential)?;
+        match &credential {
+            // A keyless provider stores nothing; clear any stale key from a prior keyed config of this
+            // id best-effort (a missing-key delete is a harmless no-op) so no orphaned secret lingers.
+            Credential::None => {
+                let _ = self.secrets.delete(&profile.id);
+            }
+            _ => self.secrets.set(&profile.id, &credential)?,
+        }
         let id = profile.id.clone();
         let model = profile.model.clone();
         self.providers.retain(|p| p.id != id);
@@ -719,23 +734,45 @@ impl Tui {
                         base_url,
                         model: model_id,
                         models,
+                        auth,
                     } => {
-                        // The wizard staged the typed key as a Secret out of the effect; take it here.
-                        let Some(key) = model.pending_credential.take() else {
-                            model.transcript.push(TranscriptItem::Notice(
-                                NoticeLevel::Error,
-                                "chave ausente; provider não foi salvo".to_string(),
-                            ));
-                            continue;
+                        // Build the credential from the wizard-derived auth. The key was staged in
+                        // `pending_credential` only when present; a keyless save stores nothing.
+                        let credential = match &auth {
+                            AuthMethod::ApiKey => {
+                                let Some(key) = model.pending_credential.take() else {
+                                    model.transcript.push(TranscriptItem::Notice(
+                                        NoticeLevel::Error,
+                                        "chave ausente; provider não foi salvo".to_string(),
+                                    ));
+                                    continue;
+                                };
+                                Credential::ApiKey { key }
+                            }
+                            AuthMethod::None => {
+                                // Keyless: drop any stray staged secret and store no credential.
+                                model.pending_credential = None;
+                                Credential::None
+                            }
+                            other => {
+                                // The wizard never emits OAuth or an unrecognized method; guard, never panic.
+                                model.pending_credential = None;
+                                model.transcript.push(TranscriptItem::Notice(
+                                    NoticeLevel::Error,
+                                    format!(
+                                        "método de auth não suportado pelo wizard ({other:?}); provider não foi salvo"
+                                    ),
+                                ));
+                                continue;
+                            }
                         };
-                        let credential = Credential::ApiKey { key };
                         let profile = ProviderProfile {
                             id: id.clone(),
                             kind,
                             base_url,
                             model: model_id.clone(),
                             models: models.clone(),
-                            auth: AuthMethod::ApiKey,
+                            auth,
                         };
                         match provider_swap.add_and_activate(profile.clone(), credential) {
                             Ok((provider, target_model)) => {
@@ -753,7 +790,7 @@ impl Tui {
                                     format!("provider '{id}' adicionado e ativo"),
                                 ));
                                 // Persist the profile (config) and the active selection; the credential
-                                // already went to the keyring above.
+                                // (if any) was stored by add_and_activate above.
                                 if let Err(error) = config::upsert_provider(&config_path, &profile)
                                     .and_then(|()| {
                                         config::persist_active_provider(&config_path, &id)
@@ -1588,9 +1625,38 @@ mod tests {
             }
         }
 
+        /// A keyless (`auth = "none"`) profile — a local OpenAI-compatible endpoint that needs no key.
+        fn keyless_profile(id: &str, kind: ProviderKind, model: &str) -> ProviderProfile {
+            ProviderProfile {
+                id: id.into(),
+                kind,
+                base_url: "http://localhost:1234/v1".into(),
+                model: model.into(),
+                models: vec![model.into()],
+                auth: AuthMethod::None,
+            }
+        }
+
         fn api_key() -> Credential {
             Credential::ApiKey {
                 key: Secret::new("k"),
+            }
+        }
+
+        /// A store whose `set` errors — used to prove a keyless save never persists a credential (it would
+        /// fail here if it tried).
+        struct FailingSetStore;
+        impl SecretStore for FailingSetStore {
+            fn get(&self, _id: &str) -> Result<Option<Credential>, AgentError> {
+                Ok(None)
+            }
+            fn set(&self, _id: &str, _credential: &Credential) -> Result<(), AgentError> {
+                Err(AgentError::Provider(
+                    "set must not be called for a keyless provider".into(),
+                ))
+            }
+            fn delete(&self, _id: &str) -> Result<(), AgentError> {
+                Ok(())
             }
         }
 
@@ -1701,6 +1767,85 @@ mod tests {
             assert_eq!(model, "claude-opus-4-8");
             assert_eq!(s.active, "claude");
             assert!(s.provider_ids().iter().any(|p| p == "claude"));
+        }
+
+        #[test]
+        fn resolve_credential_yields_none_for_a_keyless_profile() {
+            let s = swap(
+                vec![profile("nvidia", ProviderKind::Nvidia, "m1")],
+                "nvidia",
+                &[("nvidia", api_key())],
+            );
+            let p = keyless_profile("lmstudio", ProviderKind::OpenAiCompatible, "gemma");
+            assert!(matches!(
+                s.resolve_credential(&p).unwrap(),
+                Credential::None
+            ));
+        }
+
+        #[test]
+        fn switch_to_no_auth_provider_needs_no_credential() {
+            // A keyless provider in the catalog switches with neither a stored credential nor an env key —
+            // the direct fix for the reported "no credential for provider" on /provider.
+            let mut s = swap(
+                vec![
+                    profile("nvidia", ProviderKind::Nvidia, "m1"),
+                    keyless_profile("lmstudio", ProviderKind::OpenAiCompatible, "gemma"),
+                ],
+                "nvidia",
+                &[("nvidia", api_key())],
+            );
+            let (_, model) = s
+                .switch_to("lmstudio")
+                .expect("a keyless switch needs no credential");
+            assert_eq!(model, "gemma");
+            assert_eq!(s.active, "lmstudio");
+        }
+
+        #[test]
+        fn add_and_activate_none_credential_skips_secret_store() {
+            // A keyless save must succeed without calling secrets.set (which errors in this store).
+            let mut s = ProviderSwap::new(
+                reqwest::Client::new(),
+                Box::new(FailingSetStore),
+                vec![],
+                String::new(),
+                None,
+                true,
+                Effort::High,
+            );
+            let (_, model) = s
+                .add_and_activate(
+                    keyless_profile("lmstudio", ProviderKind::OpenAiCompatible, "gemma"),
+                    Credential::None,
+                )
+                .expect("keyless add must not touch secrets.set");
+            assert_eq!(model, "gemma");
+            assert_eq!(s.active, "lmstudio");
+        }
+
+        #[test]
+        fn rebuild_with_effort_works_for_a_keyless_active_provider() {
+            // The keyless active provider caches Some(Credential::None); changing effort must rebuild,
+            // never hit the "configure um provider" error a None credential would trigger.
+            let mut s = ProviderSwap::new(
+                reqwest::Client::new(),
+                Box::new(FakeStore {
+                    creds: HashMap::new(),
+                }),
+                vec![keyless_profile(
+                    "lmstudio",
+                    ProviderKind::OpenAiCompatible,
+                    "gemma",
+                )],
+                "lmstudio".into(),
+                Some(Credential::None),
+                true,
+                Effort::High,
+            );
+            s.rebuild_with_effort(Effort::Max)
+                .expect("a keyless effort rebuild must succeed");
+            assert_eq!(s.effort, Effort::Max);
         }
     }
 

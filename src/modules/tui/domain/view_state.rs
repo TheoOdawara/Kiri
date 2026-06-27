@@ -365,8 +365,8 @@ pub enum PickerKind {
 pub const ADD_PROVIDER_LABEL: &str = "+ adicionar novo provider";
 
 /// The provider kinds the wizard offers, in display order. NVIDIA leads (the seeded default), so it is
-/// preselected at first-run onboarding; the rest follow. All are API-key only — subscription OAuth is
-/// intentionally unsupported.
+/// preselected at first-run onboarding; the rest follow. Vendor kinds require an API key; the generic
+/// OpenAI-compatible and custom kinds may be keyless (Ollama / LM Studio) — the typed key decides.
 pub const WIZARD_KINDS: [ProviderKind; 5] = [
     ProviderKind::Nvidia,
     ProviderKind::Anthropic,
@@ -375,10 +375,13 @@ pub const WIZARD_KINDS: [ProviderKind; 5] = [
     ProviderKind::Custom,
 ];
 
-/// The steps of the add-provider wizard, in order.
+/// The steps of the add-provider wizard, in order. `ProviderId` is shown only for the keyless-capable
+/// kinds (OpenAI-compatible / custom), so the user can name several coexisting endpoints; vendor kinds
+/// use a canonical id and skip it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WizardStep {
     Kind,
+    ProviderId,
     BaseUrl,
     Model,
     ExtraModels,
@@ -392,6 +395,8 @@ pub enum WizardStep {
 pub struct ProviderWizard {
     pub step: WizardStep,
     pub kind_selected: usize,
+    /// The user-chosen provider id (keyless-capable kinds only; vendor kinds use a canonical token).
+    pub id: String,
     pub base_url: String,
     pub model: String,
     pub extra_models: String,
@@ -406,6 +411,7 @@ impl std::fmt::Debug for ProviderWizard {
         f.debug_struct("ProviderWizard")
             .field("step", &self.step)
             .field("kind", &self.kind())
+            .field("id", &self.id)
             .field("base_url", &self.base_url)
             .field("model", &self.model)
             .field("extra_models", &self.extra_models)
@@ -420,6 +426,7 @@ impl ProviderWizard {
         Self {
             step: WizardStep::Kind,
             kind_selected: 0,
+            id: String::new(),
             base_url: String::new(),
             model: String::new(),
             extra_models: String::new(),
@@ -442,9 +449,14 @@ impl ProviderWizard {
         WIZARD_KINDS[self.kind_selected.min(WIZARD_KINDS.len() - 1)]
     }
 
-    /// The id a finished wizard gives its provider — the kind's canonical token. Re-adding a kind thus
-    /// reconfigures it (one configured provider per kind via the wizard; the TOML allows more).
-    pub fn provider_id(&self) -> String {
+    /// Whether the selected kind requires an API key (vendor) or may be keyless (compatible / custom).
+    pub fn key_required(&self) -> bool {
+        self.kind().requires_api_key()
+    }
+
+    /// The kind's canonical id token (the wizard id for a vendor kind, and the fallback for a blank
+    /// keyless id).
+    fn canonical_id(&self) -> &'static str {
         match self.kind() {
             ProviderKind::Nvidia => "nvidia",
             ProviderKind::Openai => "openai",
@@ -452,7 +464,35 @@ impl ProviderWizard {
             ProviderKind::OpenAiCompatible => "openai-compatible",
             ProviderKind::Custom => "custom",
         }
-        .to_string()
+    }
+
+    /// The id a finished wizard gives its provider. Vendor kinds use the canonical token (re-adding one
+    /// reconfigures it). Keyless-capable kinds use the user-typed `id`, sanitized to a stable `[a-z0-9_-]`
+    /// token, so several compatible endpoints (e.g. a local LM Studio and a remote OpenRouter) can coexist;
+    /// a blank id falls back to the canonical token.
+    pub fn provider_id(&self) -> String {
+        if self.key_required() {
+            return self.canonical_id().to_string();
+        }
+        let sanitized: String = self
+            .id
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let sanitized = sanitized.trim_matches('-').to_string();
+        if sanitized.is_empty() {
+            self.canonical_id().to_string()
+        } else {
+            sanitized
+        }
     }
 
     /// The model catalog: the default model first, then the comma-separated extras (trimmed, de-duped,
@@ -476,6 +516,7 @@ impl ProviderWizard {
     fn field_mut(&mut self) -> Option<&mut String> {
         match self.step {
             WizardStep::Kind => None,
+            WizardStep::ProviderId => Some(&mut self.id),
             WizardStep::BaseUrl => Some(&mut self.base_url),
             WizardStep::Model => Some(&mut self.model),
             WizardStep::ExtraModels => Some(&mut self.extra_models),
@@ -603,6 +644,31 @@ mod tests {
         let w = ProviderWizard::new(); // kind index 0 = NVIDIA (the leading, preselected entry)
         assert_eq!(w.provider_id(), "nvidia");
         assert_eq!(w.kind(), ProviderKind::Nvidia);
+    }
+
+    #[test]
+    fn key_required_only_for_vendor_kinds() {
+        let mut w = ProviderWizard::new();
+        // WIZARD_KINDS: [Nvidia, Anthropic, Openai, OpenAiCompatible, Custom].
+        for (idx, required) in [(0, true), (1, true), (2, true), (3, false), (4, false)] {
+            w.kind_selected = idx;
+            assert_eq!(w.key_required(), required, "kind {:?}", w.kind());
+        }
+    }
+
+    #[test]
+    fn provider_id_sanitizes_a_named_keyless_provider() {
+        let mut w = ProviderWizard::new();
+        w.kind_selected = 3; // OpenAiCompatible — keyless-capable, so the typed id is used
+        w.id = "  My LM Studio! ".to_string();
+        assert_eq!(w.provider_id(), "my-lm-studio");
+        // A blank id falls back to the canonical kind token, never an empty id.
+        w.id = "   ".to_string();
+        assert_eq!(w.provider_id(), "openai-compatible");
+        // A vendor kind ignores the id field entirely.
+        w.kind_selected = 0;
+        w.id = "ignored".to_string();
+        assert_eq!(w.provider_id(), "nvidia");
     }
 
     #[test]
