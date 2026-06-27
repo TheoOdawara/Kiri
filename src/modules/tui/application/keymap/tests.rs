@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::modules::tui::domain::view_state::{PendingApproval, PendingPlan};
 

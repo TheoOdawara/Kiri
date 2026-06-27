@@ -1,4 +1,3 @@
-
 use super::view;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::TranscriptItem;

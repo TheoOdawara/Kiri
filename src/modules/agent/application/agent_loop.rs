@@ -30,6 +30,15 @@ pub enum TurnOutcome {
     Aborted,
 }
 
+/// The outcome of a runaway checkpoint's shared approval arms: either the turn continues (the user
+/// approved, optionally switching to auto) or it ends with the carried outcome (declined or aborted).
+/// The caller layers on its own end-of-turn bookkeeping (the within-round case answers the remaining
+/// calls before returning).
+enum CheckpointFlow {
+    Continue,
+    End(TurnOutcome),
+}
+
 /// Run a tool execution to completion, returning its outcome alongside how long only the execution
 /// took (so the reported duration excludes any time the user spent at an approval prompt). Async so
 /// tools that spawn processes can await them; the wall clock still measures only the await span.
@@ -181,36 +190,33 @@ impl AgentLoop {
                 // round run them all (unattended in auto — e.g. a prompt-injected burst of write_file)
                 // before any pause. When the cap is reached, confirm before executing the next call.
                 if calls_since_checkpoint >= self.max_tool_calls {
-                    match io
+                    let decision = io
                         .confirm_continue(CheckpointReason::CallCount {
                             calls: calls_since_checkpoint,
                         })
-                        .await
-                    {
-                        Approval::Approved => {
-                            checkpoint = Instant::now();
-                            calls_since_checkpoint = 0;
-                        }
-                        Approval::ApprovedAuto => {
-                            mode = ApprovalMode::Auto;
-                            checkpoint = Instant::now();
-                            calls_since_checkpoint = 0;
-                        }
-                        Approval::Declined => {
-                            answer_unanswered(
-                                conversation,
-                                &calls[index..],
-                                "ignorada: execução interrompida no checkpoint",
-                            );
-                            return Ok(TurnOutcome::Completed);
-                        }
-                        Approval::Aborted => {
+                        .await;
+                    match self.checkpoint_transition(
+                        decision,
+                        &mut checkpoint,
+                        &mut calls_since_checkpoint,
+                        &mut mode,
+                    ) {
+                        CheckpointFlow::Continue => {}
+                        CheckpointFlow::End(TurnOutcome::Aborted) => {
                             answer_unanswered(
                                 conversation,
                                 &calls[index..],
                                 "ignorada: sessão encerrada",
                             );
                             return Ok(TurnOutcome::Aborted);
+                        }
+                        CheckpointFlow::End(outcome) => {
+                            answer_unanswered(
+                                conversation,
+                                &calls[index..],
+                                "ignorada: execução interrompida no checkpoint",
+                            );
+                            return Ok(outcome);
                         }
                     }
                 }
@@ -222,88 +228,9 @@ impl AgentLoop {
                     .command_line(sandbox, call)
                     .unwrap_or_else(|| call.function.name.clone());
 
-                // `tool_started` is emitted just before running (paired with `tool_finished`), so the
-                // transcript records every attempt — including declined and plan-blocked calls. A `None`
-                // result means the user aborted at this call: the turn ends after answering the
-                // remaining calls (below) so the exchange stays valid.
-                let result: Option<(ToolOutcome, Duration)> = match mode {
-                    // Auto: run calls without asking — EXCEPT high-blast-radius tools (run_command,
-                    // delete_*, move_path) and any out-of-root target, which still require a live
-                    // confirmation. This is what keeps an unattended turn — including a prompt-injected
-                    // one — from silently destroying data or reaching outside the workspace, and it is
-                    // the only such guard on platforms without an OS sandbox.
-                    ApprovalMode::Auto => match self.registry.confirm(sandbox, call) {
-                        Some(confirmation)
-                            if self.registry.confirm_in_auto(&call.function.name)
-                                || !confirmation.default_accept =>
-                        {
-                            match io.decide(&confirmation).await {
-                                // Already in auto, so "approve and don't ask again" is just "approve":
-                                // destructive calls keep being confirmed for the rest of the turn.
-                                Approval::Approved | Approval::ApprovedAuto => {
-                                    io.tool_started(call, &command);
-                                    Some(timed(self.registry.execute(sandbox, call)).await)
-                                }
-                                Approval::Declined => {
-                                    io.tool_started(call, &command);
-                                    Some((ToolOutcome::Declined, Duration::ZERO))
-                                }
-                                Approval::Aborted => None,
-                            }
-                        }
-                        _ => {
-                            io.tool_started(call, &command);
-                            Some(timed(self.registry.execute(sandbox, call)).await)
-                        }
-                    },
-                    // Plan: non-plannable tools are withheld from the schema; if the model still names
-                    // one, refuse it without touching the filesystem. Plannable tools (read-only +
-                    // run_command) run directly so the agent can investigate while drafting its plan.
-                    ApprovalMode::Plan if !self.registry.is_plannable(&call.function.name) => {
-                        io.tool_started(call, &command);
-                        Some((
-                            ToolOutcome::Error(format!(
-                                "'{}' is blocked in plan mode (not available for planning)",
-                                call.function.name
-                            )),
-                            Duration::ZERO,
-                        ))
-                    }
-                    ApprovalMode::Plan => {
-                        if let Some(reason) = self.registry.plan_check(sandbox, call) {
-                            io.tool_started(call, &command);
-                            Some((ToolOutcome::Error(reason), Duration::ZERO))
-                        } else {
-                            io.tool_started(call, &command);
-                            Some(timed(self.registry.execute(sandbox, call)).await)
-                        }
-                    }
-                    // Default: confirm each call through the UI before running it.
-                    ApprovalMode::Default => match self.registry.confirm(sandbox, call) {
-                        Some(confirmation) => match io.decide(&confirmation).await {
-                            Approval::Approved => {
-                                io.tool_started(call, &command);
-                                Some(timed(self.registry.execute(sandbox, call)).await)
-                            }
-                            // "Approve and don't ask again": run this call, then switch the rest of the
-                            // turn to auto so the following calls no longer prompt.
-                            Approval::ApprovedAuto => {
-                                mode = ApprovalMode::Auto;
-                                io.tool_started(call, &command);
-                                Some(timed(self.registry.execute(sandbox, call)).await)
-                            }
-                            Approval::Declined => {
-                                io.tool_started(call, &command);
-                                Some((ToolOutcome::Declined, Duration::ZERO))
-                            }
-                            Approval::Aborted => None,
-                        },
-                        None => {
-                            io.tool_started(call, &command);
-                            Some(timed(self.registry.execute(sandbox, call)).await)
-                        }
-                    },
-                };
+                let result = self
+                    .decide_and_run(sandbox, call, &command, &mut mode, io)
+                    .await;
 
                 let Some((outcome, elapsed)) = result else {
                     // The user aborted at this call: answer it and every remaining call so the assistant
@@ -339,21 +266,139 @@ impl AgentLoop {
                         minutes: checkpoint.elapsed().as_secs() / 60,
                     }
                 };
-                match io.confirm_continue(reason).await {
-                    Approval::Approved => {
-                        checkpoint = Instant::now();
-                        calls_since_checkpoint = 0;
-                    }
-                    // "Keep going, and don't ask again": resume and run the rest of the turn unattended.
-                    Approval::ApprovedAuto => {
-                        mode = ApprovalMode::Auto;
-                        checkpoint = Instant::now();
-                        calls_since_checkpoint = 0;
-                    }
-                    Approval::Declined => return Ok(TurnOutcome::Completed),
-                    Approval::Aborted => return Ok(TurnOutcome::Aborted),
+                let decision = io.confirm_continue(reason).await;
+                match self.checkpoint_transition(
+                    decision,
+                    &mut checkpoint,
+                    &mut calls_since_checkpoint,
+                    &mut mode,
+                ) {
+                    CheckpointFlow::Continue => {}
+                    CheckpointFlow::End(outcome) => return Ok(outcome),
                 }
             }
+        }
+    }
+
+    /// The per-call decision tree for one tool call, factored out of `run` to collapse its deepest
+    /// nesting. Emits `tool_started` just before running (paired with `tool_finished` in `run`) so the
+    /// transcript records every attempt — including declined and plan-blocked calls. Switches `mode` to
+    /// `Auto` when the user approves with "don't ask again" in `Default`. Returns `None` when the user
+    /// aborts at this call, signalling `run` to answer the remaining calls and end the turn.
+    async fn decide_and_run<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
+        &self,
+        sandbox: &dyn Sandbox,
+        call: &ToolCall,
+        command: &str,
+        mode: &mut ApprovalMode,
+        io: &mut IO,
+    ) -> Option<(ToolOutcome, Duration)> {
+        match *mode {
+            // Auto: run calls without asking — EXCEPT high-blast-radius tools (run_command,
+            // delete_*, move_path) and any out-of-root target, which still require a live
+            // confirmation. This is what keeps an unattended turn — including a prompt-injected
+            // one — from silently destroying data or reaching outside the workspace, and it is
+            // the only such guard on platforms without an OS sandbox.
+            ApprovalMode::Auto => match self.registry.confirm(sandbox, call) {
+                Some(confirmation)
+                    if self.registry.confirm_in_auto(&call.function.name)
+                        || !confirmation.default_accept =>
+                {
+                    match io.decide(&confirmation).await {
+                        // Already in auto, so "approve and don't ask again" is just "approve":
+                        // destructive calls keep being confirmed for the rest of the turn.
+                        Approval::Approved | Approval::ApprovedAuto => {
+                            io.tool_started(call, command);
+                            Some(timed(self.registry.execute(sandbox, call)).await)
+                        }
+                        Approval::Declined => {
+                            io.tool_started(call, command);
+                            Some((ToolOutcome::Declined, Duration::ZERO))
+                        }
+                        Approval::Aborted => None,
+                    }
+                }
+                _ => {
+                    io.tool_started(call, command);
+                    Some(timed(self.registry.execute(sandbox, call)).await)
+                }
+            },
+            // Plan: non-plannable tools are withheld from the schema; if the model still names
+            // one, refuse it without touching the filesystem. Plannable tools (read-only +
+            // run_command) run directly so the agent can investigate while drafting its plan.
+            ApprovalMode::Plan if !self.registry.is_plannable(&call.function.name) => {
+                io.tool_started(call, command);
+                Some((
+                    ToolOutcome::Error(format!(
+                        "'{}' is blocked in plan mode (not available for planning)",
+                        call.function.name
+                    )),
+                    Duration::ZERO,
+                ))
+            }
+            ApprovalMode::Plan => {
+                if let Some(reason) = self.registry.plan_check(sandbox, call) {
+                    io.tool_started(call, command);
+                    Some((ToolOutcome::Error(reason), Duration::ZERO))
+                } else {
+                    io.tool_started(call, command);
+                    Some(timed(self.registry.execute(sandbox, call)).await)
+                }
+            }
+            // Default: confirm each call through the UI before running it.
+            ApprovalMode::Default => match self.registry.confirm(sandbox, call) {
+                Some(confirmation) => match io.decide(&confirmation).await {
+                    Approval::Approved => {
+                        io.tool_started(call, command);
+                        Some(timed(self.registry.execute(sandbox, call)).await)
+                    }
+                    // "Approve and don't ask again": run this call, then switch the rest of the
+                    // turn to auto so the following calls no longer prompt.
+                    Approval::ApprovedAuto => {
+                        *mode = ApprovalMode::Auto;
+                        io.tool_started(call, command);
+                        Some(timed(self.registry.execute(sandbox, call)).await)
+                    }
+                    Approval::Declined => {
+                        io.tool_started(call, command);
+                        Some((ToolOutcome::Declined, Duration::ZERO))
+                    }
+                    Approval::Aborted => None,
+                },
+                None => {
+                    io.tool_started(call, command);
+                    Some(timed(self.registry.execute(sandbox, call)).await)
+                }
+            },
+        }
+    }
+
+    /// The shared approval arms of a runaway checkpoint, used by both the within-round and post-round
+    /// guards. `Approved` resets the checkpoint clock and call counter; `ApprovedAuto` additionally
+    /// switches the turn to `Auto`; `Declined`/`Aborted` end the turn (the caller adds its own
+    /// end-of-turn bookkeeping — the within-round case answers the remaining calls first).
+    fn checkpoint_transition(
+        &self,
+        decision: Approval,
+        checkpoint: &mut Instant,
+        calls_since_checkpoint: &mut usize,
+        mode: &mut ApprovalMode,
+    ) -> CheckpointFlow {
+        match decision {
+            Approval::Approved => {
+                *checkpoint = Instant::now();
+                *calls_since_checkpoint = 0;
+                CheckpointFlow::Continue
+            }
+            // "Keep going, and don't ask again": resume and run the rest of the turn unattended.
+            Approval::ApprovedAuto => {
+                *mode = ApprovalMode::Auto;
+                *checkpoint = Instant::now();
+                *calls_since_checkpoint = 0;
+                CheckpointFlow::Continue
+            }
+            Approval::Declined => CheckpointFlow::End(TurnOutcome::Completed),
+            Approval::Aborted => CheckpointFlow::End(TurnOutcome::Aborted),
         }
     }
 }
