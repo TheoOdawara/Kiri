@@ -69,9 +69,10 @@ single path chokepoint) — **except** the `memory`, `session`,
 and `sync` contexts, which own their data dirs (`.kiri/memory`, `~/.kiri/memory`, `~/.kiri/sessions.db`,
 `~/.kiri/sync`), plus `provider/infrastructure/secrets` (the keyring/`0600` credentials file) and
 `shared/infra/config` (the `~/.kiri/config.toml` + dir creation) — all do their own file/SQLite I/O for
-harness-owned storage, never for agent-supplied paths (ref ADRs 0010/0013/0015); `domain` has no I/O;
-the engine never touches stdin/stdout
-directly (all UI via the engine ports). Ports return `AgentError`; `anyhow` only at the binary edge.
+harness-owned storage, never for agent-supplied paths (ref ADRs 0010/0013/0015); `domain` has no I/O and
+no UI-framework dependency — the **one** sanctioned exception is the TUI `InputBuffer` owning a
+`tui_textarea::TextArea` (ADR 0017, guarded by a recursive domain-purity test); the engine never touches
+stdin/stdout directly (all UI via the engine ports). Ports return `AgentError`; `anyhow` only at the binary edge.
 
 **Extending:** a new tool = one file under `tools/infrastructure/fs/` implementing `Tool` (it receives
 the `Sandbox` port as `&dyn Sandbox`), registered in `default_fs_tools`; a new provider = one adapter implementing `CompletionProvider` + a `(kind, auth)` arm in
