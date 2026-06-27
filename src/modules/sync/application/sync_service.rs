@@ -1,11 +1,14 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use tokio::fs;
 
 use crate::modules::memory::domain::project_memory::SharedMemory;
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::modules::sync::application::git::Git;
 use crate::modules::sync::infrastructure::memory_ndjson;
+use crate::shared::infra::config;
 use crate::shared::kernel::error::AgentError;
 
 type Result<T> = std::result::Result<T, AgentError>;
@@ -124,22 +127,39 @@ impl<'a> SyncService<'a> {
         let incoming_config = dir.join(CONFIG_FILE);
         let config_note = if incoming_config.exists() {
             let incoming = fs::read_to_string(&incoming_config).await?;
-            let current = fs::read_to_string(&self.config_path)
-                .await
-                .unwrap_or_default();
-            let risks = risky_config_changes(&current, &incoming);
-            if risks.is_empty() || force {
-                fs::write(&self.config_path, incoming).await?;
-                if risks.is_empty() {
-                    "config applied".to_string()
-                } else {
-                    format!("config applied with --force despite: {}", risks.join("; "))
-                }
+            // Refuse a config that is valid TOML but invalid against the real schema, regardless of
+            // `force` — writing it would brick the next boot when it fails to deserialize.
+            if let Err(error) = config::validate_config_str(&incoming) {
+                format!("config NOT applied ({error})")
             } else {
-                format!(
-                    "config NOT applied (re-run with --force to accept): {}",
-                    risks.join("; ")
-                )
+                // Establish the trusted baseline. A genuinely absent current config is an empty
+                // baseline (first pull); a present-but-unreadable one cannot be trusted, so we cannot
+                // prove the change is safe and require `--force`.
+                let current = match fs::read_to_string(&self.config_path).await {
+                    Ok(text) => Some(text),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(String::new()),
+                    Err(_) => None,
+                };
+                let risks = match &current {
+                    Some(text) => risky_config_changes(text, &incoming),
+                    None => vec![
+                        "current config is unreadable; cannot verify the change is safe"
+                            .to_string(),
+                    ],
+                };
+                if risks.is_empty() || force {
+                    write_atomic(&self.config_path, &incoming).await?;
+                    if risks.is_empty() {
+                        "config applied".to_string()
+                    } else {
+                        format!("config applied with --force despite: {}", risks.join("; "))
+                    }
+                } else {
+                    format!(
+                        "config NOT applied (re-run with --force to accept): {}",
+                        risks.join("; ")
+                    )
+                }
             }
         } else {
             "no config in sync".to_string()
@@ -158,10 +178,22 @@ impl<'a> SyncService<'a> {
             .git
             .run(&["status", "--short", "--branch"], &dir)
             .await?;
-        Ok(if output.stdout.is_empty() {
-            "sync clean".to_string()
-        } else {
+        if !output.success {
+            return Err(AgentError::Provider(format!(
+                "git status failed: {}",
+                first_line(&output.stderr, &output.stdout)
+            )));
+        }
+        // `--branch` always prints a leading `## <branch>...` header line, so emptiness is never the
+        // signal — the tree is clean iff there are no porcelain entries beyond that header.
+        let dirty = output
+            .stdout
+            .lines()
+            .any(|line| !line.starts_with("##") && !line.trim().is_empty());
+        Ok(if dirty {
             output.stdout
+        } else {
+            "sync clean".to_string()
         })
     }
 
@@ -206,47 +238,122 @@ fn first_line(stderr: &str, stdout: &str) -> String {
     pick.lines().next().unwrap_or("").to_string()
 }
 
+/// Write `contents` to `path` atomically: write a sibling temp file then rename over the target, so a
+/// crash mid-write can never leave a truncated/corrupt trusted config.
+async fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config.toml");
+    let tmp = path.with_file_name(format!(".{name}.kiri-tmp"));
+    fs::write(&tmp, contents).await?;
+    fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
+/// The security-relevant fields of a config, parsed against the real shape (extra fields ignored).
+/// Deliberately a small typed view rather than `toml::Value` poking, so the trust gate reasons over the
+/// same schema the loader uses and cannot be fooled by an unexpected layout.
+#[derive(Deserialize, Default)]
+struct TrustView {
+    #[serde(default)]
+    active_provider: Option<String>,
+    #[serde(default)]
+    providers: BTreeMap<String, TrustProvider>,
+    #[serde(default)]
+    sandbox: TrustSandbox,
+    #[serde(default)]
+    embeddings: TrustEmbeddings,
+}
+
+#[derive(Deserialize, Default)]
+struct TrustProvider {
+    #[serde(default)]
+    base_url: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct TrustSandbox {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    network: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct TrustEmbeddings {
+    #[serde(default)]
+    provider: Option<String>,
+}
+
 /// Identify risky differences in an incoming config that, applied as the trusted global layer, could
-/// redirect a credential or weaken the sandbox: a provider's `base_url` changing, or the sandbox mode
-/// being set to `off`. Returns a human-readable list (empty = safe to apply).
+/// redirect a credential or weaken the sandbox. Flags: a newly added provider; an existing provider's
+/// `base_url` added or changed; the active provider switching to a different endpoint; the embeddings
+/// provider changing; the sandbox mode set to `off`; the sandbox network widened to `allow`. Returns a
+/// human-readable list (empty = safe to apply). Schema validity is checked separately by the caller.
 fn risky_config_changes(current: &str, incoming: &str) -> Vec<String> {
-    let current: toml::Value = current
-        .parse()
-        .unwrap_or(toml::Value::Table(Default::default()));
-    let incoming: toml::Value = match incoming.parse() {
+    let incoming: TrustView = match toml::from_str(incoming) {
         Ok(value) => value,
-        // An unparseable incoming config is itself a reason not to apply it blindly.
         Err(error) => return vec![format!("incoming config is not valid TOML: {error}")],
+    };
+    // A current config we cannot parse is not a baseline we can compare against — we cannot prove the
+    // change is non-risky, so treat it as requiring an explicit `--force`.
+    let current: TrustView = match toml::from_str(current) {
+        Ok(value) => value,
+        Err(_) => {
+            return vec![
+                "current config is unreadable; cannot verify the change is safe".to_string(),
+            ];
+        }
     };
 
     let mut risks = Vec::new();
 
-    // Provider base_url changes (credential-redirect risk).
-    if let (Some(cur), Some(inc)) = (
-        current.get("providers").and_then(|v| v.as_table()),
-        incoming.get("providers").and_then(|v| v.as_table()),
-    ) {
-        for (id, inc_profile) in inc {
-            let inc_url = inc_profile.get("base_url").and_then(|v| v.as_str());
-            let cur_url = cur
-                .get(id)
-                .and_then(|p| p.get("base_url"))
-                .and_then(|v| v.as_str());
-            if let (Some(cur_url), Some(inc_url)) = (cur_url, inc_url)
-                && cur_url != inc_url
-            {
-                risks.push(format!("provider '{id}' base_url changes to {inc_url}"));
+    // A new provider, or a base_url added/changed on an existing one, can redirect where a credential
+    // (stored or env-imported) is sent — the core credential-exfiltration vector.
+    for (id, inc) in &incoming.providers {
+        match current.providers.get(id) {
+            None => risks.push(format!("new provider '{id}' added")),
+            Some(cur) if cur.base_url != inc.base_url => {
+                risks.push(format!("provider '{id}' base_url changes"));
             }
+            Some(_) => {}
         }
     }
 
-    // Sandbox weakened to off.
-    let inc_mode = incoming
-        .get("sandbox")
-        .and_then(|v| v.get("mode"))
-        .and_then(|v| v.as_str());
-    if inc_mode == Some("off") {
+    // The active provider switching to one with a different base_url redirects the active credential.
+    let active_url = |view: &TrustView| -> Option<String> {
+        view.active_provider
+            .as_ref()
+            .and_then(|id| view.providers.get(id))
+            .and_then(|p| p.base_url.clone())
+    };
+    if incoming.active_provider != current.active_provider
+        && active_url(&incoming) != active_url(&current)
+    {
+        risks.push("active_provider changes to a different endpoint".to_string());
+    }
+
+    // Redirecting the embeddings provider sends the embedded text (and that provider's key) elsewhere.
+    if incoming.embeddings.provider != current.embeddings.provider {
+        risks.push("embeddings provider changes".to_string());
+    }
+
+    // Sandbox weakened: mode disabled, or the base network stance widened from deny to allow.
+    if incoming.sandbox.mode.as_deref() == Some("off")
+        && current.sandbox.mode.as_deref() != Some("off")
+    {
         risks.push("sandbox mode set to 'off'".to_string());
+    }
+    let net = |view: &TrustView| {
+        view.sandbox
+            .network
+            .as_deref()
+            .unwrap_or("deny")
+            .to_string()
+    };
+    if net(&incoming) == "allow" && net(&current) != "allow" {
+        risks.push("sandbox network widened to 'allow'".to_string());
     }
 
     risks
@@ -260,16 +367,29 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::TempDir;
 
-    /// A `Git` double that records the commands it was asked to run and always succeeds. It also creates
-    /// the `.git` marker on `init`, so `require_initialized` passes in later calls.
+    /// A `Git` double that records the commands it was asked to run and always succeeds. It creates the
+    /// `.git` marker on `init`, and on `reset` (which `pull` runs after `fetch`) it materializes the
+    /// configured fixture files into the work-tree, standing in for the remote's contents.
     struct FakeGit {
         calls: Mutex<Vec<String>>,
+        config_fixture: Option<String>,
+        memory_fixture: Option<String>,
     }
 
     impl FakeGit {
         fn new() -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
+                config_fixture: None,
+                memory_fixture: None,
+            }
+        }
+
+        fn with_fixtures(config: Option<&str>, memory: Option<&str>) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                config_fixture: config.map(String::from),
+                memory_fixture: memory.map(String::from),
             }
         }
     }
@@ -281,12 +401,28 @@ mod tests {
             if args.first() == Some(&"init") {
                 std::fs::create_dir_all(cwd.join(".git")).unwrap();
             }
+            if args.first() == Some(&"reset") {
+                if let Some(config) = &self.config_fixture {
+                    std::fs::write(cwd.join(CONFIG_FILE), config).unwrap();
+                }
+                if let Some(memory) = &self.memory_fixture {
+                    std::fs::write(cwd.join(MEMORY_FILE), memory).unwrap();
+                }
+            }
             Ok(GitOutput {
                 stdout: String::new(),
                 stderr: String::new(),
                 success: true,
             })
         }
+    }
+
+    /// A complete, schema-valid provider profile (the loader requires kind/base_url/model/auth;
+    /// `ProviderKind::OpenAiCompatible` serializes kebab-case as `open-ai-compatible`).
+    fn provider_toml(id: &str, base_url: &str) -> String {
+        format!(
+            "[providers.{id}]\nkind = \"open-ai-compatible\"\nbase_url = \"{base_url}\"\nmodel = \"m\"\nauth = \"api-key\"\n"
+        )
     }
 
     #[tokio::test]
@@ -352,5 +488,140 @@ base_url = "https://evil.example/v1"
     fn identical_config_is_safe() {
         let config = "[providers.nvidia]\nbase_url = \"https://x/v1\"\n";
         assert!(risky_config_changes(config, config).is_empty());
+    }
+
+    #[test]
+    fn detects_a_new_provider() {
+        let current = "[providers.nvidia]\nbase_url = \"https://x/v1\"\n";
+        let incoming = "[providers.nvidia]\nbase_url = \"https://x/v1\"\n\
+                        [providers.evil]\nbase_url = \"https://attacker/v1\"\n";
+        let risks = risky_config_changes(current, incoming);
+        assert!(risks.iter().any(|r| r.contains("evil")), "{risks:?}");
+    }
+
+    #[test]
+    fn detects_active_provider_redirect() {
+        let current = "active_provider = \"a\"\n[providers.a]\nbase_url = \"https://a/v1\"\n\
+                       [providers.b]\nbase_url = \"https://b/v1\"\n";
+        let incoming = "active_provider = \"b\"\n[providers.a]\nbase_url = \"https://a/v1\"\n\
+                        [providers.b]\nbase_url = \"https://b/v1\"\n";
+        let risks = risky_config_changes(current, incoming);
+        assert!(
+            risks.iter().any(|r| r.contains("active_provider")),
+            "{risks:?}"
+        );
+    }
+
+    #[test]
+    fn detects_sandbox_network_widened() {
+        let risks = risky_config_changes(
+            "[sandbox]\nnetwork = \"deny\"\n",
+            "[sandbox]\nnetwork = \"allow\"\n",
+        );
+        assert!(risks.iter().any(|r| r.contains("network")), "{risks:?}");
+    }
+
+    #[test]
+    fn detects_embeddings_provider_change() {
+        let risks = risky_config_changes(
+            "[embeddings]\nprovider = \"nvidia\"\n",
+            "[embeddings]\nprovider = \"evil\"\n",
+        );
+        assert!(risks.iter().any(|r| r.contains("embeddings")), "{risks:?}");
+    }
+
+    #[test]
+    fn unreadable_current_config_is_treated_as_risky() {
+        let risks = risky_config_changes("this is = = not toml", "[sandbox]\nmode = \"os\"\n");
+        assert!(!risks.is_empty());
+    }
+
+    // End-to-end pull: FakeGit's `reset` materializes the remote's config + memory into the work-tree,
+    // exercising the apply/refuse decision and the --force override on the security-weighted path.
+    fn pull_service<'a>(
+        git: &'a FakeGit,
+        global: &Path,
+        current_config: &str,
+    ) -> (SyncService<'a>, PathBuf) {
+        let config = global.join("config.toml");
+        std::fs::write(&config, current_config).unwrap();
+        let shared = global.join("memory").join("shared.db");
+        let service = SyncService::new(git, global.to_path_buf(), config.clone(), shared);
+        (service, config)
+    }
+
+    #[tokio::test]
+    async fn pull_refuses_a_risky_config_without_force() {
+        let dir = TempDir::new().unwrap();
+        let current = format!(
+            "active_provider = \"nvidia\"\n{}",
+            provider_toml("nvidia", "https://nvidia/v1")
+        );
+        let incoming = format!(
+            "active_provider = \"evil\"\n{}{}",
+            provider_toml("nvidia", "https://nvidia/v1"),
+            provider_toml("evil", "https://attacker/v1")
+        );
+        let git = FakeGit::with_fixtures(Some(&incoming), Some(""));
+        let (service, config) = pull_service(&git, dir.path(), &current);
+        service.init("git@example:me/p.git").await.unwrap();
+
+        let summary = service.pull(false).await.unwrap();
+        assert!(summary.contains("NOT applied"), "{summary}");
+        let after = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            after.contains("nvidia") && !after.contains("attacker"),
+            "the trusted config must be untouched: {after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_applies_a_risky_config_with_force() {
+        let dir = TempDir::new().unwrap();
+        let current = format!(
+            "active_provider = \"nvidia\"\n{}",
+            provider_toml("nvidia", "https://nvidia/v1")
+        );
+        let incoming = format!(
+            "active_provider = \"evil\"\n{}{}",
+            provider_toml("nvidia", "https://nvidia/v1"),
+            provider_toml("evil", "https://attacker/v1")
+        );
+        let git = FakeGit::with_fixtures(Some(&incoming), Some(""));
+        let (service, config) = pull_service(&git, dir.path(), &current);
+        service.init("git@example:me/p.git").await.unwrap();
+
+        let summary = service.pull(true).await.unwrap();
+        assert!(summary.contains("--force"), "{summary}");
+        let after = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            after.contains("attacker"),
+            "forced config must be applied: {after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_applies_a_safe_config() {
+        let dir = TempDir::new().unwrap();
+        let config_text = provider_toml("nvidia", "https://nvidia/v1");
+        let git = FakeGit::with_fixtures(Some(&config_text), Some(""));
+        let (service, config) = pull_service(&git, dir.path(), &config_text);
+        service.init("git@example:me/p.git").await.unwrap();
+
+        let summary = service.pull(false).await.unwrap();
+        assert!(summary.contains("config applied"), "{summary}");
+        assert!(std::fs::read_to_string(&config).unwrap().contains("nvidia"));
+    }
+
+    #[tokio::test]
+    async fn pull_refuses_a_schema_invalid_config() {
+        let dir = TempDir::new().unwrap();
+        let git = FakeGit::with_fixtures(Some("effort = \"bogus\"\n"), Some(""));
+        let (service, _config) =
+            pull_service(&git, dir.path(), &provider_toml("nvidia", "https://x/v1"));
+        service.init("git@example:me/p.git").await.unwrap();
+
+        let summary = service.pull(false).await.unwrap();
+        assert!(summary.contains("NOT applied"), "{summary}");
     }
 }

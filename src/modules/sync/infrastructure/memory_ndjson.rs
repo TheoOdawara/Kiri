@@ -13,6 +13,10 @@ type Result<T> = std::result::Result<T, AgentError>;
 /// Upper bound on entries exported in one pass — a personal cross-project memory stays well under this.
 const EXPORT_CAP: usize = 100_000;
 
+/// Upper bound on entries imported in one pass (mirrors `EXPORT_CAP`), so a large or hostile remote
+/// `memory.ndjson` cannot drive an unbounded number of per-entry DB round-trips.
+const IMPORT_CAP: usize = EXPORT_CAP;
+
 /// What an import merged versus skipped (an older or equal entry already present).
 pub struct MergeReport {
     pub merged: usize,
@@ -57,6 +61,9 @@ pub async fn import(memory: &SqliteSharedMemory, path: &Path) -> Result<MergeRep
         let line = line.trim();
         if line.is_empty() {
             continue;
+        }
+        if report.merged + report.skipped >= IMPORT_CAP {
+            break;
         }
         let entry: MemoryEntry = serde_json::from_str(line)
             .map_err(|error| AgentError::Memory(format!("invalid memory line: {error}")))?;

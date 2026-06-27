@@ -329,6 +329,16 @@ fn read_config_file(path: &Path) -> Result<RawConfig> {
     }
 }
 
+/// Validate a config string against the real `RawConfig` schema (not just "is it TOML"). Used by
+/// `sync pull` to refuse an incoming config that is valid TOML but invalid against the schema (e.g.
+/// `effort = "bogus"`), which would otherwise be written and brick the next boot when it fails to
+/// deserialize.
+pub(crate) fn validate_config_str(raw: &str) -> Result<()> {
+    toml::from_str::<RawConfig>(raw)
+        .map(|_| ())
+        .map_err(|e| anyhow!("incoming config does not match the schema: {e}"))
+}
+
 /// Apply `mutate` to the GLOBAL config (read-modify-write), preserving every other section. Backs the
 /// live `/models`/`/effort` swaps. Only the trusted global `~/.kiri/config.toml` is written — never the
 /// untrusted project layer (which would let a workspace change provider routing; see `resolve_layers`).
