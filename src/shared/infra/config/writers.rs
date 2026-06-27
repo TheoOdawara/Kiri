@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Result, anyhow};
 
@@ -117,7 +117,7 @@ pub(super) fn default_provider() -> ProviderProfile {
 
 /// Write a starter global config so a first-run user has a real file to edit. Best-effort.
 pub(super) fn write_starter_config(
-    path: &PathBuf,
+    path: &Path,
     providers: &[ProviderProfile],
     active: &str,
 ) -> Result<()> {

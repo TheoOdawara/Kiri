@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 /// A tool call the model emitted, assembled from its streamed fragments and re-sent in history.
 /// Cross-cutting protocol primitive: the agent stores it in history, the provider assembles it,
 /// and the tools layer executes it — so it lives in the kernel, depended on by all three.
+///
+/// Kernel serde exception (see ADR 0003): unlike `Message`/`Role` — deliberately serde-free, mapped
+/// through a provider DTO — `ToolCall`/`FunctionCall` derive serde because they are persisted verbatim
+/// for session history (`/resume`) and re-sent on the wire. The OpenAI `type` field is the only
+/// wire-specific detail and is incidental; carrying it here keeps the persisted and streamed shape one
+/// type rather than splitting a near-trivial DTO.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,

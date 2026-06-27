@@ -91,11 +91,11 @@ pub struct EmbeddingSettings {
 }
 
 impl Settings {
-    /// Parse the CLI, load the layered TOML config (`~/.kiri` ← `<workspace>/.kiri`), and resolve the
-    /// runtime settings. No `.env`: the harness owns its config (TOML) and secrets (keyring). A first
-    /// run with no config seeds a default NVIDIA provider and writes a starter `~/.kiri/config.toml`.
-    /// Resolve settings from the already-parsed CLI path/prompt. `main` parses the CLI (so it can
-    /// dispatch the headless `kiri sync` route before reaching the TUI) and hands the values here.
+    /// Resolve the runtime settings from the already-parsed CLI path/prompt: load the layered TOML
+    /// config (`~/.kiri` global ← `<workspace>/.kiri` project) and reduce it to `Settings`. `main` owns
+    /// CLI parsing — so it can dispatch the headless `kiri sync` route before reaching the TUI — and
+    /// hands the values here. No `.env`: the harness owns its config (TOML) and secrets (keyring); a
+    /// first run with no config seeds a default NVIDIA provider and writes a starter `~/.kiri/config.toml`.
     pub fn resolve(cli_path: Option<PathBuf>, cli_prompt: Option<String>) -> Result<Self> {
         let path = cli_path
             .or_else(|| std::env::var_os("T_CLI_PATH").map(PathBuf::from))

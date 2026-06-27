@@ -1,6 +1,7 @@
-/// The author of a message. Pure domain and serde-free: the single source of each variant's wire
-/// spelling is [`Role::as_wire_str`]/[`Role::from_wire_str`], shared by the provider wire DTO (on the
-/// network) and the session store (in SQLite) so the two can never drift.
+/// The author of a message. Pure domain and serde-free — like the rest of the kernel except the
+/// persisted `ToolCall` (see ADR 0003): the single source of each variant's wire spelling is
+/// [`Role::as_wire_str`]/[`Role::from_wire_str`], shared by the provider wire DTO (on the network) and
+/// the session store (in SQLite) so the two can never drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     System,

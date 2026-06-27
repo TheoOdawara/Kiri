@@ -80,9 +80,20 @@ pub(super) fn load_net_allow() -> Result<Arc<[Regex]>> {
     compile_patterns("KIRI_SANDBOX_NET_ALLOW_CMDS", DEFAULT_NET_ALLOW)
 }
 
-/// Expand a leading `~`/`~/…` to `$HOME`; any other path is taken as given.
+/// The single read of the platform's home directory — the one extension point for home resolution.
+/// Unix-only today (`$HOME`); macOS is the v1 target. Windows: fall back to `%USERPROFILE%` here and
+/// nowhere else when Windows support lands (deferred — do not add untested Windows code now).
+fn home_dir() -> Option<OsString> {
+    std::env::var_os("HOME")
+}
+
+/// The separator between entries in a colon-list env var (the extra docs/memory paths). Unix-only today
+/// (`:`); Windows uses `;` — change it here, the single site, when Windows support lands (deferred).
+const PATH_LIST_SEPARATOR: char = ':';
+
+/// Expand a leading `~`/`~/…` to the home dir; any other path is taken as given.
 pub(super) fn expand_home(path: &str) -> PathBuf {
-    expand_home_with(path, std::env::var_os("HOME").as_ref())
+    expand_home_with(path, home_dir().as_ref())
 }
 
 /// Pure tilde expansion against an explicit `home`: `~` and `~/…` expand when `home` is `Some`, else
@@ -100,11 +111,16 @@ fn expand_home_with(path: &str, home: Option<&OsString>) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Parse a colon-separated path list from `env`, tilde-expanded, prefixed with `defaults`.
+/// Parse a `PATH_LIST_SEPARATOR`-separated path list from `env`, tilde-expanded, prefixed with `defaults`.
 pub(super) fn load_extra_paths(env: &str, defaults: &[&str]) -> Arc<[PathBuf]> {
     let mut paths: Vec<PathBuf> = defaults.iter().map(|p| expand_home(p)).collect();
     if let Some(value) = std::env::var(env).ok().filter(|v| !v.is_empty()) {
-        paths.extend(value.split(':').filter(|s| !s.is_empty()).map(expand_home));
+        paths.extend(
+            value
+                .split(PATH_LIST_SEPARATOR)
+                .filter(|s| !s.is_empty())
+                .map(expand_home),
+        );
     }
     Arc::from(paths)
 }

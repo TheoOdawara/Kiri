@@ -1,8 +1,10 @@
 use super::role::Role;
 use crate::shared::kernel::tool_call::ToolCall;
 
-/// A single message in the conversation. Pure domain: no wire/serde concern — the provider maps it to
-/// its own request shape via a DTO (see `provider::infrastructure::openai::message_dto`).
+/// A single message in the conversation. Pure domain: no wire/serde concern of its own — the provider
+/// maps it to its request shape via a DTO (see `provider::infrastructure::openai::message_dto`). Its one
+/// embedded exception is `ToolCall`, which is serde-derived because it is persisted verbatim for session
+/// history (see `tool_call` and ADR 0003).
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,

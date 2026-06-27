@@ -145,14 +145,15 @@ pub(super) fn resolve_providers(
     table: BTreeMap<String, ProviderProfile>,
     requested_active: Option<String>,
 ) -> (Vec<ProviderProfile>, String) {
-    let mut providers: Vec<ProviderProfile> = table
+    // `table` is a `BTreeMap` keyed by provider id, and `profile.id` is set from that key, so
+    // `into_iter` already yields the providers sorted by id — no explicit re-sort needed.
+    let providers: Vec<ProviderProfile> = table
         .into_iter()
         .map(|(id, mut profile)| {
             profile.id = id;
             profile
         })
         .collect();
-    providers.sort_by(|a, b| a.id.cmp(&b.id));
 
     let active = requested_active
         .filter(|id| providers.iter().any(|p| &p.id == id))
@@ -259,6 +260,26 @@ mod tests {
         );
         let (_, active) = resolve_providers(table, Some("does-not-exist".into()));
         assert_eq!(active, "zeta");
+    }
+
+    #[test]
+    fn resolve_providers_returns_sorted_without_an_explicit_sort() {
+        // SHARED-09: the result is id-sorted purely because `table` is a `BTreeMap` (no `sort_by`).
+        let profile = |kind| ProviderProfile {
+            id: String::new(),
+            kind,
+            base_url: "x".into(),
+            model: "m".into(),
+            models: vec![],
+            auth: AuthMethod::ApiKey,
+        };
+        let mut table = BTreeMap::new();
+        for id in ["gamma", "alpha", "beta"] {
+            table.insert(id.to_string(), profile(ProviderKind::Custom));
+        }
+        let (providers, _) = resolve_providers(table, None);
+        let ids: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["alpha", "beta", "gamma"]);
     }
 
     #[test]
