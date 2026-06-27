@@ -44,7 +44,13 @@ fn only_input_buffer_couples_domain_to_ui_crates() {
     let allowed = Path::new("tui").join("domain").join("view_state.rs");
     for file in &domain_files {
         let source = std::fs::read_to_string(file).expect("read domain file");
-        let couples = source.contains("use ratatui") || source.contains("use tui_textarea");
+        // Match the bare crate-path tokens, not just the `use` forms, so a fully-qualified
+        // `ratatui::Style` / `tui_textarea::TextArea` cannot re-breach without a `use`. The small
+        // false-positive risk (a comment naming the crate) is fail-loud and easily reworded.
+        let couples = source.contains("ratatui::")
+            || source.contains("use ratatui")
+            || source.contains("tui_textarea::")
+            || source.contains("use tui_textarea");
         let is_allowed = file.ends_with(&allowed);
         assert!(
             !couples || is_allowed,

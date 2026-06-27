@@ -776,6 +776,20 @@ mod tests {
         ));
     }
 
+    // Characterization lock for the rendered refusal text: the typed `AgentError::Sandbox` surfaces
+    // path-resolution refusals with the same "sandbox error: " prefix as confinement-setup failures — a
+    // deliberate, consistent surface the model/transcript sees (it replaced the bare anyhow message).
+    #[test]
+    fn resolve_refusal_renders_with_sandbox_error_prefix() {
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        let rendered = sb.resolve_existing("../escape").unwrap_err().to_string();
+        assert!(
+            rendered.starts_with("sandbox error: "),
+            "expected the blessed sandbox-error prefix, got {rendered:?}"
+        );
+    }
+
     // Compile-asserting regression lock: the port methods expose the typed signature, not anyhow.
     #[test]
     fn sandbox_port_error_type_is_agenterror() {

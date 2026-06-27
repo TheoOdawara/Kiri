@@ -200,9 +200,9 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
 /// build the sync ports over the paths single-sourced from `Settings`, run the action, and print the
 /// one-line summary. Never needs a terminal, so it works over SSH and in scripts.
 pub async fn wire_sync(settings: &Settings, action: SyncAction) -> Result<()> {
-    // Harden the harness home before any store opens it (carried from the former main.rs::run_sync): the
-    // interactive boot hardens ~/.kiri (0700) via Settings::resolve, so the headless route must too, or it
-    // would create ~/.kiri world-traversable (0755).
+    // Defense-in-depth: harden the harness home (0700) so `wire_sync` is self-contained even when called
+    // directly (e.g. in tests). On the normal path `main.rs` resolves `Settings` first, which already
+    // hardens `~/.kiri`, so this is a redundant-but-cheap guarantee rather than the sole protection.
     ensure_private_dir(&settings.global_dir)?;
     let memory = build_sync_memory(settings).await?;
     let git = GitCli;
