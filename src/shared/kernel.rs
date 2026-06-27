@@ -7,4 +7,5 @@ pub mod provider;
 pub mod role;
 pub mod sandbox;
 pub mod stream_event;
+pub mod time;
 pub mod tool_call;

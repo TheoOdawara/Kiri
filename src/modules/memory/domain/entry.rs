@@ -1,6 +1,6 @@
+use crate::shared::kernel::time::now_rfc3339;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// Memory entry kind — categorizes the content to ease search and use.
@@ -89,14 +89,6 @@ pub struct MemoryEntry {
     pub created_at: String,
     /// Last-update timestamp (ISO 8601).
     pub updated_at: String,
-}
-
-/// RFC3339 timestamp for "now". Formatting a valid UTC instant cannot fail in practice; the empty
-/// fallback keeps this runtime path total without an `unwrap` (forbidden outside tests).
-fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
 }
 
 impl MemoryEntry {

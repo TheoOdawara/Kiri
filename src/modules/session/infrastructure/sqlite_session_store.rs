@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rusqlite::{Connection, params};
-use time::OffsetDateTime;
 use tokio::task::spawn_blocking;
 use uuid::Uuid;
 
@@ -13,16 +12,9 @@ use crate::modules::session::domain::session::{Session, SessionSummary};
 use crate::modules::session::infrastructure::message_dto::StoredMessage;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::message::Message;
+use crate::shared::kernel::time::now_rfc3339;
 
 type Result<T> = std::result::Result<T, AgentError>;
-
-/// RFC3339 timestamp for "now". Formatting a valid UTC instant cannot fail in practice; the empty
-/// fallback keeps this runtime path total without an `unwrap` (forbidden outside tests).
-fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
-}
 
 /// Conversation persistence in a single SQLite database (`~/.kiri/sessions.db`). Mirrors
 /// `SqliteSharedMemory`: the blocking `rusqlite` connection lives behind `Arc<Mutex<_>>` and every query
