@@ -34,4 +34,9 @@ pub enum AgentError {
     /// Distinct from `Provider` so it is not mistaken for a retryable transport failure.
     #[error("sync error: {0}")]
     Sync(String),
+    /// A config read/encode/write failure while persisting a live `/models`/`/effort`/`/provider`
+    /// change to the global `~/.kiri/config.toml`. Distinct from `Io` because the TOML encode failure is
+    /// not an `io::Error`, and distinct from `Sandbox`/`Secret`.
+    #[error("config error: {0}")]
+    Config(String),
 }

@@ -9,6 +9,7 @@ use clap::Parser;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::{AuthMethod, Effort, ProviderKind, ProviderProfile};
 use crate::shared::kernel::sandbox::{NetworkPolicy, NetworkStance, SandboxMode};
 
@@ -362,24 +363,37 @@ pub(crate) fn validate_config_str(raw: &str) -> Result<()> {
 /// live `/models`/`/effort` swaps. Only the trusted global `~/.kiri/config.toml` is written — never the
 /// untrusted project layer (which would let a workspace change provider routing; see `resolve_layers`).
 /// Note: TOML comments in a hand-edited file are dropped on rewrite — the values are preserved.
-fn update_global_config(config_path: &Path, mutate: impl FnOnce(&mut RawConfig)) -> Result<()> {
-    let mut config = read_config_file(config_path)?;
+fn update_global_config(
+    config_path: &Path,
+    mutate: impl FnOnce(&mut RawConfig),
+) -> Result<(), AgentError> {
+    let mut config =
+        read_config_file(config_path).map_err(|e| AgentError::Config(e.to_string()))?;
     mutate(&mut config);
-    let body =
-        toml::to_string_pretty(&config).map_err(|e| anyhow!("failed to encode config: {e}"))?;
+    let body = toml::to_string_pretty(&config)
+        .map_err(|e| AgentError::Config(format!("failed to encode config: {e}")))?;
     if let Some(parent) = config_path.parent() {
         // Route every `~/.kiri` creation through `ensure_private_dir` so the dir holding the config (and
         // the co-located `credentials.json`) is owner-only, never a plain `0755` from `create_dir_all`.
-        ensure_private_dir(parent)
-            .map_err(|e| anyhow!("failed to create {}: {e}", parent.display()))?;
+        ensure_private_dir(parent).map_err(|e| {
+            AgentError::Config(format!("failed to create {}: {e}", parent.display()))
+        })?;
     }
-    std::fs::write(config_path, body)
-        .map_err(|e| anyhow!("failed to write config at {}: {e}", config_path.display()))
+    std::fs::write(config_path, body).map_err(|e| {
+        AgentError::Config(format!(
+            "failed to write config at {}: {e}",
+            config_path.display()
+        ))
+    })
 }
 
 /// Persist a live `/models` change: set the active model on its provider and add it to that provider's
 /// catalog if missing. A no-op if the provider id is not in the config (the live change still stands).
-pub fn persist_active_model(config_path: &Path, provider_id: &str, model: &str) -> Result<()> {
+pub fn persist_active_model(
+    config_path: &Path,
+    provider_id: &str,
+    model: &str,
+) -> Result<(), AgentError> {
     update_global_config(config_path, |config| {
         if let Some(profile) = config.providers.get_mut(provider_id) {
             profile.model = model.to_string();
@@ -391,12 +405,12 @@ pub fn persist_active_model(config_path: &Path, provider_id: &str, model: &str) 
 }
 
 /// Persist a live `/effort` change to the global config.
-pub fn persist_effort(config_path: &Path, effort: Effort) -> Result<()> {
+pub fn persist_effort(config_path: &Path, effort: Effort) -> Result<(), AgentError> {
     update_global_config(config_path, |config| config.effort = Some(effort))
 }
 
 /// Persist a live `/provider` switch (the active provider id) to the global config.
-pub fn persist_active_provider(config_path: &Path, provider_id: &str) -> Result<()> {
+pub fn persist_active_provider(config_path: &Path, provider_id: &str) -> Result<(), AgentError> {
     update_global_config(config_path, |config| {
         config.active_provider = Some(provider_id.to_string())
     })
@@ -405,7 +419,7 @@ pub fn persist_active_provider(config_path: &Path, provider_id: &str) -> Result<
 /// Add or replace a provider profile in the global config (from the add wizard). The profile's `id`
 /// keys the table (and is itself `#[serde(skip)]` in the body); the secret material is stored separately
 /// in the keyring, never here.
-pub fn upsert_provider(config_path: &Path, profile: &ProviderProfile) -> Result<()> {
+pub fn upsert_provider(config_path: &Path, profile: &ProviderProfile) -> Result<(), AgentError> {
     update_global_config(config_path, |config| {
         config.providers.insert(profile.id.clone(), profile.clone());
     })
@@ -1096,6 +1110,61 @@ read_timeout_ms = 99000
         // Non-targeted sections survived the read-modify-write (not lossy).
         assert_eq!(config.sandbox.mode.as_deref(), Some("require"));
         assert_eq!(config.http.read_timeout_ms, Some(99000));
+    }
+
+    // The writers run deep in the live `/models`/`/effort`/`/provider` handlers, so a failure must come
+    // back as a typed `AgentError::Config` (surfaced as a transcript Notice), never an anyhow panic.
+    #[test]
+    fn persist_active_model_returns_agenterror_config_on_unwritable_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        // A config path nested under a regular file: neither the read nor the owner-only dir creation can
+        // succeed, so the writer must surface the failure as `AgentError::Config`.
+        let bad = file.join("sub").join("config.toml");
+        assert!(matches!(
+            persist_active_model(&bad, "nvidia", "m"),
+            Err(AgentError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn persist_effort_round_trips_and_is_ok() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        persist_effort(&path, Effort::High).unwrap();
+        let config = read_config_file(&path).unwrap();
+        assert_eq!(config.effort, Some(Effort::High));
+    }
+
+    #[test]
+    fn upsert_provider_adds_then_persist_active_provider_chains() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let claude = ProviderProfile {
+            id: "claude".into(),
+            kind: ProviderKind::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            model: "claude-opus-4-8".into(),
+            models: vec!["claude-opus-4-8".into()],
+            auth: AuthMethod::ApiKey,
+        };
+        // Mirror the runtime's `.and_then` chain (upsert then activate) under the new error type.
+        upsert_provider(&path, &claude)
+            .and_then(|()| persist_active_provider(&path, "claude"))
+            .unwrap();
+        let config = read_config_file(&path).unwrap();
+        assert!(config.providers.contains_key("claude"));
+        assert_eq!(config.active_provider.as_deref(), Some("claude"));
+    }
+
+    // Compile-asserting regression lock: the writers expose the typed signature, not anyhow.
+    #[test]
+    fn config_writers_do_not_return_anyhow() {
+        let _: fn(&Path, Effort) -> Result<(), AgentError> = persist_effort;
+        let _: fn(&Path, &str, &str) -> Result<(), AgentError> = persist_active_model;
+        let _: fn(&Path, &str) -> Result<(), AgentError> = persist_active_provider;
+        let _: fn(&Path, &ProviderProfile) -> Result<(), AgentError> = upsert_provider;
     }
 
     #[test]
