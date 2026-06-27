@@ -233,34 +233,62 @@ impl<'a> SyncService<'a> {
 }
 
 /// Validate a `kiri sync init` remote URL before it reaches `git remote add`. `git` treats some "URLs"
-/// as code-execution transports (`ext::sh -c …`, `fab::…`) or as options (a leading `-`, e.g.
-/// `-oProxyCommand=…`, and a `file://-…` dash-path), any of which turns an attacker-controlled URL into a
+/// as code-execution transports (`ext::sh -c …`, and any other `<helper>::…` remote helper) or as options
+/// (a leading `-`, e.g. `-oProxyCommand=…`), either of which turns an attacker-controlled URL into a
 /// command-injection vector. `git remote add` takes no `--` end-of-options marker, so this validation is
-/// the defense: reject those dangerous shapes; accept the ordinary transports (https/http/ssh, scp-like
-/// `git@host:path`) and an ordinary local path.
+/// the defense — and it is a positive ALLOWLIST: accept only the ordinary transports (https/http/ssh, the
+/// scp-like `user@host:path`, and a local filesystem path) and reject everything else, so every `::`
+/// remote-helper transport (in any case) and every option-like input is rejected by construction.
 fn validate_remote_url(url: &str) -> Result<()> {
     let url = url.trim();
     if url.is_empty() {
         return Err(AgentError::Sync("sync remote URL is empty".to_string()));
     }
-    if url.starts_with('-') {
-        return Err(AgentError::Sync(format!(
-            "refusing remote URL parsed by git as an option (leading '-'): {url}"
-        )));
+    if is_allowed_remote_url(url) {
+        Ok(())
+    } else {
+        Err(AgentError::Sync(format!(
+            "refusing remote URL outside the allowed set (https/http/ssh, user@host:path, or a local path): {url}"
+        )))
     }
-    if url.starts_with("file://-") {
-        return Err(AgentError::Sync(format!(
-            "refusing file:// URL with a leading-dash path: {url}"
-        )));
+}
+
+/// The positive allowlist behind `validate_remote_url`: an ordinary scheme transport, a scp-like
+/// `user@host:path`, or a local filesystem path (absolute, or an existing relative one). An absolute or
+/// existing path cannot be parsed by git as an option or a `::` remote helper, so accepting it is safe.
+fn is_allowed_remote_url(url: &str) -> bool {
+    const SCHEMES: [&str; 3] = ["https://", "http://", "ssh://"];
+    if SCHEMES.iter().any(|scheme| url.starts_with(scheme)) {
+        return true;
     }
-    for transport in ["ext::", "fab::"] {
-        if url.starts_with(transport) {
-            return Err(AgentError::Sync(format!(
-                "refusing remote transport '{transport}' (arbitrary command execution): {url}"
-            )));
+    if is_scp_like(url) {
+        return true;
+    }
+    let path = Path::new(url);
+    path.is_absolute() || path.exists()
+}
+
+/// scp-like git syntax `user@host:path`: the text before the first `:` is `user@host`, where `user` and
+/// `host` each start with an alphanumeric and otherwise hold only `[A-Za-z0-9._-]`. Requiring an
+/// alphanumeric first char keeps an option (a leading `-`) from masquerading as a `user` segment.
+fn is_scp_like(url: &str) -> bool {
+    let Some((authority, _path)) = url.split_once(':') else {
+        return false;
+    };
+    let Some((user, host)) = authority.split_once('@') else {
+        return false;
+    };
+    is_host_segment(user) && is_host_segment(host)
+}
+
+fn is_host_segment(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {
+            chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         }
+        _ => false,
     }
-    Ok(())
 }
 
 /// The first non-empty line of stderr, falling back to stdout, for a compact error message.
@@ -676,6 +704,9 @@ base_url = "https://evil.example/v1"
     fn validate_remote_url_rejects_ext_and_dash() {
         assert!(validate_remote_url("ext::sh -c 'rm -rf ~'").is_err());
         assert!(validate_remote_url("fab::evil").is_err());
+        // A case variant and any other `<helper>::` transport must fall out of the allowlist too.
+        assert!(validate_remote_url("EXT::sh -c 'rm -rf ~'").is_err());
+        assert!(validate_remote_url("fd::evil").is_err());
         assert!(validate_remote_url("-oProxyCommand=evil").is_err());
         assert!(validate_remote_url("file://-evil").is_err());
         assert!(validate_remote_url("   ").is_err());
