@@ -41,115 +41,68 @@ impl CompletionProvider for ScriptedProvider {
     }
 }
 
-/// A UI that decides every call with a fixed `Approval` and renders nothing.
-struct ScriptedIo(Approval);
-
-impl EventSink for ScriptedIo {
-    fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
-        Ok(())
-    }
-}
-
-impl Presenter for ScriptedIo {
-    fn begin_turn(&mut self) {}
-    fn finish_turn(&mut self) -> Result<(), AgentError> {
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait(?Send)]
-impl ApprovalPolicy for ScriptedIo {
-    async fn decide(&mut self, _confirmation: &Confirmation) -> Approval {
-        self.0
-    }
-    async fn confirm_continue(&mut self, _reason: CheckpointReason) -> Approval {
-        self.0
-    }
-}
-
-impl ToolObserver for ScriptedIo {
-    fn tool_started(&mut self, _call: &ToolCall, _command: &str) {}
-    fn tool_finished(&mut self, _call: &ToolCall, _outcome: &ToolOutcome, _elapsed: Duration) {}
-}
-
-/// A UI that answers each confirmation from a queue and counts how many times it was asked, so a
-/// test can prove that later calls in the turn ran without prompting.
-struct CountingIo {
+/// One configurable UI double for every agent-loop test. It answers each confirmation from an optional
+/// `decisions` queue (consumed in order, then falling back to a fixed `default_decision`) and records
+/// what it was shown: the per-call `tool_started` commands, the `tool_finished` outcomes, the
+/// checkpoint reasons, and the `decide`/`finish_round` counts. Each test reads only the axis it needs.
+struct TestIo {
     decisions: VecDeque<Approval>,
+    default_decision: Approval,
     decide_calls: u32,
-}
-
-impl EventSink for CountingIo {
-    fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
-        Ok(())
-    }
-}
-
-impl Presenter for CountingIo {
-    fn begin_turn(&mut self) {}
-    fn finish_turn(&mut self) -> Result<(), AgentError> {
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait(?Send)]
-impl ApprovalPolicy for CountingIo {
-    async fn decide(&mut self, _confirmation: &Confirmation) -> Approval {
-        self.decide_calls += 1;
-        self.decisions.pop_front().unwrap_or(Approval::Declined)
-    }
-    async fn confirm_continue(&mut self, _reason: CheckpointReason) -> Approval {
-        Approval::Approved
-    }
-}
-
-impl ToolObserver for CountingIo {
-    fn tool_started(&mut self, _call: &ToolCall, _command: &str) {}
-    fn tool_finished(&mut self, _call: &ToolCall, _outcome: &ToolOutcome, _elapsed: Duration) {}
-}
-
-/// A UI double that records the command of every `tool_started` and the outcome of every
-/// `tool_finished`, so a test can prove the loop surfaces each call in any approval mode.
-struct RecordingIo {
-    decision: Approval,
+    finishes: u32,
     started: Vec<String>,
     finished: Vec<ToolOutcome>,
+    reasons: Vec<CheckpointReason>,
 }
 
-impl RecordingIo {
-    fn new(decision: Approval) -> Self {
+impl TestIo {
+    /// Answer every confirmation with `default_decision` until a queued answer overrides it.
+    fn new(default_decision: Approval) -> Self {
         Self {
-            decision,
+            decisions: VecDeque::new(),
+            default_decision,
+            decide_calls: 0,
+            finishes: 0,
             started: Vec::new(),
             finished: Vec::new(),
+            reasons: Vec::new(),
         }
+    }
+
+    /// Queue the leading confirmation answers, consumed in order before `default_decision` takes over.
+    fn with_decisions(mut self, decisions: Vec<Approval>) -> Self {
+        self.decisions = VecDeque::from(decisions);
+        self
     }
 }
 
-impl EventSink for RecordingIo {
+impl EventSink for TestIo {
     fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
         Ok(())
     }
 }
 
-impl Presenter for RecordingIo {
-    fn begin_turn(&mut self) {}
-    fn finish_turn(&mut self) -> Result<(), AgentError> {
+impl Presenter for TestIo {
+    fn begin_round(&mut self) {}
+    fn finish_round(&mut self) -> Result<(), AgentError> {
+        self.finishes += 1;
         Ok(())
     }
 }
 
 #[async_trait::async_trait(?Send)]
-impl ApprovalPolicy for RecordingIo {
+impl ApprovalPolicy for TestIo {
     async fn decide(&mut self, _confirmation: &Confirmation) -> Approval {
-        self.decision
+        self.decide_calls += 1;
+        self.decisions.pop_front().unwrap_or(self.default_decision)
     }
-    async fn confirm_continue(&mut self, _reason: CheckpointReason) -> Approval {
-        self.decision
+    async fn confirm_continue(&mut self, reason: CheckpointReason) -> Approval {
+        self.reasons.push(reason);
+        self.decisions.pop_front().unwrap_or(self.default_decision)
     }
 }
 
-impl ToolObserver for RecordingIo {
+impl ToolObserver for TestIo {
     fn tool_started(&mut self, _call: &ToolCall, command: &str) {
         self.started.push(command.to_string());
     }
@@ -173,17 +126,22 @@ fn tool_call_id(name: &str, args: &str, id: &str) -> ToolCall {
     }
 }
 
+/// The full fs tool set with no sensitive-path matchers, the single construction every test shares.
+fn registry_for_tests() -> ToolRegistry {
+    ToolRegistry::new(default_fs_tools(
+        Arc::from(Vec::<Regex>::new()),
+        Arc::from(Vec::<Regex>::new()),
+        false,
+    ))
+}
+
 fn agent_loop_with(turns: Vec<CompletedTurn>) -> AgentLoop {
     let provider = Arc::new(ScriptedProvider {
         turns: Mutex::new(VecDeque::from(turns)),
     });
     AgentLoop::new(
         provider,
-        ToolRegistry::new(default_fs_tools(
-            Arc::from(Vec::<Regex>::new()),
-            Arc::from(Vec::<Regex>::new()),
-            false,
-        )),
+        registry_for_tests(),
         "model".to_string(),
         Duration::from_secs(3600),
         1000,
@@ -209,7 +167,7 @@ async fn run_drives_a_tool_turn_then_a_text_turn() {
 
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("read a.txt"));
-    let mut io = ScriptedIo(Approval::Approved);
+    let mut io = TestIo::new(Approval::Approved);
 
     let outcome = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
@@ -244,7 +202,7 @@ async fn run_aborts_when_the_user_ends_the_session_at_a_prompt() {
 
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("read a.txt"));
-    let mut io = ScriptedIo(Approval::Aborted);
+    let mut io = TestIo::new(Approval::Aborted);
 
     let outcome = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
@@ -273,7 +231,7 @@ async fn auto_mode_runs_tools_without_asking() {
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("write a.txt"));
     // Would decline if asked — auto mode must not ask.
-    let mut io = ScriptedIo(Approval::Declined);
+    let mut io = TestIo::new(Approval::Declined);
 
     let outcome = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
@@ -307,10 +265,7 @@ async fn approved_auto_stops_asking_for_the_rest_of_the_turn() {
     ]);
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("write two files"));
-    let mut io = CountingIo {
-        decisions: VecDeque::from(vec![Approval::ApprovedAuto]),
-        decide_calls: 0,
-    };
+    let mut io = TestIo::new(Approval::Declined).with_decisions(vec![Approval::ApprovedAuto]);
 
     let outcome = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
@@ -351,7 +306,7 @@ async fn plan_mode_blocks_destructive_tools() {
     ]);
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("write a.txt"));
-    let mut io = ScriptedIo(Approval::Approved);
+    let mut io = TestIo::new(Approval::Approved);
 
     let outcome = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
@@ -395,7 +350,7 @@ async fn plan_mode_allows_read_only_tools() {
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("read a.txt"));
     // Would decline if asked — plan mode runs read-only tools directly.
-    let mut io = ScriptedIo(Approval::Declined);
+    let mut io = TestIo::new(Approval::Declined);
 
     let outcome = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
@@ -425,7 +380,7 @@ async fn plan_mode_present_plan_proposes_the_plan_and_keeps_the_wire_valid() {
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("faça um plano"));
     // Would decline if asked — present_plan never goes through the confirmation flow.
-    let mut io = ScriptedIo(Approval::Declined);
+    let mut io = TestIo::new(Approval::Declined);
 
     let outcome = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
@@ -450,7 +405,7 @@ async fn plan_mode_present_plan_proposes_the_plan_and_keeps_the_wire_valid() {
             .content
             .as_deref()
             .unwrap()
-            .contains("apresentado")
+            .contains("presented")
     );
 }
 
@@ -474,7 +429,7 @@ async fn auto_mode_emits_tool_started_and_finished() {
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("write a.txt"));
     // Would decline if asked — auto must not ask, and must still surface the call.
-    let mut io = RecordingIo::new(Approval::Declined);
+    let mut io = TestIo::new(Approval::Declined);
 
     agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
@@ -502,7 +457,7 @@ async fn default_mode_emits_around_execution() {
     ]);
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("read a.txt"));
-    let mut io = RecordingIo::new(Approval::Approved);
+    let mut io = TestIo::new(Approval::Approved);
 
     agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
@@ -532,7 +487,7 @@ async fn plan_block_emits_started_and_error_finish() {
     ]);
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("write a.txt"));
-    let mut io = RecordingIo::new(Approval::Approved);
+    let mut io = TestIo::new(Approval::Approved);
 
     agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
@@ -567,7 +522,7 @@ async fn declined_emits_started_and_declined_finish() {
     ]);
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("delete a.txt"));
-    let mut io = RecordingIo::new(Approval::Declined);
+    let mut io = TestIo::new(Approval::Declined);
 
     agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
@@ -599,10 +554,7 @@ async fn auto_mode_runs_inroot_read_without_confirming() {
     ]);
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("read a.txt"));
-    let mut io = CountingIo {
-        decisions: VecDeque::new(),
-        decide_calls: 0,
-    };
+    let mut io = TestIo::new(Approval::Declined);
 
     agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
@@ -633,10 +585,7 @@ async fn auto_mode_confirms_destructive_delete() {
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("delete a.txt"));
     // Declines the destructive call — auto must still ask, so the file survives.
-    let mut io = CountingIo {
-        decisions: VecDeque::from(vec![Approval::Declined]),
-        decide_calls: 0,
-    };
+    let mut io = TestIo::new(Approval::Declined);
 
     agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
@@ -673,10 +622,7 @@ async fn auto_mode_confirms_out_of_root_target() {
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("write outside the workspace"));
     // write_file is an ordinary mutation, but the target is outside the root — auto must still ask.
-    let mut io = CountingIo {
-        decisions: VecDeque::from(vec![Approval::Declined]),
-        decide_calls: 0,
-    };
+    let mut io = TestIo::new(Approval::Declined);
 
     agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
@@ -713,11 +659,7 @@ async fn iteration_cap_fires_the_checkpoint() {
     });
     let agent_loop = AgentLoop::new(
         provider,
-        ToolRegistry::new(default_fs_tools(
-            Arc::from(Vec::<Regex>::new()),
-            Arc::from(Vec::<Regex>::new()),
-            false,
-        )),
+        registry_for_tests(),
         "model".to_string(),
         Duration::from_secs(3600),
         1,
@@ -725,7 +667,7 @@ async fn iteration_cap_fires_the_checkpoint() {
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("read repeatedly"));
     // Declining the checkpoint ends the turn before the second round can run.
-    let mut io = ScriptedIo(Approval::Declined);
+    let mut io = TestIo::new(Approval::Declined);
 
     let outcome = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
@@ -742,14 +684,6 @@ async fn iteration_cap_fires_the_checkpoint() {
         tool_results, 1,
         "the call cap must pause the turn before the second tool round"
     );
-}
-
-fn registry_for_tests() -> ToolRegistry {
-    ToolRegistry::new(default_fs_tools(
-        Arc::from(Vec::<Regex>::new()),
-        Arc::from(Vec::<Regex>::new()),
-        false,
-    ))
 }
 
 #[tokio::test]
@@ -778,7 +712,7 @@ async fn the_call_cap_pauses_within_a_single_oversized_round() {
     );
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("write three"));
-    let mut io = ScriptedIo(Approval::Declined);
+    let mut io = TestIo::new(Approval::Declined);
 
     let outcome = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
@@ -825,7 +759,7 @@ async fn aborting_mid_round_answers_every_tool_call() {
     );
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("delete two"));
-    let mut io = ScriptedIo(Approval::Aborted);
+    let mut io = TestIo::new(Approval::Aborted);
 
     let outcome = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
@@ -857,40 +791,10 @@ impl CompletionProvider for FailingProvider {
     }
 }
 
-/// A UI double that counts `finish_turn` calls (and auto-approves everything else).
-struct FinishCountingIo {
-    finishes: u32,
-}
-impl EventSink for FinishCountingIo {
-    fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
-        Ok(())
-    }
-}
-impl Presenter for FinishCountingIo {
-    fn begin_turn(&mut self) {}
-    fn finish_turn(&mut self) -> Result<(), AgentError> {
-        self.finishes += 1;
-        Ok(())
-    }
-}
-#[async_trait::async_trait(?Send)]
-impl ApprovalPolicy for FinishCountingIo {
-    async fn decide(&mut self, _confirmation: &Confirmation) -> Approval {
-        Approval::Approved
-    }
-    async fn confirm_continue(&mut self, _reason: CheckpointReason) -> Approval {
-        Approval::Approved
-    }
-}
-impl ToolObserver for FinishCountingIo {
-    fn tool_started(&mut self, _call: &ToolCall, _command: &str) {}
-    fn tool_finished(&mut self, _call: &ToolCall, _outcome: &ToolOutcome, _elapsed: Duration) {}
-}
-
 #[tokio::test]
 async fn provider_failure_propagates_after_finishing_the_render() {
     // The contract requires render cleanup (spinner erase / terminal reset) on the failure path too,
-    // and the error to propagate. A refactor moving finish_turn after `?` would pass every other
+    // and the error to propagate. A refactor moving finish_round after `?` would pass every other
     // test but break this.
     let dir = TempDir::new().unwrap();
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
@@ -903,7 +807,7 @@ async fn provider_failure_propagates_after_finishing_the_render() {
     );
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("hi"));
-    let mut io = FinishCountingIo { finishes: 0 };
+    let mut io = TestIo::new(Approval::Approved);
 
     let result = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
@@ -915,39 +819,8 @@ async fn provider_failure_propagates_after_finishing_the_render() {
     );
     assert_eq!(
         io.finishes, 1,
-        "finish_turn must run exactly once before the error propagates"
+        "finish_round must run exactly once before the error propagates"
     );
-}
-
-/// A UI double that records every checkpoint reason it is shown and answers with a fixed decision.
-struct ReasonRecordingIo {
-    reasons: Vec<CheckpointReason>,
-    decision: Approval,
-}
-impl EventSink for ReasonRecordingIo {
-    fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
-        Ok(())
-    }
-}
-impl Presenter for ReasonRecordingIo {
-    fn begin_turn(&mut self) {}
-    fn finish_turn(&mut self) -> Result<(), AgentError> {
-        Ok(())
-    }
-}
-#[async_trait::async_trait(?Send)]
-impl ApprovalPolicy for ReasonRecordingIo {
-    async fn decide(&mut self, _confirmation: &Confirmation) -> Approval {
-        self.decision
-    }
-    async fn confirm_continue(&mut self, reason: CheckpointReason) -> Approval {
-        self.reasons.push(reason);
-        self.decision
-    }
-}
-impl ToolObserver for ReasonRecordingIo {
-    fn tool_started(&mut self, _call: &ToolCall, _command: &str) {}
-    fn tool_finished(&mut self, _call: &ToolCall, _outcome: &ToolOutcome, _elapsed: Duration) {}
 }
 
 #[tokio::test]
@@ -972,10 +845,7 @@ async fn wall_clock_checkpoint_fires_with_an_elapsed_reason() {
     );
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("read"));
-    let mut io = ReasonRecordingIo {
-        reasons: Vec::new(),
-        decision: Approval::Declined,
-    };
+    let mut io = TestIo::new(Approval::Declined);
 
     let outcome = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
@@ -1021,11 +891,7 @@ async fn run_through_the_real_bridge_emits_began_first_then_content() {
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
     let agent_loop = AgentLoop::new(
         Arc::new(EmittingProvider),
-        ToolRegistry::new(default_fs_tools(
-            Arc::from(Vec::<Regex>::new()),
-            Arc::from(Vec::<Regex>::new()),
-            false,
-        )),
+        registry_for_tests(),
         "model".to_string(),
         Duration::from_secs(3600),
         1000,
@@ -1064,4 +930,39 @@ async fn run_through_the_real_bridge_emits_began_first_then_content() {
         msgs.iter().any(|m| matches!(m, EngineMsg::Finished)),
         "the turn must signal Finished"
     );
+}
+
+#[test]
+fn tool_results_are_english() {
+    // The model-facing tool-result consts are protocol text and must stay English (the contract:
+    // code/protocol in English). The user-facing pt-BR confirmation prompts live in the Bridge adapter
+    // and are deliberately untouched. Guard against a pt-BR regression sneaking back into the consts.
+    let messages = [
+        TOOL_RESULT_PLAN_PRESENTED,
+        TOOL_RESULT_PLAN_BLOCKED,
+        TOOL_RESULT_IGNORED_SESSION_ENDED,
+        TOOL_RESULT_IGNORED_CHECKPOINT,
+        TOOL_RESULT_IGNORED_USER_ABORT,
+    ];
+    let pt_br_markers = [
+        "ignorada",
+        "apresentado",
+        "encerra",
+        "sessão",
+        "execução",
+        "interrompida",
+        "usuário",
+        "aprovação",
+    ];
+    for message in messages {
+        let lower = message.to_lowercase();
+        for marker in pt_br_markers {
+            assert!(
+                !lower.contains(marker),
+                "tool-result const carries pt-BR marker {marker:?}: {message:?}"
+            );
+        }
+    }
+    assert!(TOOL_RESULT_PLAN_PRESENTED.contains("presented"));
+    assert!(TOOL_RESULT_IGNORED_USER_ABORT.starts_with("ignored:"));
 }

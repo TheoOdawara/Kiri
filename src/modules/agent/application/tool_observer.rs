@@ -5,8 +5,8 @@ use crate::shared::kernel::tool_call::ToolCall;
 
 /// The engine's output port for observing tool activity, fired around every execution in **all**
 /// approval modes — so the UI can show each command, result, and edit even when the user is not
-/// prompted (auto/plan). Separate from `Presenter` (per-turn lifecycle) because this is per-call:
-/// it fires N times within a turn. Synchronous, like `Presenter::begin_turn` — the production
+/// prompted (auto/plan). Separate from `Presenter` (per-round lifecycle) because this is per-call:
+/// it fires N times within a turn. Synchronous, like `Presenter::begin_round` — the production
 /// adapter just pushes a message onto a channel and never blocks.
 pub trait ToolObserver {
     /// A tool call is about to run (or be refused). `command` is the bare command label the registry

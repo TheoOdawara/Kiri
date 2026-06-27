@@ -19,6 +19,15 @@ use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::message::Message;
 use crate::shared::kernel::tool_call::ToolCall;
 
+/// Model-facing tool-result content, single-sourced here. These are protocol strings the model reads
+/// back in the conversation history, so they stay English (the contract: code/protocol in English) —
+/// distinct from the user-facing pt-BR confirmation prompts, which live in the `Bridge` adapter.
+const TOOL_RESULT_PLAN_PRESENTED: &str = "Plan presented to the user for approval.";
+const TOOL_RESULT_PLAN_BLOCKED: &str = "ignored: present_plan ends the turn";
+const TOOL_RESULT_IGNORED_SESSION_ENDED: &str = "ignored: session ended";
+const TOOL_RESULT_IGNORED_CHECKPOINT: &str = "ignored: execution interrupted at the checkpoint";
+const TOOL_RESULT_IGNORED_USER_ABORT: &str = "ignored: interrupted by the user";
+
 /// Whether a user turn ran to completion, proposed a plan for approval, or the user ended the session
 /// at a prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,12 +135,15 @@ impl AgentLoop {
     ) -> Result<TurnOutcome, AgentError> {
         // The advertised tool set is fixed for the turn; in plan mode it excludes destructive tools.
         // `mode` may still tighten to `Auto` mid-turn if the user approves a call with "don't ask again".
+        // Deliberately keep the plan-restricted schema for the whole turn; never recompute it on a
+        // mid-turn `ApprovedAuto` switch, or a Plan->Auto turn would gain the destructive tools that
+        // plan mode withheld from the model.
         let mut mode = mode;
         let schemas = self.registry.schemas_for(mode);
         let mut checkpoint = Instant::now();
         let mut calls_since_checkpoint: usize = 0;
         loop {
-            io.begin_turn();
+            io.begin_round();
             let result = self
                 .provider
                 .complete(
@@ -147,7 +159,7 @@ impl AgentLoop {
             // provider error: the cleanup must run on the failure path too, so its Result is dropped.
             // A failed finish send means the runtime's receiver is gone (the app is tearing down) —
             // benign, and nothing useful could be done with the error here.
-            let _ = io.finish_turn();
+            let _ = io.finish_round();
             let turn = result?;
 
             if turn.tool_calls.is_empty() {
@@ -172,9 +184,9 @@ impl AgentLoop {
                 let plan = extract_plan(plan_call).unwrap_or(content);
                 for call in &calls {
                     let response_message = if call.function.name == PRESENT_PLAN {
-                        "Plano apresentado ao usuário para aprovação."
+                        TOOL_RESULT_PLAN_PRESENTED
                     } else {
-                        "ignorada: present_plan encerra o turno"
+                        TOOL_RESULT_PLAN_BLOCKED
                     };
                     conversation.push(Message::tool_result(
                         call.id.as_str(),
@@ -206,7 +218,7 @@ impl AgentLoop {
                             answer_unanswered(
                                 conversation,
                                 &calls[index..],
-                                "ignorada: sessão encerrada",
+                                TOOL_RESULT_IGNORED_SESSION_ENDED,
                             );
                             return Ok(TurnOutcome::Aborted);
                         }
@@ -214,7 +226,7 @@ impl AgentLoop {
                             answer_unanswered(
                                 conversation,
                                 &calls[index..],
-                                "ignorada: execução interrompida no checkpoint",
+                                TOOL_RESULT_IGNORED_CHECKPOINT,
                             );
                             return Ok(outcome);
                         }
@@ -238,7 +250,7 @@ impl AgentLoop {
                     answer_unanswered(
                         conversation,
                         &calls[index..],
-                        "ignorada: interrompida pelo usuário",
+                        TOOL_RESULT_IGNORED_USER_ABORT,
                     );
                     return Ok(TurnOutcome::Aborted);
                 };
