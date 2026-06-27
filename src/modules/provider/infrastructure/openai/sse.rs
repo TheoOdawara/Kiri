@@ -40,7 +40,15 @@ pub(crate) fn handle_event(
     };
 
     // Bound the running total before absorbing, so an unbounded stream fails fast instead of OOMing.
+    // Reasoning (under either field name) flows through the channel/transcript just like content, so it
+    // counts toward the same ceiling — otherwise a provider streaming reasoning forever defeats the cap.
     let delta_bytes = choice.delta.content.as_deref().map_or(0, str::len)
+        + choice
+            .delta
+            .reasoning_content
+            .as_deref()
+            .map_or(0, str::len)
+        + choice.delta.reasoning.as_deref().map_or(0, str::len)
         + choice
             .delta
             .tool_calls
@@ -80,10 +88,14 @@ fn format_stream_error(error: &StreamError) -> String {
         .unwrap_or_else(|| "unknown error".to_string());
     match error.code.as_ref().filter(|code| !code.is_null()) {
         Some(code) => {
-            let code = code
-                .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| code.to_string());
+            // `code` is provider-controlled too; bounding only `message` is bypassed if the oversized
+            // payload is moved here, so it is capped the same way.
+            let code = bounded_preview(
+                &code
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| code.to_string()),
+            );
             format!("stream error from provider: {message} (code {code})")
         }
         None => format!("stream error from provider: {message}"),
@@ -127,7 +139,8 @@ fn events_from_delta(delta: Delta) -> Vec<StreamEvent> {
 pub(crate) struct TurnAccumulator {
     content: String,
     tool_calls: BTreeMap<u32, PartialToolCall>,
-    /// Running total of streamed content + tool-call argument bytes, bounded by `MAX_STREAM_BYTES`.
+    /// Running total of streamed content + reasoning + tool-call argument bytes, bounded by
+    /// `MAX_STREAM_BYTES`.
     streamed_bytes: usize,
     /// The last `finish_reason` seen; `"length"` means the output token cap was hit (truncation).
     finish_reason: Option<String>,
@@ -357,6 +370,51 @@ mod tests {
         assert!(
             error.to_string().contains("… (truncated)"),
             "oversized in-band error must be bounded: {error}"
+        );
+    }
+
+    #[test]
+    fn oversized_error_code_is_bounded() {
+        // PROV-06: bounding only `message` is bypassed if the attacker moves the oversized payload into
+        // the string-typed `code`. It must be capped the same way.
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        let data = serde_json::json!({ "error": { "message": "x", "code": "C".repeat(5_000) } })
+            .to_string();
+        let error = handle_event(&data, &mut accumulator, &mut sink)
+            .expect_err("an in-band error event must fail the turn");
+        let surfaced = error.to_string();
+        assert!(
+            surfaced.contains("… (truncated)"),
+            "oversized error code must be bounded: {surfaced}"
+        );
+        assert!(
+            !surfaced.contains(&"C".repeat(5_000)),
+            "the oversized error code must be truncated, not surfaced verbatim"
+        );
+    }
+
+    #[test]
+    fn reasoning_stream_exceeding_cap_fails() {
+        // PROV-01: reasoning deltas must count toward the same ceiling as content/tool-input, or a
+        // provider streaming reasoning forever grows memory without bound.
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        let chunk = serde_json::json!({
+            "choices": [{ "delta": { "reasoning_content": "a".repeat(1024 * 1024) } }]
+        })
+        .to_string();
+        let mut error = None;
+        for _ in 0..16 {
+            if let Err(err) = handle_event(&chunk, &mut accumulator, &mut sink) {
+                error = Some(err);
+                break;
+            }
+        }
+        let error = error.expect("reasoning past MAX_STREAM_BYTES must fail");
+        assert!(
+            error.to_string().contains("maximum response size"),
+            "reasoning cap error expected: {error}"
         );
     }
 

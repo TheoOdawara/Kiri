@@ -30,7 +30,7 @@ pub(crate) fn handle_event(
         StreamEventDto::Error { error } => Err(AgentError::Provider(format!(
             "stream error from provider: {} ({})",
             bounded_preview(&error.message),
-            error.kind
+            bounded_preview(&error.kind)
         ))),
         StreamEventDto::ContentBlockStart {
             index,
@@ -69,6 +69,9 @@ fn apply_delta(
             sink.on_event(StreamEvent::Content(text))
         }
         BlockDeltaDto::ThinkingDelta { thinking } if !thinking.is_empty() => {
+            // Reasoning is not persisted, but it still flows through the channel/transcript, so it must
+            // count toward the same ceiling — otherwise a provider streaming thinking forever OOMs.
+            accumulator.bound_streamed_bytes(thinking.len())?;
             sink.on_event(StreamEvent::Reasoning(thinking))
         }
         BlockDeltaDto::InputJsonDelta { partial_json } => {
@@ -87,7 +90,7 @@ fn apply_delta(
 pub(crate) struct TurnAccumulator {
     content: String,
     tool_uses: BTreeMap<u32, PartialToolUse>,
-    /// Running total of streamed text + tool-input bytes, bounded by `MAX_STREAM_BYTES`.
+    /// Running total of streamed text + reasoning + tool-input bytes, bounded by `MAX_STREAM_BYTES`.
     streamed_bytes: usize,
     /// The message's `stop_reason`; `"max_tokens"` means the output cap truncated the turn.
     stop_reason: Option<String>,
@@ -109,8 +112,8 @@ impl TurnAccumulator {
             && self.tool_uses.is_empty()
     }
 
-    /// Bound the running total of streamed text + tool-input bytes before absorbing more, so an
-    /// unbounded stream fails fast instead of OOMing (`read_timeout` only bounds idle time between
+    /// Bound the running total of streamed text + reasoning + tool-input bytes before absorbing more, so
+    /// an unbounded stream fails fast instead of OOMing (`read_timeout` only bounds idle time between
     /// chunks). Mirrors the OpenAI accumulator's ceiling against the single shared `MAX_STREAM_BYTES`.
     fn bound_streamed_bytes(&mut self, delta: usize) -> Result<(), AgentError> {
         self.streamed_bytes = self.streamed_bytes.saturating_add(delta);
@@ -345,6 +348,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn oversized_error_type_is_bounded() {
+        // PROV-06: bounding only `message` is bypassed if the attacker moves the oversized payload into
+        // the provider-controlled `type`. Every surfaced field must be bounded.
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        let data = serde_json::json!({
+            "type": "error",
+            "error": { "type": "T".repeat(5_000), "message": "x" }
+        })
+        .to_string();
+        let error = handle_event(&data, &mut accumulator, &mut sink)
+            .expect_err("an error event must fail the turn");
+        let surfaced = error.to_string();
+        assert!(
+            surfaced.contains("… (truncated)"),
+            "oversized error type must be bounded: {surfaced}"
+        );
+        assert!(
+            !surfaced.contains(&"T".repeat(5_000)),
+            "the oversized error type must be truncated, not surfaced verbatim"
+        );
+    }
+
     /// Drive the given event through the accumulator repeatedly until it errors, returning that error.
     /// Used to cross `MAX_STREAM_BYTES` with a handful of large chunks without allocating the whole cap.
     fn accumulate_until_error(payload: &str) -> AgentError {
@@ -370,6 +397,23 @@ mod tests {
         assert!(
             error.to_string().contains("maximum response size"),
             "text-delta cap error expected: {error}"
+        );
+    }
+
+    #[test]
+    fn anthropic_reasoning_stream_exceeding_cap_fails() {
+        // PROV-01: reasoning (thinking) deltas must count toward the same ceiling as text/tool-input,
+        // or a provider streaming reasoning forever grows the channel without bound.
+        let chunk = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "thinking_delta", "thinking": "a".repeat(1024 * 1024) }
+        })
+        .to_string();
+        let error = accumulate_until_error(&chunk);
+        assert!(
+            error.to_string().contains("maximum response size"),
+            "reasoning cap error expected: {error}"
         );
     }
 
