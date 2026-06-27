@@ -3,8 +3,6 @@ use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
-#[cfg(unix)]
-use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema, simple_command,
@@ -16,6 +14,8 @@ use crate::modules::tools::infrastructure::sandbox::default_accept_for;
 use crate::modules::tools::infrastructure::support::READ_FILE_MAX_BYTES;
 #[cfg(windows)]
 use crate::modules::tools::infrastructure::support::read_capped;
+#[cfg(unix)]
+use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct ReadFile;

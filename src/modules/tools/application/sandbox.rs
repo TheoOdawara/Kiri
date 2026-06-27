@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::modules::tools::application::command_sandbox::{
-    CommandSandbox, NetworkPolicy, SandboxPolicy,
-};
+use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::sandbox::NetworkPolicy;
 
 /// The resolved target of a create operation, plus any parent directories that do not yet exist (in
 /// shallow-first order) and would have to be created for the write to succeed. Pure data, so it lives

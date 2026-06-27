@@ -3,8 +3,6 @@ use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
-#[cfg(unix)]
-use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
@@ -14,6 +12,8 @@ use crate::modules::tools::infrastructure::args::{PathArgs, WriteArgs, parse, pa
 use crate::modules::tools::infrastructure::exec;
 use crate::modules::tools::infrastructure::sandbox::default_accept_for;
 use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
+#[cfg(unix)]
+use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct WriteFile;

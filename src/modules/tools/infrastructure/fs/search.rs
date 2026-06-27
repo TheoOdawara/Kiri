@@ -5,8 +5,6 @@ use std::fs;
 
 use serde_json::{Value, json};
 
-#[cfg(unix)]
-use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema, simple_command,
@@ -22,6 +20,8 @@ use crate::modules::tools::infrastructure::support::SEARCH_MAX_LINE_CHARS;
 use crate::modules::tools::infrastructure::support::SEARCH_MAX_MATCHES;
 #[cfg(windows)]
 use crate::modules::tools::infrastructure::support::search_file;
+#[cfg(unix)]
+use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct Search;

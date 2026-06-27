@@ -5,13 +5,13 @@ use std::time::Duration;
 use regex::Regex;
 use serde_json::{Value, json};
 
-use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{RunCommandArgs, parse_args};
 use crate::modules::tools::infrastructure::exec::{self, ExecError};
+use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// The leading program token of a command (first whitespace-delimited word). The network allow-list is

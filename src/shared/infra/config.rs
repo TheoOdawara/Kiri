@@ -9,10 +9,8 @@ use clap::Parser;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::modules::tools::application::command_sandbox::NetworkPolicy;
-use crate::modules::tools::infrastructure::sensitive::{SensitiveMatcher, load_sensitive_matcher};
 use crate::shared::kernel::provider::{AuthMethod, Effort, ProviderKind, ProviderProfile};
-use crate::shared::kernel::sandbox::{NetworkStance, SandboxMode};
+use crate::shared::kernel::sandbox::{NetworkPolicy, NetworkStance, SandboxMode};
 
 /// Seeded once as the first message of the session; broken into 9 named sections (Identity, Quality,
 /// Posture, Workspace & paths, Tools, Approval modes, Turn mechanics, Memory & preferences, Security)
@@ -640,7 +638,6 @@ pub struct Settings {
     pub checkpoint_budget: Duration,
     pub max_tool_calls: usize,
     pub plan_blacklist: Arc<[Regex]>,
-    pub sensitive: SensitiveMatcher,
     /// Whether OS-level command confinement is active (`KIRI_SANDBOX` ≠ `off`, facility available).
     pub sandbox_enabled: bool,
     /// `KIRI_SANDBOX=require`: refuse `run_command` when no OS sandbox is available.
@@ -756,7 +753,6 @@ impl Settings {
             checkpoint_budget: TOOL_CHECKPOINT,
             max_tool_calls: MAX_TOOL_CALLS_PER_CHECKPOINT,
             plan_blacklist: compile_patterns("KIRI_PLAN_BLACKLIST", DEFAULT_PLAN_BLACKLIST)?,
-            sensitive: load_sensitive_matcher()?,
             sandbox_enabled,
             require_confinement,
             sandbox_network: resolve_sandbox_network(config.sandbox.network.as_deref()),
@@ -865,6 +861,19 @@ fn write_starter_config(path: &PathBuf, providers: &[ProviderProfile], active: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `shared` is the leaf every module depends on; this foundation file must never reach *down* into a
+    // module. Guard the invariant structurally so a future edit cannot silently re-introduce the edge.
+    #[test]
+    fn config_has_no_module_imports() {
+        let source = include_str!("config.rs");
+        // Build the needle by concatenation so this guard's own literal does not self-match the file.
+        let needle = concat!("use crate", "::modules::");
+        assert!(
+            !source.contains(needle),
+            "shared/infra/config.rs must not import from any module"
+        );
+    }
 
     #[test]
     fn parse_duration_ms_uses_default_when_absent_invalid_or_zero() {

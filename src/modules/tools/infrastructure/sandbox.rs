@@ -3,14 +3,13 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
-use crate::modules::tools::application::command_sandbox::{
-    CommandSandbox, NetworkPolicy, SandboxPolicy,
-};
+use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
 use crate::modules::tools::application::sandbox::{CreateResolution, Sandbox};
 #[cfg(test)]
 use crate::modules::tools::infrastructure::confine::noop::NoConfinement;
 use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::sandbox::NetworkPolicy;
 
 /// The credential-directory names guarded by both the path-resolution refusal here and the macOS
 /// Seatbelt read-deny. Single-sourced in `secret_paths` and re-exported so existing importers

@@ -3,8 +3,6 @@ use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
-#[cfg(unix)]
-use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema, simple_command,
@@ -13,6 +11,8 @@ use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
 #[cfg(unix)]
 use crate::modules::tools::infrastructure::exec;
 use crate::modules::tools::infrastructure::sandbox::default_accept_for;
+#[cfg(unix)]
+use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct CreateDir;

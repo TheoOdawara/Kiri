@@ -31,6 +31,7 @@ use crate::modules::tools::infrastructure::confine;
 use crate::modules::tools::infrastructure::control::present_plan::PresentPlan;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
+use crate::modules::tools::infrastructure::sensitive::load_sensitive_matcher;
 use crate::modules::tui::infrastructure::runtime::{ProviderSwap, Tui};
 use crate::shared::infra::config::Settings;
 use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile};
@@ -69,9 +70,12 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     let project_id = project_id_from_path(&canonical_path);
     let session_store = build_session(&settings).await?;
     let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
+    // The composition root owns cross-module wiring: build the sensitive matcher here and inject it into
+    // the sandbox, so `Settings`/`config` no longer reaches into the `tools` adapter for it.
+    let sensitive = load_sensitive_matcher()?;
     let sandbox = FsSandbox::with_confinement(
         &settings.path,
-        settings.sensitive.clone(),
+        sensitive,
         confiner,
         settings.sandbox_network,
         settings.extra_ro.clone(),
@@ -504,5 +508,25 @@ mod tests {
             Some(Credential::None) => {}
             other => panic!("expected Credential::None, got {other:?}"),
         }
+    }
+
+    // After Step 2, the sensitive matcher is built in `wire` (via `load_sensitive_matcher`) and injected
+    // into the sandbox instead of carried on `Settings`. Lock that this build path still produces a
+    // guarding sandbox — a sandbox wired from it must refuse a `.env` write — so the relocation did not
+    // silently drop the secrets guard.
+    #[test]
+    fn wire_builds_sensitive_matcher() {
+        use crate::modules::tools::application::sandbox::Sandbox;
+        use crate::modules::tools::infrastructure::sandbox::FsSandbox;
+        use crate::modules::tools::infrastructure::sensitive::load_sensitive_matcher;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let sensitive = load_sensitive_matcher().unwrap();
+        let sandbox = FsSandbox::new(dir.path(), sensitive).unwrap();
+        assert!(
+            sandbox.resolve_create(".env").is_err(),
+            "the matcher built in wire must still refuse a .env path"
+        );
     }
 }

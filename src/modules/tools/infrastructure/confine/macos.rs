@@ -1,13 +1,12 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use crate::modules::tools::application::command_sandbox::{
-    CommandSandbox, NetworkPolicy, SandboxPolicy,
-};
+use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
 use crate::modules::tools::infrastructure::secret_paths::{
     HARNESS_PRIVATE_DIR, HOME_SECRET_FILES, SECRET_DIRS,
 };
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::sandbox::NetworkPolicy;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 

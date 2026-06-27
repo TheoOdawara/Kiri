@@ -78,6 +78,15 @@ impl<'de> Deserialize<'de> for NetworkStance {
     }
 }
 
+/// Whether a confined command may open outbound network connections. The resolved policy the `tools`
+/// layer consumes (the config resolvers map a [`NetworkStance`] to this). It lives in the kernel beside
+/// its sibling stance so neither `config` nor a future `sync` gate has to reach into `tools`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkPolicy {
+    Deny,
+    Allow,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
