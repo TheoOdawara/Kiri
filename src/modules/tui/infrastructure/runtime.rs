@@ -30,7 +30,8 @@ use crate::modules::session::application::session_store::SessionStore;
 use crate::modules::session::domain::session::derive_title;
 use crate::modules::sync::application::sync_service::SyncService;
 use crate::modules::sync::infrastructure::git_cli::GitCli;
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
+use crate::modules::tools::application::sandbox::Sandbox;
+use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::msg::{Msg, StreamKind};
@@ -235,7 +236,7 @@ impl ProviderSwap {
 /// and drives one agent turn at a time. The sole frontend, assembled in `app::wire`.
 pub struct Tui {
     agent_loop: AgentLoop,
-    sandbox: Sandbox,
+    sandbox: FsSandbox,
     conversation: Conversation,
     model: Model,
     seed: Option<String>,
@@ -259,7 +260,7 @@ impl Tui {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent_loop: AgentLoop,
-        sandbox: Sandbox,
+        sandbox: FsSandbox,
         system_prompt: String,
         seed: Option<String>,
         provider_swap: ProviderSwap,
@@ -943,7 +944,7 @@ fn resolve_motion() -> Motion {
 async fn drive_turn(
     agent_loop: &AgentLoop,
     conversation: &mut Conversation,
-    sandbox: &Sandbox,
+    sandbox: &dyn Sandbox,
     bridge: &mut Bridge,
     model: &mut Model,
     engine_rx: &mut mpsc::UnboundedReceiver<EngineMsg>,

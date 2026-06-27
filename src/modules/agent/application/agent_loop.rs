@@ -11,8 +11,8 @@ use crate::modules::provider::application::completion_provider::{
 };
 use crate::modules::tools::application::plan::{PRESENT_PLAN, extract_plan};
 use crate::modules::tools::application::registry::ToolRegistry;
+use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::ToolOutcome;
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::conversation::Conversation;
 use crate::shared::kernel::error::AgentError;
@@ -111,7 +111,7 @@ impl AgentLoop {
     pub async fn run<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
         &self,
         conversation: &mut Conversation,
-        sandbox: &Sandbox,
+        sandbox: &dyn Sandbox,
         mode: ApprovalMode,
         io: &mut IO,
     ) -> Result<TurnOutcome, AgentError> {
@@ -372,6 +372,7 @@ mod tests {
     use crate::modules::provider::application::completion_provider::EventSink;
     use crate::modules::tools::application::tool::Confirmation;
     use crate::modules::tools::infrastructure::fs::default_fs_tools;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
     use crate::shared::kernel::completed_turn::CompletedTurn;
     use crate::shared::kernel::role::Role;
     use crate::shared::kernel::stream_event::StreamEvent;
@@ -555,7 +556,7 @@ mod tests {
     async fn run_drives_a_tool_turn_then_a_text_turn() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
 
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
@@ -597,7 +598,7 @@ mod tests {
     #[tokio::test]
     async fn run_aborts_when_the_user_ends_the_session_at_a_prompt() {
         let dir = TempDir::new().unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![CompletedTurn {
             content: String::new(),
             tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
@@ -617,7 +618,7 @@ mod tests {
     #[tokio::test]
     async fn auto_mode_runs_tools_without_asking() {
         let dir = TempDir::new().unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "writing".to_string(),
@@ -651,7 +652,7 @@ mod tests {
     #[tokio::test]
     async fn approved_auto_stops_asking_for_the_rest_of_the_turn() {
         let dir = TempDir::new().unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         // One assistant turn with two destructive calls: the first prompts, the second must not.
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
@@ -696,7 +697,7 @@ mod tests {
     #[tokio::test]
     async fn plan_mode_blocks_destructive_tools() {
         let dir = TempDir::new().unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "writing".to_string(),
@@ -742,7 +743,7 @@ mod tests {
     async fn plan_mode_allows_read_only_tools() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "reading".to_string(),
@@ -778,7 +779,7 @@ mod tests {
         // (no execution), and the conversation stays a valid tool round (assistant tool_call answered
         // by a tool result) so the next turn after approval is accepted by the provider.
         let dir = TempDir::new().unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![CompletedTurn {
             content: "vou planejar".to_string(),
             tool_calls: vec![tool_call("present_plan", r#"{"plan":"Plano final"}"#)],
@@ -818,7 +819,7 @@ mod tests {
     #[tokio::test]
     async fn auto_mode_emits_tool_started_and_finished() {
         let dir = TempDir::new().unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "writing".to_string(),
@@ -850,7 +851,7 @@ mod tests {
     async fn default_mode_emits_around_execution() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "reading".to_string(),
@@ -877,7 +878,7 @@ mod tests {
     #[tokio::test]
     async fn plan_block_emits_started_and_error_finish() {
         let dir = TempDir::new().unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "writing".to_string(),
@@ -915,7 +916,7 @@ mod tests {
     async fn declined_emits_started_and_declined_finish() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "deleting".to_string(),
@@ -947,7 +948,7 @@ mod tests {
     async fn auto_mode_runs_inroot_read_without_confirming() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "reading".to_string(),
@@ -980,7 +981,7 @@ mod tests {
     async fn auto_mode_confirms_destructive_delete() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = agent_loop_with(vec![
             CompletedTurn {
                 content: "deleting".to_string(),
@@ -1018,7 +1019,7 @@ mod tests {
     async fn auto_mode_confirms_out_of_root_target() {
         let outside = TempDir::new().unwrap();
         let dir = TempDir::new().unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let target = outside.path().join("new.txt");
         let args =
             serde_json::json!({ "path": target.to_str().unwrap(), "content": "x" }).to_string();
@@ -1059,7 +1060,7 @@ mod tests {
     async fn iteration_cap_fires_the_checkpoint() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         // Two read-only rounds are queued; with a cap of 1 the checkpoint must fire after the first.
         let provider = Arc::new(ScriptedProvider {
             turns: Mutex::new(VecDeque::from(vec![
@@ -1120,7 +1121,7 @@ mod tests {
         // WITHIN the round: the first two write, the third is paused-and-declined before executing —
         // the regression where a single round could run an unbounded burst before any checkpoint.
         let dir = TempDir::new().unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let provider = Arc::new(ScriptedProvider {
             turns: Mutex::new(VecDeque::from(vec![CompletedTurn {
                 content: String::new(),
@@ -1168,7 +1169,7 @@ mod tests {
         // The user aborts at the first of two calls; both must still receive a tool_result so the
         // assistant tool_calls message is a fully-answered (valid, persistable) exchange.
         let dir = TempDir::new().unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let provider = Arc::new(ScriptedProvider {
             turns: Mutex::new(VecDeque::from(vec![CompletedTurn {
                 content: String::new(),
@@ -1255,7 +1256,7 @@ mod tests {
         // and the error to propagate. A refactor moving finish_turn after `?` would pass every other
         // test but break this.
         let dir = TempDir::new().unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = AgentLoop::new(
             Arc::new(FailingProvider),
             registry_for_tests(),
@@ -1318,7 +1319,7 @@ mod tests {
         // NOT the call-count leg — the reason shown must be Elapsed, not CallCount.
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"hi").unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let provider = Arc::new(ScriptedProvider {
             turns: Mutex::new(VecDeque::from(vec![CompletedTurn {
                 content: "x".to_string(),
@@ -1380,7 +1381,7 @@ mod tests {
         }
 
         let dir = TempDir::new().unwrap();
-        let sandbox = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
         let agent_loop = AgentLoop::new(
             Arc::new(EmittingProvider),
             ToolRegistry::new(default_fs_tools(

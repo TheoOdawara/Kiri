@@ -30,7 +30,7 @@ use crate::modules::tools::application::tool::Tool;
 use crate::modules::tools::infrastructure::confine;
 use crate::modules::tools::infrastructure::control::present_plan::PresentPlan;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
+use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tui::infrastructure::runtime::{ProviderSwap, Tui};
 use crate::shared::infra::config::Settings;
 use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile, Secret};
@@ -69,7 +69,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     let project_id = project_id_from_path(&canonical_path);
     let session_store = build_session(&settings).await?;
     let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
-    let sandbox = Sandbox::with_confinement(
+    let sandbox = FsSandbox::with_confinement(
         &settings.path,
         settings.sensitive.clone(),
         confiner,

@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 use crate::modules::tools::application::command_sandbox::{
     CommandSandbox, NetworkPolicy, SandboxPolicy,
 };
+use crate::modules::tools::application::sandbox::{CreateResolution, Sandbox};
 #[cfg(test)]
 use crate::modules::tools::infrastructure::confine::noop::NoConfinement;
 use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
@@ -21,7 +22,7 @@ pub(crate) const SECRET_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".ku
 /// whose name matches a sensitive pattern (secrets, keys, credentials). All file tools resolve
 /// their path through this type; nothing else touches the filesystem with a raw, unvalidated path.
 #[derive(Debug, Clone)]
-pub struct Sandbox {
+pub struct FsSandbox {
     root: PathBuf,
     sensitive: SensitiveMatcher,
     /// OS-level confinement applied to every child process the tools spawn. `NoConfinement` on
@@ -34,15 +35,7 @@ pub struct Sandbox {
     extra_rw: Arc<[PathBuf]>,
 }
 
-/// The resolved target of a create operation, plus any parent directories that do not yet exist (in
-/// shallow-first order) and would have to be created for the write to succeed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateResolution {
-    pub target: PathBuf,
-    pub missing_dirs: Vec<PathBuf>,
-}
-
-impl Sandbox {
+impl FsSandbox {
     /// Canonicalize the root once. Fails if it does not exist or is not a directory. The
     /// `SensitiveMatcher` is carried on the sandbox so every path resolution can check the file
     /// name against the sensitive patterns before the tool touches the filesystem.
@@ -86,29 +79,46 @@ impl Sandbox {
         })
     }
 
-    pub fn root(&self) -> &Path {
+    /// Resolve a new workspace root from a `/cd` argument and return the relocated sandbox. A relative
+    /// argument is joined onto the current root; an absolute or `~`/`~/…` argument is taken as given.
+    /// The new root is canonicalized and must exist and be a directory (else this fails). Returns
+    /// `Self`, so it stays inherent on the concrete adapter rather than on the object-safe port.
+    pub fn relocated(&self, arg: &str) -> Result<Self> {
+        let expanded = expand_tilde(arg, home().as_deref());
+        let target = if expanded.is_absolute() {
+            expanded
+        } else {
+            self.root.join(arg)
+        };
+        Self::with_confinement(
+            &target,
+            self.sensitive.clone(),
+            self.confiner.clone(),
+            self.network,
+            self.extra_ro.clone(),
+            self.extra_rw.clone(),
+        )
+    }
+}
+
+impl Sandbox for FsSandbox {
+    fn root(&self) -> &Path {
         &self.root
     }
 
-    /// The sensitive-file matcher this sandbox enforces, so a tool can filter its own results by file
-    /// name (e.g. `search` dropping matches that come from a secret file the recursive scan reached).
-    pub fn sensitive(&self) -> &SensitiveMatcher {
-        &self.sensitive
-    }
-
     /// The OS-confinement adapter every tool wraps its child process with before spawning.
-    pub fn confiner(&self) -> &dyn CommandSandbox {
+    fn confiner(&self) -> &dyn CommandSandbox {
         self.confiner.as_ref()
     }
 
     /// The base network stance (the default for `run_command` before its dev-command allow-list).
-    pub fn network(&self) -> NetworkPolicy {
+    fn network(&self) -> NetworkPolicy {
         self.network
     }
 
     /// Build the per-call OS-confinement policy: writes confined to the workspace root plus the
     /// configured extras and any per-call `extra_rw` (e.g. an approved out-of-root target's directory).
-    pub fn command_policy(&self, network: NetworkPolicy, extra_rw: &[&Path]) -> SandboxPolicy {
+    fn command_policy(&self, network: NetworkPolicy, extra_rw: &[&Path]) -> SandboxPolicy {
         let mut rw: Vec<PathBuf> = self.extra_rw.to_vec();
         rw.extend(extra_rw.iter().map(|path| path.to_path_buf()));
         SandboxPolicy {
@@ -122,7 +132,7 @@ impl Sandbox {
     /// The name of a secret directory (`.ssh`, `.aws`, …) that `real` lies within, if any. The
     /// recursive read-only tools use this to refuse poking inside a credential store, which the
     /// file-name guard alone does not cover.
-    pub fn secret_dir_component(&self, real: &Path) -> Option<&'static str> {
+    fn secret_dir_component(&self, real: &Path) -> Option<&'static str> {
         real.components().find_map(|component| {
             let Component::Normal(name) = component else {
                 return None;
@@ -137,7 +147,7 @@ impl Sandbox {
 
     /// Whether a resolved absolute path lies outside the active workspace root. Used by the file tools
     /// to phrase the out-of-jail case and pick the working directory the command runs in.
-    pub fn is_outside_root(&self, resolved: &Path) -> bool {
+    fn is_outside_root(&self, resolved: &Path) -> bool {
         !resolved.starts_with(&self.root)
     }
 
@@ -145,7 +155,7 @@ impl Sandbox {
     /// at the workspace root. When the user has approved an out-of-jail target, the command runs at that
     /// target's nearest existing directory — the harness "moves" there for that one call and, since each
     /// call builds its own process, is back at the root for the next (no process-global `chdir`).
-    pub fn exec_cwd_for(&self, resolved: &Path) -> PathBuf {
+    fn exec_cwd_for(&self, resolved: &Path) -> PathBuf {
         if !self.is_outside_root(resolved) {
             return self.root.clone();
         }
@@ -164,30 +174,10 @@ impl Sandbox {
         }
     }
 
-    /// Resolve a new workspace root from a `/cd` argument and return the relocated sandbox. A relative
-    /// argument is joined onto the current root; an absolute or `~`/`~/…` argument is taken as given.
-    /// The new root is canonicalized and must exist and be a directory (else this fails).
-    pub fn relocated(&self, arg: &str) -> Result<Self> {
-        let expanded = expand_tilde(arg, home().as_deref());
-        let target = if expanded.is_absolute() {
-            expanded
-        } else {
-            self.root.join(arg)
-        };
-        Self::with_confinement(
-            &target,
-            self.sensitive.clone(),
-            self.confiner.clone(),
-            self.network,
-            self.extra_ro.clone(),
-            self.extra_rw.clone(),
-        )
-    }
-
     /// Resolve a path that must already exist (read/edit/overwrite/delete/list/search). A relative path
     /// resolves under the active root and is asserted to stay within it; an absolute path (or `~/…`) is
     /// resolved as given — allowed outside the root, since the CLI gates it with explicit confirmation.
-    pub fn resolve_existing(&self, rel: &str) -> Result<PathBuf> {
+    fn resolve_existing(&self, rel: &str) -> Result<PathBuf> {
         let expanded = expand_tilde(rel, home().as_deref());
         if expanded.is_absolute() {
             let real = std::fs::canonicalize(&expanded)
@@ -214,7 +204,7 @@ impl Sandbox {
     /// location the user must approve at the confirmation prompt, so it deliberately bypasses the
     /// within-root check (`confined == false`). It is still run through `assert_not_sensitive`, so
     /// secret paths are rejected regardless.
-    pub fn resolve_create(&self, rel: &str) -> Result<CreateResolution> {
+    fn resolve_create(&self, rel: &str) -> Result<CreateResolution> {
         let expanded = expand_tilde(rel, home().as_deref());
         let (candidate, confined) = if expanded.is_absolute() {
             // Absolute/tilde-expanded paths are user-approved out-of-root targets — not confined here;
@@ -265,6 +255,14 @@ impl Sandbox {
         })
     }
 
+    /// Whether a bare file name matches a sensitive pattern (secrets, keys, credentials). Exposing the
+    /// boolean keeps the `SensitiveMatcher` itself out of the application-layer port.
+    fn is_sensitive_name(&self, name: &str) -> bool {
+        self.sensitive.matches(name).is_some()
+    }
+}
+
+impl FsSandbox {
     /// Lexical guard + normalization: reject `..`, absolute paths, and empty input before touching the
     /// filesystem, dropping any `.` components. Returns the root joined with the normal components.
     fn join_checked(&self, rel: &str) -> Result<PathBuf> {
@@ -356,12 +354,12 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn sandbox(dir: &TempDir) -> Sandbox {
-        Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap()
+    fn sandbox(dir: &TempDir) -> FsSandbox {
+        FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap()
     }
 
-    fn guarded_sandbox(dir: &TempDir) -> Sandbox {
-        Sandbox::new(
+    fn guarded_sandbox(dir: &TempDir) -> FsSandbox {
+        FsSandbox::new(
             dir.path(),
             SensitiveMatcher::new(&[".env", "id_rsa", "*.pem"]).unwrap(),
         )
@@ -370,7 +368,7 @@ mod tests {
 
     #[test]
     fn new_rejects_missing_root() {
-        assert!(Sandbox::new("/nonexistent/t-cli/xyz-9999", SensitiveMatcher::empty()).is_err());
+        assert!(FsSandbox::new("/nonexistent/t-cli/xyz-9999", SensitiveMatcher::empty()).is_err());
     }
 
     #[test]
@@ -378,7 +376,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("f.txt");
         fs::write(&file, b"x").unwrap();
-        assert!(Sandbox::new(&file, SensitiveMatcher::empty()).is_err());
+        assert!(FsSandbox::new(&file, SensitiveMatcher::empty()).is_err());
     }
 
     #[test]

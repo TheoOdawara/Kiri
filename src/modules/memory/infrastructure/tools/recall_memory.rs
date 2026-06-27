@@ -5,11 +5,11 @@ use serde_json::{Value, json};
 
 use crate::modules::memory::application::memory_port::MemoryPort;
 use crate::modules::memory::domain::entry::MemoryEntry;
+use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{parse, parse_args};
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::tool_call::ToolCall;
 
 #[derive(Deserialize)]
@@ -75,12 +75,12 @@ impl Tool for RecallMemory {
         )
     }
 
-    fn command_line(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+    fn command_line(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         let a: RecallArgs = parse(call.function.arguments.as_str()).ok()?;
         Some(format!("recall_memory {}", a.query))
     }
 
-    fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+    fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let cmd = self.command_line(sandbox, call)?;
         Some(confirm(
             format!("Consultar a memória. Aprova executar: {cmd}?"),
@@ -88,7 +88,7 @@ impl Tool for RecallMemory {
         ))
     }
 
-    async fn execute(&self, _sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: RecallArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,
@@ -151,12 +151,12 @@ mod tests {
     use super::*;
     use crate::modules::memory::domain::entry::MemoryKind;
     use crate::modules::memory::infrastructure::test_support::{call, temp_port};
-    use crate::modules::tools::infrastructure::sandbox::Sandbox;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use tempfile::TempDir;
 
-    fn sandbox() -> Sandbox {
-        Sandbox::new(std::path::PathBuf::from("."), SensitiveMatcher::empty()).unwrap()
+    fn sandbox() -> FsSandbox {
+        FsSandbox::new(std::path::PathBuf::from("."), SensitiveMatcher::empty()).unwrap()
     }
 
     #[tokio::test]

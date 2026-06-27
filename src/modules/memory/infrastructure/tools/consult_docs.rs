@@ -4,11 +4,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::modules::memory::infrastructure::docs_library::DocsLibrary;
+use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{parse, parse_args};
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::tool_call::ToolCall;
 
 #[derive(Deserialize)]
@@ -62,12 +62,12 @@ impl Tool for ConsultDocs {
         )
     }
 
-    fn command_line(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+    fn command_line(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         let a: ConsultArgs = parse(call.function.arguments.as_str()).ok()?;
         Some(format!("consult_docs {}", a.query))
     }
 
-    fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+    fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let cmd = self.command_line(sandbox, call)?;
         Some(confirm(
             format!("Consultar a documentação. Aprova executar: {cmd}?"),
@@ -75,7 +75,7 @@ impl Tool for ConsultDocs {
         ))
     }
 
-    async fn execute(&self, _sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: ConsultArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,
@@ -108,12 +108,12 @@ impl Tool for ConsultDocs {
 mod tests {
     use super::*;
     use crate::modules::memory::infrastructure::test_support::call;
-    use crate::modules::tools::infrastructure::sandbox::Sandbox;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use tempfile::TempDir;
 
-    fn sandbox() -> Sandbox {
-        Sandbox::new(std::path::PathBuf::from("."), SensitiveMatcher::empty()).unwrap()
+    fn sandbox() -> FsSandbox {
+        FsSandbox::new(std::path::PathBuf::from("."), SensitiveMatcher::empty()).unwrap()
     }
 
     #[tokio::test]

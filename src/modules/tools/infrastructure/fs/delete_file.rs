@@ -5,13 +5,14 @@ use serde_json::{Value, json};
 
 #[cfg(unix)]
 use crate::modules::tools::application::command_sandbox::NetworkPolicy;
+use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema, simple_command,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
 #[cfg(unix)]
 use crate::modules::tools::infrastructure::exec;
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
+use crate::modules::tools::infrastructure::sandbox::default_accept_for;
 use crate::modules::tools::infrastructure::support::stat_guard;
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -36,11 +37,11 @@ impl Tool for DeleteFile {
         )
     }
 
-    fn command_line(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+    fn command_line(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         simple_command(call, |a: &PathArgs| format!("rm {}", a.path))
     }
 
-    fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+    fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let cmd = self.command_line(sandbox, call)?;
         let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
         Some(confirm(
@@ -53,7 +54,7 @@ impl Tool for DeleteFile {
         true
     }
 
-    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: PathArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,

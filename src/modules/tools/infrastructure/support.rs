@@ -6,9 +6,9 @@ use std::fs::Metadata;
 use std::io::Read;
 use std::path::Path;
 
+use crate::modules::tools::application::sandbox::{CreateResolution, Sandbox};
 use crate::modules::tools::application::tool::ToolOutcome;
 use crate::modules::tools::infrastructure::exec;
-use crate::modules::tools::infrastructure::sandbox::{CreateResolution, Sandbox};
 
 pub const READ_FILE_MAX_BYTES: usize = 64 * 1024;
 pub const EDIT_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -67,7 +67,7 @@ pub fn search_file(path: &Path, query: &str, root: &Path, matches: &mut Vec<Stri
 }
 
 /// Workspace-relative, comma-joined list of the directories a create/move would have to make.
-pub fn missing_dirs_label(resolution: &CreateResolution, sandbox: &Sandbox) -> String {
+pub fn missing_dirs_label(resolution: &CreateResolution, sandbox: &dyn Sandbox) -> String {
     resolution
         .missing_dirs
         .iter()

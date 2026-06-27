@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 #[cfg(unix)]
 use crate::modules::tools::application::command_sandbox::NetworkPolicy;
+use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema, simple_command,
 };
@@ -15,7 +16,7 @@ use crate::modules::tools::infrastructure::args::{SearchArgs, parse, parse_args}
 use crate::modules::tools::infrastructure::exec;
 #[cfg(any(unix, windows))]
 use crate::modules::tools::infrastructure::sandbox::SECRET_DIRS;
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
+use crate::modules::tools::infrastructure::sandbox::default_accept_for;
 #[cfg(unix)]
 use crate::modules::tools::infrastructure::support::SEARCH_MAX_LINE_CHARS;
 use crate::modules::tools::infrastructure::support::SEARCH_MAX_MATCHES;
@@ -43,12 +44,12 @@ fn format_grep_line(line: &str) -> String {
 /// Whether a raw `grep` match line comes from a sensitive file (by its last path component). Such
 /// matches are dropped so `search` cannot leak the contents of a `.env`/`id_rsa` the scan reached.
 #[cfg(unix)]
-fn is_sensitive_match(sandbox: &Sandbox, grep_line: &str) -> bool {
+fn is_sensitive_match(sandbox: &dyn Sandbox, grep_line: &str) -> bool {
     let path = grep_line.split(':').next().unwrap_or_default();
     std::path::Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| sandbox.sensitive().matches(name).is_some())
+        .is_some_and(|name| sandbox.is_sensitive_name(name))
 }
 
 #[async_trait::async_trait(?Send)]
@@ -74,13 +75,13 @@ impl Tool for Search {
         )
     }
 
-    fn command_line(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+    fn command_line(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         simple_command(call, |a: &SearchArgs| {
             format!("rg '{}' {}", a.query, a.path)
         })
     }
 
-    fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+    fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let cmd = self.command_line(sandbox, call)?;
         let a: SearchArgs = parse(call.function.arguments.as_str()).ok()?;
         Some(confirm(
@@ -89,7 +90,7 @@ impl Tool for Search {
         ))
     }
 
-    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: SearchArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,
@@ -210,7 +211,7 @@ impl Tool for Search {
                         if entry
                             .file_name()
                             .to_str()
-                            .is_some_and(|name| sandbox.sensitive().matches(name).is_some())
+                            .is_some_and(|name| sandbox.is_sensitive_name(name))
                         {
                             continue; // never leak the contents of a sensitive file
                         }
@@ -246,7 +247,7 @@ impl Tool for Search {
 mod tests {
     use super::{SEARCH_MAX_LINE_CHARS, Search, format_grep_line};
     use crate::modules::tools::application::tool::{Tool, ToolOutcome};
-    use crate::modules::tools::infrastructure::sandbox::Sandbox;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
     use std::fs;
@@ -294,7 +295,7 @@ mod tests {
             b"{\"auth\":\"TOKEN\"}",
         )
         .unwrap();
-        let sb = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
 
         let outcome = Search
             .execute(&sb, &call(serde_json::json!({"query": "TOKEN"})))
@@ -326,7 +327,7 @@ mod tests {
             b"PRIVATE KEY material",
         )
         .unwrap();
-        let sb = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
 
         let outcome = Search
             .execute(
@@ -348,7 +349,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("a.txt"), b"NEEDLE in code").unwrap();
         fs::write(dir.path().join(".env"), b"SECRET=NEEDLE").unwrap();
-        let sb = Sandbox::new(dir.path(), SensitiveMatcher::new(&[".env"]).unwrap()).unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::new(&[".env"]).unwrap()).unwrap();
 
         let outcome = Search
             .execute(&sb, &call(serde_json::json!({"query": "NEEDLE"})))

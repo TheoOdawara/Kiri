@@ -1,10 +1,11 @@
 use serde_json::{Value, json};
 
+use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema, simple_command,
 };
 use crate::modules::tools::infrastructure::args::{EditArgs, PathArgs, parse, parse_args};
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
+use crate::modules::tools::infrastructure::sandbox::default_accept_for;
 use crate::modules::tools::infrastructure::support::{EDIT_FILE_MAX_BYTES, stat_guard};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -33,11 +34,11 @@ impl Tool for EditFile {
         )
     }
 
-    fn command_line(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+    fn command_line(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         simple_command(call, |a: &PathArgs| format!("edit {}", a.path))
     }
 
-    fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+    fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let cmd = self.command_line(sandbox, call)?;
         let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
         Some(confirm(
@@ -46,7 +47,7 @@ impl Tool for EditFile {
         ))
     }
 
-    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: EditArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,

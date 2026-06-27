@@ -44,7 +44,7 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
   port + two API-key adapters — `openai` (chat-completions: NVIDIA / compatible / custom / OpenAI) and
   `anthropic` (Messages API) — plus the `SecretStore` port with `keyring`/`0600`-file adapters and the
   `factory` that picks the adapter from `(kind, auth)`; see ADRs 0011/0012), `tools` (the `Tool` trait + `ToolRegistry`
-  + the sandbox + one fs adapter per tool), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
+  + the `Sandbox` port — `FsSandbox` the fs adapter — + one fs adapter per tool), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
   adapter + the ratatui runtime — the sole front-end), `memory` (durable knowledge: `MemoryEntry`/`MemoryKind`
   domain — kinds include `preference` — + the `MemoryPort`/`ProjectStore`/`SharedStore` ports + adapters —
   `FileProjectMemory` for project memory in `<workspace>/.kiri/memory/`, `SqliteSharedMemory` for shared
@@ -64,7 +64,8 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
 
 **Invariants:** network I/O only in `provider/infrastructure` — **except** `sync/infrastructure`, which
 shells out to `git` to reach the user's profile repo (ADR 0015); filesystem I/O only in
-`tools/infrastructure` (the sandbox is the single path chokepoint) — **except** the `memory`, `session`,
+`tools/infrastructure` (the `FsSandbox` adapter — behind the `tools/application::Sandbox` port — is the
+single path chokepoint) — **except** the `memory`, `session`,
 and `sync` contexts, which own their data dirs (`.kiri/memory`, `~/.kiri/memory`, `~/.kiri/sessions.db`,
 `~/.kiri/sync`), plus `provider/infrastructure/secrets` (the keyring/`0600` credentials file) and
 `shared/infra/config` (the `~/.kiri/config.toml` + dir creation) — all do their own file/SQLite I/O for
@@ -72,8 +73,8 @@ harness-owned storage, never for agent-supplied paths (ref ADRs 0010/0013/0015);
 the engine never touches stdin/stdout
 directly (all UI via the engine ports). Ports return `AgentError`; `anyhow` only at the binary edge.
 
-**Extending:** a new tool = one file under `tools/infrastructure/fs/` implementing `Tool`, registered in
-`default_fs_tools`; a new provider = one adapter implementing `CompletionProvider` + a `(kind, auth)` arm in
+**Extending:** a new tool = one file under `tools/infrastructure/fs/` implementing `Tool` (it receives
+the `Sandbox` port as `&dyn Sandbox`), registered in `default_fs_tools`; a new provider = one adapter implementing `CompletionProvider` + a `(kind, auth)` arm in
 `provider/infrastructure/factory`; a new memory/docs tool = one file under `memory/infrastructure/tools/`,
 registered in `default_memory_tools`.
 

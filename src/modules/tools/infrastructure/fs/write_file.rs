@@ -5,13 +5,14 @@ use serde_json::{Value, json};
 
 #[cfg(unix)]
 use crate::modules::tools::application::command_sandbox::NetworkPolicy;
+use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, WriteArgs, parse, parse_args};
 #[cfg(unix)]
 use crate::modules::tools::infrastructure::exec;
-use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
+use crate::modules::tools::infrastructure::sandbox::default_accept_for;
 use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -40,12 +41,12 @@ impl Tool for WriteFile {
         )
     }
 
-    fn command_line(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+    fn command_line(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
         Some(format!("write {}", a.path))
     }
 
-    fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+    fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
         let cmd = self.command_line(sandbox, call)?;
         let action = match sandbox.resolve_create(&a.path) {
@@ -64,7 +65,7 @@ impl Tool for WriteFile {
         Some(confirm(action, default_accept))
     }
 
-    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: WriteArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,

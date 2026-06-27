@@ -1,5 +1,5 @@
+use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{Confirmation, Tool, ToolOutcome};
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -63,7 +63,7 @@ impl ToolRegistry {
 
     /// In plan mode, ask the named tool whether the call should be blocked. Returns
     /// `Some(reason)` if the tool refuses the call, `None` if it's allowed.
-    pub fn plan_check(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+    pub fn plan_check(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         self.find(&call.function.name)?.plan_check(sandbox, call)
     }
 
@@ -74,17 +74,17 @@ impl ToolRegistry {
             .find(|tool| tool.name() == name)
     }
 
-    pub fn confirm(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+    pub fn confirm(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         self.find(&call.function.name)?.confirmation(sandbox, call)
     }
 
     /// The bare command label for a call, for on-screen display. `None` for an unknown tool or
     /// unparseable args (the caller falls back to the tool name).
-    pub fn command_line(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+    pub fn command_line(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         self.find(&call.function.name)?.command_line(sandbox, call)
     }
 
-    pub async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    pub async fn execute(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
         match self.find(&call.function.name) {
             Some(tool) => tool.execute(sandbox, call).await,
             None => ToolOutcome::Error(format!("unknown tool '{}'", call.function.name)),
@@ -96,6 +96,7 @@ impl ToolRegistry {
 mod tests {
     use super::*;
     use crate::modules::tools::infrastructure::fs::default_fs_tools;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use crate::modules::tools::infrastructure::support::READ_FILE_MAX_BYTES;
     use crate::shared::kernel::tool_call::FunctionCall;
@@ -113,8 +114,8 @@ mod tests {
         ))
     }
 
-    fn sandbox(dir: &TempDir) -> Sandbox {
-        Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap()
+    fn sandbox(dir: &TempDir) -> FsSandbox {
+        FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap()
     }
 
     fn call(name: &str, args: serde_json::Value) -> ToolCall {

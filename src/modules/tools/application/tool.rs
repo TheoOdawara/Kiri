@@ -1,8 +1,8 @@
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::infrastructure::args::parse;
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// The result of executing a tool. Failures are data the model reads and recovers from — never panics
@@ -84,14 +84,14 @@ pub trait Tool: Send + Sync {
     /// The bare command this call represents, for on-screen display (e.g. `edit src/x.rs`, `cat foo`,
     /// `rg 'q' .`). `None` only when the args do not parse. `confirmation` composes its prose around
     /// this, so the command text lives in one place.
-    fn command_line(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<String>;
+    fn command_line(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String>;
     /// Phrase the confirmation from the parsed args; `None` only when the args do not parse (then
     /// `execute` reports the error). May resolve paths via the sandbox to phrase write/move precisely.
-    fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation>;
+    fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation>;
     /// Run the call against the sandbox. Never panics nor returns `Err` that aborts the turn. Async so
     /// tools that spawn processes (`run_command`) can await them; the fast file tools keep their
     /// blocking `std::fs` bodies — they complete in microseconds and the runtime is unaffected.
-    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome;
+    async fn execute(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome;
     /// Whether the tool only reads, never mutating the filesystem. Read-only tools stay available in
     /// plan mode and run without confirmation while planning. Defaults to `false` (treated as
     /// destructive), so a new tool is gated unless it explicitly opts in.
@@ -115,7 +115,7 @@ pub trait Tool: Send + Sync {
     /// In plan mode, check whether this call should be blocked before execution. Returns
     /// `Some(reason)` if blocked, `None` if allowed. Defaults to `None` — tools that need
     /// plan-mode restrictions (e.g. `run_command` checking a command blacklist) override this.
-    fn plan_check(&self, _sandbox: &Sandbox, _call: &ToolCall) -> Option<String> {
+    fn plan_check(&self, _sandbox: &dyn Sandbox, _call: &ToolCall) -> Option<String> {
         None
     }
     /// Whether this tool must still be confirmed in auto mode — a high-blast-radius / irreversible

@@ -5,12 +5,12 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::command_sandbox::NetworkPolicy;
+use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{RunCommandArgs, parse_args};
 use crate::modules::tools::infrastructure::exec::{self, ExecError};
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// The leading program token of a command (first whitespace-delimited word). The network allow-list is
@@ -127,7 +127,7 @@ impl Tool for RunCommand {
         )
     }
 
-    fn command_line(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+    fn command_line(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         let args: RunCommandArgs = parse_args(call).ok()?;
         if cfg!(windows) {
             Some(format!("$ cmd /C \"{}\"", args.command))
@@ -136,7 +136,7 @@ impl Tool for RunCommand {
         }
     }
 
-    fn confirmation(&self, sandbox: &Sandbox, call: &ToolCall) -> Option<Confirmation> {
+    fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let cmd = self.command_line(sandbox, call)?;
         let action = format!("Executar comando no shell. Aprova executar: {cmd}?");
         // run_command is the single highest-blast-radius tool (a full shell), so it always
@@ -145,7 +145,7 @@ impl Tool for RunCommand {
         Some(confirm(action, false))
     }
 
-    async fn execute(&self, sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: RunCommandArgs = match parse_args(call) {
             Ok(args) => args,
             Err(out) => return out,
@@ -210,7 +210,7 @@ impl Tool for RunCommand {
         true
     }
 
-    fn plan_check(&self, _sandbox: &Sandbox, call: &ToolCall) -> Option<String> {
+    fn plan_check(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         let args: RunCommandArgs = parse_args(call).ok()?;
         for pattern in self.plan_blacklist.iter() {
             if pattern.is_match(&args.command) {
@@ -228,6 +228,7 @@ impl Tool for RunCommand {
 mod tests {
     use super::*;
     use crate::modules::tools::infrastructure::fs::default_fs_tools;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use crate::shared::kernel::tool_call::FunctionCall;
     use regex::Regex;
@@ -237,8 +238,8 @@ mod tests {
 
     use tempfile::TempDir;
 
-    fn sandbox(dir: &TempDir) -> Sandbox {
-        Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap()
+    fn sandbox(dir: &TempDir) -> FsSandbox {
+        FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap()
     }
 
     fn call(name: &str, args: serde_json::Value) -> ToolCall {
@@ -512,9 +513,9 @@ mod tests {
     // End-to-end confinement proof through the real tool path: a Sandbox carrying the macOS Seatbelt
     // adapter must stop run_command from writing outside the workspace, while in-jail work still runs.
     #[cfg(target_os = "macos")]
-    fn confined_sandbox(dir: &TempDir) -> Sandbox {
+    fn confined_sandbox(dir: &TempDir) -> FsSandbox {
         use crate::modules::tools::infrastructure::confine::macos::MacosSeatbelt;
-        Sandbox::with_confinement(
+        FsSandbox::with_confinement(
             dir.path(),
             SensitiveMatcher::empty(),
             Arc::new(MacosSeatbelt),

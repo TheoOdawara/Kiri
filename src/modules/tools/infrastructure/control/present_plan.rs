@@ -1,8 +1,8 @@
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::plan::{PRESENT_PLAN, extract_plan};
+use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{Confirmation, Tool, ToolOutcome, function_schema};
-use crate::modules::tools::infrastructure::sandbox::Sandbox;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// The plan-mode control tool: the model calls it once, with the complete plan as a single markdown
@@ -38,17 +38,17 @@ impl Tool for PresentPlan {
         )
     }
 
-    fn command_line(&self, _sandbox: &Sandbox, _call: &ToolCall) -> Option<String> {
+    fn command_line(&self, _sandbox: &dyn Sandbox, _call: &ToolCall) -> Option<String> {
         Some("apresentar plano".to_string())
     }
 
-    fn confirmation(&self, _sandbox: &Sandbox, _call: &ToolCall) -> Option<Confirmation> {
+    fn confirmation(&self, _sandbox: &dyn Sandbox, _call: &ToolCall) -> Option<Confirmation> {
         // Never confirmed as an ordinary tool: the agent loop intercepts the call and routes it to the
         // plan-approval box instead of the per-call confirmation flow.
         None
     }
 
-    async fn execute(&self, _sandbox: &Sandbox, call: &ToolCall) -> ToolOutcome {
+    async fn execute(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
         // Unreachable on the normal path — the agent loop handles `present_plan` before dispatching to
         // the registry. Kept total (echoes the plan) so a stray call can never panic or mutate state.
         ToolOutcome::Ok(extract_plan(call).unwrap_or_default())
