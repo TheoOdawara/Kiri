@@ -53,13 +53,12 @@ impl Tool for ListDir {
             Ok(args) => args,
             Err(out) => return out,
         };
+        // `resolve_existing` refuses a path inside a credential directory (`.ssh`/…), so listing one is
+        // rejected there — no separate secret-dir check needed here.
         let dir = match sandbox.resolve_existing(&args.path) {
             Ok(dir) => dir,
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
-        if let Some(secret) = sandbox.secret_dir_component(&dir) {
-            return ToolOutcome::Error(format!("refusing to list the secret directory '{secret}'"));
-        }
 
         // `ls -1A -p` lists one entry per line, excludes `.`/`..`, and marks directories with `/`.
         // `QUOTING_STYLE=literal` stops GNU `ls` from quoting unusual names; the lines are re-sorted in

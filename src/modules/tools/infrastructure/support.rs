@@ -7,6 +7,7 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::modules::tools::application::tool::ToolOutcome;
+use crate::modules::tools::infrastructure::exec;
 use crate::modules::tools::infrastructure::sandbox::{CreateResolution, Sandbox};
 
 pub const READ_FILE_MAX_BYTES: usize = 64 * 1024;
@@ -104,12 +105,22 @@ pub async fn stat_guard(
     label: &str,
     reject: impl FnOnce(&Metadata) -> Option<String>,
 ) -> Result<(), ToolOutcome> {
-    match tokio::fs::metadata(path).await {
-        Ok(metadata) => match reject(&metadata) {
-            Some(error) => Err(ToolOutcome::Error(error)),
-            None => Ok(()),
-        },
-        Err(error) => Err(ToolOutcome::Error(format!("cannot stat {label}: {error}"))),
+    // Bound the stat: on a wedged/stale network mount `metadata` can hang forever, and the contract
+    // requires every blocking await to fail fast rather than stall the runtime.
+    let metadata = match tokio::time::timeout(exec::DEFAULT_TIMEOUT, tokio::fs::metadata(path))
+        .await
+    {
+        Ok(Ok(metadata)) => metadata,
+        Ok(Err(error)) => return Err(ToolOutcome::Error(format!("cannot stat {label}: {error}"))),
+        Err(_) => {
+            return Err(ToolOutcome::Error(format!(
+                "cannot stat {label}: timed out"
+            )));
+        }
+    };
+    match reject(&metadata) {
+        Some(error) => Err(ToolOutcome::Error(error)),
+        None => Ok(()),
     }
 }
 

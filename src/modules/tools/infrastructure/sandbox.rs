@@ -10,10 +10,12 @@ use crate::modules::tools::application::command_sandbox::{
 use crate::modules::tools::infrastructure::confine::noop::NoConfinement;
 use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
 
-/// Directory names that hold credentials/keys. The recursive read-only tools (`search`, `list_dir`)
-/// refuse to operate *inside* one of these, since the file-name sensitive guard matches files, not
-/// directories — without this, `search` could recurse into `~/.ssh` and print `id_rsa` line by line.
-const SECRET_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker"];
+/// Directory names that hold credentials/keys. Every path resolution refuses to operate *inside* one
+/// of these, since the file-name sensitive guard matches files, not directories — without this,
+/// `search` could recurse into `~/.ssh` and print `id_rsa` line by line, and `read_file` could read
+/// `~/.aws/config` (a non-sensitive *name* in a secret *dir*). Exposed so `search`/`list_dir` can also
+/// exclude these directories from their own recursion. Compared case-insensitively (macOS APFS).
+pub(crate) const SECRET_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker"];
 
 /// Confines every file operation to a canonicalized root directory, and refuses CRUD on files
 /// whose name matches a sensitive pattern (secrets, keys, credentials). All file tools resolve
@@ -126,7 +128,10 @@ impl Sandbox {
                 return None;
             };
             let name = name.to_str()?;
-            SECRET_DIRS.iter().copied().find(|dir| *dir == name)
+            SECRET_DIRS
+                .iter()
+                .copied()
+                .find(|dir| dir.eq_ignore_ascii_case(name))
         })
     }
 
@@ -188,6 +193,7 @@ impl Sandbox {
             let real = std::fs::canonicalize(&expanded)
                 .with_context(|| format!("path not found: {rel}"))?;
             self.assert_not_sensitive(&real, rel)?;
+            self.assert_not_in_secret_dir(&real, rel)?;
             return Ok(real);
         }
         let candidate = self.join_checked(rel)?;
@@ -195,6 +201,7 @@ impl Sandbox {
             std::fs::canonicalize(&candidate).with_context(|| format!("path not found: {rel}"))?;
         self.assert_within(&real)?;
         self.assert_not_sensitive(&real, rel)?;
+        self.assert_not_in_secret_dir(&real, rel)?;
         Ok(real)
     }
 
@@ -251,6 +258,7 @@ impl Sandbox {
         }
 
         self.assert_not_sensitive(&real_target, rel)?;
+        self.assert_not_in_secret_dir(&real_target, rel)?;
         Ok(CreateResolution {
             target: real_target,
             missing_dirs,
@@ -292,6 +300,19 @@ impl Sandbox {
             && let Some(glob) = self.sensitive.matches(name)
         {
             bail!("path matches sensitive file pattern '{glob}': {display}");
+        }
+        Ok(())
+    }
+
+    /// Refuse any resolved path that lies inside a credential directory (`.ssh`/`.aws`/…) — the
+    /// single chokepoint that covers the single-path tools (read/write/edit/delete/move), which the
+    /// file-name guard alone misses for non-sensitive names like `~/.aws/config`. For an in-root path
+    /// only the portion beyond the workspace root is inspected, so a workspace that itself sits under
+    /// such a directory is not self-blocked; an out-of-root (absolute/`~`) target is inspected in full.
+    fn assert_not_in_secret_dir(&self, real: &Path, display: &str) -> Result<()> {
+        let scoped = real.strip_prefix(&self.root).unwrap_or(real);
+        if let Some(name) = self.secret_dir_component(scoped) {
+            bail!("path is inside the secret directory '{name}': {display}");
         }
         Ok(())
     }
@@ -337,6 +358,14 @@ mod tests {
 
     fn sandbox(dir: &TempDir) -> Sandbox {
         Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap()
+    }
+
+    fn guarded_sandbox(dir: &TempDir) -> Sandbox {
+        Sandbox::new(
+            dir.path(),
+            SensitiveMatcher::new(&[".env", "id_rsa", "*.pem"]).unwrap(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -419,6 +448,74 @@ mod tests {
             sb.secret_dir_component(Path::new("/home/u/project/src/main.rs")),
             None
         );
+    }
+
+    #[test]
+    fn secret_dir_component_is_case_insensitive() {
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        assert_eq!(
+            sb.secret_dir_component(Path::new("/home/u/.SSH/id_rsa")),
+            Some(".ssh")
+        );
+        assert_eq!(
+            sb.secret_dir_component(Path::new("/home/u/.Docker/config.json")),
+            Some(".docker")
+        );
+    }
+
+    // The sensitive-file guard is the secrets chokepoint, yet every other test builds the sandbox with
+    // an empty matcher. These lock that resolve_existing/resolve_create actually refuse a sensitive
+    // name through a real matcher (the highest-value missing coverage the audit flagged).
+    #[test]
+    fn resolve_existing_refuses_a_sensitive_file() {
+        let dir = TempDir::new().unwrap();
+        let sb = guarded_sandbox(&dir);
+        fs::write(dir.path().join(".env"), b"SECRET=1").unwrap();
+        fs::write(dir.path().join("id_rsa"), b"key").unwrap();
+        fs::write(dir.path().join("server.pem"), b"cert").unwrap();
+        assert!(sb.resolve_existing(".env").is_err());
+        assert!(sb.resolve_existing("id_rsa").is_err());
+        assert!(sb.resolve_existing("server.pem").is_err());
+    }
+
+    #[test]
+    fn resolve_create_refuses_a_sensitive_file() {
+        let dir = TempDir::new().unwrap();
+        let sb = guarded_sandbox(&dir);
+        assert!(sb.resolve_create(".env").is_err());
+        assert!(sb.resolve_create("sub/id_rsa").is_err());
+    }
+
+    #[test]
+    fn resolve_create_refuses_an_out_of_root_sensitive_file() {
+        let outside = TempDir::new().unwrap();
+        let sb = guarded_sandbox(&TempDir::new().unwrap());
+        let leak = outside.path().join("leak.pem");
+        assert!(sb.resolve_create(leak.to_str().unwrap()).is_err());
+    }
+
+    // The single-path tools (read/write/edit/delete/move) resolve through these methods, so refusing a
+    // path inside a credential directory here closes the gap the file-name guard misses (e.g. a
+    // non-sensitive name like `config` living in `.aws`/`.ssh`/`.docker`).
+    #[test]
+    fn resolve_refuses_paths_inside_a_credential_dir() {
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        fs::create_dir(dir.path().join(".ssh")).unwrap();
+        fs::write(dir.path().join(".ssh").join("config"), b"x").unwrap();
+        assert!(sb.resolve_existing(".ssh/config").is_err());
+        assert!(sb.resolve_create(".ssh/newkey").is_err());
+    }
+
+    #[test]
+    fn resolve_refuses_out_of_root_credential_dir() {
+        let outside = TempDir::new().unwrap();
+        fs::create_dir(outside.path().join(".aws")).unwrap();
+        fs::write(outside.path().join(".aws").join("region"), b"k").unwrap();
+        let sb = sandbox(&TempDir::new().unwrap());
+        let inside_creds = outside.path().join(".aws").join("region");
+        assert!(sb.resolve_existing(inside_creds.to_str().unwrap()).is_err());
     }
 
     #[test]

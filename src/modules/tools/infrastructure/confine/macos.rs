@@ -101,7 +101,11 @@ fn build_profile(policy: &SandboxPolicy) -> String {
     }
 
     // Reads: deny credential directories under home (the base `allow default` would otherwise permit
-    // them), so a confined command cannot read keys to exfiltrate.
+    // them), so a confined command cannot read keys to exfiltrate. When HOME is unset there is no
+    // per-user home whose credential dirs we could resolve, so there is nothing home-relative to deny —
+    // the `~/.ssh`-style rules simply have no target. This skip is deliberate, not silent: HOME is
+    // effectively always set on the macOS v1 target, so the empty case is the headless/CI edge and the
+    // base posture stands.
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         for dir in SECRET_HOME_DIRS {

@@ -83,9 +83,11 @@ impl SensitiveMatcher {
     }
 }
 
-/// Convert a simple glob (`*`, `?`, literal) to an anchored regex string (`^…$`).
+/// Convert a simple glob (`*`, `?`, literal) to an anchored, case-insensitive regex string
+/// (`(?i)^…$`). Case-insensitive because the macOS v1 target's filesystem is case-insensitive — a
+/// `.ENV` / `ID_RSA` resolves to the same file as `.env` / `id_rsa` and must be guarded the same.
 fn glob_to_regex(glob: &str) -> String {
-    let mut regex = String::from("^");
+    let mut regex = String::from("(?i)^");
     for ch in glob.chars() {
         match ch {
             '*' => regex.push_str(".*"),
@@ -163,6 +165,16 @@ mod tests {
             m.matches("aws-credentials.json"),
             Some("*-credentials.json")
         );
+    }
+
+    #[test]
+    fn matches_are_case_insensitive() {
+        // macOS APFS is case-insensitive: an uppercase variant resolves to the same file and must be
+        // guarded the same, so a write to `.ENV` cannot slip past the guard and clobber `.env`.
+        let m = SensitiveMatcher::new(DEFAULT_SENSITIVE_PATTERNS).unwrap();
+        assert_eq!(m.matches(".ENV"), Some(".env"));
+        assert_eq!(m.matches("ID_RSA"), Some("id_rsa"));
+        assert_eq!(m.matches("Server.PEM"), Some("*.pem"));
     }
 
     #[test]

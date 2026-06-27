@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 #[cfg(windows)]
 use std::fs;
 
@@ -13,6 +13,8 @@ use crate::modules::tools::application::tool::{
 use crate::modules::tools::infrastructure::args::{SearchArgs, parse, parse_args};
 #[cfg(unix)]
 use crate::modules::tools::infrastructure::exec;
+#[cfg(any(unix, windows))]
+use crate::modules::tools::infrastructure::sandbox::SECRET_DIRS;
 use crate::modules::tools::infrastructure::sandbox::{Sandbox, default_accept_for};
 #[cfg(unix)]
 use crate::modules::tools::infrastructure::support::SEARCH_MAX_LINE_CHARS;
@@ -24,7 +26,9 @@ use crate::shared::kernel::tool_call::ToolCall;
 pub struct Search;
 
 /// Reformat one `grep -rIFn` line (`./path:line:content`) to the native shape `path:line: content`:
-/// drop the `./` grep prepends, and bound the content to the per-line char cap.
+/// drop the `./` grep prepends, and bound the content to the per-line char cap. (Parsing splits on the
+/// first two `:` — `-Z`/`--null` would disambiguate a `:` in a filename, but its meaning differs across
+/// grep implementations on PATH, e.g. ugrep treats `-Z` as fuzzy-match, so it is not relied upon.)
 #[cfg(unix)]
 fn format_grep_line(line: &str) -> String {
     let mut parts = line.splitn(3, ':');
@@ -93,30 +97,32 @@ impl Tool for Search {
         if args.query.is_empty() {
             return ToolOutcome::Error("query must not be empty".to_string());
         }
+        // `resolve_existing` already refuses a start path inside a credential directory (`.ssh`/…), so
+        // a search rooted at a secret dir is rejected here; the `--exclude-dir` flags below stop the
+        // recursion from descending into a secret dir nested *under* an allowed start.
         let start = match sandbox.resolve_existing(&args.path) {
             Ok(start) => start,
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
-        if let Some(secret) = sandbox.secret_dir_component(&start) {
-            return ToolOutcome::Error(format!(
-                "refusing to search inside the secret directory '{secret}'"
-            ));
-        }
 
         // `grep -rIFn` does the recursive scan: `-r` recurse (without following symlinked dirs), `-I`
-        // skip binary files, `-F` fixed-string (literal, case-sensitive) match, `-n` line numbers. The
-        // query is its own argv element, so it is never shell-interpreted. The command runs *in* the
-        // resolved start directory and searches `.`, so the paths grep prints are relative to it.
+        // skip binary files, `-F` fixed-string (literal, case-sensitive) match, `-n` line numbers.
+        // `--exclude-dir` (supported by GNU/BSD/ugrep alike) keeps the scan out of credential
+        // directories whose files (e.g. `.aws/config`) the file-name guard misses. The query is its own
+        // argv element, so it is never shell-interpreted. The command runs *in* the resolved start
+        // directory and searches `.`, so the paths grep prints are relative to it.
         #[cfg(unix)]
         {
+            let mut argv: Vec<OsString> = vec![OsString::from("grep"), OsString::from("-rIFn")];
+            for dir in SECRET_DIRS {
+                argv.push(OsString::from(format!("--exclude-dir={dir}")));
+            }
+            argv.push(OsString::from("-e"));
+            argv.push(OsString::from(args.query.as_str()));
+            argv.push(OsString::from("."));
+            let argv: Vec<&OsStr> = argv.iter().map(OsString::as_os_str).collect();
             let result = match exec::run_argv(
-                &[
-                    OsStr::new("grep"),
-                    OsStr::new("-rIFn"),
-                    OsStr::new("-e"),
-                    OsStr::new(args.query.as_str()),
-                    OsStr::new("."),
-                ],
+                &argv,
                 Some(&start),
                 None,
                 &[],
@@ -192,6 +198,13 @@ impl Tool for Search {
                         continue;
                     }
                     if file_type.is_dir() {
+                        // Never descend into a credential directory (matches the Unix `--exclude-dir`),
+                        // so files there with non-sensitive names (e.g. `.aws\config`) are not scanned.
+                        if entry.file_name().to_str().is_some_and(|name| {
+                            SECRET_DIRS.iter().any(|dir| dir.eq_ignore_ascii_case(name))
+                        }) {
+                            continue;
+                        }
                         stack.push(path);
                     } else if file_type.is_file() {
                         if entry
@@ -265,6 +278,43 @@ mod tests {
         let content = shown.rsplit_once(": ").unwrap().1;
         assert_eq!(content.chars().count(), SEARCH_MAX_LINE_CHARS);
         assert!(content.chars().all(|c| c == 'é'));
+    }
+
+    #[tokio::test]
+    async fn search_does_not_descend_into_credential_dirs() {
+        // Files with non-sensitive *names* (`config`, `config.json`) inside a credential *dir* must not
+        // be reached by the recursion, even though the file-name guard would not catch them.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.txt"), b"TOKEN in code").unwrap();
+        fs::create_dir(dir.path().join(".aws")).unwrap();
+        fs::write(dir.path().join(".aws").join("config"), b"aws_secret=TOKEN").unwrap();
+        fs::create_dir(dir.path().join(".docker")).unwrap();
+        fs::write(
+            dir.path().join(".docker").join("config.json"),
+            b"{\"auth\":\"TOKEN\"}",
+        )
+        .unwrap();
+        let sb = Sandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+
+        let outcome = Search
+            .execute(&sb, &call(serde_json::json!({"query": "TOKEN"})))
+            .await;
+        match outcome {
+            ToolOutcome::Ok(text) => {
+                assert!(
+                    text.contains("a.txt"),
+                    "normal match must be present: {text}"
+                );
+                assert!(
+                    !text.contains(".aws")
+                        && !text.contains(".docker")
+                        && !text.contains("aws_secret")
+                        && !text.contains("auth"),
+                    "a credential dir's files must not be searched: {text}"
+                );
+            }
+            other => panic!("expected matches, got {other:?}"),
+        }
     }
 
     #[tokio::test]
