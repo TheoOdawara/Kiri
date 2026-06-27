@@ -129,7 +129,7 @@ async fn semantic_pick(
 #[async_trait::async_trait]
 impl<P, S> MemoryPort for MemoryPortImpl<P, S>
 where
-    P: crate::modules::memory::application::project_store::ProjectStore + Send + Sync,
+    P: crate::modules::memory::application::memory_store::MemoryStore + Send + Sync,
     S: crate::modules::memory::application::shared_store::SharedStore + Send + Sync,
 {
     async fn recall_project(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
@@ -220,148 +220,14 @@ where
 mod tests {
     use super::*;
     use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
+    use crate::modules::memory::infrastructure::test_support::InMemoryStore;
     use crate::shared::kernel::error::AgentError;
     use std::collections::HashSet;
-    use std::sync::Mutex;
-
-    struct MockProjectStore {
-        entries: Mutex<Vec<MemoryEntry>>,
-        available: bool,
-    }
-
-    impl MockProjectStore {
-        fn new(available: bool) -> Self {
-            Self {
-                entries: Mutex::new(Vec::new()),
-                available,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::modules::memory::application::project_store::ProjectStore for MockProjectStore {
-        async fn save(&self, entry: MemoryEntry) -> AgentResult<()> {
-            self.entries.lock().unwrap().push(entry);
-            Ok(())
-        }
-
-        async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
-            let entries = self.entries.lock().unwrap();
-            Ok(entries
-                .iter()
-                .filter(|e| e.matches_query(query))
-                .take(limit)
-                .cloned()
-                .collect())
-        }
-
-        async fn list_by_kind(
-            &self,
-            kind: MemoryKind,
-            limit: usize,
-        ) -> AgentResult<Vec<MemoryEntry>> {
-            let entries = self.entries.lock().unwrap();
-            Ok(entries
-                .iter()
-                .filter(|e| e.kind == kind)
-                .take(limit)
-                .cloned()
-                .collect())
-        }
-
-        async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
-            let entries = self.entries.lock().unwrap();
-            Ok(entries
-                .iter()
-                .filter(|e| e.tags.contains(tag))
-                .take(limit)
-                .cloned()
-                .collect())
-        }
-
-        fn is_available(&self) -> bool {
-            self.available
-        }
-    }
-
-    struct MockSharedStore {
-        entries: Mutex<Vec<MemoryEntry>>,
-        available: bool,
-    }
-
-    impl MockSharedStore {
-        fn new(available: bool) -> Self {
-            Self {
-                entries: Mutex::new(Vec::new()),
-                available,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::modules::memory::application::shared_store::SharedStore for MockSharedStore {
-        async fn save(&self, entry: MemoryEntry) -> AgentResult<()> {
-            self.entries.lock().unwrap().push(entry);
-            Ok(())
-        }
-
-        async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
-            let entries = self.entries.lock().unwrap();
-            Ok(entries
-                .iter()
-                .filter(|e| e.matches_query(query))
-                .take(limit)
-                .cloned()
-                .collect())
-        }
-
-        async fn list_by_kind(
-            &self,
-            kind: MemoryKind,
-            limit: usize,
-        ) -> AgentResult<Vec<MemoryEntry>> {
-            let entries = self.entries.lock().unwrap();
-            Ok(entries
-                .iter()
-                .filter(|e| e.kind == kind)
-                .take(limit)
-                .cloned()
-                .collect())
-        }
-
-        async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
-            let entries = self.entries.lock().unwrap();
-            Ok(entries
-                .iter()
-                .filter(|e| e.tags.contains(tag))
-                .take(limit)
-                .cloned()
-                .collect())
-        }
-
-        async fn list_by_project(
-            &self,
-            project_id: &str,
-            limit: usize,
-        ) -> AgentResult<Vec<MemoryEntry>> {
-            let entries = self.entries.lock().unwrap();
-            Ok(entries
-                .iter()
-                .filter(|e| e.project_id.as_deref() == Some(project_id))
-                .take(limit)
-                .cloned()
-                .collect())
-        }
-
-        fn is_available(&self) -> bool {
-            self.available
-        }
-    }
 
     #[tokio::test]
     async fn memory_port_delegates_to_stores() {
-        let project = MockProjectStore::new(true);
-        let shared = MockSharedStore::new(true);
+        let project = InMemoryStore::new(true);
+        let shared = InMemoryStore::new(true);
         let port = MemoryPortImpl::new(project, shared);
 
         let entry = MemoryEntry::new(
@@ -382,8 +248,8 @@ mod tests {
 
     #[tokio::test]
     async fn memory_port_reports_availability() {
-        let project = MockProjectStore::new(false);
-        let shared = MockSharedStore::new(true);
+        let project = InMemoryStore::new(false);
+        let shared = InMemoryStore::new(true);
         let port = MemoryPortImpl::new(project, shared);
 
         assert!(!port.project_memory_available());
@@ -395,9 +261,9 @@ mod tests {
     /// content shares its keyword first.
     mod semantic {
         use super::*;
+        use crate::modules::memory::application::memory_store::MemoryStore;
         use crate::modules::memory::application::project_memory::ProjectMemory;
         use crate::modules::memory::application::shared_memory::SharedMemory;
-        use crate::modules::memory::application::shared_store::SharedStore;
         use crate::modules::memory::infrastructure::file_project_memory::FileProjectMemory;
         use crate::modules::memory::infrastructure::file_project_store::FileProjectStore;
         use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;

@@ -1,9 +1,12 @@
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::shared::kernel::error::AgentResult;
 
-/// Use cases for project memory. Implemented by `FileProjectStore` (adapter over `FileProjectMemory`).
+/// Base use-case port for a memory store (project or shared). Implemented by `FileProjectStore` and
+/// `SqliteSharedStore`; `SharedStore` extends it with the cross-project `list_by_project`. The embedding
+/// methods carry a default so a store without embedding support — and the test doubles — need not
+/// implement them.
 #[async_trait::async_trait]
-pub trait ProjectStore: Send + Sync {
+pub trait MemoryStore: Send + Sync {
     /// Save an entry (create or update).
     async fn save(&self, entry: MemoryEntry) -> AgentResult<()>;
 
@@ -49,72 +52,13 @@ pub trait ProjectStore: Send + Sync {
 mod tests {
     use super::*;
     use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
+    use crate::modules::memory::infrastructure::test_support::InMemoryStore;
     use std::collections::HashSet;
-    use std::sync::{Arc, Mutex};
-
-    struct InMemoryProjectStore {
-        entries: Mutex<Vec<MemoryEntry>>,
-        available: bool,
-    }
-
-    impl InMemoryProjectStore {
-        fn new(available: bool) -> Self {
-            Self {
-                entries: Mutex::new(Vec::new()),
-                available,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ProjectStore for InMemoryProjectStore {
-        async fn save(&self, entry: MemoryEntry) -> AgentResult<()> {
-            self.entries.lock().unwrap().push(entry);
-            Ok(())
-        }
-
-        async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
-            let entries = self.entries.lock().unwrap();
-            Ok(entries
-                .iter()
-                .filter(|e| e.matches_query(query))
-                .take(limit)
-                .cloned()
-                .collect())
-        }
-
-        async fn list_by_kind(
-            &self,
-            kind: MemoryKind,
-            limit: usize,
-        ) -> AgentResult<Vec<MemoryEntry>> {
-            let entries = self.entries.lock().unwrap();
-            Ok(entries
-                .iter()
-                .filter(|e| e.kind == kind)
-                .take(limit)
-                .cloned()
-                .collect())
-        }
-
-        async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
-            let entries = self.entries.lock().unwrap();
-            Ok(entries
-                .iter()
-                .filter(|e| e.tags.contains(tag))
-                .take(limit)
-                .cloned()
-                .collect())
-        }
-
-        fn is_available(&self) -> bool {
-            self.available
-        }
-    }
+    use std::sync::Arc;
 
     #[tokio::test]
-    async fn project_store_save_and_search() {
-        let store = Arc::new(InMemoryProjectStore::new(true));
+    async fn memory_store_save_and_search() {
+        let store = Arc::new(InMemoryStore::new(true));
         let entry = MemoryEntry::new(
             MemoryKind::Pattern,
             "Use Result<T, E> for fallible operations".into(),
@@ -132,8 +76,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_store_list_by_kind() {
-        let store = Arc::new(InMemoryProjectStore::new(true));
+    async fn memory_store_list_by_kind() {
+        let store = Arc::new(InMemoryStore::new(true));
         store
             .save(MemoryEntry::new(
                 MemoryKind::Pattern,
@@ -159,8 +103,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_store_list_by_tag() {
-        let store = Arc::new(InMemoryProjectStore::new(true));
+    async fn memory_store_list_by_tag() {
+        let store = Arc::new(InMemoryStore::new(true));
         store
             .save(MemoryEntry::new(
                 MemoryKind::Pattern,
@@ -185,8 +129,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_store_availability() {
-        let store = Arc::new(InMemoryProjectStore::new(false));
+    async fn memory_store_availability() {
+        let store = Arc::new(InMemoryStore::new(false));
         assert!(!store.is_available());
     }
 }

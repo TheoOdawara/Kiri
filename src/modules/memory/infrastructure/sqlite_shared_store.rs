@@ -1,11 +1,13 @@
+use crate::modules::memory::application::memory_store::MemoryStore;
 use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::application::shared_store::SharedStore;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
 use crate::shared::kernel::error::AgentResult;
 
-/// Application-level adapter exposing shared memory as the `SharedStore` use-case surface, delegating
-/// to the SQLite-backed `SqliteSharedMemory`. `available` records whether `init` succeeded.
+/// Application-level adapter exposing shared memory as the `MemoryStore` use-case surface plus the
+/// `SharedStore` extension, delegating to the SQLite-backed `SqliteSharedMemory`. `available` records
+/// whether `init` succeeded.
 pub struct SqliteSharedStore {
     inner: SqliteSharedMemory,
     available: bool,
@@ -18,7 +20,7 @@ impl SqliteSharedStore {
 }
 
 #[async_trait::async_trait]
-impl SharedStore for SqliteSharedStore {
+impl MemoryStore for SqliteSharedStore {
     async fn save(&self, entry: MemoryEntry) -> AgentResult<()> {
         self.inner.save(&entry).await
     }
@@ -35,14 +37,6 @@ impl SharedStore for SqliteSharedStore {
         self.inner.list_by_tag(tag, limit).await
     }
 
-    async fn list_by_project(
-        &self,
-        project_id: &str,
-        limit: usize,
-    ) -> AgentResult<Vec<MemoryEntry>> {
-        self.inner.list_by_project(project_id, limit).await
-    }
-
     async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> AgentResult<()> {
         self.inner.save_embedding(entry_id, model, vector).await
     }
@@ -57,6 +51,17 @@ impl SharedStore for SqliteSharedStore {
 
     fn is_available(&self) -> bool {
         self.available
+    }
+}
+
+#[async_trait::async_trait]
+impl SharedStore for SqliteSharedStore {
+    async fn list_by_project(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<MemoryEntry>> {
+        self.inner.list_by_project(project_id, limit).await
     }
 }
 

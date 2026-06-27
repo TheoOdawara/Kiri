@@ -150,14 +150,8 @@ fn render(heading: &str, entries: &[MemoryEntry]) -> String {
 mod tests {
     use super::*;
     use crate::modules::memory::domain::entry::MemoryKind;
-    use crate::modules::memory::infrastructure::test_support::{call, temp_port};
-    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
-    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    use crate::modules::memory::infrastructure::test_support::{call, sandbox, temp_port};
     use tempfile::TempDir;
-
-    fn sandbox() -> FsSandbox {
-        FsSandbox::new(std::path::PathBuf::from("."), SensitiveMatcher::empty()).unwrap()
-    }
 
     #[tokio::test]
     async fn recalls_after_remember() {

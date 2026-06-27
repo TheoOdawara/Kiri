@@ -246,22 +246,6 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn delete(&self, id: &str) -> AgentResult<bool> {
-        let conn = self.conn.clone();
-        let id = id.to_string();
-        run_blocking(
-            move || -> AgentResult<bool> {
-                let conn = lock(&conn, AgentError::memory)?;
-                let affected = conn
-                    .execute("DELETE FROM entries WHERE id = ?1", params![id])
-                    .map_err(AgentError::memory)?;
-                Ok(affected > 0)
-            },
-            AgentError::memory,
-        )
-        .await
-    }
-
     async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let like = format!("%{}%", query.to_lowercase());
         query_entries(
@@ -333,26 +317,6 @@ impl SharedMemory for SqliteSharedMemory {
         )
         .await
     }
-
-    async fn count_by_project(&self, project_id: &str) -> AgentResult<usize> {
-        let conn = self.conn.clone();
-        let project_id = project_id.to_string();
-        run_blocking(
-            move || -> AgentResult<usize> {
-                let conn = lock(&conn, AgentError::memory)?;
-                let count: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM entries WHERE project_id = ?1",
-                        params![project_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(AgentError::memory)?;
-                Ok(count as usize)
-            },
-            AgentError::memory,
-        )
-        .await
-    }
 }
 
 #[cfg(test)]
@@ -377,7 +341,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_load_and_delete() {
+    async fn save_and_load() {
         let dir = TempDir::new().unwrap();
         let memory = memory(&dir).await;
 
@@ -393,9 +357,6 @@ mod tests {
         assert_eq!(loaded.id, e.id);
         assert_eq!(loaded.kind, MemoryKind::Heuristic);
         assert!(loaded.tags.contains("rust"));
-
-        assert!(memory.delete(&e.id).await.unwrap());
-        assert!(memory.load(&e.id).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -435,7 +396,6 @@ mod tests {
         assert_eq!(memory.list_by_tag("types", 10).await.unwrap().len(), 1);
         assert_eq!(memory.list_by_project("proj-a", 10).await.unwrap().len(), 1);
         assert_eq!(memory.count().await.unwrap(), 2);
-        assert_eq!(memory.count_by_project("proj-a").await.unwrap(), 1);
     }
 
     #[tokio::test]

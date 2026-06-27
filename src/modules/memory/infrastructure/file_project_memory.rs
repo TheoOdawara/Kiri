@@ -295,25 +295,6 @@ impl ProjectMemory for FileProjectMemory {
         Ok(Some(entry))
     }
 
-    async fn delete(&self, id: &str) -> AgentResult<bool> {
-        let rel = {
-            let mut index = self.index.write().await;
-            let Some(index_entry) = index.entries.remove(id) else {
-                return Ok(false);
-            };
-            index_entry.path.clone()
-        };
-
-        // Only touch the filesystem for a path that stays inside the memory root; an escaping or symlinked
-        // index path is dropped from the in-memory index without becoming an out-of-root delete primitive.
-        // The index is still persisted and the entry reported gone.
-        if let Some(path) = resolve_contained(&self.root, &rel).await {
-            fs::remove_file(&path).await?;
-        }
-        self.save_index().await?;
-        Ok(true)
-    }
-
     async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         // Snapshot the candidate paths under the lock, then release it before any file I/O so a long
         // read can never block a concurrent writer (matches `list`/`list_by_kind`).
@@ -400,11 +381,6 @@ impl ProjectMemory for FileProjectMemory {
             }
         }
         Ok(results)
-    }
-
-    async fn count(&self) -> AgentResult<usize> {
-        let index = self.index.read().await;
-        Ok(index.entries.len())
     }
 }
 
@@ -524,23 +500,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_project_memory_delete() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().join(".kiri").join("memory");
-        let memory = FileProjectMemory::new(root.clone());
-        memory.init().await.unwrap();
-
-        let entry = MemoryEntry::new(MemoryKind::Fact, "to delete".into(), HashSet::new(), None);
-        memory.save(&entry).await.unwrap();
-
-        let deleted = memory.delete(&entry.id).await.unwrap();
-        assert!(deleted);
-
-        let loaded = memory.load(&entry.id).await.unwrap();
-        assert!(loaded.is_none());
-    }
-
-    #[tokio::test]
     async fn file_project_memory_persists_index() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join(".kiri").join("memory");
@@ -562,8 +521,8 @@ mod tests {
         {
             let memory = FileProjectMemory::new(root.clone());
             memory.init().await.unwrap();
-            let count = memory.count().await.unwrap();
-            assert_eq!(count, 1);
+            let entries = memory.list(0, 100).await.unwrap();
+            assert_eq!(entries.len(), 1);
         }
     }
 

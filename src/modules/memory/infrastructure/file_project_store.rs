@@ -1,10 +1,10 @@
+use crate::modules::memory::application::memory_store::MemoryStore;
 use crate::modules::memory::application::project_memory::ProjectMemory;
-use crate::modules::memory::application::project_store::ProjectStore;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::modules::memory::infrastructure::file_project_memory::FileProjectMemory;
 use crate::shared::kernel::error::AgentResult;
 
-/// Application-level adapter exposing project memory as the reduced `ProjectStore` use-case surface,
+/// Application-level adapter exposing project memory as the reduced `MemoryStore` use-case surface,
 /// delegating to the file-backed `FileProjectMemory`. `available` records whether `init` succeeded, so
 /// a storage failure degrades to an inert store (the harness keeps running) instead of aborting.
 pub struct FileProjectStore {
@@ -19,7 +19,7 @@ impl FileProjectStore {
 }
 
 #[async_trait::async_trait]
-impl ProjectStore for FileProjectStore {
+impl MemoryStore for FileProjectStore {
     async fn save(&self, entry: MemoryEntry) -> AgentResult<()> {
         self.inner.save(&entry).await
     }
