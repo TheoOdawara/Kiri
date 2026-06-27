@@ -26,7 +26,23 @@ pub(crate) struct ChatTemplateKwargs {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChatStreamChunk {
+    #[serde(default)]
     pub choices: Vec<StreamChoice>,
+    /// An OpenAI-compatible provider can deliver an error in-band on an HTTP 200 stream
+    /// (`data: {"error": {...}}`). Captured on the chunk so a single parse handles both the normal and
+    /// error shapes — the streaming hot path no longer parses every token-delta twice.
+    #[serde(default)]
+    pub error: Option<StreamError>,
+}
+
+/// An in-band stream error. `code` is kept as a raw `Value` because providers send it as either a
+/// string or a number.
+#[derive(Debug, Deserialize)]
+pub(crate) struct StreamError {
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub code: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]

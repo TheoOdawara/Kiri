@@ -10,6 +10,7 @@ use crate::modules::provider::application::completion_provider::{
 };
 use crate::modules::provider::infrastructure::http_error::error_from_status;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::provider::Secret;
 
 /// The Messages API version pin (the only value Anthropic currently accepts).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -38,19 +39,17 @@ const MAX_OUTPUT_TOKENS: u32 = 16_000;
 pub struct AnthropicProvider {
     client: reqwest::Client,
     base_url: String,
-    api_key: String,
+    /// Held as a `Secret` (zeroized on drop, redacted in Debug) rather than a plain `String`, exposed
+    /// only at the `x-api-key` header call site.
+    api_key: Secret,
 }
 
 impl AnthropicProvider {
-    pub fn new(
-        client: reqwest::Client,
-        base_url: impl Into<String>,
-        api_key: impl Into<String>,
-    ) -> Self {
+    pub fn new(client: reqwest::Client, base_url: impl Into<String>, api_key: Secret) -> Self {
         Self {
             client,
             base_url: base_url.into(),
-            api_key: api_key.into(),
+            api_key,
         }
     }
 
@@ -82,7 +81,7 @@ impl CompletionProvider for AnthropicProvider {
         let response = self
             .client
             .post(&url)
-            .header("x-api-key", self.api_key.as_str())
+            .header("x-api-key", self.api_key.expose())
             .header("anthropic-version", ANTHROPIC_VERSION)
             .json(&body)
             .send()
@@ -123,7 +122,7 @@ mod tests {
         AnthropicProvider::new(
             reqwest::Client::new(),
             "https://api.anthropic.com",
-            "sk-ant-test",
+            Secret::new("sk-ant-test"),
         )
     }
 
@@ -203,8 +202,11 @@ mod tests {
             }
         });
 
-        let provider =
-            AnthropicProvider::new(reqwest::Client::new(), format!("http://{addr}"), "k");
+        let provider = AnthropicProvider::new(
+            reqwest::Client::new(),
+            format!("http://{addr}"),
+            Secret::new("k"),
+        );
         let messages = vec![Message::user("hi")];
         let request = TurnRequest {
             messages: &messages,
@@ -247,7 +249,7 @@ mod tests {
             .read_timeout(Duration::from_millis(300))
             .build()
             .unwrap();
-        let provider = AnthropicProvider::new(client, format!("http://{addr}"), "k");
+        let provider = AnthropicProvider::new(client, format!("http://{addr}"), Secret::new("k"));
         let messages = vec![Message::user("hi")];
         let request = TurnRequest {
             messages: &messages,

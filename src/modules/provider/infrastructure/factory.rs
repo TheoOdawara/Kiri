@@ -50,7 +50,7 @@ pub fn build_provider(
             Ok(Arc::new(AnthropicProvider::new(
                 client,
                 profile.base_url.clone(),
-                key.expose().to_string(),
+                key,
             )))
         }
         _ => {
@@ -58,7 +58,7 @@ pub fn build_provider(
             Ok(Arc::new(OpenAiProvider::new(
                 client,
                 profile.base_url.clone(),
-                key.expose().to_string(),
+                key,
                 thinking,
                 effort,
             )))
@@ -90,7 +90,7 @@ pub fn build_embedding_provider(
     Ok(Arc::new(OpenAiEmbeddingProvider::new(
         client,
         profile.base_url.clone(),
-        key.expose().to_string(),
+        key,
         model,
     )))
 }

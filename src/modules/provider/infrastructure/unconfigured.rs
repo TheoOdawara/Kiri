@@ -30,7 +30,7 @@ impl CompletionProvider for UnconfiguredProvider {
         _sink: &mut dyn EventSink,
     ) -> Result<CompletedTurn, AgentError> {
         Err(AgentError::Provider(
-            "nenhum provider configurado — use /provider para adicionar uma chave".to_string(),
+            "no provider configured — use /provider to add an API key".to_string(),
         ))
     }
 }

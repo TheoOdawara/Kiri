@@ -22,6 +22,18 @@ fn truncate_body(body: String) -> String {
 /// (carrying the status + a bounded body) so the frontend can drop the offending turn instead of
 /// resending it forever; a 5xx/other becomes a plain (transient) [`AgentError::Provider`].
 pub(crate) fn error_from_status(status: reqwest::StatusCode, body: String) -> AgentError {
+    // 429 (rate limit) and 408 (request timeout) are 4xx but transient throttles, not body defects:
+    // the same request succeeds after a backoff. Classify them as a retryable `Provider` error so the
+    // frontend keeps the turn instead of discarding it as a permanent rejection (the single most common
+    // failure on free/low tiers must not silently lose the user's message).
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+    {
+        return AgentError::Provider(format!(
+            "provider throttled ({status}): {}",
+            truncate_body(body)
+        ));
+    }
     if status.is_client_error() {
         AgentError::ProviderRejected {
             status: status.as_u16(),
@@ -75,5 +87,20 @@ mod tests {
             "boom".to_string(),
         );
         assert!(matches!(error, AgentError::Provider(_)));
+    }
+
+    #[test]
+    fn rate_limit_and_request_timeout_are_transient_not_rejected() {
+        // 429/408 must NOT become ProviderRejected (which the frontend drops); they are retryable.
+        for status in [
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+        ] {
+            let error = error_from_status(status, "slow down".to_string());
+            assert!(
+                matches!(error, AgentError::Provider(_)),
+                "{status} should be transient, got {error:?}"
+            );
+        }
     }
 }

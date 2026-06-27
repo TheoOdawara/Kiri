@@ -10,7 +10,7 @@ use crate::modules::provider::application::completion_provider::{
 };
 use crate::modules::provider::infrastructure::http_error::error_from_status;
 use crate::shared::kernel::error::AgentError;
-use crate::shared::kernel::provider::Effort;
+use crate::shared::kernel::provider::{Effort, Secret};
 
 /// OpenAI-compatible chat provider (NVIDIA today). Holds the HTTP client and endpoint/credentials;
 /// translates a domain `TurnRequest` into the wire `ChatRequest`, streams the response forwarding
@@ -18,7 +18,10 @@ use crate::shared::kernel::provider::Effort;
 pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
-    api_key: String,
+    /// Held as a `Secret` (zeroized on drop, redacted in Debug) rather than a plain `String`, so the
+    /// key bytes are wiped when the adapter is dropped on a live `/provider` swap; exposed only at the
+    /// auth-header call site.
+    api_key: Secret,
     /// Whether the model accepts `chat_template_kwargs.thinking` at all; off for one that rejects/stalls
     /// on it. Gated further by `effort` — `Effort::Off` suppresses reasoning even when this is true.
     thinking: bool,
@@ -32,14 +35,14 @@ impl OpenAiProvider {
     pub fn new(
         client: reqwest::Client,
         base_url: impl Into<String>,
-        api_key: impl Into<String>,
+        api_key: Secret,
         thinking: bool,
         effort: Effort,
     ) -> Self {
         Self {
             client,
             base_url: base_url.into(),
-            api_key: api_key.into(),
+            api_key,
             thinking,
             effort,
         }
@@ -73,7 +76,7 @@ impl CompletionProvider for OpenAiProvider {
         let response = self
             .client
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.api_key.expose())
             .json(&body)
             .send()
             .await
@@ -146,7 +149,7 @@ mod tests {
         let provider = OpenAiProvider::new(
             client,
             format!("http://{addr}/v1"),
-            "k",
+            crate::shared::kernel::provider::Secret::new("k"),
             false,
             crate::shared::kernel::provider::Effort::Off,
         );
@@ -199,7 +202,7 @@ mod tests {
         let provider = OpenAiProvider::new(
             client,
             format!("http://{addr}/v1"),
-            "k",
+            crate::shared::kernel::provider::Secret::new("k"),
             false,
             crate::shared::kernel::provider::Effort::Off,
         );

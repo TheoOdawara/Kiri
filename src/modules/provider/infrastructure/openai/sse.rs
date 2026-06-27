@@ -1,12 +1,20 @@
 use std::collections::BTreeMap;
 
 use super::arguments::normalize_arguments;
-use super::wire::{ChatStreamChunk, Delta, StreamChoice, ToolCallFragment};
+#[cfg(test)]
+use super::wire::StreamChoice;
+use super::wire::{ChatStreamChunk, Delta, StreamError, ToolCallFragment};
 use crate::modules::agent::domain::completed_turn::CompletedTurn;
 use crate::modules::agent::domain::stream_event::StreamEvent;
 use crate::modules::provider::application::completion_provider::EventSink;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
+
+/// Cap on the bytes a single turn may accumulate (streamed content + tool-call arguments). Provider
+/// responses are untrusted input, and `read_timeout` only bounds idle time between chunks (it resets on
+/// each chunk), so a misbehaving provider streaming continuously could otherwise grow memory without
+/// bound. Generous — far above any real turn — purely a safety ceiling.
+const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 
 /// Feed one parsed SSE event's `data` payload into the accumulator (content/tool-calls) and the live
 /// `on_event` callback (reasoning/content). The `[DONE]` sentinel and malformed JSON are ignored. Line
@@ -16,16 +24,41 @@ pub(crate) fn handle_event(
     accumulator: &mut TurnAccumulator,
     sink: &mut dyn EventSink,
 ) -> Result<(), AgentError> {
-    // An OpenAI-compatible provider can deliver an error in-band on an HTTP 200 stream:
-    // `data: {"error": {...}}` (then `[DONE]`). Surface it as a turn failure instead of silently
-    // dropping the chunk — a swallowed in-band error left an empty turn with no feedback at all (a
-    // phantom "plan ready" box in plan mode, with the model never appearing to have been contacted).
-    if let Some(message) = parse_stream_error(data) {
-        return Err(AgentError::Provider(message));
+    if data.is_empty() || data == SSE_DONE_SENTINEL {
+        return Ok(());
     }
-    let Some(choice) = parse_chunk(data) else {
+    // Parse the payload ONCE. A non-JSON line (keep-alive, unknown event) is ignored.
+    let Ok(chunk) = serde_json::from_str::<ChatStreamChunk>(data) else {
         return Ok(());
     };
+    // An OpenAI-compatible provider can deliver an error in-band on an HTTP 200 stream
+    // (`data: {"error": {...}}`, then `[DONE]`). Surface it as a turn failure instead of silently
+    // dropping the chunk — a swallowed in-band error left an empty turn with no feedback (a phantom
+    // "plan ready" box in plan mode, the model never appearing to have been contacted). A `null` error
+    // (some providers include it on success) is `None` here and ignored.
+    if let Some(error) = &chunk.error {
+        return Err(AgentError::Provider(format_stream_error(error)));
+    }
+    let Some(choice) = chunk.choices.into_iter().next() else {
+        return Ok(());
+    };
+
+    // Bound the running total before absorbing, so an unbounded stream fails fast instead of OOMing.
+    let delta_bytes = choice.delta.content.as_deref().map_or(0, str::len)
+        + choice
+            .delta
+            .tool_calls
+            .iter()
+            .filter_map(|fragment| fragment.function.as_ref()?.arguments.as_deref())
+            .map(str::len)
+            .sum::<usize>();
+    accumulator.streamed_bytes = accumulator.streamed_bytes.saturating_add(delta_bytes);
+    if accumulator.streamed_bytes > MAX_STREAM_BYTES {
+        return Err(AgentError::Provider(format!(
+            "provider stream exceeded the maximum response size ({MAX_STREAM_BYTES} bytes)"
+        )));
+    }
+
     accumulator.absorb_tool_fragments(&choice.delta.tool_calls);
     if let Some(content) = &choice.delta.content {
         accumulator.content.push_str(content);
@@ -36,30 +69,23 @@ pub(crate) fn handle_event(
     Ok(())
 }
 
-/// Detect an in-band error payload (`{"error": {...}}`) the provider can stream on a 200 response,
-/// returning a human-readable message. Yields nothing for a normal chunk, `[DONE]`, a non-JSON line,
-/// or an `error` field that is explicitly `null` (some providers include a null `error` on success).
-fn parse_stream_error(data: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(data).ok()?;
-    let error = value.get("error").filter(|error| !error.is_null())?;
+/// Render an in-band stream error as a human-readable message. `code` may be a string or a number.
+fn format_stream_error(error: &StreamError) -> String {
     let message = error
-        .get("message")
-        .and_then(serde_json::Value::as_str)
+        .message
+        .as_deref()
         .map(str::trim)
         .filter(|message| !message.is_empty())
         .unwrap_or("unknown error");
-    match error.get("code").filter(|code| !code.is_null()) {
+    match error.code.as_ref().filter(|code| !code.is_null()) {
         Some(code) => {
-            // Prefer a bare string code; otherwise its JSON form (e.g. the number 500).
             let code = code
                 .as_str()
                 .map(str::to_string)
                 .unwrap_or_else(|| code.to_string());
-            Some(format!(
-                "stream error from provider: {message} (code {code})"
-            ))
+            format!("stream error from provider: {message} (code {code})")
         }
-        None => Some(format!("stream error from provider: {message}")),
+        None => format!("stream error from provider: {message}"),
     }
 }
 
@@ -67,7 +93,8 @@ fn parse_stream_error(data: &str) -> Option<String> {
 const SSE_DONE_SENTINEL: &str = "[DONE]";
 
 /// Parse one event's `data` payload into its first choice. Yields nothing for the `[DONE]` sentinel,
-/// an empty payload, or malformed JSON.
+/// an empty payload, or malformed JSON. (A test seam; the live path uses `handle_event`.)
+#[cfg(test)]
 fn parse_chunk(data: &str) -> Option<StreamChoice> {
     if data.is_empty() || data == SSE_DONE_SENTINEL {
         return None;
@@ -99,6 +126,8 @@ fn events_from_delta(delta: Delta) -> Vec<StreamEvent> {
 pub(crate) struct TurnAccumulator {
     content: String,
     tool_calls: BTreeMap<u32, PartialToolCall>,
+    /// Running total of streamed content + tool-call argument bytes, bounded by `MAX_STREAM_BYTES`.
+    streamed_bytes: usize,
 }
 
 #[derive(Default)]
