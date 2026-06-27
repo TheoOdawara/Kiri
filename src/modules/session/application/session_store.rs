@@ -5,7 +5,7 @@ use crate::shared::kernel::message::Message;
 /// Port for persisting conversations across sessions. Implemented by `SqliteSessionStore`
 /// (`~/.kiri/sessions.db`). Sessions are keyed by `project_id` so a workspace lists only its own.
 /// `init/create/append_messages/set_title/latest_for_project/list_for_project/load` are used by the
-/// TUI runtime; `delete` prunes empty/aborted sessions.
+/// TUI runtime; `delete` is reserved for the planned session-management prune, not yet wired.
 #[async_trait::async_trait]
 pub trait SessionStore: Send + Sync {
     /// Initialize storage (create the database and schema).
@@ -35,6 +35,7 @@ pub trait SessionStore: Send + Sync {
     async fn load(&self, session_id: &str) -> AgentResult<Option<Session>>;
 
     /// Delete a session and its messages. Returns whether a row was removed.
+    /// Reserved for the planned session-management prune; not yet wired.
     #[allow(dead_code)]
     async fn delete(&self, session_id: &str) -> AgentResult<bool>;
 
