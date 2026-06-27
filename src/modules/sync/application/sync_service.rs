@@ -266,6 +266,8 @@ struct TrustView {
 struct TrustProvider {
     #[serde(default)]
     base_url: Option<String>,
+    #[serde(default)]
+    auth: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -306,14 +308,22 @@ fn risky_config_changes(current: &str, incoming: &str) -> Vec<String> {
     let mut risks = Vec::new();
 
     // A new provider, or a base_url added/changed on an existing one, can redirect where a credential
-    // (stored or env-imported) is sent — the core credential-exfiltration vector.
+    // (stored or env-imported) is sent — the core credential-exfiltration vector. Turning off an existing
+    // provider's authentication (api-key/oauth -> none) silently disables its credential, and for a vendor
+    // endpoint the next boot then fails to build it (a DoS-via-sync); both require an explicit `--force`.
     for (id, inc) in &incoming.providers {
         match current.providers.get(id) {
             None => risks.push(format!("new provider '{id}' added")),
-            Some(cur) if cur.base_url != inc.base_url => {
-                risks.push(format!("provider '{id}' base_url changes"));
+            Some(cur) => {
+                if cur.base_url != inc.base_url {
+                    risks.push(format!("provider '{id}' base_url changes"));
+                }
+                // Anything not explicitly "none" (api-key/oauth, or absent = the historical default) is
+                // treated as keyed, so dropping authentication is always flagged.
+                if cur.auth.as_deref() != Some("none") && inc.auth.as_deref() == Some("none") {
+                    risks.push(format!("provider '{id}' auth disabled (set to none)"));
+                }
             }
-            Some(_) => {}
         }
     }
 
@@ -491,6 +501,28 @@ base_url = "https://evil.example/v1"
                         [providers.evil]\nbase_url = \"https://attacker/v1\"\n";
         let risks = risky_config_changes(current, incoming);
         assert!(risks.iter().any(|r| r.contains("evil")), "{risks:?}");
+    }
+
+    #[test]
+    fn detects_auth_downgrade_to_none() {
+        // Turning off authentication on an existing provider (same base_url) must require --force, so a
+        // synced config cannot silently disable a credential — and, for a vendor endpoint, brick the boot.
+        let current = provider_toml("nvidia", "https://x/v1"); // auth = "api-key"
+        let incoming = "[providers.nvidia]\nkind = \"open-ai-compatible\"\n\
+                        base_url = \"https://x/v1\"\nmodel = \"m\"\nauth = \"none\"\n";
+        let risks = risky_config_changes(&current, incoming);
+        assert!(
+            risks.iter().any(|r| r.contains("auth disabled")),
+            "{risks:?}"
+        );
+    }
+
+    #[test]
+    fn already_keyless_provider_unchanged_is_safe() {
+        // A provider that was already keyless (none -> none) is not flagged as a downgrade.
+        let config = "[providers.lmstudio]\nkind = \"open-ai-compatible\"\n\
+                      base_url = \"http://localhost:1234/v1\"\nmodel = \"m\"\nauth = \"none\"\n";
+        assert!(risky_config_changes(config, config).is_empty());
     }
 
     #[test]

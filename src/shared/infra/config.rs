@@ -961,6 +961,34 @@ mod tests {
     }
 
     #[test]
+    fn provider_with_auth_none_parses_and_validates() {
+        // A keyless local provider (auth = "none") must parse through RawConfig and pass the sync-pull
+        // gate (validate_config_str), so a config seeded for Ollama / LM Studio loads cleanly.
+        let toml = "[providers.lmstudio]\nkind = \"open-ai-compatible\"\n\
+                    base_url = \"http://localhost:1234/v1\"\nmodel = \"gemma\"\nauth = \"none\"\n";
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, toml).unwrap();
+        let parsed = read_config_file(&path).unwrap();
+        assert!(parsed.providers.contains_key("lmstudio"));
+        assert!(validate_config_str(toml).is_ok());
+    }
+
+    #[test]
+    fn unrecognized_auth_value_does_not_abort_parsing() {
+        // A forward-version auth value deserializes to AuthMethod::Unknown rather than failing the
+        // trusted global parse, so reading a config written by a newer Kiri never aborts the boot.
+        let toml = "[providers.future]\nkind = \"open-ai-compatible\"\n\
+                    base_url = \"http://x/v1\"\nmodel = \"m\"\nauth = \"some-future-method\"\n";
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, toml).unwrap();
+        let parsed = read_config_file(&path).unwrap();
+        assert!(parsed.providers.contains_key("future"));
+        assert!(validate_config_str(toml).is_ok());
+    }
+
+    #[test]
     fn project_config_is_lenient_on_malformed_input() {
         // The untrusted project layer must NOT abort the boot on a malformed file (a repo could ship one
         // as a DoS); a parse error degrades to defaults rather than propagating.
