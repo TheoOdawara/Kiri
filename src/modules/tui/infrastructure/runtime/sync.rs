@@ -13,6 +13,7 @@ use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::sync::application::git::Git;
 use crate::modules::sync::application::sync_service::SyncService;
 use crate::modules::sync::application::work_tree::SyncWorkTree;
+use crate::modules::sync::infrastructure::memory_ndjson::NdjsonMemoryExchange;
 use crate::modules::tui::domain::model::Model;
 use crate::shared::kernel::error::AgentResult;
 
@@ -89,11 +90,12 @@ pub(super) async fn sync_push(
         model.notify_error(format!("sync: {reason}"));
     }
 
+    let exchange = NdjsonMemoryExchange::new(memory.as_ref());
     let service = SyncService::new(
         ctx.git.as_ref(),
         ctx.global_dir.clone(),
         ctx.config_path.clone(),
-        memory.as_ref(),
+        &exchange,
         ctx.work_tree.as_ref(),
     );
     match service.push().await {

@@ -1,9 +1,8 @@
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::modules::tools::application::path::default_accept_for;
 use crate::modules::tools::application::sandbox::Sandbox;
-use crate::modules::tools::infrastructure::args::parse;
-use crate::modules::tools::infrastructure::path::default_accept_for;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// The result of executing a tool. Failures are data the model reads and recovers from — never panics
@@ -69,7 +68,7 @@ pub fn simple_command<T: DeserializeOwned>(
     call: &ToolCall,
     render: impl FnOnce(&T) -> String,
 ) -> Option<String> {
-    let args: T = parse(call.function.arguments.as_str()).ok()?;
+    let args: T = serde_json::from_str(call.function.arguments.as_str()).ok()?;
     Some(render(&args))
 }
 

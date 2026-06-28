@@ -5,6 +5,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::domain::entry::MemoryEntry;
+use crate::modules::sync::application::memory_exchange::{MemoryExchange, MergeReport};
 use crate::modules::sync::domain::merge::incoming_wins;
 use crate::shared::kernel::error::{AgentError, AgentResult};
 
@@ -21,11 +22,28 @@ const IMPORT_CAP: usize = EXPORT_CAP;
 /// entry cap (`IMPORT_CAP`) bounds the work done within it.
 const MAX_IMPORT_BYTES: u64 = 512 * 1024 * 1024;
 
-/// What an import merged versus skipped (an older or equal entry already present).
-#[derive(Debug)]
-pub struct MergeReport {
-    pub merged: usize,
-    pub skipped: usize,
+/// The NDJSON adapter behind the [`MemoryExchange`] port, bound to the shared store it serializes. The
+/// composition root injects one into `SyncService`; the free `export`/`import` functions below hold the
+/// actual logic and are exercised directly by this module's tests.
+pub struct NdjsonMemoryExchange<'a> {
+    memory: &'a dyn SharedMemory,
+}
+
+impl<'a> NdjsonMemoryExchange<'a> {
+    pub fn new(memory: &'a dyn SharedMemory) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait::async_trait]
+impl MemoryExchange for NdjsonMemoryExchange<'_> {
+    async fn export(&self, path: &Path) -> AgentResult<usize> {
+        export(self.memory, path).await
+    }
+
+    async fn import(&self, path: &Path) -> AgentResult<MergeReport> {
+        import(self.memory, path).await
+    }
 }
 
 /// Export the shared memory to deterministic NDJSON (one entry per line, sorted by id) so the synced repo

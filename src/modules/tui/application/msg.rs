@@ -4,49 +4,16 @@ use crate::modules::tui::domain::input_buffer::ImageAttachment;
 use crate::modules::tui::domain::modal::PendingApproval;
 use crate::modules::tui::domain::transcript::{ToolDiff, ToolStatus};
 
+// The normalized input primitives live in `domain` (so `InputBuffer` can map a key onto the widget
+// without the reducer touching `tui_textarea`); re-exported here so `application::msg::{Key, KeyPress,
+// MouseKind}` keeps resolving for the reducer, update loop, and runtime.
+pub use crate::modules::tui::domain::input::{Key, KeyPress, MouseKind};
+
 /// Which stream a delta belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamKind {
     Reasoning,
     Content,
-}
-
-/// A normalized key press, decoupled from crossterm so the reducer and key map stay library-free.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyPress {
-    pub code: Key,
-    pub ctrl: bool,
-    pub alt: bool,
-    pub shift: bool,
-}
-
-/// Which phase of a left-button mouse gesture a `Msg::Mouse` carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MouseKind {
-    Down,
-    Drag,
-    Up,
-}
-
-/// The subset of keys the TUI acts on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Key {
-    Char(char),
-    Enter,
-    Backspace,
-    Delete,
-    Left,
-    Right,
-    Up,
-    Down,
-    Home,
-    End,
-    PageUp,
-    PageDown,
-    Esc,
-    Tab,
-    /// Shift+Tab (crossterm reports it as a distinct back-tab key code).
-    BackTab,
 }
 
 /// Everything that can change the model: UI events (from crossterm), engine events (from the bridge

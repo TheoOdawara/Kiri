@@ -187,7 +187,7 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         // Everything else — typing, deletion, cursor motion, word motion, Shift-selection — is the
         // editor's; the widget handles it and we keep the slash-command preview in sync.
         _ => {
-            model.input.feed(to_input(key));
+            model.input.feed_key(key);
             sync_menu(model);
             vec![]
         }
@@ -255,72 +255,5 @@ fn click_granularity(model: &mut Model, col: u16, row: u16) -> Granularity {
         1 => Granularity::Char,
         2 => Granularity::Word,
         _ => Granularity::Line,
-    }
-}
-
-/// Map a normalized key press onto the editor widget's backend-agnostic input type.
-///
-/// macOS word ops are translated onto the bindings the widget already understands: terminals send
-/// Option as Alt, but the widget binds word motion to `Ctrl+Left/Right` (and meta `Alt+b/f`) and
-/// word-delete to `Alt+Backspace/Delete`. So `Option+←/→` is rewritten to `Ctrl+←/→` — with `alt: false`,
-/// which is mandatory: the widget has a `Ctrl+Alt+Left -> line head` arm that would otherwise win.
-/// `Ctrl+Backspace/Delete` (Windows/Linux muscle memory) is rewritten to the widget's `Alt` word-delete.
-fn to_input(key: KeyPress) -> Input {
-    match (key.ctrl, key.alt, key.code) {
-        (false, true, Key::Left) => {
-            return Input {
-                key: TaKey::Left,
-                ctrl: true,
-                alt: false,
-                shift: key.shift,
-            };
-        }
-        (false, true, Key::Right) => {
-            return Input {
-                key: TaKey::Right,
-                ctrl: true,
-                alt: false,
-                shift: key.shift,
-            };
-        }
-        (true, false, Key::Backspace) => {
-            return Input {
-                key: TaKey::Backspace,
-                ctrl: false,
-                alt: true,
-                shift: false,
-            };
-        }
-        (true, false, Key::Delete) => {
-            return Input {
-                key: TaKey::Delete,
-                ctrl: false,
-                alt: true,
-                shift: false,
-            };
-        }
-        _ => {}
-    }
-    Input {
-        key: match key.code {
-            Key::Char(c) => TaKey::Char(c),
-            Key::Enter => TaKey::Enter,
-            Key::Backspace => TaKey::Backspace,
-            Key::Delete => TaKey::Delete,
-            Key::Left => TaKey::Left,
-            Key::Right => TaKey::Right,
-            Key::Up => TaKey::Up,
-            Key::Down => TaKey::Down,
-            Key::Home => TaKey::Home,
-            Key::End => TaKey::End,
-            Key::PageUp => TaKey::PageUp,
-            Key::PageDown => TaKey::PageDown,
-            Key::Esc => TaKey::Esc,
-            Key::Tab => TaKey::Tab,
-            Key::BackTab => TaKey::Null,
-        },
-        ctrl: key.ctrl,
-        alt: key.alt,
-        shift: key.shift,
     }
 }

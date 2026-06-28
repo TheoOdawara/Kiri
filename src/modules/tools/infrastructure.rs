@@ -3,7 +3,6 @@ pub mod confine;
 pub mod control;
 pub mod exec;
 pub mod fs;
-pub mod path;
 pub mod run_command;
 pub mod sandbox;
 pub mod secret_paths;

@@ -1,10 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::sync::application::git::Git;
+use crate::modules::sync::application::memory_exchange::MemoryExchange;
 use crate::modules::sync::application::work_tree::SyncWorkTree;
 use crate::modules::sync::domain::config_trust::risky_config_changes;
-use crate::modules::sync::infrastructure::memory_ndjson;
 use crate::shared::infra::config;
 use crate::shared::kernel::error::{AgentError, AgentResult};
 
@@ -26,10 +25,10 @@ pub struct SyncService<'a> {
     global_dir: PathBuf,
     /// The live global config file (`~/.kiri/config.toml`).
     config_path: PathBuf,
-    /// The shared memory store, exported to / imported from NDJSON. Injected as a port so this
-    /// application service never depends on the concrete SQLite adapter (the caller owns the store).
-    memory: &'a dyn SharedMemory,
-    /// Every work-tree/config filesystem touch, behind a port (like `git`/`memory`) so this use-case
+    /// Move the shared memory to/from the work-tree's NDJSON, behind a port so this application service
+    /// depends on neither the concrete NDJSON adapter nor the SQLite store (the caller wires both).
+    exchange: &'a dyn MemoryExchange,
+    /// Every work-tree/config filesystem touch, behind a port (like `git`/`exchange`) so this use-case
     /// holds no raw filesystem calls — neither writes/reads nor presence checks.
     work_tree: &'a dyn SyncWorkTree,
 }
@@ -39,14 +38,14 @@ impl<'a> SyncService<'a> {
         git: &'a dyn Git,
         global_dir: PathBuf,
         config_path: PathBuf,
-        memory: &'a dyn SharedMemory,
+        exchange: &'a dyn MemoryExchange,
         work_tree: &'a dyn SyncWorkTree,
     ) -> Self {
         Self {
             git,
             global_dir,
             config_path,
-            memory,
+            exchange,
             work_tree,
         }
     }
@@ -126,7 +125,7 @@ impl<'a> SyncService<'a> {
             .await?;
 
         // Merge memory (always safe — last-write-wins, never destructive).
-        let report = memory_ndjson::import(self.memory, &dir.join(MEMORY_FILE)).await?;
+        let report = self.exchange.import(&dir.join(MEMORY_FILE)).await?;
 
         // Apply config under the trust check. `read_to_string` returns `None` for an absent work-tree
         // config (no config in sync), collapsing the former presence-check + read pair.
@@ -215,7 +214,7 @@ impl<'a> SyncService<'a> {
                 .copy(&self.config_path, &dir.join(CONFIG_FILE))
                 .await?;
         }
-        memory_ndjson::export(self.memory, &dir.join(MEMORY_FILE)).await
+        self.exchange.export(&dir.join(MEMORY_FILE)).await
     }
 
     async fn require_initialized(&self) -> AgentResult<PathBuf> {
@@ -337,9 +336,11 @@ fn first_line(stderr: &str, stdout: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::memory::application::shared_memory::SharedMemory;
     use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
     use crate::modules::sync::application::git::GitOutput;
     use crate::modules::sync::infrastructure::fs_work_tree::FsSyncWorkTree;
+    use crate::modules::sync::infrastructure::memory_ndjson::NdjsonMemoryExchange;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -435,9 +436,10 @@ mod tests {
         // A real (empty) shared store so export has a valid port to read.
         let mem = SqliteSharedMemory::new(global.join("memory").join("shared.db")).unwrap();
         mem.init().await.unwrap();
+        let exchange = NdjsonMemoryExchange::new(&mem);
         let git = FakeGit::new();
         let work_tree = FsSyncWorkTree;
-        let service = SyncService::new(&git, global.clone(), config, &mem, &work_tree);
+        let service = SyncService::new(&git, global.clone(), config, &exchange, &work_tree);
 
         service.init("git@example:me/profile.git").await.unwrap();
         service.push().await.unwrap();
@@ -457,13 +459,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let global = dir.path().to_path_buf();
         let mem = SqliteSharedMemory::in_memory().unwrap();
+        let exchange = NdjsonMemoryExchange::new(&mem);
         let git = FakeGit::new();
         let work_tree = FsSyncWorkTree;
         let service = SyncService::new(
             &git,
             global.clone(),
             global.join("config.toml"),
-            &mem,
+            &exchange,
             &work_tree,
         );
         assert!(service.push().await.is_err());
@@ -474,14 +477,14 @@ mod tests {
     /// tests never touch the work-tree beyond the allowlist's existence probe.
     fn url_service<'a>(
         git: &'a FakeGit,
-        memory: &'a dyn SharedMemory,
+        exchange: &'a dyn MemoryExchange,
         work_tree: &'a FsSyncWorkTree,
     ) -> SyncService<'a> {
         SyncService::new(
             git,
             PathBuf::from("/kiri-url-test"),
             PathBuf::from("/kiri-url-test/config.toml"),
-            memory,
+            exchange,
             work_tree,
         )
     }
@@ -490,8 +493,9 @@ mod tests {
     async fn validate_remote_url_rejects_ext_and_dash() {
         let git = FakeGit::new();
         let mem = SqliteSharedMemory::in_memory().unwrap();
+        let exchange = NdjsonMemoryExchange::new(&mem);
         let work_tree = FsSyncWorkTree;
-        let s = url_service(&git, &mem, &work_tree);
+        let s = url_service(&git, &exchange, &work_tree);
         assert!(
             s.validate_remote_url("ext::sh -c 'rm -rf ~'")
                 .await
@@ -527,8 +531,9 @@ mod tests {
     async fn validate_remote_url_accepts_https_ssh_and_local() {
         let git = FakeGit::new();
         let mem = SqliteSharedMemory::in_memory().unwrap();
+        let exchange = NdjsonMemoryExchange::new(&mem);
         let work_tree = FsSyncWorkTree;
-        let s = url_service(&git, &mem, &work_tree);
+        let s = url_service(&git, &exchange, &work_tree);
         assert!(
             s.validate_remote_url("https://github.com/me/profile.git")
                 .await
@@ -560,15 +565,20 @@ mod tests {
     // exercising the apply/refuse decision and the --force override on the security-weighted path.
     fn pull_service<'a>(
         git: &'a FakeGit,
-        memory: &'a dyn SharedMemory,
+        exchange: &'a dyn MemoryExchange,
         work_tree: &'a FsSyncWorkTree,
         global: &Path,
         current_config: &str,
     ) -> (SyncService<'a>, PathBuf) {
         let config = global.join("config.toml");
         std::fs::write(&config, current_config).unwrap();
-        let service =
-            SyncService::new(git, global.to_path_buf(), config.clone(), memory, work_tree);
+        let service = SyncService::new(
+            git,
+            global.to_path_buf(),
+            config.clone(),
+            exchange,
+            work_tree,
+        );
         (service, config)
     }
 
@@ -587,8 +597,9 @@ mod tests {
         let git = FakeGit::with_fixtures(Some(&incoming), Some(""));
         let mem = SqliteSharedMemory::in_memory().unwrap();
         mem.init().await.unwrap();
+        let exchange = NdjsonMemoryExchange::new(&mem);
         let work_tree = FsSyncWorkTree;
-        let (service, config) = pull_service(&git, &mem, &work_tree, dir.path(), &current);
+        let (service, config) = pull_service(&git, &exchange, &work_tree, dir.path(), &current);
         service.init("git@example:me/p.git").await.unwrap();
 
         let summary = service.pull(false).await.unwrap();
@@ -615,8 +626,9 @@ mod tests {
         let git = FakeGit::with_fixtures(Some(&incoming), Some(""));
         let mem = SqliteSharedMemory::in_memory().unwrap();
         mem.init().await.unwrap();
+        let exchange = NdjsonMemoryExchange::new(&mem);
         let work_tree = FsSyncWorkTree;
-        let (service, config) = pull_service(&git, &mem, &work_tree, dir.path(), &current);
+        let (service, config) = pull_service(&git, &exchange, &work_tree, dir.path(), &current);
         service.init("git@example:me/p.git").await.unwrap();
 
         let summary = service.pull(true).await.unwrap();
@@ -635,8 +647,9 @@ mod tests {
         let git = FakeGit::with_fixtures(Some(&config_text), Some(""));
         let mem = SqliteSharedMemory::in_memory().unwrap();
         mem.init().await.unwrap();
+        let exchange = NdjsonMemoryExchange::new(&mem);
         let work_tree = FsSyncWorkTree;
-        let (service, config) = pull_service(&git, &mem, &work_tree, dir.path(), &config_text);
+        let (service, config) = pull_service(&git, &exchange, &work_tree, dir.path(), &config_text);
         service.init("git@example:me/p.git").await.unwrap();
 
         let summary = service.pull(false).await.unwrap();
@@ -650,10 +663,11 @@ mod tests {
         let git = FakeGit::with_fixtures(Some("effort = \"bogus\"\n"), Some(""));
         let mem = SqliteSharedMemory::in_memory().unwrap();
         mem.init().await.unwrap();
+        let exchange = NdjsonMemoryExchange::new(&mem);
         let work_tree = FsSyncWorkTree;
         let (service, _config) = pull_service(
             &git,
-            &mem,
+            &exchange,
             &work_tree,
             dir.path(),
             &provider_toml("nvidia", "https://x/v1"),

@@ -41,6 +41,7 @@ use crate::modules::session::infrastructure::sqlite_session_store::SqliteSession
 use crate::modules::sync::application::sync_service::SyncService;
 use crate::modules::sync::infrastructure::fs_work_tree::FsSyncWorkTree;
 use crate::modules::sync::infrastructure::git_cli::GitCli;
+use crate::modules::sync::infrastructure::memory_ndjson::NdjsonMemoryExchange;
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::Tool;
 use crate::modules::tools::infrastructure::args::RUN_COMMAND_DEFAULT_TIMEOUT_MS;
@@ -205,11 +206,12 @@ pub async fn wire_sync(settings: &Settings, action: SyncAction) -> Result<()> {
     }
     let git = GitCli;
     let work_tree = FsSyncWorkTree;
+    let exchange = NdjsonMemoryExchange::new(memory.as_ref());
     let service = SyncService::new(
         &git,
         settings.global_dir.clone(),
         settings.config_path.clone(),
-        memory.as_ref(),
+        &exchange,
         &work_tree,
     );
     let summary = match action {

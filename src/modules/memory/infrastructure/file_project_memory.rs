@@ -511,6 +511,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_project_memory_list_by_tag() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        let memory = FileProjectMemory::new(root.clone());
+        memory.init().await.unwrap();
+
+        memory
+            .save(&MemoryEntry::new(
+                MemoryKind::Fact,
+                "tagged rust".into(),
+                ["rust"].into_iter().map(String::from).collect(),
+                None,
+            ))
+            .await
+            .unwrap();
+        memory
+            .save(&MemoryEntry::new(
+                MemoryKind::Fact,
+                "tagged python".into(),
+                ["python"].into_iter().map(String::from).collect(),
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let rust = memory.list_by_tag("rust", 10).await.unwrap();
+        assert_eq!(rust.len(), 1);
+        assert!(rust[0].content.contains("rust"));
+    }
+
+    #[tokio::test]
     async fn file_project_memory_persists_index() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join(".kiri").join("memory");

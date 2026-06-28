@@ -3,12 +3,12 @@ use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
+use crate::modules::tools::application::path::default_accept_for;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, WriteArgs, parse, parse_args};
-use crate::modules::tools::infrastructure::path::default_accept_for;
 #[cfg(unix)]
 use crate::modules::tools::infrastructure::support::run_fs_argv;
 use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};

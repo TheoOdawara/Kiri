@@ -5,6 +5,7 @@ use std::time::Duration;
 use regex::Regex;
 use serde_json::{Value, json};
 
+use crate::modules::tools::application::path::is_absolute_target;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
@@ -13,7 +14,6 @@ use crate::modules::tools::infrastructure::args::{
     RUN_COMMAND_DEFAULT_TIMEOUT_MS, RunCommandArgs, parse_args,
 };
 use crate::modules::tools::infrastructure::exec::{self, ExecError};
-use crate::modules::tools::infrastructure::path::is_absolute_target;
 use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
 

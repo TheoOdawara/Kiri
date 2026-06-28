@@ -1,5 +1,7 @@
 use ratatui::style::Style;
-use tui_textarea::{CursorMove, Input, TextArea, WrapMode};
+use tui_textarea::{CursorMove, Input, Key as TaKey, TextArea, WrapMode};
+
+use crate::modules::tui::domain::input::{Key, KeyPress};
 
 /// A pasted image staged for the next prompt: its data URL (base64 PNG, ready for the provider's
 /// multimodal content) and pixel dimensions for the "attached" chip. Pure data — the clipboard read and
@@ -70,10 +72,12 @@ impl InputBuffer {
         self.area.insert_newline();
     }
 
-    /// Feed a widget input event (the reducer maps a key press to it), returning whether it mutated the
-    /// text. This is the single path for ordinary editing: typing, deletion, cursor motion, selection.
-    pub fn feed(&mut self, input: Input) -> bool {
-        self.area.input(input)
+    /// Feed a normalized key press, returning whether it mutated the text. The single path for ordinary
+    /// editing (typing, deletion, cursor motion, selection): the reducer passes a backend-agnostic
+    /// `KeyPress` and the widget-specific translation stays inside this sanctioned widget owner (ADR 0017),
+    /// so the keymap never touches `tui_textarea`.
+    pub fn feed_key(&mut self, key: KeyPress) -> bool {
+        self.area.input(to_input(key))
     }
 
     pub fn is_selecting(&self) -> bool {
@@ -137,6 +141,73 @@ impl InputBuffer {
     /// The widget for rendering. `&TextArea` implements `Widget`; the editor renders it directly.
     pub fn widget(&self) -> &TextArea<'static> {
         &self.area
+    }
+}
+
+/// Map a normalized key press onto the editor widget's backend-agnostic input type.
+///
+/// macOS word ops are translated onto the bindings the widget already understands: terminals send
+/// Option as Alt, but the widget binds word motion to `Ctrl+Left/Right` (and meta `Alt+b/f`) and
+/// word-delete to `Alt+Backspace/Delete`. So `Option+←/→` is rewritten to `Ctrl+←/→` — with `alt: false`,
+/// which is mandatory: the widget has a `Ctrl+Alt+Left -> line head` arm that would otherwise win.
+/// `Ctrl+Backspace/Delete` (Windows/Linux muscle memory) is rewritten to the widget's `Alt` word-delete.
+fn to_input(key: KeyPress) -> Input {
+    match (key.ctrl, key.alt, key.code) {
+        (false, true, Key::Left) => {
+            return Input {
+                key: TaKey::Left,
+                ctrl: true,
+                alt: false,
+                shift: key.shift,
+            };
+        }
+        (false, true, Key::Right) => {
+            return Input {
+                key: TaKey::Right,
+                ctrl: true,
+                alt: false,
+                shift: key.shift,
+            };
+        }
+        (true, false, Key::Backspace) => {
+            return Input {
+                key: TaKey::Backspace,
+                ctrl: false,
+                alt: true,
+                shift: false,
+            };
+        }
+        (true, false, Key::Delete) => {
+            return Input {
+                key: TaKey::Delete,
+                ctrl: false,
+                alt: true,
+                shift: false,
+            };
+        }
+        _ => {}
+    }
+    Input {
+        key: match key.code {
+            Key::Char(c) => TaKey::Char(c),
+            Key::Enter => TaKey::Enter,
+            Key::Backspace => TaKey::Backspace,
+            Key::Delete => TaKey::Delete,
+            Key::Left => TaKey::Left,
+            Key::Right => TaKey::Right,
+            Key::Up => TaKey::Up,
+            Key::Down => TaKey::Down,
+            Key::Home => TaKey::Home,
+            Key::End => TaKey::End,
+            Key::PageUp => TaKey::PageUp,
+            Key::PageDown => TaKey::PageDown,
+            Key::Esc => TaKey::Esc,
+            Key::Tab => TaKey::Tab,
+            Key::BackTab => TaKey::Null,
+        },
+        ctrl: key.ctrl,
+        alt: key.alt,
+        shift: key.shift,
     }
 }
 

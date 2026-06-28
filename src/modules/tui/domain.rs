@@ -1,5 +1,6 @@
 pub mod command_menu;
 pub mod history;
+pub mod input;
 pub mod input_buffer;
 pub mod modal;
 pub mod model;
