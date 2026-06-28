@@ -2,11 +2,13 @@
 //! `kiri sync` route — the *only* places concrete adapters are chosen. For sync, both build the
 //! git/shared-memory/work-tree adapters here and inject them as ports: `wire` packages them into a
 //! [`SyncContext`] handed to the runtime (so a live `/sync` push constructs no adapter and recomputes no
-//! path), and `wire_sync` runs the action directly. `build_sync_memory` opens the shared store with a
-//! non-fatal init (mirroring `build_memory`); it opens `shared.db` even when memory is disabled because
-//! sync owns the shared store as its own data source (ADR 0015 / the wave-2 Open Questions).
+//! path), and `wire_sync` runs the action directly. The shared store opens with a non-fatal init
+//! (mirroring `build_memory`): `wire` injects a *factory* (`sync_memory_factory`) so the store opens
+//! lazily on the first `/sync`, never birthing a `shared.db` for a memory-off session that never syncs;
+//! `wire_sync` opens it eagerly since it is *running* sync (ADR 0015).
 
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -49,11 +51,12 @@ use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tools::infrastructure::sensitive::load_sensitive_matcher;
 use crate::modules::tui::infrastructure::runtime::{
-    BootNotice, ProviderSwap, SyncContext, Tui, TuiParams,
+    BootNotice, ProviderSwap, SharedMemoryFactory, SyncContext, Tui, TuiParams,
 };
 use crate::shared::infra::config::{
     Settings, SyncAction, ensure_private_dir, render_system_prompt,
 };
+use crate::shared::kernel::error::AgentResult;
 use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile};
 
 /// The composition root: build the sandbox, the provider adapter, the tool registry and the agent loop
@@ -158,7 +161,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // provider swap consumes `settings.providers`/`active_provider`.
     let sync_context = SyncContext::new(
         Arc::new(GitCli),
-        build_sync_memory(&settings).await?,
+        sync_memory_factory(settings.shared_memory_db.clone()),
         Arc::new(FsSyncWorkTree),
         settings.global_dir.clone(),
         settings.config_path.clone(),
@@ -196,7 +199,10 @@ pub async fn wire_sync(settings: &Settings, action: SyncAction) -> Result<()> {
     // directly (e.g. in tests). On the normal path `main.rs` resolves `Settings` first, which already
     // hardens `~/.kiri`, so this is a redundant-but-cheap guarantee rather than the sole protection.
     ensure_private_dir(&settings.global_dir)?;
-    let memory = build_sync_memory(settings).await?;
+    let (memory, warning) = build_sync_memory_at(settings.shared_memory_db.clone()).await?;
+    if let Some(reason) = warning {
+        eprintln!("kiri: {reason}");
+    }
     let git = GitCli;
     let work_tree = FsSyncWorkTree;
     let service = SyncService::new(
@@ -216,27 +222,38 @@ pub async fn wire_sync(settings: &Settings, action: SyncAction) -> Result<()> {
     Ok(())
 }
 
-/// Open the shared-memory store for sync as a port, mirroring `build_memory`'s non-fatal init: a failed
-/// init leaves the store inert rather than aborting (sync then degrades, never crashes the boot). It is a
-/// second SQLite handle to the same file as the memory tools — safe, exactly what the prior on-demand open
-/// did transiently. wire opens `shared.db` for sync even when memory is disabled (`KIRI_MEMORY=off`):
-/// sync owns the shared store as its own data source (ADR 0015), at the cost of one cheap SQLite open.
-async fn build_sync_memory(settings: &Settings) -> Result<Arc<dyn SharedMemory>> {
-    let memory = match SqliteSharedMemory::new(settings.shared_memory_db.clone()) {
-        Ok(memory) => memory,
-        Err(error) => {
-            eprintln!(
-                "kiri: shared memory for sync unavailable ({error}); continuing with an inert store"
-            );
-            SqliteSharedMemory::in_memory()?
-        }
+/// Open the shared store for sync at `db`, mirroring `build_memory`'s non-fatal init: a failed open or
+/// init degrades to an inert in-memory store rather than aborting (sync then degrades, never crashes). A
+/// second SQLite handle to the same file the memory tools use — safe, exactly what the prior on-demand
+/// open did transiently. Returns the store plus an optional degraded-mode warning for the caller to
+/// surface on its own channel — never swallowed, never printed from here, so it can't corrupt the live
+/// TUI on the lazy `/sync` path.
+async fn build_sync_memory_at(db: PathBuf) -> AgentResult<(Arc<dyn SharedMemory>, Option<String>)> {
+    let (memory, mut warning) = match SqliteSharedMemory::new(db) {
+        Ok(memory) => (memory, None),
+        Err(error) => (
+            SqliteSharedMemory::in_memory()?,
+            Some(format!(
+                "shared memory for sync unavailable ({error}); continuing with an inert store"
+            )),
+        ),
     };
     if let Err(error) = memory.init().await {
-        eprintln!(
-            "kiri: shared memory for sync init failed ({error}); continuing with an inert store"
-        );
+        warning = Some(format!(
+            "shared memory for sync init failed ({error}); continuing with an inert store"
+        ));
     }
-    Ok(Arc::new(memory))
+    Ok((Arc::new(memory), warning))
+}
+
+/// Build the on-demand sync-store factory (the adapter choice stays here, the composition root). Capturing
+/// only the path, it opens nothing until the first `/sync`, so a memory-off session that never syncs
+/// births no `shared.db`.
+fn sync_memory_factory(db: PathBuf) -> SharedMemoryFactory {
+    Arc::new(move || {
+        let db = db.clone();
+        Box::pin(build_sync_memory_at(db))
+    })
 }
 
 /// Wire the memory contexts (project file store + shared SQLite store) and the docs library, returning
@@ -504,7 +521,7 @@ fn resolve_credential(
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, resolve_credential, wire_sync};
+    use super::{Settings, resolve_credential, sync_memory_factory, wire_sync};
     use crate::modules::provider::application::secret_store::SecretStore;
     use crate::shared::kernel::error::AgentError;
     use crate::shared::kernel::provider::{
@@ -676,6 +693,29 @@ mod tests {
         assert!(
             settings.shared_memory_db.exists(),
             "wire_sync must open the Settings-provided shared.db"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_memory_factory_defers_the_open() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("lazy-shared.db");
+        let factory = sync_memory_factory(db.clone());
+        // Building the factory must touch the disk for nothing: no shared.db until the first /sync.
+        assert!(
+            !db.exists(),
+            "building the factory must open nothing — a memory-off session that never syncs births no shared.db"
+        );
+        let (_memory, warning) = (factory)()
+            .await
+            .expect("the factory opens the store on demand");
+        assert!(
+            db.exists(),
+            "invoking the factory opens the store, creating shared.db on demand"
+        );
+        assert!(
+            warning.is_none(),
+            "a clean open over a writable path yields no degraded-mode warning"
         );
     }
 }

@@ -1,7 +1,9 @@
 //! The `/sync` push: the wire-injected [`SyncContext`] ports/paths and the push handler. The front-end
 //! is not a composition root — it constructs no adapter and recomputes no path; `app::wire` chooses them.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,16 +14,30 @@ use crate::modules::sync::application::git::Git;
 use crate::modules::sync::application::sync_service::SyncService;
 use crate::modules::sync::application::work_tree::SyncWorkTree;
 use crate::modules::tui::domain::model::Model;
+use crate::shared::kernel::error::AgentResult;
 
 use super::render::draw_and_copy;
+
+/// Open the sync shared store on demand, returning the store plus an optional degraded-mode warning the
+/// caller surfaces on its own channel — so the open never creates an empty `shared.db` at boot (only on
+/// the first `/sync`) and a failure is never swallowed nor `eprintln!`'d into the live TUI. The concrete
+/// adapter *choice* lives only in `app::wire`; here it is seen as a port.
+pub type SharedMemoryFactory = Arc<
+    dyn Fn() -> Pin<
+            Box<dyn Future<Output = AgentResult<(Arc<dyn SharedMemory>, Option<String>)>> + Send>,
+        > + Send
+        + Sync,
+>;
 
 /// The sync ports + paths, built once in `app::wire` and injected into the front-end so a live `/sync`
 /// push constructs **no** adapter and recomputes **no** path — the runtime is no longer a second
 /// composition root. The concrete git/shared-memory/work-tree adapter *choice* lives only in `wire`;
-/// here they are seen only as ports, and the home/config paths come from `Settings`.
+/// here they are seen only as ports, and the home/config paths come from `Settings`. The shared store is
+/// a *factory* opened lazily on the first push, so a memory-off session that never syncs births no
+/// `shared.db`.
 pub struct SyncContext {
     git: Arc<dyn Git>,
-    memory: Arc<dyn SharedMemory>,
+    memory_factory: SharedMemoryFactory,
     work_tree: Arc<dyn SyncWorkTree>,
     global_dir: PathBuf,
     config_path: PathBuf,
@@ -30,14 +46,14 @@ pub struct SyncContext {
 impl SyncContext {
     pub fn new(
         git: Arc<dyn Git>,
-        memory: Arc<dyn SharedMemory>,
+        memory_factory: SharedMemoryFactory,
         work_tree: Arc<dyn SyncWorkTree>,
         global_dir: PathBuf,
         config_path: PathBuf,
     ) -> Self {
         Self {
             git,
-            memory,
+            memory_factory,
             work_tree,
             global_dir,
             config_path,
@@ -60,11 +76,24 @@ pub(super) async fn sync_push(
     // redraws on its next iteration, so a failed draw here must not block the sync.
     let _ = draw_and_copy(terminal, model);
 
+    // Open the shared store on demand (first `/sync` of the session); a degraded-mode fallback surfaces
+    // its reason as a notice, and a hard open failure aborts the push with a clear message.
+    let (memory, warning) = match (ctx.memory_factory)().await {
+        Ok(opened) => opened,
+        Err(error) => {
+            model.notify_error(format!("sync falhou: {error}"));
+            return;
+        }
+    };
+    if let Some(reason) = warning {
+        model.notify_error(format!("sync: {reason}"));
+    }
+
     let service = SyncService::new(
         ctx.git.as_ref(),
         ctx.global_dir.clone(),
         ctx.config_path.clone(),
-        ctx.memory.as_ref(),
+        memory.as_ref(),
         ctx.work_tree.as_ref(),
     );
     match service.push().await {

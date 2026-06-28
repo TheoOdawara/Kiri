@@ -21,7 +21,7 @@ mod sync;
 mod turn;
 
 pub use provider_swap::ProviderSwap;
-pub use sync::SyncContext;
+pub use sync::{SharedMemoryFactory, SyncContext};
 
 use session_ops::SessionCursor;
 
