@@ -26,6 +26,7 @@ tokio = { version = "1.52.3", features = [
     "process",
     "time",
     "io-util",
+    # net: test-only (TcpListener in the hang/timeout regression tests); production HTTP goes through reqwest.
     "net",
 ] }
 tokio-stream = "0.1.18"

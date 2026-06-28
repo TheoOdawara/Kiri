@@ -52,7 +52,14 @@ struct TrustEmbeddings {
 /// different endpoint; the embeddings provider changing; the sandbox confinement *weakened* by rank
 /// (`require → os`, `require → off`, `os → off`); the sandbox network widened to allow. Reasons over the
 /// typed kernel [`AuthMethod`]/[`SandboxMode`]/[`NetworkStance`] (no magic strings). Returns a
-/// human-readable list (empty = safe to apply). Schema validity is checked separately by the caller.
+/// human-readable list (empty = safe to apply).
+///
+/// Standalone entry point: it re-parses both configs and owns its own incoming-TOML-validity guard (the
+/// `not valid TOML` arm below), so it stays correct when called directly — from its unit tests, or any
+/// future caller that has not pre-validated. On the `pull` path the incoming config is validated first,
+/// which makes that arm redundant *there*; the self-contained parse is deliberate defense-in-depth, not
+/// dead code. (Reusing the already-parsed config would mean returning the parsed `RawConfig` from
+/// `validate_config_str` and threading it here — a wider config-API change deferred as not worth it.)
 pub(crate) fn risky_config_changes(current: &str, incoming: &str) -> Vec<String> {
     let incoming: TrustView = match toml::from_str(incoming) {
         Ok(value) => value,
