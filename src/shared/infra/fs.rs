@@ -45,6 +45,32 @@ pub(crate) fn write_atomic_sync(path: &Path, content: &[u8]) -> std::io::Result<
     Ok(())
 }
 
+/// Crash-safe, owner-only write for secrets: like [`write_atomic_sync`] but the temp sibling is created
+/// (and coerced) `0600`, so the rename — which inherits the temp's mode — yields a `0600` file from birth.
+/// Plain `write_atomic_sync` would leave the renamed file umask-wide (~`0644`), exposing credentials. The
+/// `sync_all` before rename flushes the bytes so a crash leaves either the old file or the complete new one,
+/// never an empty/partial credentials file.
+#[cfg(unix)]
+pub(crate) fn write_atomic_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let tmp = temp_sibling(path);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    // mode() only applies at create; coerce in case a stale temp from an interrupted run pre-existed wider.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

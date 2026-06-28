@@ -269,8 +269,10 @@ impl<'a> SyncService<'a> {
     /// remote-helper transport (e.g. a file literally named `evil::payload`) cannot slip through.
     async fn is_allowed_remote_url(&self, url: &str) -> AgentResult<bool> {
         const SCHEMES: [&str; 3] = ["https://", "http://", "ssh://"];
-        if SCHEMES.iter().any(|scheme| url.starts_with(scheme)) {
-            return Ok(true);
+        if let Some(rest) = SCHEMES.iter().find_map(|scheme| url.strip_prefix(scheme)) {
+            // Reject an authority whose userinfo/host begins with `-`: it would reach `git remote add`
+            // as an option (e.g. `ssh://-oProxyCommand=…@h/x`). The scp-like arm already guards this.
+            return Ok(scheme_authority_is_safe(rest));
         }
         if is_scp_like(url) {
             return Ok(true);
@@ -295,6 +297,25 @@ fn is_scp_like(url: &str) -> bool {
         return false;
     };
     is_host_segment(user) && is_host_segment(host)
+}
+
+/// The authority of a scheme URL (`[userinfo@]host[:port][/path]`) carries no leading-`-` segment, so it
+/// cannot masquerade as a git option. Narrower than [`is_host_segment`] on purpose: it rejects only the
+/// option-injection vector, leaving IPv6 literals and userinfo-with-password (legitimate remotes) alone.
+fn scheme_authority_is_safe(rest: &str) -> bool {
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() {
+        return false;
+    }
+    let (userinfo, hostport) = match authority.rsplit_once('@') {
+        Some((user, host)) => (Some(user), host),
+        None => (None, authority),
+    };
+    if userinfo.is_some_and(|user| user.starts_with('-')) {
+        return false;
+    }
+    let host = hostport.split(':').next().unwrap_or("");
+    !host.is_empty() && !host.starts_with('-')
 }
 
 fn is_host_segment(segment: &str) -> bool {
@@ -486,6 +507,16 @@ mod tests {
         assert!(s.validate_remote_url("fd::evil").await.is_err());
         assert!(s.validate_remote_url("-oProxyCommand=evil").await.is_err());
         assert!(s.validate_remote_url("file://-evil").await.is_err());
+        // A scheme URL whose host or userinfo begins with `-` reaches `git remote add` as an option;
+        // the allowlist itself must reject it rather than defer to git's downstream parsing.
+        assert!(s.validate_remote_url("https://-evil.com/x").await.is_err());
+        assert!(s.validate_remote_url("http://-evil/x").await.is_err());
+        assert!(
+            s.validate_remote_url("ssh://-oProxyCommand=evil@h/x")
+                .await
+                .is_err()
+        );
+        assert!(s.validate_remote_url("https:///no-host").await.is_err());
         assert!(s.validate_remote_url("   ").await.is_err());
         // `::` is rejected even on an otherwise-accepted absolute path, so a name git would dispatch as a
         // `<helper>::` transport cannot slip through the local-path arm (locks the pre-existence guard).

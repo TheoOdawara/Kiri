@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::modules::provider::application::secret_store::SecretStore;
@@ -67,27 +66,14 @@ impl SecretStore for FileSecretStore {
     }
 }
 
-/// Write `bytes` to `path` readable/writable by the owner only. On Unix this is enforced as `0600`
-/// (set at create and coerced on a pre-existing file). On Windows std exposes no ACL control, so the
-/// file inherits the user-profile DACL (owner + SYSTEM/Administrators) — the accepted equivalent.
+/// Write `bytes` to `path` readable/writable by the owner only. On Unix this is an atomic `0600` write
+/// (temp sibling created `0600`, then renamed over `path`) so a crash mid-write can never leave the
+/// credentials file empty or partial — losing every stored key. On Windows std exposes no ACL control, so
+/// the file inherits the user-profile DACL (owner + SYSTEM/Administrators) — the accepted equivalent.
 #[cfg(unix)]
 fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), AgentError> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| AgentError::Secret(format!("open {}: {e}", path.display())))?;
-    // Coerce perms in case the file pre-existed with a wider mode (mode() only applies at create).
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-        .map_err(|e| AgentError::Secret(format!("chmod {}: {e}", path.display())))?;
-    file.write_all(bytes)
-        .map_err(|e| AgentError::Secret(format!("write {}: {e}", path.display())))?;
-    file.flush()
-        .map_err(|e| AgentError::Secret(format!("flush {}: {e}", path.display())))
+    crate::shared::infra::fs::write_atomic_owner_only(path, bytes)
+        .map_err(|e| AgentError::Secret(format!("write {}: {e}", path.display())))
 }
 
 #[cfg(not(unix))]
@@ -139,6 +125,38 @@ mod tests {
             .unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "credentials file must be 0600, got {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_is_atomic_preserving_prior_keys_and_leaving_no_temp() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("credentials.json");
+        let store = FileSecretStore::new(path.clone());
+        store
+            .set(
+                "a",
+                &Credential::ApiKey {
+                    key: Secret::new("ka"),
+                },
+            )
+            .unwrap();
+        store
+            .set(
+                "b",
+                &Credential::ApiKey {
+                    key: Secret::new("kb"),
+                },
+            )
+            .unwrap();
+        // The second write preserved the first key (atomic rename never truncated the file to empty)...
+        assert!(store.get("a").unwrap().is_some());
+        assert!(store.get("b").unwrap().is_some());
+        // ...and the temp sibling was consumed by the rename.
+        assert!(
+            !dir.path().join(".credentials.json.kiri-tmp").exists(),
+            "the atomic write must leave no temp sibling"
+        );
     }
 
     #[cfg(unix)]

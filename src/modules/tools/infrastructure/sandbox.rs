@@ -20,6 +20,14 @@ pub(crate) use crate::modules::tools::infrastructure::secret_paths::SECRET_DIRS;
 /// Confines every file operation to a canonicalized root directory, and refuses CRUD on files
 /// whose name matches a sensitive pattern (secrets, keys, credentials). All file tools resolve
 /// their path through this type; nothing else touches the filesystem with a raw, unvalidated path.
+///
+// ponytail: the path-resolution methods (`with_confinement`, `resolve_existing`, `resolve_create`,
+// `exec_cwd_for`) run blocking `std::fs` calls (canonicalize/exists/is_dir) directly on the
+// single-threaded TUI runtime, with no timeout — accepted because the workspace root is a LOCAL
+// filesystem, where these calls return promptly. Upgrade path if a remote/automount fs ever backs the
+// root: make the `Sandbox` port async and route each call through `run_blocking_with_timeout`
+// (shared/infra/sqlite), as the SQLite adapter does. Not done now: a sync→async port flip ripples to
+// every tool, disproportionate to a local-fs hang.
 #[derive(Debug, Clone)]
 pub struct FsSandbox {
     root: PathBuf,

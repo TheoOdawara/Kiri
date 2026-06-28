@@ -5,6 +5,7 @@ use crate::modules::tools::application::command_sandbox::{CommandSandbox, Sandbo
 use crate::modules::tools::infrastructure::secret_paths::{
     HARNESS_PRIVATE_DIR, HOME_SECRET_FILES, SECRET_DIRS,
 };
+use crate::modules::tools::infrastructure::sensitive::sensitive_globs;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::sandbox::NetworkPolicy;
 
@@ -117,6 +118,13 @@ fn build_profile(policy: &SandboxPolicy) -> String {
         // Reads: deny the same set so a confined command cannot read keys to exfiltrate.
         push_home_denies(&mut profile, &home);
     }
+    // Deny reads of sensitive-by-name files anywhere (the base `allow default` would permit them), so a
+    // confined `run_command` (`cat ./service.pem`, `cat ./.env`) cannot read the secret-name set the file
+    // tools already refuse via `SensitiveMatcher` — closing the OS-layer name-blindness (SEC issue #17).
+    // Defense-in-depth: `run_command` is already always-decline-confirm. Emitted before `extra_ro` so an
+    // explicit read-hole can still opt a path back in, mirroring the credential-dir denies.
+    push_sensitive_name_denies(&mut profile);
+
     // Re-allow any explicitly configured read paths (KIRI_SANDBOX_RO_PATHS), so the user can punch a
     // read-hole through the credential-dir denies above — e.g. a deploy tool that legitimately reads
     // ~/.aws/config. Emitted last so it wins (Seatbelt applies the last matching rule).
@@ -124,6 +132,45 @@ fn build_profile(policy: &SandboxPolicy) -> String {
         push_allow_read(&mut profile, dir);
     }
     profile
+}
+
+/// Deny reads of files whose last path component matches a sensitive glob (`*.pem`, `.env`, …), single-
+/// sourced from [`sensitive_globs`] so the OS layer and the file tools refuse the same set.
+fn push_sensitive_name_denies(profile: &mut String) {
+    for glob in sensitive_globs() {
+        profile.push_str(&format!(
+            "(deny file-read* (regex #\"{}\"))\n",
+            glob_to_sbpl_tail_regex(&glob)
+        ));
+    }
+}
+
+/// Translate a name glob into a Seatbelt regex matching it as a full path's last component: `/`-anchored,
+/// `$`-terminated, `*`→`[^/]*`, `?`→`[^/]`, regex metacharacters escaped, and each ASCII letter expanded to
+/// a `[aA]` class. The letter expansion (not `(?i)`) is deliberate: sandbox-exec's regex engine silently
+/// ignores `(?i)`, producing a fail-open rule, so case-insensitivity for the case-insensitive APFS target
+/// must be encoded in the pattern itself.
+fn glob_to_sbpl_tail_regex(glob: &str) -> String {
+    let mut body = String::from("/");
+    for ch in glob.chars() {
+        match ch {
+            '*' => body.push_str("[^/]*"),
+            '?' => body.push_str("[^/]"),
+            c if c.is_ascii_alphabetic() => {
+                body.push('[');
+                body.push(c.to_ascii_lowercase());
+                body.push(c.to_ascii_uppercase());
+                body.push(']');
+            }
+            '.' | '\\' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '/' => {
+                body.push('\\');
+                body.push(ch);
+            }
+            c => body.push(c),
+        }
+    }
+    body.push('$');
+    body
 }
 
 /// Emit the credential read-denies resolved relative to `home`: the single-sourced credential dirs, the
@@ -232,6 +279,31 @@ mod tests {
         assert!(p.contains(".kiri"));
         assert!(p.contains(".netrc"));
         assert!(p.contains(".git-credentials"));
+    }
+
+    #[test]
+    fn profile_denies_sensitive_file_names() {
+        // SEC issue #17: a confined run_command must not read secret-name files the file tools refuse.
+        // The denies are path-tail regexes with char-class case folding (sandbox-exec ignores `(?i)`).
+        let p = build_profile(&policy(NetworkPolicy::Deny));
+        assert!(
+            p.contains(r#"(deny file-read* (regex #"/\.[eE][nN][vV]$"))"#),
+            "the .env name must be read-denied at the OS layer:\n{p}"
+        );
+        assert!(
+            p.contains(r#"(deny file-read* (regex #"/[^/]*\.[pP][eE][mM]$"))"#),
+            "the *.pem glob must be read-denied at the OS layer:\n{p}"
+        );
+    }
+
+    #[test]
+    fn glob_to_sbpl_tail_regex_folds_case_and_anchors() {
+        assert_eq!(glob_to_sbpl_tail_regex(".env"), r"/\.[eE][nN][vV]$");
+        assert_eq!(glob_to_sbpl_tail_regex("*.pem"), r"/[^/]*\.[pP][eE][mM]$");
+        assert_eq!(
+            glob_to_sbpl_tail_regex("id_rsa"),
+            r"/[iI][dD]_[rR][sS][aA]$"
+        );
     }
 
     #[test]

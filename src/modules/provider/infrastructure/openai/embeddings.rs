@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
 use crate::modules::provider::infrastructure::request::{apply_optional_bearer, join_url};
-use crate::modules::provider::infrastructure::streaming::ensure_success;
+use crate::modules::provider::infrastructure::streaming::{MAX_STREAM_BYTES, ensure_success};
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::Secret;
 
@@ -78,6 +78,32 @@ fn align_embeddings(
     Ok(data.into_iter().map(|datum| datum.embedding).collect())
 }
 
+/// Read the response body with a byte ceiling, mirroring the chat path's `MAX_STREAM_BYTES`, so a hostile
+/// or misbehaving embeddings endpoint cannot exhaust memory through an unbounded JSON body. The advertised
+/// `content-length` is rejected up front; the post-read recheck is the real guard for a chunked body that
+/// advertises no length.
+/// ponytail: a chunked body without content-length is still fully buffered by `bytes()` before the recheck;
+/// upgrade path = a streamed, budget-bounded reader (like the chat SSE path) if a true cap is needed.
+async fn bounded_body(response: reqwest::Response) -> Result<Vec<u8>, AgentError> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_STREAM_BYTES as u64)
+    {
+        return Err(AgentError::Provider(format!(
+            "embeddings response exceeds the maximum size ({MAX_STREAM_BYTES} bytes)"
+        )));
+    }
+    let bytes = response.bytes().await.map_err(|error| {
+        AgentError::Provider(format!("failed to read embeddings response: {error}"))
+    })?;
+    if bytes.len() > MAX_STREAM_BYTES {
+        return Err(AgentError::Provider(format!(
+            "embeddings response exceeds the maximum size ({MAX_STREAM_BYTES} bytes)"
+        )));
+    }
+    Ok(bytes.to_vec())
+}
+
 #[async_trait::async_trait]
 impl EmbeddingProvider for OpenAiEmbeddingProvider {
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, AgentError> {
@@ -97,8 +123,8 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
                 AgentError::Provider(format!("failed to reach embeddings endpoint: {error}"))
             })?;
         let response = ensure_success(response).await?;
-
-        let parsed: EmbeddingsResponse = response.json().await.map_err(|error| {
+        let bytes = bounded_body(response).await?;
+        let parsed: EmbeddingsResponse = serde_json::from_slice(&bytes).map_err(|error| {
             AgentError::Provider(format!("invalid embeddings response: {error}"))
         })?;
         align_embeddings(parsed.data, texts.len())
@@ -114,6 +140,7 @@ mod tests {
     use super::{EmbeddingDatum, OpenAiEmbeddingProvider, align_embeddings};
     use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
     use crate::modules::provider::infrastructure::test_support;
+    use crate::shared::kernel::error::AgentError;
 
     #[test]
     fn align_reorders_by_index_and_checks_count() {
@@ -174,6 +201,41 @@ mod tests {
             },
         ];
         assert!(align_embeddings(data, 2).is_err());
+    }
+
+    /// An embeddings endpoint advertising a body past `MAX_STREAM_BYTES` is rejected by the content-length
+    /// pre-check before the body is read, so a hostile endpoint fails fast instead of exhausting memory.
+    #[tokio::test]
+    async fn oversized_embeddings_response_is_rejected() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                // Advertise a length past the cap; the pre-check fires before any body is consumed.
+                let huge = super::MAX_STREAM_BYTES + 1;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {huge}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.flush().await;
+            }
+        });
+        let base_url = format!("http://{addr}/v1");
+        let provider =
+            OpenAiEmbeddingProvider::new(reqwest::Client::new(), base_url, None, "embed-model");
+        let result = provider.embed(&["hello".to_string()]).await;
+        match result {
+            Err(AgentError::Provider(message)) => assert!(
+                message.contains("maximum size"),
+                "expected a size-cap error, got: {message}"
+            ),
+            other => panic!("expected a provider size-cap error, got {other:?}"),
+        }
     }
 
     /// A keyless embeddings endpoint (local LM Studio / Ollama) must omit the `Authorization` header,

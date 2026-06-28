@@ -119,20 +119,30 @@ fn glob_to_regex(glob: &str) -> String {
     regex
 }
 
-/// Load the sensitive-file globs from `KIRI_SENSITIVE_PATTERNS` (newline-separated, `#` comments,
-/// replaces the default) or fall back to the hardcoded default. Compiles each glob into a regex
-/// and fails fast on an invalid pattern.
-pub fn load_sensitive_matcher() -> Result<SensitiveMatcher> {
-    let raw = std::env::var("KIRI_SENSITIVE_PATTERNS").ok();
-    let globs: Vec<&str> = match &raw {
-        Some(value) if !value.is_empty() => value
+/// The active sensitive-file globs: `KIRI_SENSITIVE_PATTERNS` (newline-separated, `#` comments, replaces
+/// the default) or the hardcoded default. Owned so the OS sandbox profile can deny the same set the file
+/// tools refuse without re-reading the env or borrowing a local — the single source for both layers.
+pub fn sensitive_globs() -> Vec<String> {
+    match std::env::var("KIRI_SENSITIVE_PATTERNS") {
+        Ok(value) if !value.is_empty() => value
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_string)
             .collect(),
-        _ => DEFAULT_SENSITIVE_PATTERNS.to_vec(),
-    };
-    SensitiveMatcher::new(&globs)
+        _ => DEFAULT_SENSITIVE_PATTERNS
+            .iter()
+            .map(|g| g.to_string())
+            .collect(),
+    }
+}
+
+/// Load the sensitive-file globs (via [`sensitive_globs`]) and compile them into a matcher, failing fast
+/// on an invalid pattern.
+pub fn load_sensitive_matcher() -> Result<SensitiveMatcher> {
+    let globs = sensitive_globs();
+    let refs: Vec<&str> = globs.iter().map(String::as_str).collect();
+    SensitiveMatcher::new(&refs)
 }
 
 #[cfg(test)]
