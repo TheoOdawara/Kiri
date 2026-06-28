@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::modules::memory::application::memory_port::MemoryPort;
+use crate::modules::memory::application::memory_port::Memory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::modules::memory::domain::scope::Scope;
 use crate::modules::tools::application::sandbox::Sandbox;
@@ -25,12 +25,12 @@ struct RememberArgs {
 /// Tool that persists a memory entry to the project (`.kiri/memory/`) or shared
 /// (`~/.kiri/memory/shared.db`) store, so durable knowledge survives across turns and sessions.
 pub struct Remember {
-    memory: Arc<dyn MemoryPort>,
+    memory: Arc<dyn Memory>,
     project_id: String,
 }
 
 impl Remember {
-    pub fn new(memory: Arc<dyn MemoryPort>, project_id: String) -> Self {
+    pub fn new(memory: Arc<dyn Memory>, project_id: String) -> Self {
         Self { memory, project_id }
     }
 }

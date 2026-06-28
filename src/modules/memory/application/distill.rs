@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::modules::memory::application::memory_port::MemoryPort;
+use crate::modules::memory::application::memory_port::Memory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::modules::memory::domain::scope::Scope;
 use crate::modules::provider::application::completion_provider::{
@@ -70,10 +70,10 @@ const DISTILL_SYSTEM_PROMPT: &str = concat!(
 );
 
 /// The end-of-session learning pass: feed the conversation to the model, ask it to extract durable
-/// knowledge, and persist what it returns to memory. Depends on the `MemoryPort` (to write) and is handed
-/// a `CompletionProvider` at call time (so it always uses the live adapter after a `/provider` swap).
+/// knowledge, and persist what it returns to memory. Depends on the `Memory` capability (to write) and is
+/// handed a `CompletionProvider` at call time (so it always uses the live adapter after a `/provider` swap).
 pub struct Distiller {
-    memory: Arc<dyn MemoryPort>,
+    memory: Arc<dyn Memory>,
     project_id: String,
     timeout: Duration,
     max_entries: usize,
@@ -81,7 +81,7 @@ pub struct Distiller {
 }
 
 impl Distiller {
-    pub fn new(memory: Arc<dyn MemoryPort>, project_id: String) -> Self {
+    pub fn new(memory: Arc<dyn Memory>, project_id: String) -> Self {
         Self {
             memory,
             project_id,

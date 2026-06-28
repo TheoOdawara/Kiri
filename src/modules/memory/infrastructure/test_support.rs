@@ -1,11 +1,11 @@
-//! Shared test helpers for the memory module: a real file+SQLite-backed `MemoryPort` over a temp dir,
+//! Shared test helpers for the memory module: a real file+SQLite-backed `Memory` over a temp dir,
 //! a generic in-memory `InMemoryStore` double, a sandbox fixture, and a `ToolCall` builder.
 
 use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 
-use crate::modules::memory::application::memory_port::{MemoryPort, MemoryPortImpl};
+use crate::modules::memory::application::memory_port::{LayeredMemory, Memory};
 use crate::modules::memory::application::memory_store::MemoryStore;
 use crate::modules::memory::application::project_memory::ProjectMemory;
 use crate::modules::memory::application::shared_memory::SharedMemory;
@@ -20,13 +20,13 @@ use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
 use crate::shared::kernel::error::AgentResult;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
-/// A `MemoryPort` backed by real file (project) and SQLite (shared) stores under `dir`.
-pub async fn temp_port(dir: &TempDir) -> Arc<dyn MemoryPort> {
+/// A `Memory` backed by real file (project) and SQLite (shared) stores under `dir`.
+pub async fn temp_port(dir: &TempDir) -> Arc<dyn Memory> {
     let project = FileProjectMemory::new(dir.path().join(".kiri").join("memory"));
     let project_ok = project.init().await.is_ok();
     let shared = SqliteSharedMemory::new(dir.path().join("shared.db")).unwrap();
     let shared_ok = shared.init().await.is_ok();
-    Arc::new(MemoryPortImpl::new(
+    Arc::new(LayeredMemory::new(
         FileProjectStore::new(project, project_ok),
         SqliteSharedStore::new(shared, shared_ok),
     ))

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::modules::memory::application::memory_port::MemoryPort;
+use crate::modules::memory::application::memory_port::Memory;
 use crate::modules::memory::domain::entry::MemoryEntry;
 use crate::modules::memory::domain::scope::RecallScope;
 use crate::modules::tools::application::sandbox::Sandbox;
@@ -33,11 +33,11 @@ fn default_limit() -> usize {
 /// Read-only tool that recalls relevant memory entries (project, shared, or both) for a query, so the
 /// model can pull prior decisions/patterns/facts into the current turn on demand.
 pub struct RecallMemory {
-    memory: Arc<dyn MemoryPort>,
+    memory: Arc<dyn Memory>,
 }
 
 impl RecallMemory {
-    pub fn new(memory: Arc<dyn MemoryPort>) -> Self {
+    pub fn new(memory: Arc<dyn Memory>) -> Self {
         Self { memory }
     }
 }

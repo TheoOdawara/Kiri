@@ -44,9 +44,9 @@ fn merge_dedup(
     out
 }
 
-/// Unified memory port for the AgentLoop. Combines access to project memory and shared memory.
+/// Unified memory capability for the AgentLoop. Combines access to project memory and shared memory.
 #[async_trait::async_trait]
-pub trait MemoryPort: Send + Sync {
+pub trait Memory: Send + Sync {
     /// Recall project memories relevant to the query.
     async fn recall_project(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
@@ -66,16 +66,16 @@ pub trait MemoryPort: Send + Sync {
     fn shared_memory_available(&self) -> bool;
 }
 
-/// Default implementation that delegates to separate stores. When an `EmbeddingProvider` is present,
-/// recall is semantic (cosine over stored embeddings) with a transparent keyword fallback; otherwise it
-/// is keyword-only.
-pub struct MemoryPortImpl<P, S> {
+/// Layered `Memory` adapter composing a project store, a shared store, and an optional embedder. When an
+/// `EmbeddingProvider` is present, recall is semantic (cosine over stored embeddings) with a transparent
+/// keyword fallback; otherwise it is keyword-only.
+pub struct LayeredMemory<P, S> {
     project_store: P,
     shared_store: S,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
 }
 
-impl<P, S> MemoryPortImpl<P, S> {
+impl<P, S> LayeredMemory<P, S> {
     pub fn new(project_store: P, shared_store: S) -> Self {
         Self {
             project_store,
@@ -128,7 +128,7 @@ async fn semantic_pick(
 }
 
 #[async_trait::async_trait]
-impl<P, S> MemoryPort for MemoryPortImpl<P, S>
+impl<P, S> Memory for LayeredMemory<P, S>
 where
     P: crate::modules::memory::application::memory_store::MemoryStore + Send + Sync,
     S: crate::modules::memory::application::shared_store::SharedStore + Send + Sync,
@@ -220,6 +220,11 @@ where
     }
 }
 
+// Back-compat aliases for the composition root (`app.rs`) and the TUI runtime, which still import the old
+// `MemoryPort`/`MemoryPortImpl` names. Temporary: drop once those two files adopt `Memory`/`LayeredMemory`.
+pub use LayeredMemory as MemoryPortImpl;
+pub use Memory as MemoryPort;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,7 +237,7 @@ mod tests {
     async fn memory_port_delegates_to_stores() {
         let project = InMemoryStore::new(true);
         let shared = InMemoryStore::new(true);
-        let port = MemoryPortImpl::new(project, shared);
+        let port = LayeredMemory::new(project, shared);
 
         let entry = MemoryEntry::new(
             MemoryKind::Pattern,
@@ -254,7 +259,7 @@ mod tests {
     async fn memory_port_reports_availability() {
         let project = InMemoryStore::new(false);
         let shared = InMemoryStore::new(true);
-        let port = MemoryPortImpl::new(project, shared);
+        let port = LayeredMemory::new(project, shared);
 
         assert!(!port.project_memory_available());
         assert!(port.shared_memory_available());
@@ -338,7 +343,7 @@ mod tests {
         #[tokio::test]
         async fn ranks_shared_recall_by_cosine_similarity() {
             let dir = TempDir::new().unwrap();
-            let port = MemoryPortImpl::new(project_store(&dir).await, shared_store(&dir).await)
+            let port = LayeredMemory::new(project_store(&dir).await, shared_store(&dir).await)
                 .with_embedder(Arc::new(FakeEmbedder));
 
             port.remember_shared(MemoryEntry::new(
@@ -372,7 +377,7 @@ mod tests {
         #[tokio::test]
         async fn ranks_project_recall_by_cosine_similarity() {
             let dir = TempDir::new().unwrap();
-            let port = MemoryPortImpl::new(project_store(&dir).await, shared_store(&dir).await)
+            let port = LayeredMemory::new(project_store(&dir).await, shared_store(&dir).await)
                 .with_embedder(Arc::new(FakeEmbedder));
 
             port.remember_project(MemoryEntry::new(
@@ -400,7 +405,7 @@ mod tests {
         #[tokio::test]
         async fn an_unrelated_query_returns_nothing_not_recent_entries() {
             let dir = TempDir::new().unwrap();
-            let port = MemoryPortImpl::new(project_store(&dir).await, shared_store(&dir).await)
+            let port = LayeredMemory::new(project_store(&dir).await, shared_store(&dir).await)
                 .with_embedder(Arc::new(FakeEmbedder));
             port.remember_shared(MemoryEntry::new(
                 MemoryKind::Fact,
@@ -424,7 +429,7 @@ mod tests {
         #[tokio::test]
         async fn falls_back_to_keyword_when_embedding_fails() {
             let dir = TempDir::new().unwrap();
-            let port = MemoryPortImpl::new(project_store(&dir).await, shared_store(&dir).await)
+            let port = LayeredMemory::new(project_store(&dir).await, shared_store(&dir).await)
                 .with_embedder(Arc::new(FailEmbedder));
 
             port.remember_shared(MemoryEntry::new(
@@ -461,7 +466,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let port = MemoryPortImpl::new(project_store(&dir).await, shared)
+            let port = LayeredMemory::new(project_store(&dir).await, shared)
                 .with_embedder(Arc::new(OtherModelEmbedder));
 
             let hits = port.recall_shared("alpha", 5).await.unwrap();
