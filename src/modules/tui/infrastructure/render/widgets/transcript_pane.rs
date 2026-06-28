@@ -57,37 +57,19 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
     }
 
     let width = (area.width as usize).clamp(1, BODY_MAX_WIDTH);
-    let items = model.transcript.items();
-    let last = items.len().saturating_sub(1);
     let reveal = Reveal {
         motion,
         now: model.timeline.render_at,
         landings: &model.timeline.stream_landings,
     };
-    let mut lines: Vec<Line> = Vec::new();
-    for (idx, item) in items.iter().enumerate() {
-        if !lines.is_empty() {
-            // Two blank rows open a new turn (a user prompt); one separates items within a turn.
-            lines.push(Line::default());
-            if matches!(item, TranscriptItem::User(_)) {
-                lines.push(Line::default());
-            }
-        }
-        // The still-streaming item (the trailing assistant/reasoning while a turn streams) renders as
-        // plain text — skipping the per-frame markdown parse keeps the ~30 fps stream cheap; once the
-        // turn finishes it re-renders formatted (and is then memoized).
-        let active = model.status.streaming && idx == last;
-        render_item(item, width, model.expand_tools, active, reveal, &mut lines);
-    }
-
-    // Rack focus: while a confirmation is up, the whole transcript recedes one ramp step so the
-    // borderless stanza pulls focus by depth, not by a drawn box. One static restyle — never animated,
-    // so it stays a single diff and does not fight the markdown memoization.
-    if model.has_modal() {
-        for line in &mut lines {
-            recede(line);
-        }
-    }
+    let lines = build_transcript_lines(
+        model.transcript.items(),
+        width,
+        model.expand_tools,
+        model.status.streaming,
+        model.has_modal(),
+        reveal,
+    );
 
     let total = lines.len() as u16;
     let max_offset = total.saturating_sub(area.height);
@@ -100,6 +82,46 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
             .style(theme::base()),
         area,
     );
+}
+
+/// Build the wrapped, styled transcript lines for the pane — the per-frame work, factored out of `render`
+/// so it can be timed without a ratatui `Frame` (see the `render_cost` measurement). Pure in its inputs;
+/// the markdown body of a finalized item is memoized by `markdown::render`, so a settled transcript pays
+/// only this loop and the line clones each frame.
+fn build_transcript_lines(
+    items: &[TranscriptItem],
+    width: usize,
+    expanded: bool,
+    streaming: bool,
+    has_modal: bool,
+    reveal: Reveal,
+) -> Vec<Line<'static>> {
+    let last = items.len().saturating_sub(1);
+    let mut lines: Vec<Line> = Vec::new();
+    for (idx, item) in items.iter().enumerate() {
+        if !lines.is_empty() {
+            // Two blank rows open a new turn (a user prompt); one separates items within a turn.
+            lines.push(Line::default());
+            if matches!(item, TranscriptItem::User(_)) {
+                lines.push(Line::default());
+            }
+        }
+        // The still-streaming item (the trailing assistant/reasoning while a turn streams) renders as
+        // plain text — skipping the per-frame markdown parse keeps the ~30 fps stream cheap; once the
+        // turn finishes it re-renders formatted (and is then memoized).
+        let active = streaming && idx == last;
+        render_item(item, width, expanded, active, reveal, &mut lines);
+    }
+
+    // Rack focus: while a confirmation is up, the whole transcript recedes one ramp step so the
+    // borderless stanza pulls focus by depth, not by a drawn box. One static restyle — never animated,
+    // so it stays a single diff and does not fight the markdown memoization.
+    if has_modal {
+        for line in &mut lines {
+            recede(line);
+        }
+    }
+    lines
 }
 
 fn render_item(
@@ -430,6 +452,62 @@ mod tests {
             landings: &[],
         };
         assert_eq!(line_fg(0, true, reveal), theme::CODE_FG);
+    }
+
+    use crate::modules::tui::domain::transcript::ToolActivity;
+
+    /// A representative transcript: alternating user prompts, markdown assistant answers, and tool calls.
+    fn sample_items(turns: usize) -> Vec<TranscriptItem> {
+        let mut items = Vec::new();
+        for i in 0..turns {
+            items.push(TranscriptItem::User(format!(
+                "how do I do thing number {i}?"
+            )));
+            items.push(TranscriptItem::Assistant(format!(
+                "Here is **answer {i}** with a list:\n\n- first point about it\n- second point with `code`\n\nand a closing paragraph that wraps across the pane width to exercise the word-wrap path."
+            )));
+            items.push(TranscriptItem::Tool(ToolActivity {
+                command: format!("rg 'thing {i}' ."),
+                diff: None,
+                result: Some((
+                    ToolStatus::Ok,
+                    "src/a.rs:1: match\nsrc/b.rs:2: match\nsrc/c.rs:3: match".to_string(),
+                    Duration::from_millis(12),
+                )),
+            }));
+        }
+        items
+    }
+
+    /// Measurement for PERF-01 (not a correctness assertion): prints the per-frame cost of building the
+    /// transcript lines for a settled (markdown-memoized) transcript, so the value of a line-level cache
+    /// can be judged with data. Run on demand: `cargo test render_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement, not a correctness check; run with --ignored --nocapture"]
+    fn render_cost() {
+        let items = sample_items(40); // 120 items — a long session
+        let reveal = Reveal {
+            motion: Motion::Full,
+            now: None,
+            landings: &[],
+        };
+        // Warm the markdown memoization cache (the expensive parse happens once per unique body).
+        let _ = build_transcript_lines(&items, 88, false, false, false, reveal);
+
+        let iterations = 2000;
+        let start = Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iterations {
+            let lines = build_transcript_lines(&items, 88, false, false, false, reveal);
+            sink = sink.wrapping_add(lines.len());
+        }
+        let per_frame = start.elapsed() / iterations;
+        println!(
+            "render_cost: {} items -> {} lines, {:?}/frame (markdown memoized), sink={sink}",
+            items.len(),
+            build_transcript_lines(&items, 88, false, false, false, reveal).len(),
+            per_frame,
+        );
     }
 
     #[test]
