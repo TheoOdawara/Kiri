@@ -4,6 +4,7 @@ use super::wire::MessagesRequest;
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
+use crate::modules::provider::infrastructure::request::join_url;
 use crate::modules::provider::infrastructure::streaming::{drain_sse, ensure_success};
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
@@ -74,7 +75,7 @@ impl CompletionProvider for AnthropicProvider {
     ) -> Result<CompletedTurn, AgentError> {
         let body = self.build_body(&request);
 
-        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+        let url = join_url(&self.base_url, "v1/messages");
         let response = self
             .client
             .post(&url)

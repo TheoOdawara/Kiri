@@ -214,17 +214,14 @@ pub fn generic_env_key(profile: &ProviderProfile) -> String {
     )
 }
 
-/// Extract a *required* API key, failing if the credential is absent or OAuth. Used by the Anthropic
-/// branch (no anonymous mode) — a `None` credential here is a configuration error.
+/// Extract a *required* API key by delegating to [`optional_key`] (which rejects OAuth in one place)
+/// and mapping a keyless `None` to the missing-key error. Used by the Anthropic branch (no anonymous
+/// mode) — a `None` credential here is a configuration error.
 fn api_key_of(credential: Credential, profile: &ProviderProfile) -> Result<Secret, AgentError> {
-    match credential {
-        Credential::ApiKey { key } => Ok(key),
-        Credential::None => Err(AgentError::Provider(format!(
+    match optional_key(credential, profile)? {
+        Some(key) => Ok(key),
+        None => Err(AgentError::Provider(format!(
             "provider '{}' requires an API key but none is configured",
-            profile.id
-        ))),
-        Credential::Oauth(_) => Err(AgentError::Provider(format!(
-            "provider '{}' has an OAuth credential, but Kiri only supports API-key credentials",
             profile.id
         ))),
     }
@@ -249,7 +246,8 @@ fn optional_key(
 #[cfg(test)]
 mod tests {
     use super::{
-        CredentialResolution, build_provider, resolve_credential_with_env, secret_from_env_value,
+        CredentialResolution, api_key_of, build_provider, resolve_credential_with_env,
+        secret_from_env_value,
     };
     use crate::modules::provider::application::secret_store::SecretStore;
     use crate::shared::kernel::error::AgentError;
@@ -428,6 +426,22 @@ mod tests {
         let client = reqwest::Client::new();
         let p = profile("claude", ProviderKind::Anthropic, AuthMethod::ApiKey, "m");
         assert!(build_provider(client, &p, api_key(), true, Effort::High).is_ok());
+    }
+
+    #[test]
+    fn api_key_of_rejects_oauth_once() {
+        // The required-key extractor delegates to optional_key, so the single OAuth rejection arm now
+        // lives in one place: OAuth and a keyless None both error, an API key passes through.
+        let p = profile("claude", ProviderKind::Anthropic, AuthMethod::ApiKey, "m");
+        assert!(matches!(
+            api_key_of(oauth(), &p),
+            Err(AgentError::Provider(_))
+        ));
+        assert!(matches!(
+            api_key_of(Credential::None, &p),
+            Err(AgentError::Provider(_))
+        ));
+        assert_eq!(api_key_of(api_key(), &p).unwrap().expose(), "k");
     }
 
     #[test]

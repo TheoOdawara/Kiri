@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
+use crate::modules::provider::infrastructure::request::{apply_optional_bearer, join_url};
 use crate::modules::provider::infrastructure::streaming::ensure_success;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::Secret;
@@ -83,13 +84,8 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
-        let mut request = self.client.post(&url);
-        // Omit Authorization for a keyless endpoint (see the chat adapter); `Bearer ` empty is rejected
-        // by some local servers.
-        if let Some(key) = &self.api_key {
-            request = request.bearer_auth(key.expose());
-        }
+        let url = join_url(&self.base_url, "embeddings");
+        let request = apply_optional_bearer(self.client.post(&url), &self.api_key);
         let response = request
             .json(&EmbeddingsRequest {
                 model: &self.model,
@@ -117,7 +113,7 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
 mod tests {
     use super::{EmbeddingDatum, OpenAiEmbeddingProvider, align_embeddings};
     use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
-    use std::time::Duration;
+    use crate::modules::provider::infrastructure::test_support;
 
     #[test]
     fn align_reorders_by_index_and_checks_count() {
@@ -184,44 +180,12 @@ mod tests {
     /// mirroring the chat adapter — `None` key sends no header at all.
     #[tokio::test]
     async fn keyless_embeddings_omits_authorization_header() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
-        tokio::spawn(async move {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let mut buf = vec![0u8; 4096];
-                let n = stream.read(&mut buf).await.unwrap_or(0);
-                let captured = String::from_utf8_lossy(&buf[..n]).into_owned();
-                let body = "stop";
-                let response = format!(
-                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.flush().await;
-                let _ = tx.send(captured);
-            }
-        });
-
-        let provider = OpenAiEmbeddingProvider::new(
-            reqwest::Client::new(),
-            format!("http://{addr}/v1"),
-            None,
-            "embed-model",
-        );
-        let _ = tokio::time::timeout(
-            Duration::from_secs(5),
-            provider.embed(&["hello".to_string()]),
-        )
+        let captured = test_support::capture_request(|base_url| async move {
+            let provider =
+                OpenAiEmbeddingProvider::new(reqwest::Client::new(), base_url, None, "embed-model");
+            let _ = provider.embed(&["hello".to_string()]).await;
+        })
         .await;
-        let captured = tokio::time::timeout(Duration::from_secs(5), rx)
-            .await
-            .expect("server should capture the request")
-            .expect("capture channel should deliver");
         assert!(
             !captured.to_ascii_lowercase().contains("authorization"),
             "keyless embeddings request must omit Authorization; got:\n{captured}"
