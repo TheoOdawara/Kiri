@@ -42,6 +42,8 @@ pub(super) fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
 
     let selected = model.pending_approval.as_ref().map_or(0, |p| p.selected);
     let choice = match key.code {
+        // Ctrl+C while an approval is pending answers the reply channel with Aborted — the engine future is
+        // blocked waiting on it, so a bare Quit here would strand it; the session ends via Aborted instead.
         Key::Char('c') if key.ctrl => Some(Choice::Abort),
         Key::Esc => Some(Choice::Decline),
         Key::Enter => ApprovalOption::from_index(selected).map(Choice::Option),
@@ -197,10 +199,13 @@ pub(super) fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
             Some(model_id) => vec![Effect::SetModel(model_id.clone())],
             None => vec![],
         },
-        PickerKind::Effort => {
-            let effort = Effort::ALL.get(index).copied().unwrap_or_default();
-            vec![Effect::SetEffort(effort)]
-        }
+        PickerKind::Effort => match Effort::ALL.get(index) {
+            // The index comes from the Effort picker, itself built from `Effort::ALL`, so it is always in
+            // range; mirror the Models/Sessions arms — a no-op on the unreachable miss, never a silent
+            // `unwrap_or_default` that could quietly apply the wrong effort.
+            Some(effort) => vec![Effect::SetEffort(*effort)],
+            None => vec![],
+        },
         PickerKind::Provider => {
             // The configured ids come first; the last row (`index == providers.len()`) is the
             // "+ adicionar" sentinel, which opens the add wizard instead of switching.

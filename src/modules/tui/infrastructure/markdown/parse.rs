@@ -24,7 +24,7 @@ pub(super) fn parse(markdown: &str, base: Style) -> Vec<Block> {
     let mut ctx = ParseCtx::new(base);
     for event in parser {
         match event {
-            Event::Start(tag) => ctx.start(tag, &mut blocks),
+            Event::Start(tag) => ctx.start(tag),
             Event::End(end) => ctx.end(end, &mut blocks),
             Event::Text(s) => ctx.text(s.to_string()),
             Event::Code(s) => ctx.code(s.to_string()),
@@ -165,7 +165,7 @@ impl ParseCtx {
         }
     }
 
-    fn start(&mut self, tag: Tag, blocks: &mut Vec<Block>) {
+    fn start(&mut self, tag: Tag) {
         match tag {
             Tag::Paragraph => {
                 self.accum = InlineAccum::default();
@@ -219,7 +219,6 @@ impl ParseCtx {
             Tag::Link { .. } | Tag::Image { .. } | Tag::FootnoteDefinition(_) => {}
             _ => {}
         }
-        let _ = blocks;
     }
 
     /// Rebuild the accum's bold/italic/strike flags from the current format stack.

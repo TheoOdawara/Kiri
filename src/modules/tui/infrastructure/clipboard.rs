@@ -8,27 +8,40 @@ use crate::modules::tui::domain::input_buffer::ImageAttachment;
 use crate::shared::kernel::error::AgentError;
 
 /// What the OS clipboard held when read: an image (encoded as a PNG data URL ready for the provider's
-/// multimodal content), plain text, or nothing usable.
+/// multimodal content), plain text, nothing usable, or an image that was present but could not be encoded.
 pub enum ClipboardContent {
     Image(ImageAttachment),
     Text(String),
+    /// An image was present on the clipboard but could not be encoded (zero-sized or malformed). Distinct
+    /// from `Empty` so the caller surfaces a Notice instead of a silent no-op that looks like "nothing was
+    /// pasted".
+    Unreadable,
     Empty,
 }
 
-/// Read the OS clipboard, preferring an image over text. Every failure collapses to `Empty`: clipboard
-/// access is best-effort device I/O and must never crash the TUI.
+/// Read the OS clipboard, preferring an image over text. Clipboard access is best-effort device I/O and
+/// must never crash the TUI: a missing clipboard or no usable content is `Empty`, but an image that is
+/// present yet fails to encode is `Unreadable`, so the caller can surface a Notice rather than silently
+/// dropping a paste the user intended.
 pub fn read() -> ClipboardContent {
     let Ok(mut clipboard) = Clipboard::new() else {
         return ClipboardContent::Empty;
     };
-    if let Ok(image) = clipboard.get_image()
-        && let Some(attachment) = encode_png_data_url(&image)
-    {
-        return ClipboardContent::Image(attachment);
+    if let Ok(image) = clipboard.get_image() {
+        return classify_image(&image);
     }
     match clipboard.get_text() {
         Ok(text) if !text.is_empty() => ClipboardContent::Text(text),
         _ => ClipboardContent::Empty,
+    }
+}
+
+/// Classify a present clipboard image: an encodable image becomes a staged attachment; one that cannot be
+/// encoded (zero-sized/malformed) is `Unreadable`, never silently treated as an empty clipboard.
+fn classify_image(image: &arboard::ImageData<'_>) -> ClipboardContent {
+    match encode_png_data_url(image) {
+        Some(attachment) => ClipboardContent::Image(attachment),
+        None => ClipboardContent::Unreadable,
     }
 }
 
@@ -77,5 +90,20 @@ mod tests {
         // Empty short-circuits before `Clipboard::new()`, so it is Ok in any (even headless) environment
         // and — by never reaching `set_text` — cannot overwrite the user's existing clipboard contents.
         assert!(copy_text("").is_ok());
+    }
+
+    #[test]
+    fn clipboard_image_encode_failure_is_surfaced() {
+        // A present-but-unencodable image (zero dimensions) reports Unreadable, not Empty, so the paste
+        // handler surfaces a Notice instead of looking like nothing was on the clipboard.
+        let broken = arboard::ImageData {
+            width: 0,
+            height: 0,
+            bytes: std::borrow::Cow::Borrowed(&[]),
+        };
+        assert!(matches!(
+            classify_image(&broken),
+            ClipboardContent::Unreadable
+        ));
     }
 }

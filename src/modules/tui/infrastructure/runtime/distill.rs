@@ -75,6 +75,8 @@ impl RunLoop {
         self.model.busy = true;
         let started = Instant::now();
         self.model.timeline.render_at = Some(started);
+        // Best-effort pre-op repaint to show the "distilling…" notice before the blocking call; the loop
+        // redraws on its next iteration, so a failed draw here must not block the distillation.
         let _ = draw_and_copy(ui.terminal, &mut self.model);
 
         let outcome = {

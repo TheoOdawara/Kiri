@@ -77,7 +77,8 @@ pub(super) fn place_cursor<B: Backend>(
 }
 
 /// Read the OS clipboard and route it into the buffer: an image becomes a staged attachment, text is
-/// inserted at the cursor. Best-effort — an empty or unreadable clipboard is a no-op.
+/// inserted at the cursor. Best-effort — an empty clipboard is a silent no-op, but a present-but-unencodable
+/// image surfaces a Notice (a paste the user intended must not vanish silently).
 pub(super) fn paste_from_clipboard(model: &mut Model) {
     // `update` for these messages produces no effects (they only mutate the model), so the returned
     // Vec is intentionally discarded — there is nothing for the runtime to perform.
@@ -87,6 +88,10 @@ pub(super) fn paste_from_clipboard(model: &mut Model) {
         }
         ClipboardContent::Text(text) => {
             let _ = update(model, Msg::Paste(text));
+        }
+        // An image was on the clipboard but could not be encoded: tell the user instead of doing nothing.
+        ClipboardContent::Unreadable => {
+            model.notify_error("não consegui ler a imagem da área de transferência");
         }
         ClipboardContent::Empty => {}
     }

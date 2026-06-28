@@ -56,6 +56,8 @@ pub(super) async fn sync_push(
 ) {
     model.notify_info("sincronizando (push)…");
     model.timeline.render_at = Some(Instant::now());
+    // Best-effort pre-op repaint to show the "syncing…" notice before the blocking push; the main loop
+    // redraws on its next iteration, so a failed draw here must not block the sync.
     let _ = draw_and_copy(terminal, model);
 
     let service = SyncService::new(
