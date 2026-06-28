@@ -10,13 +10,20 @@ env:
 
 jobs:
   check:
-    name: fmt · clippy · build · test
-    runs-on: ubuntu-latest
+    name: fmt · clippy · build · test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check

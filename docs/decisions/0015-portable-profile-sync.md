@@ -47,11 +47,18 @@ command runs a push live.
 ### Security — trust-on-pull
 
 The real risk is not secret leakage (the whitelist prevents it) but a **pulled `config.toml` becoming the
-trusted global layer** (ADR 0012): a changed provider `base_url` could redirect a stored credential, or
-`sandbox.mode = "off"` could weaken confinement. So `pull` diffs the incoming config and, on a risky
-change (a credentialed provider's base_url changing, or sandbox set to off), **refuses to apply the
-config** unless `--force` — printing exactly what it skipped. Memory still merges (it carries no such
-authority). Residual, documented: memory content syncs as plaintext to the user's own private repo.
+trusted global layer** (ADR 0012): a changed provider `base_url` could redirect a stored credential, or a
+weakened sandbox could lower confinement. So `pull` diffs the incoming config and, on a risky change,
+**refuses to apply the config** unless `--force` — printing exactly what it skipped. Memory still merges
+(it carries no such authority). Residual, documented: memory content syncs as plaintext to the user's own
+private repo.
+
+The trust gate reasons over a **typed view** of the security-relevant fields, parsed against the kernel
+primitives `AuthMethod` / `SandboxMode` / `NetworkStance` (no hand-typed `"none"`/`"off"`/`"allow"` magic
+strings that drift from the loader on a variant rename). Sandbox modes are **ranked** `require > os > off`,
+so the gate flags *any* strictly-lower incoming rank — `require → os`, `require → off`, `os → off` — not
+only the extreme `→ off`; strengthening (`os → require`) and an absent-to-baseline `os` are never flagged.
+The kernel placement keeps a future move of the gate into `sync/domain` pure (no `domain → infra`/`tools`).
 
 ## Consequences
 

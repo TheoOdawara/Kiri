@@ -1,5 +1,15 @@
-use super::message::Message;
-use super::role::Role;
+//! The conversation cluster: the shared data the `agent` engine and the `provider` adapters exchange.
+//! `conversation.rs` owns the `Conversation` type and groups its siblings (`message`, `role`,
+//! `completed_turn`, `stream_event`) under `conversation/`; the kernel root re-exports them so the
+//! pre-grouping `shared::kernel::{message,role,…}` paths still resolve.
+
+pub mod completed_turn;
+pub mod message;
+pub mod role;
+pub mod stream_event;
+
+use self::message::Message;
+use self::role::Role;
 
 /// The running conversation: the system seed plus every user/assistant/tool message, in order.
 pub struct Conversation {

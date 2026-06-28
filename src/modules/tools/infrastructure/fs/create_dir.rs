@@ -3,16 +3,13 @@ use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
-#[cfg(unix)]
-use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema, simple_command,
+    Confirmation, Tool, ToolOutcome, function_schema, simple_command, simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
 #[cfg(unix)]
-use crate::modules::tools::infrastructure::exec;
-use crate::modules::tools::infrastructure::sandbox::default_accept_for;
+use crate::modules::tools::infrastructure::support::run_fs_argv;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct CreateDir;
@@ -42,12 +39,8 @@ impl Tool for CreateDir {
     }
 
     fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        let cmd = self.command_line(sandbox, call)?;
         let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
-        Some(confirm(
-            format!("Criar diretório. Aprova executar: {cmd}?"),
-            default_accept_for(&a.path),
-        ))
+        simple_path_confirmation("Criar diretório", self.command_line(sandbox, call), &a.path)
     }
 
     async fn execute(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
@@ -66,32 +59,23 @@ impl Tool for CreateDir {
         #[cfg(unix)]
         {
             let cwd = sandbox.exec_cwd_for(&resolution.target);
-            match exec::run_argv(
+            match run_fs_argv(
+                sandbox,
                 &[
                     OsStr::new("mkdir"),
                     OsStr::new("-p"),
                     resolution.target.as_os_str(),
                 ],
-                Some(&cwd),
+                &cwd,
                 None,
                 &[],
-                exec::DEFAULT_TIMEOUT,
-                sandbox.confiner(),
-                &sandbox.command_policy(NetworkPolicy::Deny, &[&cwd]),
+                &[&cwd],
+                &format!("create {}", args.path),
             )
             .await
             {
-                Ok(result) if result.succeeded() => {
-                    ToolOutcome::Ok(format!("created directory {}", args.path))
-                }
-                Ok(result) => ToolOutcome::Error(format!(
-                    "cannot create {}: {}",
-                    args.path,
-                    result.stderr_text()
-                )),
-                Err(error) => {
-                    ToolOutcome::Error(format!("cannot create {}: {}", args.path, error.message()))
-                }
+                Ok(_) => ToolOutcome::Ok(format!("created directory {}", args.path)),
+                Err(out) => out,
             }
         }
 

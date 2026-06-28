@@ -1,13 +1,11 @@
-use eventsource_stream::Eventsource;
-use tokio_stream::StreamExt;
-
 use super::message_dto::{build_messages, translate_tools};
 use super::sse::{TurnAccumulator, handle_event};
 use super::wire::MessagesRequest;
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
-use crate::modules::provider::infrastructure::http_error::error_from_status;
+use crate::modules::provider::infrastructure::request::join_url;
+use crate::modules::provider::infrastructure::streaming::{drain_sse, ensure_success};
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::Secret;
@@ -77,7 +75,7 @@ impl CompletionProvider for AnthropicProvider {
     ) -> Result<CompletedTurn, AgentError> {
         let body = self.build_body(&request);
 
-        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+        let url = join_url(&self.base_url, "v1/messages");
         let response = self
             .client
             .post(&url)
@@ -87,24 +85,10 @@ impl CompletionProvider for AnthropicProvider {
             .send()
             .await
             .map_err(|error| AgentError::Provider(format!("failed to reach provider: {error}")))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("<error body unavailable: {error}>"));
-            return Err(error_from_status(status, body));
-        }
+        let response = ensure_success(response).await?;
 
         let mut accumulator = TurnAccumulator::default();
-        let stream = response.bytes_stream().eventsource();
-        tokio::pin!(stream);
-        while let Some(event) = stream.next().await {
-            let event = event
-                .map_err(|error| AgentError::Provider(format!("error reading stream: {error}")))?;
-            handle_event(&event.data, &mut accumulator, sink)?;
-        }
+        drain_sse(response, |data| handle_event(data, &mut accumulator, sink)).await?;
 
         // The output cap (max_tokens) truncated the turn before any content or tool call: surface it
         // rather than returning an empty turn with no feedback.
@@ -121,8 +105,8 @@ impl CompletionProvider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::provider::application::completion_provider::NullSink;
     use crate::shared::kernel::message::Message;
-    use crate::shared::kernel::stream_event::StreamEvent;
     use serde_json::{Value, json};
     use std::time::Duration;
 
@@ -177,13 +161,6 @@ mod tests {
         let with_tools = body_value(&provider(), &[Message::user("hi")], &tools);
         assert_eq!(with_tools["tools"][0]["name"], "read_file");
         assert_eq!(with_tools["tools"][0]["input_schema"]["type"], "object");
-    }
-
-    struct NullSink;
-    impl EventSink for NullSink {
-        fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
-            Ok(())
-        }
     }
 
     /// A 4xx from the Messages API (e.g. an unknown model, an over-cap `max_tokens`) must surface as

@@ -107,14 +107,8 @@ impl Tool for ConsultDocs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::memory::infrastructure::test_support::call;
-    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
-    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    use crate::modules::memory::infrastructure::test_support::{call, sandbox};
     use tempfile::TempDir;
-
-    fn sandbox() -> FsSandbox {
-        FsSandbox::new(std::path::PathBuf::from("."), SensitiveMatcher::empty()).unwrap()
-    }
 
     #[tokio::test]
     async fn finds_matching_docs() {

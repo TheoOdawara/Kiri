@@ -2,6 +2,8 @@
 //! knowledge of the `Command` enum (mapping a name to a behaviour belongs to `application::command`).
 //! The preview filters by the canonical name, by any alias, or by a substring of the one-line blurb.
 
+use crate::modules::tui::domain::nav::wrapping_step;
+
 /// One entry in the slash-command catalog. `name` is the canonical token shown in the preview and the
 /// one Tab completes to; `aliases` are accepted synonyms at submit time; `blurb` is the short pt-BR
 /// description shown next to the name.
@@ -38,12 +40,12 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "/plan",
         aliases: &[],
-        blurb: "modo plan (planeja e executa após aprovação)",
+        blurb: "modo plan (só leitura; planeja e executa após aprovação)",
     },
     CommandSpec {
         name: "/auto",
         aliases: &[],
-        blurb: "modo auto (executa sem pedir aprovação)",
+        blurb: "modo auto (executa tudo sem pedir aprovação)",
     },
     CommandSpec {
         name: "/default",
@@ -136,14 +138,7 @@ impl CommandMenu {
 
     /// Move the highlight by `delta` rows, wrapping within the filtered set.
     pub fn move_cursor(&mut self, delta: i32) {
-        if self.filtered.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let len = self.filtered.len() as i32;
-        let mut next = self.selected as i32 + delta;
-        next = next.rem_euclid(len);
-        self.selected = next as usize;
+        self.selected = wrapping_step(self.selected, delta, self.filtered.len());
     }
 
     /// The spec of the highlighted row, if any.

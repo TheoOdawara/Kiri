@@ -3,19 +3,19 @@ use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
-#[cfg(unix)]
-use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema, simple_command,
+    Confirmation, PATH_DESC, Tool, ToolOutcome, function_schema, simple_command,
+    simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
 #[cfg(unix)]
 use crate::modules::tools::infrastructure::exec;
-use crate::modules::tools::infrastructure::sandbox::default_accept_for;
 use crate::modules::tools::infrastructure::support::READ_FILE_MAX_BYTES;
 #[cfg(windows)]
 use crate::modules::tools::infrastructure::support::read_capped;
+#[cfg(unix)]
+use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct ReadFile;
@@ -46,12 +46,8 @@ impl Tool for ReadFile {
     }
 
     fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        let cmd = self.command_line(sandbox, call)?;
         let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
-        Some(confirm(
-            format!("Ler o arquivo. Aprova executar: {cmd}?"),
-            default_accept_for(&a.path),
-        ))
+        simple_path_confirmation("Ler o arquivo", self.command_line(sandbox, call), &a.path)
     }
 
     async fn execute(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
@@ -82,7 +78,10 @@ impl Tool for ReadFile {
                 &[],
                 exec::DEFAULT_TIMEOUT,
                 sandbox.confiner(),
-                &sandbox.command_policy(NetworkPolicy::Deny, &[&cwd]),
+                // Read-only: pass no extras. The cwd read-allow is redundant under the macOS
+                // `(allow default)` base and, emitted last, would override the home-credential denies
+                // when the workspace root is a home ancestor (TOOL-07) — a least-privilege regression.
+                &sandbox.command_policy(NetworkPolicy::Deny, &[], &[]),
             )
             .await
             {

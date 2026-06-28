@@ -3,8 +3,9 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::modules::memory::application::memory_port::MemoryPort;
+use crate::modules::memory::application::memory_port::Memory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
+use crate::modules::memory::domain::scope::Scope;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
@@ -24,12 +25,12 @@ struct RememberArgs {
 /// Tool that persists a memory entry to the project (`.kiri/memory/`) or shared
 /// (`~/.kiri/memory/shared.db`) store, so durable knowledge survives across turns and sessions.
 pub struct Remember {
-    memory: Arc<dyn MemoryPort>,
+    memory: Arc<dyn Memory>,
     project_id: String,
 }
 
 impl Remember {
-    pub fn new(memory: Arc<dyn MemoryPort>, project_id: String) -> Self {
+    pub fn new(memory: Arc<dyn Memory>, project_id: String) -> Self {
         Self { memory, project_id }
     }
 }
@@ -93,43 +94,38 @@ impl Tool for Remember {
             Ok(args) => args,
             Err(out) => return out,
         };
-        let Some(kind) = MemoryKind::from_str(&args.kind) else {
+        let Ok(kind) = args.kind.parse::<MemoryKind>() else {
             return ToolOutcome::Error(format!(
                 "invalid kind '{}': expected one of decision, pattern, anti-pattern, snippet, \
                  heuristic, fact, preference",
                 args.kind
             ));
         };
-        // A shared (cross-project) entry is global — `None` — not stamped with the originating project.
-        let project_id = if args.scope.as_str() == "shared" {
-            None
-        } else {
-            Some(self.project_id.clone())
+        let Some(scope) = Scope::from_wire(&args.scope) else {
+            return ToolOutcome::Error(format!(
+                "invalid scope '{}': expected 'project' or 'shared'",
+                args.scope
+            ));
         };
         let entry = MemoryEntry::new(
             kind,
             args.content,
             args.tags.into_iter().collect(),
-            project_id,
+            scope.project_id_for(&self.project_id),
         );
 
-        let result = match args.scope.as_str() {
-            "project" => {
+        let result = match scope {
+            Scope::Project => {
                 if !self.memory.project_memory_available() {
                     return ToolOutcome::Error("project memory is unavailable".to_string());
                 }
                 self.memory.remember_project(entry).await
             }
-            "shared" => {
+            Scope::Shared => {
                 if !self.memory.shared_memory_available() {
                     return ToolOutcome::Error("shared memory is unavailable".to_string());
                 }
                 self.memory.remember_shared(entry).await
-            }
-            other => {
-                return ToolOutcome::Error(format!(
-                    "invalid scope '{other}': expected 'project' or 'shared'"
-                ));
             }
         };
 
@@ -143,14 +139,8 @@ impl Tool for Remember {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::memory::infrastructure::test_support::{call, temp_port};
-    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
-    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    use crate::modules::memory::infrastructure::test_support::{call, sandbox, temp_port};
     use tempfile::TempDir;
-
-    fn sandbox() -> FsSandbox {
-        FsSandbox::new(std::path::PathBuf::from("."), SensitiveMatcher::empty()).unwrap()
-    }
 
     #[tokio::test]
     async fn persists_then_recallable() {

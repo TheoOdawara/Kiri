@@ -13,11 +13,11 @@ use crate::shared::kernel::tool_call::ToolCall;
 /// `Message` free of any wire concern — so a future provider with a different message shape only adds
 /// its own DTO.
 #[derive(Debug, Serialize)]
-pub(crate) struct MessageDto<'a> {
+pub(crate) struct WireMessage<'a> {
     #[serde(serialize_with = "serialize_role")]
     pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<ContentDto<'a>>,
+    pub content: Option<WireContent<'a>>,
     #[serde(
         skip_serializing_if = "<[_]>::is_empty",
         serialize_with = "serialize_tool_calls"
@@ -27,13 +27,13 @@ pub(crate) struct MessageDto<'a> {
     pub tool_call_id: Option<&'a str>,
 }
 
-impl<'a> From<&'a Message> for MessageDto<'a> {
+impl<'a> From<&'a Message> for WireMessage<'a> {
     fn from(message: &'a Message) -> Self {
         let content = message.content.as_deref().map(|text| {
             if message.images.is_empty() {
-                ContentDto::Text(text)
+                WireContent::Text(text)
             } else {
-                ContentDto::Parts {
+                WireContent::Parts {
                     text,
                     images: &message.images,
                 }
@@ -51,16 +51,16 @@ impl<'a> From<&'a Message> for MessageDto<'a> {
 /// The OpenAI-compatible `content` value: a plain string when there are no images (the common case,
 /// byte-for-byte unchanged), or the multimodal parts array when a user message carries images.
 #[derive(Debug)]
-pub(crate) enum ContentDto<'a> {
+pub(crate) enum WireContent<'a> {
     Text(&'a str),
     Parts { text: &'a str, images: &'a [String] },
 }
 
-impl Serialize for ContentDto<'_> {
+impl Serialize for WireContent<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            ContentDto::Text(text) => serializer.serialize_str(text),
-            ContentDto::Parts { text, images } => {
+            WireContent::Text(text) => serializer.serialize_str(text),
+            WireContent::Parts { text, images } => {
                 // Omit the text part when the caption is blank (image-only prompt): an empty text part
                 // is wasteful and some vision endpoints reject it.
                 let include_text = !text.trim().is_empty();
@@ -100,19 +100,8 @@ struct ImageUrl<'a> {
     url: &'a str,
 }
 
-/// The OpenAI wire string for a role — the single place the domain `Role` becomes its lowercase wire
-/// form, so the domain enum stays serde-free.
-const fn wire_role(role: Role) -> &'static str {
-    match role {
-        Role::System => "system",
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::Tool => "tool",
-    }
-}
-
 fn serialize_role<S: Serializer>(role: &Role, serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(wire_role(*role))
+    serializer.serialize_str(role.as_wire_str())
 }
 
 /// Serialize tool calls through the wire DTO, re-applying the control-char escaper to each call's
@@ -125,10 +114,10 @@ fn serialize_tool_calls<S: Serializer>(
 ) -> Result<S::Ok, S::Error> {
     let mut seq = serializer.serialize_seq(Some(calls.len()))?;
     for call in calls {
-        seq.serialize_element(&ToolCallDto {
+        seq.serialize_element(&WireToolCall {
             id: &call.id,
             kind: &call.kind,
-            function: FunctionCallDto {
+            function: WireFunctionCall {
                 name: &call.function.name,
                 arguments: escape_control_chars_in_strings(&call.function.arguments),
             },
@@ -140,15 +129,15 @@ fn serialize_tool_calls<S: Serializer>(
 /// The OpenAI wire shape of a tool call. Mirrors the kernel `ToolCall` but lets the send boundary
 /// normalize `arguments` (kept here, not on the kernel type, since it is a wire concern).
 #[derive(Debug, Serialize)]
-struct ToolCallDto<'a> {
+struct WireToolCall<'a> {
     id: &'a str,
     #[serde(rename = "type")]
     kind: &'a str,
-    function: FunctionCallDto<'a>,
+    function: WireFunctionCall<'a>,
 }
 
 #[derive(Debug, Serialize)]
-struct FunctionCallDto<'a> {
+struct WireFunctionCall<'a> {
     name: &'a str,
     arguments: Cow<'a, str>,
 }
@@ -159,16 +148,9 @@ mod tests {
     use crate::shared::kernel::tool_call::FunctionCall;
 
     #[test]
-    fn wire_role_maps_all_variants() {
-        assert_eq!(wire_role(Role::System), "system");
-        assert_eq!(wire_role(Role::User), "user");
-        assert_eq!(wire_role(Role::Assistant), "assistant");
-        assert_eq!(wire_role(Role::Tool), "tool");
-    }
-
-    #[test]
     fn system_message_serializes_role_and_content() {
-        let value = serde_json::to_value(MessageDto::from(&Message::system("be concise"))).unwrap();
+        let value =
+            serde_json::to_value(WireMessage::from(&Message::system("be concise"))).unwrap();
         assert_eq!(value["role"], "system");
         assert_eq!(value["content"], "be concise");
         assert!(value.get("tool_calls").is_none());
@@ -176,7 +158,8 @@ mod tests {
 
     #[test]
     fn assistant_text_serializes_content() {
-        let value = serde_json::to_value(MessageDto::from(&Message::assistant_text("ok"))).unwrap();
+        let value =
+            serde_json::to_value(WireMessage::from(&Message::assistant_text("ok"))).unwrap();
         assert_eq!(value["role"], "assistant");
         assert_eq!(value["content"], "ok");
     }
@@ -194,7 +177,7 @@ mod tests {
                 },
             }],
         );
-        let value = serde_json::to_value(MessageDto::from(&message)).unwrap();
+        let value = serde_json::to_value(WireMessage::from(&message)).unwrap();
         assert_eq!(value["role"], "assistant");
         assert!(value.get("content").is_none());
         assert_eq!(value["tool_calls"][0]["id"], "c1");
@@ -216,7 +199,7 @@ mod tests {
                 },
             }],
         );
-        let value = serde_json::to_value(MessageDto::from(&message)).unwrap();
+        let value = serde_json::to_value(WireMessage::from(&message)).unwrap();
 
         assert_eq!(value["tool_calls"][0]["type"], "function");
         let wire_args = value["tool_calls"][0]["function"]["arguments"]
@@ -229,7 +212,7 @@ mod tests {
 
     #[test]
     fn user_message_without_images_serializes_content_as_a_plain_string() {
-        let value = serde_json::to_value(MessageDto::from(&Message::user("oi"))).unwrap();
+        let value = serde_json::to_value(WireMessage::from(&Message::user("oi"))).unwrap();
         assert_eq!(value["role"], "user");
         assert_eq!(value["content"], "oi"); // still a string — the common path is unchanged
     }
@@ -238,7 +221,7 @@ mod tests {
     fn user_message_with_images_serializes_multimodal_content_parts() {
         let message =
             Message::user_multimodal("olha isso", vec!["data:image/png;base64,AAAA".to_string()]);
-        let value = serde_json::to_value(MessageDto::from(&message)).unwrap();
+        let value = serde_json::to_value(WireMessage::from(&message)).unwrap();
         assert_eq!(value["role"], "user");
         let parts = value["content"]
             .as_array()
@@ -254,7 +237,7 @@ mod tests {
     fn image_only_message_omits_the_empty_text_part() {
         let message =
             Message::user_multimodal("  ", vec!["data:image/png;base64,AAAA".to_string()]);
-        let value = serde_json::to_value(MessageDto::from(&message)).unwrap();
+        let value = serde_json::to_value(WireMessage::from(&message)).unwrap();
         let parts = value["content"]
             .as_array()
             .expect("content must be an array");
@@ -265,7 +248,7 @@ mod tests {
     #[test]
     fn tool_result_serializes_role_and_tool_call_id() {
         let value =
-            serde_json::to_value(MessageDto::from(&Message::tool_result("c1", "ok"))).unwrap();
+            serde_json::to_value(WireMessage::from(&Message::tool_result("c1", "ok"))).unwrap();
         assert_eq!(value["role"], "tool");
         assert_eq!(value["tool_call_id"], "c1");
         assert_eq!(value["content"], "ok");

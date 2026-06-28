@@ -3,16 +3,14 @@ use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
-#[cfg(unix)]
-use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, WriteArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::path::default_accept_for;
 #[cfg(unix)]
-use crate::modules::tools::infrastructure::exec;
-use crate::modules::tools::infrastructure::sandbox::default_accept_for;
+use crate::modules::tools::infrastructure::support::run_fs_argv;
 use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -83,30 +81,23 @@ impl Tool for WriteFile {
         #[cfg(unix)]
         {
             let cwd = sandbox.exec_cwd_for(&resolution.target);
-            match exec::run_argv(
+            match run_fs_argv(
+                sandbox,
                 &[OsStr::new("tee"), resolution.target.as_os_str()],
-                Some(&cwd),
+                &cwd,
                 Some(args.content.as_bytes()),
                 &[],
-                exec::DEFAULT_TIMEOUT,
-                sandbox.confiner(),
-                &sandbox.command_policy(NetworkPolicy::Deny, &[&cwd]),
+                &[&cwd],
+                &format!("write {}", args.path),
             )
             .await
             {
-                Ok(result) if result.succeeded() => ToolOutcome::Ok(format!(
+                Ok(_) => ToolOutcome::Ok(format!(
                     "wrote {} bytes to {}",
                     args.content.len(),
                     args.path
                 )),
-                Ok(result) => ToolOutcome::Error(format!(
-                    "cannot write {}: {}",
-                    args.path,
-                    result.stderr_text()
-                )),
-                Err(error) => {
-                    ToolOutcome::Error(format!("cannot write {}: {}", args.path, error.message()))
-                }
+                Err(out) => out,
             }
         }
 

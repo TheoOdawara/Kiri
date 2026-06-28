@@ -3,16 +3,14 @@ use std::ffi::OsStr;
 
 use serde_json::{Value, json};
 
-#[cfg(unix)]
-use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{MoveArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::path::default_accept_for;
 #[cfg(unix)]
-use crate::modules::tools::infrastructure::exec;
-use crate::modules::tools::infrastructure::sandbox::default_accept_for;
+use crate::modules::tools::infrastructure::support::run_fs_argv;
 use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -96,36 +94,23 @@ impl Tool for MovePath {
             // A move writes at both ends: it creates the destination and unlinks the source. When
             // either is an approved out-of-root target, its directory must be in the write allow-list.
             let source_cwd = sandbox.exec_cwd_for(&source);
-            match exec::run_argv(
+            match run_fs_argv(
+                sandbox,
                 &[
                     OsStr::new("mv"),
                     source.as_os_str(),
                     resolution.target.as_os_str(),
                 ],
-                Some(&cwd),
+                &cwd,
                 None,
                 &[],
-                exec::DEFAULT_TIMEOUT,
-                sandbox.confiner(),
-                &sandbox.command_policy(NetworkPolicy::Deny, &[&cwd, &source_cwd]),
+                &[&cwd, &source_cwd],
+                &format!("move {} to {}", args.source, args.destination),
             )
             .await
             {
-                Ok(result) if result.succeeded() => {
-                    ToolOutcome::Ok(format!("moved {} to {}", args.source, args.destination))
-                }
-                Ok(result) => ToolOutcome::Error(format!(
-                    "cannot move {} to {}: {}",
-                    args.source,
-                    args.destination,
-                    result.stderr_text()
-                )),
-                Err(error) => ToolOutcome::Error(format!(
-                    "cannot move {} to {}: {}",
-                    args.source,
-                    args.destination,
-                    error.message()
-                )),
+                Ok(_) => ToolOutcome::Ok(format!("moved {} to {}", args.source, args.destination)),
+                Err(out) => out,
             }
         }
 

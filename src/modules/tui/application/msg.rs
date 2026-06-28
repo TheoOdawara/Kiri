@@ -1,7 +1,8 @@
 use std::time::Duration;
 
+use crate::modules::tui::domain::input_buffer::ImageAttachment;
+use crate::modules::tui::domain::modal::PendingApproval;
 use crate::modules::tui::domain::transcript::{ToolDiff, ToolStatus};
-use crate::modules::tui::domain::view_state::{ImageAttachment, PendingApproval};
 
 /// Which stream a delta belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

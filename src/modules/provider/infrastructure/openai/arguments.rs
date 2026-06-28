@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use serde_json::Value;
+use crate::modules::provider::infrastructure::tool_args;
 
 /// ASCII space — the first printable character. Every byte below it (newline, tab, NUL, ...) is a
 /// control character that strict JSON forbids unescaped inside a string value. Naming the boundary
@@ -75,17 +75,12 @@ fn push_escaped_control(out: &mut String, byte: u8) {
     }
 }
 
-/// Normalize a tool call's `arguments` so the stored value is always valid JSON. Escapes raw control
-/// chars inside string values; if the result is still not valid JSON (e.g. a truncated/garbled
-/// stream), falls back to `"{}"` so the turn can never poison a later request — the tool then reports
-/// invalid arguments and the model recovers on its own.
+/// Normalize a tool call's `arguments` so the stored value is always valid JSON. Applies OpenAI's
+/// distinct control-char escaping first, then delegates the validate-or-`{}` decision to the shared
+/// tool-args rule — so the escaping stays local while the fallback policy is single-sourced.
 pub(crate) fn normalize_arguments(args: String) -> String {
     let escaped = escape_to_owned(args);
-    if serde_json::from_str::<Value>(&escaped).is_ok() {
-        escaped
-    } else {
-        "{}".to_string()
-    }
+    tool_args::sanitized_string(&escaped)
 }
 
 /// Apply the escaper without cloning on the clean (borrowed) path.
@@ -99,6 +94,7 @@ fn escape_to_owned(args: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn parse(text: &str) -> Value {
         serde_json::from_str(text).expect("valid JSON")

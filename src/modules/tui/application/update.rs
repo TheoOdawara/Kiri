@@ -4,7 +4,6 @@ use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::keymap;
 use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::domain::model::Model;
-use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 
 /// Backdating the open instant by more than the splash settle window instantly freezes the breath-in.
 const SPLASH_FAST_FORWARD: Duration = Duration::from_millis(700);
@@ -16,8 +15,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Key(key) => {
             // Any keypress fast-forwards the splash breath-in so a user who opens Kiri dozens of times a
             // day never waits on chrome. Backdating the open instant settles it on the next frame.
-            if let Some(now) = model.render_at {
-                model.opened_at = Some(now.checked_sub(SPLASH_FAST_FORWARD).unwrap_or(now));
+            if let Some(now) = model.timeline.render_at {
+                model.timeline.opened_at =
+                    Some(now.checked_sub(SPLASH_FAST_FORWARD).unwrap_or(now));
             }
             keymap::on_key(model, key)
         }
@@ -43,9 +43,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 attachment.width, attachment.height
             );
             model.attachments.push(attachment);
-            model
-                .transcript
-                .push(TranscriptItem::Notice(NoticeLevel::Info, label));
+            model.notify_info(label);
             Vec::new()
         }
         // A reflow makes the (col,row) selection anchors meaningless — drop it so the overlay never
@@ -60,8 +58,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Tick => Vec::new(),
         Msg::TurnBegan => {
             model.status.streaming = true;
-            model.stream_landings.clear();
-            model.turn_settled_at = None;
+            model.timeline.begin_turn();
             Vec::new()
         }
         Msg::StreamDelta(StreamKind::Reasoning, text) => {
@@ -73,11 +70,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // fresh assistant item (e.g. after a tool ran) resets the cooling state. Each completed line
             // (a `\n`) lands at the current frame's instant, driving its cooling-steel reveal.
             if !model.transcript.last_is_assistant() {
-                model.stream_landings.clear();
+                model.timeline.reset_stream();
             }
-            if let Some(now) = model.render_at {
+            if let Some(now) = model.timeline.render_at {
                 for _ in 0..text.matches('\n').count() {
-                    model.stream_landings.push(now);
+                    model.timeline.stream_landings.push(now);
                 }
             }
             model.transcript.push_content_delta(&text);
@@ -105,20 +102,19 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::ScrollUp => {
             model.clear_screen_selection();
-            model.scroll.up(3);
+            model.scroll.up(keymap::WHEEL_STEP);
             Vec::new()
         }
         Msg::ScrollDown => {
             model.clear_screen_selection();
-            model.scroll.down(3);
+            model.scroll.down(keymap::WHEEL_STEP);
             Vec::new()
         }
         Msg::TurnEnded => {
             model.busy = false;
             model.status.streaming = false;
             model.pending_approval = None;
-            model.stream_landings.clear();
-            model.turn_settled_at = model.render_at;
+            model.timeline.settle_turn();
             Vec::new()
         }
     }
@@ -187,7 +183,7 @@ mod tests {
 
     // --- screen selection invalidation --------------------------------------------
 
-    use crate::modules::tui::domain::view_state::{Granularity, ScreenSelection};
+    use crate::modules::tui::domain::selection::{Granularity, ScreenSelection};
 
     /// A non-empty three-cell character selection.
     fn a_selection() -> ScreenSelection {
@@ -198,15 +194,23 @@ mod tests {
 
     #[test]
     fn scroll_clears_the_screen_selection() {
-        let mut m = Model {
-            selection: Some(a_selection()),
-            ..Model::default()
-        };
+        let mut m = Model::default();
+        m.selection.active = Some(a_selection());
         update(&mut m, Msg::ScrollUp);
-        assert!(m.selection.is_none());
-        m.selection = Some(a_selection());
+        assert!(m.selection.active.is_none());
+        m.selection.active = Some(a_selection());
         update(&mut m, Msg::ScrollDown);
-        assert!(m.selection.is_none());
+        assert!(m.selection.active.is_none());
+    }
+
+    #[test]
+    fn wheel_step_named_and_used() {
+        // A wheel notch moves the named WHEEL_STEP lines, not a bare literal.
+        let mut m = Model::default();
+        update(&mut m, Msg::ScrollUp);
+        assert_eq!(m.scroll.scrollback, keymap::WHEEL_STEP);
+        update(&mut m, Msg::ScrollDown);
+        assert_eq!(m.scroll.scrollback, 0);
     }
 
     #[test]
@@ -214,7 +218,7 @@ mod tests {
         // Regression: a pasted API key (the common way keys are entered) must land in the wizard's
         // masked, Secret-staged field — never in the plaintext composer, where it would be unmasked,
         // survive the modal, and could be sent to the provider as a prompt.
-        use crate::modules::tui::domain::view_state::{ProviderWizard, WizardStep};
+        use crate::modules::tui::domain::wizard::{ProviderWizard, WizardStep};
         let mut wizard = ProviderWizard::new();
         wizard.step = WizardStep::ApiKey;
         let mut m = Model {
@@ -232,28 +236,27 @@ mod tests {
 
     #[test]
     fn resize_clears_the_screen_selection() {
-        let mut m = Model {
-            selection: Some(a_selection()),
-            ..Model::default()
-        };
+        let mut m = Model::default();
+        m.selection.active = Some(a_selection());
         update(&mut m, Msg::Resize);
-        assert!(m.selection.is_none());
+        assert!(m.selection.active.is_none());
     }
 
     #[test]
     fn streamed_content_keeps_the_screen_selection() {
         // Async content must NOT drop the selection: a delta arriving mid-drag/mid-copy would otherwise
         // make it impossible to select streaming output.
-        let mut m = Model {
-            selection: Some(a_selection()),
-            ..Model::default()
-        };
+        let mut m = Model::default();
+        m.selection.active = Some(a_selection());
         update(&mut m, Msg::StreamDelta(StreamKind::Content, "hi".into()));
         assert!(
-            m.selection.is_some(),
+            m.selection.active.is_some(),
             "a stream delta must keep the selection"
         );
         update(&mut m, Msg::Tick);
-        assert!(m.selection.is_some(), "a tick must keep the selection");
+        assert!(
+            m.selection.active.is_some(),
+            "a tick must keep the selection"
+        );
     }
 }

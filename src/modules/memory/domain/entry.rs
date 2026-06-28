@@ -1,6 +1,8 @@
+use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::time::now_rfc3339;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use time::OffsetDateTime;
+use std::str::FromStr;
 use uuid::Uuid;
 
 /// Memory entry kind — categorizes the content to ease search and use.
@@ -25,7 +27,7 @@ pub enum MemoryKind {
 
 impl MemoryKind {
     /// All kinds, for enumeration (e.g. a kind picker in the planned memory-management UI).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn all() -> &'static [MemoryKind] {
         &[
             MemoryKind::Decision,
@@ -38,7 +40,9 @@ impl MemoryKind {
         ]
     }
 
-    pub fn as_str(&self) -> &'static str {
+    /// The wire string for this kind, used in tool schemas, the SQLite `kind` column, and the Markdown
+    /// filename. Paired with the `FromStr` impl so the enum has one round-trippable wire shape.
+    pub fn as_wire(&self) -> &'static str {
         match self {
             MemoryKind::Decision => "decision",
             MemoryKind::Pattern => "pattern",
@@ -49,24 +53,28 @@ impl MemoryKind {
             MemoryKind::Preference => "preference",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for MemoryKind {
+    type Err = AgentError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "decision" => Some(MemoryKind::Decision),
-            "pattern" => Some(MemoryKind::Pattern),
-            "anti-pattern" => Some(MemoryKind::AntiPattern),
-            "snippet" => Some(MemoryKind::Snippet),
-            "heuristic" => Some(MemoryKind::Heuristic),
-            "fact" => Some(MemoryKind::Fact),
-            "preference" => Some(MemoryKind::Preference),
-            _ => None,
+            "decision" => Ok(MemoryKind::Decision),
+            "pattern" => Ok(MemoryKind::Pattern),
+            "anti-pattern" => Ok(MemoryKind::AntiPattern),
+            "snippet" => Ok(MemoryKind::Snippet),
+            "heuristic" => Ok(MemoryKind::Heuristic),
+            "fact" => Ok(MemoryKind::Fact),
+            "preference" => Ok(MemoryKind::Preference),
+            other => Err(AgentError::Memory(format!("unknown memory kind '{other}'"))),
         }
     }
 }
 
 impl std::fmt::Display for MemoryKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(self.as_wire())
     }
 }
 
@@ -91,16 +99,10 @@ pub struct MemoryEntry {
     pub updated_at: String,
 }
 
-/// RFC3339 timestamp for "now". Formatting a valid UTC instant cannot fail in practice; the empty
-/// fallback keeps this runtime path total without an `unwrap` (forbidden outside tests).
-fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
-}
-
 impl MemoryEntry {
-    /// Create a new entry with current timestamps and a UUID v7.
+    /// Create a new entry with current timestamps and a UUID v7. Reading the wall clock and the RNG here
+    /// is the ADR-0010-sanctioned domain exception (injecting a `Clock`/`IdGen` for one constructor is
+    /// speculative per YAGNI).
     pub fn new(
         kind: MemoryKind,
         content: String,
@@ -120,18 +122,11 @@ impl MemoryEntry {
         }
     }
 
-    /// Update the content and the last-update timestamp. Used by tests and reserved for the future
-    /// memory-editing UI.
-    #[allow(dead_code)]
+    /// Update the content and the last-update timestamp. Exercised by the store tests; reserved for the
+    /// future memory-editing UI.
+    #[cfg(test)]
     pub fn update_content(&mut self, content: String) {
         self.content = content;
-        self.updated_at = now_rfc3339();
-    }
-
-    /// Add tags. Reserved for the future memory-management UI.
-    #[allow(dead_code)]
-    pub fn add_tags(&mut self, tags: impl IntoIterator<Item = String>) {
-        self.tags.extend(tags);
         self.updated_at = now_rfc3339();
     }
 
@@ -140,7 +135,7 @@ impl MemoryEntry {
         let q = query.to_lowercase();
         self.content.to_lowercase().contains(&q)
             || self.tags.iter().any(|t| t.to_lowercase().contains(&q))
-            || self.kind.as_str().contains(&q)
+            || self.kind.as_wire().contains(&q)
     }
 
     /// Format for display in the agent's context.
@@ -166,12 +161,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_kind_roundtrip() {
+    fn memory_kind_round_trips_through_wire() {
         for kind in MemoryKind::all() {
-            let s = kind.as_str();
-            assert_eq!(MemoryKind::from_str(s), Some(*kind));
+            assert_eq!(kind.as_wire().parse::<MemoryKind>().unwrap(), *kind);
         }
-        assert_eq!(MemoryKind::from_str("invalid"), None);
+    }
+
+    #[test]
+    fn memory_kind_parse_rejects_unknown() {
+        assert!("invalid".parse::<MemoryKind>().is_err());
+    }
+
+    #[test]
+    fn fact_parses_via_fromstr() {
+        assert_eq!("fact".parse::<MemoryKind>().unwrap(), MemoryKind::Fact);
     }
 
     #[test]

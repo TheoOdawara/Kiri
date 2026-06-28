@@ -3,8 +3,9 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::modules::memory::application::memory_port::MemoryPort;
+use crate::modules::memory::application::memory_port::Memory;
 use crate::modules::memory::domain::entry::MemoryEntry;
+use crate::modules::memory::domain::scope::RecallScope;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
@@ -32,11 +33,11 @@ fn default_limit() -> usize {
 /// Read-only tool that recalls relevant memory entries (project, shared, or both) for a query, so the
 /// model can pull prior decisions/patterns/facts into the current turn on demand.
 pub struct RecallMemory {
-    memory: Arc<dyn MemoryPort>,
+    memory: Arc<dyn Memory>,
 }
 
 impl RecallMemory {
-    pub fn new(memory: Arc<dyn MemoryPort>) -> Self {
+    pub fn new(memory: Arc<dyn Memory>) -> Self {
         Self { memory }
     }
 }
@@ -98,15 +99,15 @@ impl Tool for RecallMemory {
         if args.query.trim().is_empty() {
             return ToolOutcome::Error("query must not be empty".to_string());
         }
-        let scope = args.scope.as_str();
-        if !matches!(scope, "project" | "shared" | "both") {
+        let Some(scope) = RecallScope::from_wire(&args.scope) else {
             return ToolOutcome::Error(format!(
-                "invalid scope '{scope}': expected 'project', 'shared', or 'both'"
+                "invalid scope '{}': expected 'project', 'shared', or 'both'",
+                args.scope
             ));
-        }
+        };
 
         let mut sections: Vec<String> = Vec::new();
-        if matches!(scope, "project" | "both") && self.memory.project_memory_available() {
+        if scope.includes_project() && self.memory.project_memory_available() {
             match self.memory.recall_project(&args.query, args.limit).await {
                 Ok(entries) if !entries.is_empty() => {
                     sections.push(render("Project memory", &entries))
@@ -115,7 +116,7 @@ impl Tool for RecallMemory {
                 Err(error) => return ToolOutcome::Error(error.to_string()),
             }
         }
-        if matches!(scope, "shared" | "both") && self.memory.shared_memory_available() {
+        if scope.includes_shared() && self.memory.shared_memory_available() {
             match self.memory.recall_shared(&args.query, args.limit).await {
                 Ok(entries) if !entries.is_empty() => {
                     sections.push(render("Shared memory", &entries))
@@ -150,14 +151,8 @@ fn render(heading: &str, entries: &[MemoryEntry]) -> String {
 mod tests {
     use super::*;
     use crate::modules::memory::domain::entry::MemoryKind;
-    use crate::modules::memory::infrastructure::test_support::{call, temp_port};
-    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
-    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    use crate::modules::memory::infrastructure::test_support::{call, sandbox, temp_port};
     use tempfile::TempDir;
-
-    fn sandbox() -> FsSandbox {
-        FsSandbox::new(std::path::PathBuf::from("."), SensitiveMatcher::empty()).unwrap()
-    }
 
     #[tokio::test]
     async fn recalls_after_remember() {

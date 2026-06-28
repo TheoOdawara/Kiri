@@ -4,27 +4,15 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::modules::memory::application::memory_port::MemoryPort;
+use crate::modules::memory::application::memory_port::Memory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
+use crate::modules::memory::domain::scope::Scope;
 use crate::modules::provider::application::completion_provider::{
-    CompletionProvider, EventSink, TurnRequest,
+    CompletionProvider, NullSink, TurnRequest,
 };
-use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::error::{AgentError, AgentResult};
 use crate::shared::kernel::message::Message;
 use crate::shared::kernel::role::Role;
-use crate::shared::kernel::stream_event::StreamEvent;
-
-type Result<T> = std::result::Result<T, AgentError>;
-
-/// An `EventSink` that discards every streamed delta. The distillation runs headless: its only output is
-/// the final assembled content, so there is no UI to feed.
-struct NullSink;
-
-impl EventSink for NullSink {
-    fn on_event(&mut self, _event: StreamEvent) -> Result<()> {
-        Ok(())
-    }
-}
 
 /// One entry the model proposes to remember, parsed from its JSON output.
 #[derive(Deserialize)]
@@ -55,6 +43,15 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_ENTRIES: usize = 12;
 const DEFAULT_MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
 
+/// The first N words of a candidate's content used as the keyword recall query when checking for a
+/// duplicate — enough to find an equivalent entry without over-narrowing the search.
+const DEDUP_QUERY_WORDS: usize = 6;
+/// How many existing entries to recall as duplicate candidates per write.
+const DEDUP_RECALL_LIMIT: usize = 5;
+/// Jaccard token-overlap at/above which two entries are treated as the same fact reworded (a strict
+/// superset scores lower and survives).
+const NEAR_DUPLICATE_JACCARD: f32 = 0.8;
+
 const DISTILL_SYSTEM_PROMPT: &str = concat!(
     "You distill durable knowledge from a coding session for a long-term memory. Read the transcript ",
     "and extract only knowledge that is reusable in future, unrelated sessions: architectural or design ",
@@ -73,10 +70,10 @@ const DISTILL_SYSTEM_PROMPT: &str = concat!(
 );
 
 /// The end-of-session learning pass: feed the conversation to the model, ask it to extract durable
-/// knowledge, and persist what it returns to memory. Depends on the `MemoryPort` (to write) and is handed
-/// a `CompletionProvider` at call time (so it always uses the live adapter after a `/provider` swap).
+/// knowledge, and persist what it returns to memory. Depends on the `Memory` capability (to write) and is
+/// handed a `CompletionProvider` at call time (so it always uses the live adapter after a `/provider` swap).
 pub struct Distiller {
-    memory: Arc<dyn MemoryPort>,
+    memory: Arc<dyn Memory>,
     project_id: String,
     timeout: Duration,
     max_entries: usize,
@@ -84,7 +81,7 @@ pub struct Distiller {
 }
 
 impl Distiller {
-    pub fn new(memory: Arc<dyn MemoryPort>, project_id: String) -> Self {
+    pub fn new(memory: Arc<dyn Memory>, project_id: String) -> Self {
         Self {
             memory,
             project_id,
@@ -103,7 +100,7 @@ impl Distiller {
         provider: &dyn CompletionProvider,
         model: &str,
         conversation: &[Message],
-    ) -> Result<DistillReport> {
+    ) -> AgentResult<DistillReport> {
         let transcript = render_transcript(conversation, self.max_transcript_bytes);
         if transcript.trim().is_empty() {
             return Ok(DistillReport::empty());
@@ -137,16 +134,15 @@ impl Distiller {
 
     /// Validate, dedup, and persist one proposed entry. Returns whether it was written.
     async fn persist(&self, raw: DistilledEntry) -> bool {
-        let Some(kind) = MemoryKind::from_str(&raw.kind) else {
+        let Ok(kind) = raw.kind.parse::<MemoryKind>() else {
             return false;
         };
-        let scope = raw.scope.as_str();
-        if scope != "project" && scope != "shared" {
+        let Some(scope) = Scope::from_wire(&raw.scope) else {
             return false;
-        }
+        };
         let available = match scope {
-            "shared" => self.memory.shared_memory_available(),
-            _ => self.memory.project_memory_available(),
+            Scope::Shared => self.memory.shared_memory_available(),
+            Scope::Project => self.memory.project_memory_available(),
         };
         if !available {
             return false;
@@ -154,22 +150,15 @@ impl Distiller {
         if self.is_duplicate(&raw.content, scope).await {
             return false;
         }
-        // A shared (cross-project) entry is global by definition — `None` — not stamped with the
-        // originating project, which would mis-scope it and make the 'global' branch dead.
-        let project_id = if scope == "shared" {
-            None
-        } else {
-            Some(self.project_id.clone())
-        };
         let entry = MemoryEntry::new(
             kind,
             raw.content,
             raw.tags.into_iter().collect(),
-            project_id,
+            scope.project_id_for(&self.project_id),
         );
         let result = match scope {
-            "shared" => self.memory.remember_shared(entry).await,
-            _ => self.memory.remember_project(entry).await,
+            Scope::Shared => self.memory.remember_shared(entry).await,
+            Scope::Project => self.memory.remember_project(entry).await,
         };
         result.is_ok()
     }
@@ -177,14 +166,14 @@ impl Distiller {
     /// Whether an equivalent entry already exists in the target scope, so re-learning the same fact each
     /// session does not balloon the store. Recalls candidates by the content's leading words (keyword
     /// search), then compares normalized text for equality or containment.
-    async fn is_duplicate(&self, content: &str, scope: &str) -> bool {
-        let query = leading_words(content, 6);
+    async fn is_duplicate(&self, content: &str, scope: Scope) -> bool {
+        let query = leading_words(content, DEDUP_QUERY_WORDS);
         if query.is_empty() {
             return false;
         }
         let hits = match scope {
-            "shared" => self.memory.recall_shared(&query, 5).await,
-            _ => self.memory.recall_project(&query, 5).await,
+            Scope::Shared => self.memory.recall_shared(&query, DEDUP_RECALL_LIMIT).await,
+            Scope::Project => self.memory.recall_project(&query, DEDUP_RECALL_LIMIT).await,
         };
         let Ok(hits) = hits else {
             // A recall failure must not block learning — treat as "not a duplicate" and let the write
@@ -212,8 +201,9 @@ fn is_near_duplicate(a: &str, b: &str) -> bool {
     }
     let intersection = ta.intersection(&tb).count();
     let union = ta.union(&tb).count();
-    // Jaccard ≥ 0.8 ⇒ essentially the same fact reworded; a strict superset scores lower and survives.
-    (intersection as f32 / union as f32) >= 0.8
+    // Jaccard ≥ NEAR_DUPLICATE_JACCARD ⇒ essentially the same fact reworded; a strict superset scores
+    // lower and survives.
+    (intersection as f32 / union as f32) >= NEAR_DUPLICATE_JACCARD
 }
 
 /// Render a bounded transcript: user and assistant text only (system and tool noise dropped), keeping the
@@ -243,7 +233,7 @@ fn render_transcript(messages: &[Message], max_bytes: usize) -> String {
 
 /// Extract the JSON array from the model's output (tolerating code fences or stray prose around it) and
 /// parse it. No array at all means "nothing to learn" (an empty result); a malformed array is an error.
-fn parse_entries(content: &str) -> Result<Vec<DistilledEntry>> {
+fn parse_entries(content: &str) -> AgentResult<Vec<DistilledEntry>> {
     let (Some(start), Some(end)) = (content.find('['), content.rfind(']')) else {
         return Ok(Vec::new());
     };
@@ -274,8 +264,8 @@ fn leading_words(text: &str, n: usize) -> String {
 mod tests {
     use super::*;
     use crate::modules::memory::infrastructure::test_support::temp_port;
+    use crate::modules::provider::application::completion_provider::EventSink;
     use crate::shared::kernel::completed_turn::CompletedTurn;
-    use async_trait::async_trait;
     use tempfile::TempDir;
 
     #[test]
@@ -303,13 +293,13 @@ mod tests {
         content: String,
     }
 
-    #[async_trait(?Send)]
+    #[async_trait::async_trait(?Send)]
     impl CompletionProvider for ScriptedProvider {
         async fn complete(
             &self,
             _request: TurnRequest<'_>,
             _sink: &mut dyn EventSink,
-        ) -> Result<CompletedTurn> {
+        ) -> AgentResult<CompletedTurn> {
             Ok(CompletedTurn {
                 content: self.content.clone(),
                 tool_calls: Vec::new(),

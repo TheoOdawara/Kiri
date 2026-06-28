@@ -57,8 +57,14 @@ fn default_cwd() -> String {
     ".".to_string()
 }
 
+/// The default `run_command` timeout. The single source the serde default, the JSON schema's `default`,
+/// the tool description, and the system prompt all read — so the advertised default cannot drift from the
+/// enforced one (SEC-06). Placed here, the lowest-level tool-args module, so `run_command.rs` (which
+/// already depends on `args.rs`) reaches it without a module cycle.
+pub const RUN_COMMAND_DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
 fn default_timeout_ms() -> u64 {
-    30_000
+    RUN_COMMAND_DEFAULT_TIMEOUT_MS
 }
 
 pub fn parse<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, serde_json::Error> {
@@ -70,4 +76,14 @@ pub fn parse<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, serde_json
 pub fn parse_args<T: serde::de::DeserializeOwned>(call: &ToolCall) -> Result<T, ToolOutcome> {
     parse(call.function.arguments.as_str())
         .map_err(|error| ToolOutcome::Error(format!("invalid arguments: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_timeout_ms_equals_the_const() {
+        assert_eq!(default_timeout_ms(), RUN_COMMAND_DEFAULT_TIMEOUT_MS);
+    }
 }

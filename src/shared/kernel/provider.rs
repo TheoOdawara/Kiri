@@ -1,10 +1,4 @@
-//! Cross-cutting provider primitives: which vendor/protocol a provider speaks, how it authenticates,
-//! the reasoning effort, the (non-secret) configured profile, and the secret credential material.
-//! Shared by `shared/infra/config` (reads them from TOML), the `provider` module (selects the adapter
-//! and authenticates), and `tui` (the `/provider` wizard) — so they live in the kernel, like
-//! [`super::approval_mode::ApprovalMode`], to keep the dependency direction one-way.
-
-use serde::de::{Deserializer, Error as _};
+use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -180,8 +174,9 @@ pub enum Credential {
     Oauth(OauthTokens),
 }
 
-/// An OAuth token set. `expires_at_ms` is epoch milliseconds; the auth layer refreshes proactively
-/// before it lapses. `account_id` is required by the OpenAI/Codex backend (extracted from the id token).
+/// An OAuth token set for the modeled-but-inert OAuth auth method (see [`AuthMethod::Oauth`]).
+/// `expires_at_ms` is epoch milliseconds; a future sanctioned flow would refresh before it lapses.
+/// `account_id` is an optional provider-specific field, persisted verbatim only when present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OauthTokens {
     pub access: Secret,
@@ -222,7 +217,7 @@ impl Serialize for Secret {
 
 impl<'de> Deserialize<'de> for Secret {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer).map_err(D::Error::custom)?;
+        let raw = String::deserialize(deserializer)?;
         Ok(Secret::new(raw))
     }
 }
@@ -273,6 +268,21 @@ mod tests {
             }
             other => panic!("expected oauth, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn secret_deserialize_preserves_native_error() {
+        // SHARED-10: deserialize through `String::deserialize` directly — no custom re-wrap. A valid
+        // string round-trips; a non-string surfaces the deserializer's own native type error.
+        let secret: Secret = serde_json::from_str("\"sk-xyz\"").unwrap();
+        assert_eq!(secret.expose(), "sk-xyz");
+        let err = serde_json::from_str::<Secret>("42")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("string"),
+            "expected a native type error, got {err}"
+        );
     }
 
     #[test]

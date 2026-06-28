@@ -1,3 +1,8 @@
+//! The sensitive-file matcher and its env-driven loader. `SensitiveMatcher::new` and
+//! `load_sensitive_matcher` are edge-only wiring constructors — invoked solely from the composition
+//! root (`app::wire`) — so they keep `anyhow::Result`; the matcher is then injected into `FsSandbox`,
+//! whose port methods return the typed `AgentError`.
+
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -63,12 +68,23 @@ impl SensitiveMatcher {
         })
     }
 
-    /// A matcher that matches nothing — for tests that don't exercise the sensitive guard.
-    #[allow(dead_code)]
+    /// A matcher that matches nothing — for tests that don't exercise the sensitive guard. Every
+    /// caller is a `#[cfg(test)]` fixture, so it is gated out of the release binary.
+    #[cfg(test)]
     pub fn empty() -> Self {
         Self {
             patterns: Arc::from(Vec::<(String, Regex)>::new()),
         }
+    }
+
+    /// The original glob patterns this matcher was built from (the `(glob, regex)` pairs keep them), so
+    /// the system prompt can render the *live* sensitive list rather than a hardcoded copy that an
+    /// override could make lie (SEC-06).
+    pub fn globs(&self) -> Vec<&str> {
+        self.patterns
+            .iter()
+            .map(|(glob, _)| glob.as_str())
+            .collect()
     }
 
     /// Check whether a file name matches any sensitive pattern. Returns the matched glob (for
@@ -191,5 +207,11 @@ mod tests {
         let m = SensitiveMatcher::empty();
         assert_eq!(m.matches(".env"), None);
         assert_eq!(m.matches("id_rsa"), None);
+    }
+
+    #[test]
+    fn globs_returns_the_original_patterns() {
+        let m = SensitiveMatcher::new(&[".env", "id_rsa", "*.pem"]).unwrap();
+        assert_eq!(m.globs(), vec![".env", "id_rsa", "*.pem"]);
     }
 }

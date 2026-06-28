@@ -5,16 +5,14 @@ use super::arguments::normalize_arguments;
 use super::wire::StreamChoice;
 use super::wire::{ChatStreamChunk, Delta, StreamError, ToolCallFragment};
 use crate::modules::provider::application::completion_provider::EventSink;
+use crate::modules::provider::infrastructure::http_error::bounded_preview;
+use crate::modules::provider::infrastructure::streaming::{
+    enforce_stream_budget, is_empty_truncation,
+};
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::stream_event::StreamEvent;
-use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
-
-/// Cap on the bytes a single turn may accumulate (streamed content + tool-call arguments). Provider
-/// responses are untrusted input, and `read_timeout` only bounds idle time between chunks (it resets on
-/// each chunk), so a misbehaving provider streaming continuously could otherwise grow memory without
-/// bound. Generous — far above any real turn — purely a safety ceiling.
-const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
+use crate::shared::kernel::tool_call::{FunctionCall, TOOL_CALL_FUNCTION_KIND, ToolCall};
 
 /// Feed one parsed SSE event's `data` payload into the accumulator (content/tool-calls) and the live
 /// `on_event` callback (reasoning/content). The `[DONE]` sentinel and malformed JSON are ignored. Line
@@ -44,7 +42,15 @@ pub(crate) fn handle_event(
     };
 
     // Bound the running total before absorbing, so an unbounded stream fails fast instead of OOMing.
+    // Reasoning (under either field name) flows through the channel/transcript just like content, so it
+    // counts toward the same ceiling — otherwise a provider streaming reasoning forever defeats the cap.
     let delta_bytes = choice.delta.content.as_deref().map_or(0, str::len)
+        + choice
+            .delta
+            .reasoning_content
+            .as_deref()
+            .map_or(0, str::len)
+        + choice.delta.reasoning.as_deref().map_or(0, str::len)
         + choice
             .delta
             .tool_calls
@@ -52,12 +58,7 @@ pub(crate) fn handle_event(
             .filter_map(|fragment| fragment.function.as_ref()?.arguments.as_deref())
             .map(str::len)
             .sum::<usize>();
-    accumulator.streamed_bytes = accumulator.streamed_bytes.saturating_add(delta_bytes);
-    if accumulator.streamed_bytes > MAX_STREAM_BYTES {
-        return Err(AgentError::Provider(format!(
-            "provider stream exceeded the maximum response size ({MAX_STREAM_BYTES} bytes)"
-        )));
-    }
+    enforce_stream_budget(&mut accumulator.streamed_bytes, delta_bytes)?;
 
     if let Some(reason) = &choice.finish_reason {
         accumulator.finish_reason = Some(reason.clone());
@@ -72,20 +73,26 @@ pub(crate) fn handle_event(
     Ok(())
 }
 
-/// Render an in-band stream error as a human-readable message. `code` may be a string or a number.
+/// Render an in-band stream error as a human-readable message. `code` may be a string or a number; the
+/// provider's `message` is untrusted text, so it is bounded before reaching the transcript.
 fn format_stream_error(error: &StreamError) -> String {
     let message = error
         .message
         .as_deref()
         .map(str::trim)
         .filter(|message| !message.is_empty())
-        .unwrap_or("unknown error");
+        .map(bounded_preview)
+        .unwrap_or_else(|| "unknown error".to_string());
     match error.code.as_ref().filter(|code| !code.is_null()) {
         Some(code) => {
-            let code = code
-                .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| code.to_string());
+            // `code` is provider-controlled too; bounding only `message` is bypassed if the oversized
+            // payload is moved here, so it is capped the same way.
+            let code = bounded_preview(
+                &code
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| code.to_string()),
+            );
             format!("stream error from provider: {message} (code {code})")
         }
         None => format!("stream error from provider: {message}"),
@@ -94,6 +101,9 @@ fn format_stream_error(error: &StreamError) -> String {
 
 /// The sentinel payload OpenAI-compatible SSE streams send to mark the end of a completion.
 const SSE_DONE_SENTINEL: &str = "[DONE]";
+
+/// The `finish_reason` the chat-completions API sends when the output token cap truncated the turn.
+const FINISH_REASON_LENGTH: &str = "length";
 
 /// Parse one event's `data` payload into its first choice. Yields nothing for the `[DONE]` sentinel,
 /// an empty payload, or malformed JSON. (A test seam; the live path uses `handle_event`.)
@@ -129,7 +139,8 @@ fn events_from_delta(delta: Delta) -> Vec<StreamEvent> {
 pub(crate) struct TurnAccumulator {
     content: String,
     tool_calls: BTreeMap<u32, PartialToolCall>,
-    /// Running total of streamed content + tool-call argument bytes, bounded by `MAX_STREAM_BYTES`.
+    /// Running total of streamed content + reasoning + tool-call argument bytes, bounded by
+    /// `MAX_STREAM_BYTES`.
     streamed_bytes: usize,
     /// The last `finish_reason` seen; `"length"` means the output token cap was hit (truncation).
     finish_reason: Option<String>,
@@ -148,9 +159,11 @@ impl TurnAccumulator {
     /// producing anything usable. The provider surfaces this as an error rather than returning a turn
     /// that silently did nothing (the truncated case the user otherwise gets no feedback on).
     pub(crate) fn hit_empty_output_limit(&self) -> bool {
-        self.finish_reason.as_deref() == Some("length")
-            && self.content.is_empty()
-            && self.tool_calls.is_empty()
+        is_empty_truncation(
+            self.finish_reason.as_deref() == Some(FINISH_REASON_LENGTH),
+            &self.content,
+            self.tool_calls.is_empty(),
+        )
     }
 
     fn absorb_tool_fragments(&mut self, fragments: &[ToolCallFragment]) {
@@ -180,7 +193,7 @@ impl TurnAccumulator {
             .map(|partial| ToolCall {
                 id: partial.id,
                 kind: if partial.kind.is_empty() {
-                    "function".to_string()
+                    TOOL_CALL_FUNCTION_KIND.to_string()
                 } else {
                     partial.kind
                 },
@@ -200,22 +213,13 @@ impl TurnAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::provider::infrastructure::test_support::CollectSink;
 
     /// Parse one event payload into events (test seam over `parse_chunk` + `events_from_delta`).
     fn events_from_data(data: &str) -> Vec<StreamEvent> {
         match parse_chunk(data) {
             Some(choice) => events_from_delta(choice.delta),
             None => Vec::new(),
-        }
-    }
-
-    #[derive(Default)]
-    struct CollectSink(Vec<StreamEvent>);
-
-    impl EventSink for CollectSink {
-        fn on_event(&mut self, event: StreamEvent) -> Result<(), AgentError> {
-            self.0.push(event);
-            Ok(())
         }
     }
 
@@ -344,6 +348,67 @@ mod tests {
         // abort the turn — its content still flows.
         let turn = accumulate(&[r#"{"error":null,"choices":[{"delta":{"content":"Hi"}}]}"#]);
         assert_eq!(turn.content, "Hi");
+    }
+
+    #[test]
+    fn in_band_error_message_is_bounded() {
+        // An oversized in-band error message must be capped via `bounded_preview` before it reaches the
+        // transcript, just like an HTTP error body.
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        let data = serde_json::json!({ "error": { "message": "x".repeat(5_000), "code": 500 } })
+            .to_string();
+        let error = handle_event(&data, &mut accumulator, &mut sink)
+            .expect_err("an in-band error event must fail the turn");
+        assert!(
+            error.to_string().contains("… (truncated)"),
+            "oversized in-band error must be bounded: {error}"
+        );
+    }
+
+    #[test]
+    fn oversized_error_code_is_bounded() {
+        // PROV-06: bounding only `message` is bypassed if the attacker moves the oversized payload into
+        // the string-typed `code`. It must be capped the same way.
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        let data = serde_json::json!({ "error": { "message": "x", "code": "C".repeat(5_000) } })
+            .to_string();
+        let error = handle_event(&data, &mut accumulator, &mut sink)
+            .expect_err("an in-band error event must fail the turn");
+        let surfaced = error.to_string();
+        assert!(
+            surfaced.contains("… (truncated)"),
+            "oversized error code must be bounded: {surfaced}"
+        );
+        assert!(
+            !surfaced.contains(&"C".repeat(5_000)),
+            "the oversized error code must be truncated, not surfaced verbatim"
+        );
+    }
+
+    #[test]
+    fn reasoning_stream_exceeding_cap_fails() {
+        // PROV-01: reasoning deltas must count toward the same ceiling as content/tool-input, or a
+        // provider streaming reasoning forever grows memory without bound.
+        let mut accumulator = TurnAccumulator::default();
+        let mut sink = CollectSink::default();
+        let chunk = serde_json::json!({
+            "choices": [{ "delta": { "reasoning_content": "a".repeat(1024 * 1024) } }]
+        })
+        .to_string();
+        let mut error = None;
+        for _ in 0..16 {
+            if let Err(err) = handle_event(&chunk, &mut accumulator, &mut sink) {
+                error = Some(err);
+                break;
+            }
+        }
+        let error = error.expect("reasoning past MAX_STREAM_BYTES must fail");
+        assert!(
+            error.to_string().contains("maximum response size"),
+            "reasoning cap error expected: {error}"
+        );
     }
 
     #[test]

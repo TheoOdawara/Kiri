@@ -46,6 +46,12 @@ top-k. **Any** failure — embedder unconfigured, endpoint down, timeout, or an 
 back transparently to the existing keyword search. The boot digest stays recency-based (no embedding call
 at startup).
 
+The candidate fetch is **scoped to the active embedder's `model()`**: both stores persist each vector with
+its producing model, and `embedded_candidates(model, limit)` filters to that model before ranking. Two
+models of the same dimension would otherwise be ranked on meaningless cross-model cosines that can clear
+`MIN_SIMILARITY` and silently corrupt recall. Changing the embedding model therefore degrades recall to
+keyword for already-stored entries until they are re-embedded under the new model — correct over wrong.
+
 ## Consequences
 
 - Recall finds paraphrased knowledge, not just literal substrings, sharply improving how often the right

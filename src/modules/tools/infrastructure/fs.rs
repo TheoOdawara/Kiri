@@ -5,7 +5,6 @@ pub mod edit_file;
 pub mod list_dir;
 pub mod move_path;
 pub mod read_file;
-pub mod run_command;
 pub mod search;
 pub mod write_file;
 
@@ -14,6 +13,7 @@ use std::sync::Arc;
 use regex::Regex;
 
 use crate::modules::tools::application::tool::Tool;
+use crate::modules::tools::infrastructure::run_command::RunCommand;
 
 /// The default file tool set, in the order advertised to the model. `RunCommand` is injected with the
 /// plan-mode blacklist (destructive shell commands in plan mode), the network allow-list (dev/package
@@ -34,7 +34,7 @@ pub fn default_fs_tools(
         Box::new(create_dir::CreateDir),
         Box::new(delete_dir::DeleteDir),
         Box::new(search::Search),
-        Box::new(run_command::RunCommand::new(
+        Box::new(RunCommand::new(
             plan_blacklist,
             net_allow,
             require_confinement,

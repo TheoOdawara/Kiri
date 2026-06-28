@@ -1,21 +1,12 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use rusqlite::{Connection, Row, params};
-use tokio::task::spawn_blocking;
 
 use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
-use crate::shared::kernel::error::AgentError;
-
-type Result<T> = std::result::Result<T, AgentError>;
-
-/// Map any non-IO failure (SQLite, serde, join, lock) into the kernel's memory error variant.
-fn mem<E: std::fmt::Display>(error: E) -> AgentError {
-    AgentError::Memory(error.to_string())
-}
+use crate::shared::infra::sqlite::{lock, open_with_parent, run_blocking};
+use crate::shared::kernel::error::{AgentError, AgentResult};
 
 const SELECT_COLUMNS: &str =
     "id, kind, content, tags, project_id, created_at, updated_at FROM entries";
@@ -30,11 +21,8 @@ pub struct SqliteSharedMemory {
 impl SqliteSharedMemory {
     /// Open (creating it and its parent directory if needed) the shared database. Does not yet create
     /// the schema — call `init` for that.
-    pub fn new(db_path: PathBuf) -> Result<Self> {
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let conn = Connection::open(&db_path).map_err(mem)?;
+    pub fn new(db_path: PathBuf) -> AgentResult<Self> {
+        let conn = open_with_parent(&db_path, AgentError::memory)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -42,61 +30,79 @@ impl SqliteSharedMemory {
 
     /// Open an ephemeral in-memory database. Used as an inert fallback when the on-disk store cannot
     /// be opened, so the harness still wires a (unavailable) store instead of failing to start.
-    pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().map_err(mem)?;
+    pub fn in_memory() -> AgentResult<Self> {
+        let conn = Connection::open_in_memory().map_err(AgentError::memory)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
 
     /// Persist (or replace) the embedding vector for an entry. Stored as little-endian f32 bytes.
-    pub async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> Result<()> {
+    pub async fn save_embedding(
+        &self,
+        entry_id: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> AgentResult<()> {
         let conn = self.conn.clone();
         let entry_id = entry_id.to_string();
         let model = model.to_string();
         let dim = vector.len() as i64;
         let blob = vec_to_blob(vector);
-        run_blocking(move || -> Result<()> {
-            let conn = lock(&conn)?;
-            conn.execute(
-                "INSERT INTO entry_embeddings (entry_id, model, dim, vector)
+        run_blocking(
+            move || -> AgentResult<()> {
+                let conn = lock(&conn, AgentError::memory)?;
+                conn.execute(
+                    "INSERT INTO entry_embeddings (entry_id, model, dim, vector)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(entry_id) DO UPDATE SET model = ?2, dim = ?3, vector = ?4",
-                params![entry_id, model, dim, blob],
-            )
-            .map_err(mem)?;
-            Ok(())
-        })
+                    params![entry_id, model, dim, blob],
+                )
+                .map_err(AgentError::memory)?;
+                Ok(())
+            },
+            AgentError::memory,
+        )
         .await
     }
 
-    /// The most recently updated entries that carry an embedding, paired with their vector. Backs the
-    /// semantic recall's candidate set (ranked by cosine in the application layer).
-    pub async fn embedded_candidates(&self, limit: usize) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+    /// The most recently updated entries embedded under `model`, paired with their vector. Backs the
+    /// semantic recall's candidate set (ranked by cosine in the application layer). Scoping to `model`
+    /// keeps cross-model vectors out of the ranking when the active embedder changes.
+    pub async fn embedded_candidates(
+        &self,
+        model: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<(MemoryEntry, Vec<f32>)>> {
         let conn = self.conn.clone();
-        run_blocking(move || -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
-            let conn = lock(&conn)?;
-            let mut stmt = conn
-                .prepare(
-                    "SELECT e.id, e.kind, e.content, e.tags, e.project_id, e.created_at, \
+        let model = model.to_string();
+        run_blocking(
+            move || -> AgentResult<Vec<(MemoryEntry, Vec<f32>)>> {
+                let conn = lock(&conn, AgentError::memory)?;
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT e.id, e.kind, e.content, e.tags, e.project_id, e.created_at, \
                      e.updated_at, emb.vector \
                      FROM entries e JOIN entry_embeddings emb ON emb.entry_id = e.id \
-                     ORDER BY e.updated_at DESC LIMIT ?1",
-                )
-                .map_err(mem)?;
-            let rows = stmt
-                .query_map(params![limit as i64], |row| {
-                    let entry = row_to_entry(row)?;
-                    let blob: Vec<u8> = row.get("vector")?;
-                    Ok((entry, blob_to_vec(&blob)))
-                })
-                .map_err(mem)?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row.map_err(mem)?);
-            }
-            Ok(out)
-        })
+                     WHERE emb.model = ?1 \
+                     ORDER BY e.updated_at DESC LIMIT ?2",
+                    )
+                    .map_err(AgentError::memory)?;
+                let rows = stmt
+                    .query_map(params![model, limit as i64], |row| {
+                        let entry = row_to_entry(row)?;
+                        let blob: Vec<u8> = row.get("vector")?;
+                        Ok((entry, blob_to_vec(&blob)))
+                    })
+                    .map_err(AgentError::memory)?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(AgentError::memory)?);
+                }
+                Ok(out)
+            },
+            AgentError::memory,
+        )
         .await
     }
 }
@@ -113,30 +119,6 @@ fn blob_to_vec(blob: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-fn lock(conn: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
-    conn.lock()
-        .map_err(|error| AgentError::Memory(format!("sqlite mutex poisoned: {error}")))
-}
-
-/// Upper bound for a single blocking database operation, so a wedged lock or pathological query
-/// surfaces as a clear error instead of hanging the runtime.
-const DB_OP_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Run a blocking database closure on the blocking pool, bounded by `DB_OP_TIMEOUT`. Centralizes the
-/// spawn-blocking, timeout, and join-error handling every query shares.
-async fn run_blocking<T, F>(op: F) -> Result<T>
-where
-    F: FnOnce() -> Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    match tokio::time::timeout(DB_OP_TIMEOUT, spawn_blocking(op)).await {
-        Ok(joined) => joined.map_err(mem)?,
-        Err(_) => Err(AgentError::Memory(
-            "database operation timed out".to_string(),
-        )),
-    }
-}
-
 /// Map a SQLite row to a `MemoryEntry`. Unknown kinds fall back to `Fact` and unparseable tags to an
 /// empty set — defensive recovery, never a panic, for a database an external tool may have touched.
 fn row_to_entry(row: &Row) -> rusqlite::Result<MemoryEntry> {
@@ -144,7 +126,7 @@ fn row_to_entry(row: &Row) -> rusqlite::Result<MemoryEntry> {
     let tags: String = row.get("tags")?;
     Ok(MemoryEntry {
         id: row.get("id")?,
-        kind: MemoryKind::from_str(&kind).unwrap_or(MemoryKind::Fact),
+        kind: kind.parse::<MemoryKind>().unwrap_or(MemoryKind::Fact),
         content: row.get("content")?,
         tags: serde_json::from_str(&tags).unwrap_or_default(),
         project_id: row.get("project_id")?,
@@ -158,29 +140,35 @@ async fn query_entries(
     conn: Arc<Mutex<Connection>>,
     sql: String,
     bind: Vec<Box<dyn rusqlite::ToSql + Send>>,
-) -> Result<Vec<MemoryEntry>> {
-    run_blocking(move || -> Result<Vec<MemoryEntry>> {
-        let conn = lock(&conn)?;
-        let mut stmt = conn.prepare(&sql).map_err(mem)?;
-        let params = rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref()));
-        let rows = stmt.query_map(params, row_to_entry).map_err(mem)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(mem)?);
-        }
-        Ok(out)
-    })
+) -> AgentResult<Vec<MemoryEntry>> {
+    run_blocking(
+        move || -> AgentResult<Vec<MemoryEntry>> {
+            let conn = lock(&conn, AgentError::memory)?;
+            let mut stmt = conn.prepare(&sql).map_err(AgentError::memory)?;
+            let params = rusqlite::params_from_iter(bind.iter().map(|b| b.as_ref()));
+            let rows = stmt
+                .query_map(params, row_to_entry)
+                .map_err(AgentError::memory)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(AgentError::memory)?);
+            }
+            Ok(out)
+        },
+        AgentError::memory,
+    )
     .await
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl SharedMemory for SqliteSharedMemory {
-    async fn init(&self) -> Result<()> {
+    async fn init(&self) -> AgentResult<()> {
         let conn = self.conn.clone();
-        run_blocking(move || -> Result<()> {
-            let conn = lock(&conn)?;
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS entries (
+        run_blocking(
+            move || -> AgentResult<()> {
+                let conn = lock(&conn, AgentError::memory)?;
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS entries (
                     id          TEXT PRIMARY KEY,
                     kind        TEXT NOT NULL,
                     content     TEXT NOT NULL,
@@ -197,27 +185,30 @@ impl SharedMemory for SqliteSharedMemory {
                     dim      INTEGER NOT NULL,
                     vector   BLOB NOT NULL
                 );",
-            )
-            .map_err(mem)?;
-            Ok(())
-        })
+                )
+                .map_err(AgentError::memory)?;
+                Ok(())
+            },
+            AgentError::memory,
+        )
         .await
     }
 
-    async fn save(&self, entry: &MemoryEntry) -> Result<()> {
+    async fn save(&self, entry: &MemoryEntry) -> AgentResult<()> {
         let conn = self.conn.clone();
         let entry = entry.clone();
-        run_blocking(move || -> Result<()> {
-            let tags = serde_json::to_string(&entry.tags).map_err(mem)?;
-            let conn = lock(&conn)?;
-            conn.execute(
+        run_blocking(
+            move || -> AgentResult<()> {
+                let tags = serde_json::to_string(&entry.tags).map_err(AgentError::memory)?;
+                let conn = lock(&conn, AgentError::memory)?;
+                conn.execute(
                 "INSERT INTO entries (id, kind, content, tags, project_id, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(id) DO UPDATE SET
                     kind = ?2, content = ?3, tags = ?4, project_id = ?5, updated_at = ?7",
                 params![
                     entry.id,
-                    entry.kind.as_str(),
+                    entry.kind.as_wire(),
                     entry.content,
                     tags,
                     entry.project_id,
@@ -225,43 +216,37 @@ impl SharedMemory for SqliteSharedMemory {
                     entry.updated_at,
                 ],
             )
-            .map_err(mem)?;
-            Ok(())
-        })
+            .map_err(AgentError::memory)?;
+                Ok(())
+            },
+            AgentError::memory,
+        )
         .await
     }
 
-    async fn load(&self, id: &str) -> Result<Option<MemoryEntry>> {
+    async fn load(&self, id: &str) -> AgentResult<Option<MemoryEntry>> {
         let conn = self.conn.clone();
         let id = id.to_string();
-        run_blocking(move || -> Result<Option<MemoryEntry>> {
-            let conn = lock(&conn)?;
-            let mut stmt = conn
-                .prepare(&format!("SELECT {SELECT_COLUMNS} WHERE id = ?1"))
-                .map_err(mem)?;
-            let mut rows = stmt.query_map(params![id], row_to_entry).map_err(mem)?;
-            match rows.next() {
-                Some(row) => Ok(Some(row.map_err(mem)?)),
-                None => Ok(None),
-            }
-        })
+        run_blocking(
+            move || -> AgentResult<Option<MemoryEntry>> {
+                let conn = lock(&conn, AgentError::memory)?;
+                let mut stmt = conn
+                    .prepare(&format!("SELECT {SELECT_COLUMNS} WHERE id = ?1"))
+                    .map_err(AgentError::memory)?;
+                let mut rows = stmt
+                    .query_map(params![id], row_to_entry)
+                    .map_err(AgentError::memory)?;
+                match rows.next() {
+                    Some(row) => Ok(Some(row.map_err(AgentError::memory)?)),
+                    None => Ok(None),
+                }
+            },
+            AgentError::memory,
+        )
         .await
     }
 
-    async fn delete(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.clone();
-        let id = id.to_string();
-        run_blocking(move || -> Result<bool> {
-            let conn = lock(&conn)?;
-            let affected = conn
-                .execute("DELETE FROM entries WHERE id = ?1", params![id])
-                .map_err(mem)?;
-            Ok(affected > 0)
-        })
-        .await
-    }
-
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let like = format!("%{}%", query.to_lowercase());
         query_entries(
             self.conn.clone(),
@@ -274,7 +259,7 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn list(&self, offset: usize, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list(&self, offset: usize, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         query_entries(
             self.conn.clone(),
             format!("SELECT {SELECT_COLUMNS} ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2"),
@@ -283,16 +268,16 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         query_entries(
             self.conn.clone(),
             format!("SELECT {SELECT_COLUMNS} WHERE kind = ?1 ORDER BY updated_at DESC LIMIT ?2"),
-            vec![Box::new(kind.as_str().to_string()), Box::new(limit as i64)],
+            vec![Box::new(kind.as_wire().to_string()), Box::new(limit as i64)],
         )
         .await
     }
 
-    async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         // Tags are stored as a JSON array; match the quoted token to avoid prefix collisions.
         let like = format!("%\"{tag}\"%");
         query_entries(
@@ -303,7 +288,11 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn list_by_project(&self, project_id: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_project(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<MemoryEntry>> {
         query_entries(
             self.conn.clone(),
             format!(
@@ -314,32 +303,18 @@ impl SharedMemory for SqliteSharedMemory {
         .await
     }
 
-    async fn count(&self) -> Result<usize> {
+    async fn count(&self) -> AgentResult<usize> {
         let conn = self.conn.clone();
-        run_blocking(move || -> Result<usize> {
-            let conn = lock(&conn)?;
-            let count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
-                .map_err(mem)?;
-            Ok(count as usize)
-        })
-        .await
-    }
-
-    async fn count_by_project(&self, project_id: &str) -> Result<usize> {
-        let conn = self.conn.clone();
-        let project_id = project_id.to_string();
-        run_blocking(move || -> Result<usize> {
-            let conn = lock(&conn)?;
-            let count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM entries WHERE project_id = ?1",
-                    params![project_id],
-                    |row| row.get(0),
-                )
-                .map_err(mem)?;
-            Ok(count as usize)
-        })
+        run_blocking(
+            move || -> AgentResult<usize> {
+                let conn = lock(&conn, AgentError::memory)?;
+                let count: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+                    .map_err(AgentError::memory)?;
+                Ok(count as usize)
+            },
+            AgentError::memory,
+        )
         .await
     }
 }
@@ -366,7 +341,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_load_and_delete() {
+    async fn save_and_load() {
         let dir = TempDir::new().unwrap();
         let memory = memory(&dir).await;
 
@@ -382,9 +357,6 @@ mod tests {
         assert_eq!(loaded.id, e.id);
         assert_eq!(loaded.kind, MemoryKind::Heuristic);
         assert!(loaded.tags.contains("rust"));
-
-        assert!(memory.delete(&e.id).await.unwrap());
-        assert!(memory.load(&e.id).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -424,7 +396,6 @@ mod tests {
         assert_eq!(memory.list_by_tag("types", 10).await.unwrap().len(), 1);
         assert_eq!(memory.list_by_project("proj-a", 10).await.unwrap().len(), 1);
         assert_eq!(memory.count().await.unwrap(), 2);
-        assert_eq!(memory.count_by_project("proj-a").await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -456,5 +427,28 @@ mod tests {
         let reopened = SqliteSharedMemory::new(db).unwrap();
         reopened.init().await.unwrap();
         assert_eq!(reopened.count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn embedded_candidates_filters_by_model() {
+        let dir = TempDir::new().unwrap();
+        let memory = memory(&dir).await;
+
+        let a = entry(MemoryKind::Fact, "content a", &[], None);
+        let b = entry(MemoryKind::Fact, "content b", &[], None);
+        memory.save(&a).await.unwrap();
+        memory.save(&b).await.unwrap();
+        memory
+            .save_embedding(&a.id, "model-a", &[1.0, 0.0])
+            .await
+            .unwrap();
+        memory
+            .save_embedding(&b.id, "model-b", &[0.0, 1.0])
+            .await
+            .unwrap();
+
+        let candidates = memory.embedded_candidates("model-a", 10).await.unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0.id, a.id);
     }
 }

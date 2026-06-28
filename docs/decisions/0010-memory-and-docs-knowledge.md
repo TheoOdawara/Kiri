@@ -25,9 +25,12 @@ modular-hexagonal architecture of ADR 0003.
 and `MemoryKind` (decision, pattern, anti-pattern, snippet, heuristic, fact). `project_id_from_path`
 derives a stable project id from the workspace path (blake3, 16 hex chars).
 
-**Ports.** Domain ports `ProjectMemory` / `SharedMemory` model the full CRUD+query persistence
-contract. Application ports `ProjectStore` / `SharedStore` are the reduced use-case surface the agent
-needs; `MemoryPort` (with `MemoryPortImpl<P, S>`) unifies both for recall/remember.
+**Ports.** Domain ports `ProjectMemory` / `SharedMemory` model the persistence contract, trimmed to the
+wired surface (`init`/`save`/`load`/`search`/`list`, plus `list_by_*`/`count` kept for the future UI and
+the store/sync tests). Application ports collapse to a single base `MemoryStore`
+(save/search/`list_by_*`/embedding-persistence/availability) with `SharedStore: MemoryStore` adding the
+cross-project `list_by_project`; `MemoryPort` (with `MemoryPortImpl<P, S>`) unifies project + shared for
+recall/remember.
 
 **Adapters.**
 - `FileProjectMemory` — Markdown files with YAML front-matter plus a JSON index, under
@@ -61,8 +64,16 @@ inert (`is_available() == false`), the tools report it, and the harness still st
   root.
 - Ports return `AgentError` (the WIP's `anyhow::Result` was aligned to the architecture contract;
   `anyhow` stays at the binary edge).
+- **Accepted domain exception: clock + RNG in `MemoryEntry::new`.** The constructor reads the wall clock
+  (`now_rfc3339`) and the RNG (`Uuid::now_v7`) directly in the domain layer. This is ratified as a
+  documented exception rather than injecting a `Clock`/`IdGen` port for a single constructor (YAGNI); the
+  impurity is confined to entry creation and the rest of the domain stays pure and I/O-free.
 - New dependencies: `rusqlite` (bundled), `serde_yaml`, `time`, `uuid` (v7), `blake3`; `tempfile` as a
   dev-dependency.
 - `KIRI_MEMORY=off` disables the whole context; `KIRI_DOCS_PATH` overrides the docs root.
-- A memory-management GUI is planned; the domain ports' full CRUD surface (currently exercised by tests
-  and the digest) anticipates it.
+- A memory-management GUI is planned. The speculative full-CRUD port surface was trimmed (Wave 5) to what
+  the runtime, the digest, and the sync export/import actually call: the `delete`/`count_by_project`
+  domain methods and the duplicate `*Store` tier were removed (decision: wire-only; restore the CRUD
+  methods from git history when the UI is built), `list_by_*`/`count` are retained behind targeted
+  `#[allow(dead_code)]` for the tests and the future UI, and the two application ports were folded into a
+  single `MemoryStore` base + `SharedStore` extension.

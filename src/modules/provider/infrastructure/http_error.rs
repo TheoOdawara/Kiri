@@ -10,12 +10,18 @@ use crate::shared::kernel::error::AgentError;
 /// than surfaced in full.
 const MAX_ERROR_BODY_CHARS: usize = 600;
 
-fn truncate_body(body: String) -> String {
-    if body.chars().count() <= MAX_ERROR_BODY_CHARS {
-        return body;
+/// Bound untrusted provider error text to a short, transcript-safe preview. Shared with the SSE adapters
+/// so an in-band stream error (`{"error": …}` on a 200 stream) is capped exactly like an HTTP error body.
+pub(crate) fn bounded_preview(text: &str) -> String {
+    if text.chars().count() <= MAX_ERROR_BODY_CHARS {
+        return text.to_string();
     }
-    let head: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
+    let head: String = text.chars().take(MAX_ERROR_BODY_CHARS).collect();
     format!("{head}… (truncated)")
+}
+
+fn truncate_body(body: String) -> String {
+    bounded_preview(&body)
 }
 
 /// Classify a non-success response into the matching error. A 4xx becomes [`AgentError::ProviderRejected`]

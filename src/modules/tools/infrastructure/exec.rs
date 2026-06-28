@@ -192,8 +192,9 @@ async fn run(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::modules::tools::application::command_sandbox::{NetworkPolicy, SandboxPolicy};
+    use crate::modules::tools::application::command_sandbox::SandboxPolicy;
     use crate::modules::tools::infrastructure::confine::noop::NoConfinement;
+    use crate::shared::kernel::sandbox::NetworkPolicy;
 
     fn policy() -> SandboxPolicy {
         SandboxPolicy {

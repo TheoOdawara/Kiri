@@ -1,0 +1,328 @@
+use super::view;
+use crate::modules::tui::domain::modal::PendingApproval;
+use crate::modules::tui::domain::model::Model;
+use crate::modules::tui::domain::transcript::TranscriptItem;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+
+/// Render the model onto an in-memory backend and flatten the buffer to text for `contains` checks.
+fn render(model: &Model, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| view(model, frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut out = String::new();
+    for y in 0..height {
+        for x in 0..width {
+            out.push_str(buffer[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn empty_shell_shows_brand_splash_and_hints() {
+    let model = Model::new("model-x".to_string(), "/work".to_string());
+    let out = render(&model, 80, 12);
+    assert!(out.contains("kiri"), "brand seal missing:\n{out}");
+    assert!(out.contains("KIRI"), "splash mark missing:\n{out}");
+    assert!(out.contains("model-x"), "model missing:\n{out}");
+    assert!(out.contains("›▏"), "prompt glyph missing:\n{out}");
+    assert!(out.contains("Enter envia"), "hints missing:\n{out}");
+}
+
+#[test]
+fn transcript_and_pending_approval_render() {
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model
+        .transcript
+        .push(TranscriptItem::User("oi".to_string()));
+    model
+        .transcript
+        .push(TranscriptItem::Assistant("olá".to_string()));
+    model.pending_approval = Some(PendingApproval::new("ler a.txt".to_string(), true));
+    let out = render(&model, 80, 20);
+    assert!(out.contains("você › oi"), "user item missing:\n{out}");
+    assert!(out.contains("olá"), "assistant item missing:\n{out}");
+    assert!(
+        out.contains("aprovação"),
+        "approval box title missing:\n{out}"
+    );
+    assert!(out.contains("ler a.txt"), "approval action missing:\n{out}");
+    assert!(out.contains("Sim"), "approval option missing:\n{out}");
+}
+
+#[test]
+fn the_view_is_a_pure_function_of_the_frame_instant() {
+    use std::time::Instant;
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model
+        .transcript
+        .push(TranscriptItem::Assistant("olá".to_string()));
+    model.timeline.render_at = Some(Instant::now());
+    // Same model, same frame instant → byte-identical buffer (the view reads no clock of its own).
+    assert_eq!(render(&model, 80, 20), render(&model, 80, 20));
+}
+
+#[test]
+fn reduced_motion_idle_frame_is_byte_identical_across_time() {
+    use crate::modules::tui::domain::model::Motion;
+    use std::time::{Duration, Instant};
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model
+        .transcript
+        .push(TranscriptItem::User("oi".to_string()));
+    model
+        .transcript
+        .push(TranscriptItem::Assistant("olá".to_string()));
+    model.timeline.motion = Motion::Reduced;
+    let now = Instant::now();
+    model.timeline.render_at = Some(now);
+    let a = render(&model, 80, 20);
+    // Advance the clock five seconds: a frozen, idle frame must not change a single cell (the idle
+    // zero-diff invariant — under reduced motion not even the cursor pulses).
+    model.timeline.render_at = Some(now + Duration::from_secs(5));
+    let b = render(&model, 80, 20);
+    assert_eq!(a, b, "a reduced-motion idle frame must be stable over time");
+}
+
+#[test]
+fn streaming_answer_shows_the_wet_ink_caret() {
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model
+        .transcript
+        .push(TranscriptItem::Assistant("escrevendo".to_string()));
+    model.status.streaming = true;
+    let out = render(&model, 80, 20);
+    assert!(out.contains('▌'), "wet-ink caret missing:\n{out}");
+}
+
+#[test]
+fn active_streaming_item_is_plain_then_formats_when_finished() {
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model
+        .transcript
+        .push(TranscriptItem::Assistant("**negrito**".to_string()));
+
+    // While streaming, the trailing item renders as plain text — the markdown markers stay literal
+    // (no per-frame parse).
+    model.status.streaming = true;
+    let streaming = render(&model, 100, 30);
+    assert!(
+        streaming.contains("**negrito**"),
+        "streaming item must render plain (literal markers):\n{streaming}"
+    );
+
+    // Once the turn finishes, the same item re-renders formatted: the `**` markers are gone.
+    model.status.streaming = false;
+    let finished = render(&model, 100, 30);
+    assert!(
+        finished.contains("negrito") && !finished.contains("**negrito**"),
+        "finished item must render markdown (markers stripped):\n{finished}"
+    );
+}
+
+#[test]
+fn meta_rule_shows_the_active_approval_mode() {
+    use crate::shared::kernel::approval_mode::ApprovalMode;
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model.approval_mode = ApprovalMode::Plan;
+    let out = render(&model, 80, 12);
+    assert!(out.contains("PLAN"), "mode badge missing:\n{out}");
+}
+
+#[test]
+fn pending_plan_renders_the_plan_box_below_the_transcript() {
+    use crate::modules::tui::domain::modal::PendingPlan;
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model
+        .transcript
+        .push(TranscriptItem::Assistant("meu plano".to_string()));
+    model.pending_plan = Some(PendingPlan::default());
+    let out = render(&model, 80, 20);
+    assert!(out.contains("plano"), "plan box title missing:\n{out}");
+    assert!(out.contains("Executar"), "plan option missing:\n{out}");
+    // The box must sit BELOW the transcript, not overlay it: the assistant's plan text renders on
+    // an earlier row than the box's options.
+    let rows: Vec<&str> = out.lines().collect();
+    let plan_row = rows.iter().position(|l| l.contains("meu plano"));
+    let box_row = rows.iter().position(|l| l.contains("Executar"));
+    assert!(
+        matches!((plan_row, box_row), (Some(p), Some(b)) if p < b),
+        "plan text should render above the box (plan_row={plan_row:?}, box_row={box_row:?}):\n{out}"
+    );
+    // ...and the box sits in its dedicated region just above the input prompt, anchored to the
+    // bottom — the box options render below the transcript but above the `›▏` prompt row.
+    let prompt_row = rows.iter().position(|l| l.contains("›▏"));
+    assert!(
+        matches!((box_row, prompt_row), (Some(b), Some(p)) if b < p),
+        "plan box should sit above the input (box_row={box_row:?}, prompt_row={prompt_row:?}):\n{out}"
+    );
+}
+
+#[test]
+fn plan_box_shows_all_options_on_a_short_terminal() {
+    use crate::modules::tui::domain::modal::PendingPlan;
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model.pending_plan = Some(PendingPlan::default());
+    // On a short terminal the box takes priority over the transcript, so every option the user
+    // must read to answer stays visible (regression: it used to be clipped). Four options plus the
+    // surrounding chrome need a row more than three did.
+    let out = render(&model, 80, 12);
+    assert!(out.contains("Executar o plano"), "option 1 missing:\n{out}");
+    assert!(out.contains("modo auto"), "option 2 missing:\n{out}");
+    assert!(out.contains("Continuar"), "option 3 missing:\n{out}");
+    assert!(out.contains("Cancelar"), "option 4 clipped:\n{out}");
+}
+
+#[test]
+fn tool_activity_renders_command_result_and_diff() {
+    use crate::modules::tui::domain::transcript::{ToolActivity, ToolDiff, ToolStatus};
+    use std::time::Duration;
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model.transcript.push(TranscriptItem::Tool(ToolActivity {
+        command: "edit src/app.rs".to_string(),
+        diff: Some(ToolDiff {
+            old: "let mode = mode;".to_string(),
+            new: "let mut mode = mode;".to_string(),
+        }),
+        result: Some((
+            ToolStatus::Ok,
+            "edited src/app.rs".to_string(),
+            Duration::from_millis(7),
+        )),
+    }));
+    let out = render(&model, 80, 20);
+    assert!(
+        out.contains("⏺ edit src/app.rs"),
+        "command line missing:\n{out}"
+    );
+    assert!(out.contains("⎿"), "result marker missing:\n{out}");
+    assert!(
+        out.contains("- let mode = mode;"),
+        "removed diff line missing:\n{out}"
+    );
+    assert!(
+        out.contains("+ let mut mode = mode;"),
+        "added diff line missing:\n{out}"
+    );
+    assert!(
+        out.contains("edited src/app.rs"),
+        "result detail missing:\n{out}"
+    );
+}
+
+#[test]
+fn long_tool_output_is_previewed_until_expanded() {
+    use crate::modules::tui::domain::transcript::{ToolActivity, ToolStatus};
+    use std::time::Duration;
+    let output = (1..=20)
+        .map(|i| format!("line{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model.transcript.push(TranscriptItem::Tool(ToolActivity {
+        command: "cat big.txt".to_string(),
+        diff: None,
+        result: Some((ToolStatus::Ok, output, Duration::from_millis(1))),
+    }));
+    let collapsed = render(&model, 80, 40);
+    assert!(
+        collapsed.contains("para expandir"),
+        "elision hint missing when collapsed:\n{collapsed}"
+    );
+    model.expand_tools = true;
+    let expanded = render(&model, 80, 40);
+    assert!(
+        expanded.contains("line20"),
+        "expanded output should show every line:\n{expanded}"
+    );
+    assert!(
+        !expanded.contains("para expandir"),
+        "no elision hint once expanded:\n{expanded}"
+    );
+}
+
+#[test]
+fn meta_rule_keeps_mode_badge_with_a_long_workspace() {
+    use crate::shared::kernel::approval_mode::ApprovalMode;
+    let mut model = Model::new(
+        "some-long-model-name".to_string(),
+        "C:/Users/dev/very/deep/workspace/path/kiri".to_string(),
+    );
+    model.approval_mode = ApprovalMode::Auto;
+    // On a tight width the overlong workspace must not push the mode badge off the rule.
+    let out = render(&model, 40, 12);
+    assert!(
+        out.contains("AUTO"),
+        "mode badge must survive a long workspace:\n{out}"
+    );
+}
+
+#[test]
+fn typed_input_renders_in_the_editor() {
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model.input.set("ola mundo".to_string());
+    let out = render(&model, 80, 12);
+    assert!(out.contains("ola mundo"), "input text missing:\n{out}");
+}
+
+#[test]
+fn narrow_terminal_keeps_prompt_and_short_hint_without_overflow() {
+    let model = Model::new("m".to_string(), "/w".to_string());
+    let out = render(&model, 20, 8);
+    // The prompt glyph and the seal survive; the long hint collapses to the short form.
+    assert!(out.contains("kiri"), "brand seal missing:\n{out}");
+    assert!(out.contains("›▏"), "prompt glyph missing:\n{out}");
+    assert!(out.contains("/help"), "short hint missing:\n{out}");
+}
+
+// --- screen selection overlay -------------------------------------------------
+
+fn render_buffer(model: &Model, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+    terminal.draw(|frame| view(model, frame)).unwrap();
+    terminal.backend().buffer().clone()
+}
+
+#[test]
+fn a_screen_selection_highlights_buffer_cells() {
+    use crate::modules::tui::domain::selection::{Granularity, ScreenSelection};
+    use crate::modules::tui::infrastructure::theme;
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model
+        .transcript
+        .push(TranscriptItem::Assistant("hello".to_string()));
+    let mut sel = ScreenSelection::new(0, 0, Granularity::Char);
+    sel.extend(3, 0);
+    model.selection.active = Some(sel);
+    let buffer = render_buffer(&model, 40, 12);
+    for x in 0..=3u16 {
+        assert_eq!(
+            buffer[(x, 0)].style().bg,
+            Some(theme::BRAND),
+            "selected cell {x} must carry the selection highlight"
+        );
+    }
+}
+
+#[test]
+fn a_stable_selection_keeps_the_frame_byte_identical_across_time() {
+    use crate::modules::tui::domain::model::Motion;
+    use crate::modules::tui::domain::selection::{Granularity, ScreenSelection};
+    use std::time::{Duration, Instant};
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model
+        .transcript
+        .push(TranscriptItem::Assistant("olá".to_string()));
+    model.timeline.motion = Motion::Reduced;
+    let mut sel = ScreenSelection::new(0, 0, Granularity::Char);
+    sel.extend(5, 0);
+    model.selection.active = Some(sel);
+    let now = Instant::now();
+    model.timeline.render_at = Some(now);
+    let a = render_buffer(&model, 80, 20);
+    model.timeline.render_at = Some(now + Duration::from_secs(5));
+    let b = render_buffer(&model, 80, 20);
+    assert_eq!(a, b, "a stable selection must not change a cell over time");
+}

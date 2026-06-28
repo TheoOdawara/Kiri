@@ -5,16 +5,17 @@ use time::format_description::well_known::Rfc3339;
 /// Last-write-wins by parsed instant: the RFC3339 timestamps `time` produces are variable-width (it
 /// omits or trims the sub-second fraction), so a plain string compare is WRONG — e.g.
 /// `"…00.5Z" > "…00Z"` is false lexicographically though `.5s` is strictly later. We therefore parse
-/// both and compare the instants. If either fails to parse (timestamps are always machine-generated,
-/// so this is defensive), fall back to the string compare. Ties keep the existing entry (the incoming
-/// is not strictly newer), making a re-pull idempotent.
+/// both and compare the instants. If either fails to parse, **fail closed** and keep the existing entry:
+/// a hand-crafted `updated_at` (e.g. `"zzzz"`) must not be able to win via the known-wrong lexicographic
+/// compare and overwrite a local entry. Ties also keep the existing entry (the incoming is not strictly
+/// newer), making a re-pull idempotent.
 pub fn incoming_wins(incoming_updated_at: &str, existing_updated_at: &str) -> bool {
     match (
         OffsetDateTime::parse(incoming_updated_at, &Rfc3339),
         OffsetDateTime::parse(existing_updated_at, &Rfc3339),
     ) {
         (Ok(incoming), Ok(existing)) => incoming > existing,
-        _ => incoming_updated_at > existing_updated_at,
+        _ => false,
     }
 }
 
@@ -58,5 +59,14 @@ mod tests {
             "2026-06-26T12:00:00Z",
             "2026-06-26T12:00:00.5Z"
         ));
+    }
+
+    #[test]
+    fn non_rfc3339_incoming_does_not_overwrite() {
+        // SYNC-08 regression: a non-parseable incoming timestamp must fail closed (keep the existing
+        // entry), never win via the old lexicographic fallback (`"zzzz" > "2026-…"`).
+        assert!(!incoming_wins("zzzz", "2026-06-26T12:00:00Z"));
+        // Both unparseable also keeps the existing entry.
+        assert!(!incoming_wins("nope", "also-bad"));
     }
 }

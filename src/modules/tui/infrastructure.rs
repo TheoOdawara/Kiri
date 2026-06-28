@@ -1,11 +1,9 @@
-pub mod bridge;
-pub mod clipboard;
-pub mod input;
-pub mod layout;
-pub mod markdown;
+pub mod render;
 pub mod runtime;
-pub mod terminal_guard;
-pub mod text;
-pub mod theme;
-pub mod view;
-pub mod widgets;
+
+// The render path lives under `render/`; re-export its modules at the infrastructure root so the
+// pre-grouping `tui::infrastructure::{view,layout,markdown,text,theme,widgets}` paths keep resolving.
+pub use render::{layout, markdown, text, theme, view, widgets};
+// The IO spine (bridge/input/clipboard/terminal_guard) lives under `runtime/` and is referenced locally
+// within `runtime/` (self/super); it has no production consumer outside `runtime`, so it needs no root
+// re-export.

@@ -7,6 +7,7 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::modules::provider::infrastructure::tool_args;
 use crate::shared::kernel::message::Message;
 use crate::shared::kernel::role::Role;
 
@@ -117,7 +118,7 @@ fn blocks_for(message: &Message) -> Vec<ContentBlock> {
                 blocks.push(ContentBlock::ToolUse {
                     id: call.id.clone(),
                     name: call.function.name.clone(),
-                    input: parse_input(&call.function.arguments),
+                    input: tool_args::sanitized_object(&call.function.arguments),
                 });
             }
             blocks
@@ -141,17 +142,6 @@ fn text_and_images(message: &Message) -> Vec<ContentBlock> {
         }
     }
     blocks
-}
-
-/// Parse a tool call's stored JSON-string arguments into the JSON value Anthropic's `tool_use.input`
-/// expects. Falls back to an empty object if the string is empty or not valid JSON, so a garbled turn
-/// can never produce a malformed request body.
-fn parse_input(arguments: &str) -> Value {
-    let trimmed = arguments.trim();
-    if trimmed.is_empty() {
-        return json!({});
-    }
-    serde_json::from_str(trimmed).unwrap_or_else(|_| json!({}))
 }
 
 /// Parse a `data:<media_type>;base64,<data>` URL into an Anthropic base64 image source. Returns `None`

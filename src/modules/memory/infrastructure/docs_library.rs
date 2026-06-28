@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use tokio::fs;
 
-use crate::shared::kernel::error::AgentError;
-
-type Result<T> = std::result::Result<T, AgentError>;
+use crate::shared::kernel::error::AgentResult;
 
 /// Caps that keep `consult_docs` bounded: how many files to scan, how large a file to read, and how
 /// wide an excerpt to return around a match. The docs tree is a fallback knowledge source, not a
@@ -43,7 +41,7 @@ impl DocsLibrary {
 
     /// Search the docs tree for the query's terms, returning up to `limit` ranked excerpts. An absent
     /// or empty docs tree, or a blank query, yields an empty result rather than an error.
-    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<DocMatch>> {
+    pub async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<DocMatch>> {
         let terms: Vec<String> = query
             .split_whitespace()
             .map(|t| t.to_lowercase())
@@ -81,7 +79,7 @@ impl DocsLibrary {
 
     /// Collect Markdown files under the docs root (depth-first via a LIFO stack), capped at
     /// `MAX_FILES_SCANNED`.
-    async fn collect_markdown_files(&self) -> Result<Vec<PathBuf>> {
+    async fn collect_markdown_files(&self) -> AgentResult<Vec<PathBuf>> {
         let mut files = Vec::new();
         let mut dirs = vec![self.root.clone()];
         while let Some(dir) = dirs.pop() {
@@ -94,7 +92,12 @@ impl DocsLibrary {
             };
             while let Some(entry) = reader.next_entry().await? {
                 let path = entry.path();
-                if path.is_dir() {
+                // `file_type` reads the entry's own type without traversing a symlink, so a symlinked
+                // file or dir under `docs/` is skipped — `consult_docs` cannot follow it out of the root.
+                let file_type = entry.file_type().await?;
+                if file_type.is_symlink() {
+                    continue;
+                } else if file_type.is_dir() {
                     dirs.push(path);
                 } else if is_markdown(&path) {
                     files.push(path);
@@ -234,5 +237,30 @@ mod tests {
         write(&docs_root, "a.md", "content").await;
         let docs = DocsLibrary::new(docs_root);
         assert!(docs.search("   ", 5).await.unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn docs_walk_skips_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let docs_root = dir.path().join("docs");
+        write(&docs_root, "real.md", "architecture lives in this doc").await;
+
+        // A secret outside the docs root, reachable only via a symlink placed inside it.
+        let outside = dir.path().join("outside");
+        write(
+            &outside,
+            "secret.md",
+            "architecture secret outside the docs root",
+        )
+        .await;
+        symlink(&outside, docs_root.join("linked")).unwrap();
+
+        let docs = DocsLibrary::new(docs_root);
+        let hits = docs.search("architecture", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "real.md");
     }
 }

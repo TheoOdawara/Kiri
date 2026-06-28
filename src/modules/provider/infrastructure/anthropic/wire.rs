@@ -29,30 +29,30 @@ pub(crate) struct MessagesRequest<'a> {
 /// is ignored.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum StreamEventDto {
+pub(crate) enum WireStreamEvent {
     ContentBlockStart {
         index: u32,
-        content_block: ContentBlockStartDto,
+        content_block: ContentBlockStart,
     },
     ContentBlockDelta {
         index: u32,
-        delta: BlockDeltaDto,
+        delta: BlockDelta,
     },
     /// The end-of-message delta, carrying `stop_reason` (`"max_tokens"` means the output cap truncated
     /// the turn). Modeled so a silent truncation can be surfaced.
     MessageDelta {
-        delta: MessageDeltaDto,
+        delta: MessageDelta,
     },
     /// An in-stream error the API can deliver on an otherwise-200 SSE response.
     Error {
-        error: ApiErrorDto,
+        error: ApiError,
     },
     #[serde(other)]
     Other,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct MessageDeltaDto {
+pub(crate) struct MessageDelta {
     #[serde(default)]
     pub stop_reason: Option<String>,
 }
@@ -61,7 +61,7 @@ pub(crate) struct MessageDeltaDto {
 /// text/thinking blocks fall into `Other`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ContentBlockStartDto {
+pub(crate) enum ContentBlockStart {
     ToolUse {
         id: String,
         name: String,
@@ -75,7 +75,7 @@ pub(crate) enum ContentBlockStartDto {
 /// (`signature_delta`, …) are ignored.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum BlockDeltaDto {
+pub(crate) enum BlockDelta {
     TextDelta {
         text: String,
     },
@@ -90,7 +90,7 @@ pub(crate) enum BlockDeltaDto {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ApiErrorDto {
+pub(crate) struct ApiError {
     #[serde(rename = "type")]
     pub kind: String,
     pub message: String,
@@ -102,14 +102,14 @@ mod tests {
 
     #[test]
     fn content_block_start_reads_tool_use_id_and_name() {
-        let event: StreamEventDto = serde_json::from_str(
+        let event: WireStreamEvent = serde_json::from_str(
             r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}"#,
         )
         .unwrap();
         match event {
-            StreamEventDto::ContentBlockStart {
+            WireStreamEvent::ContentBlockStart {
                 index,
-                content_block: ContentBlockStartDto::ToolUse { id, name },
+                content_block: ContentBlockStart::ToolUse { id, name },
             } => {
                 assert_eq!(index, 1);
                 assert_eq!(id, "toolu_1");
@@ -121,14 +121,14 @@ mod tests {
 
     #[test]
     fn text_block_start_falls_into_other() {
-        let event: StreamEventDto = serde_json::from_str(
+        let event: WireStreamEvent = serde_json::from_str(
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
         )
         .unwrap();
         assert!(matches!(
             event,
-            StreamEventDto::ContentBlockStart {
-                content_block: ContentBlockStartDto::Other,
+            WireStreamEvent::ContentBlockStart {
+                content_block: ContentBlockStart::Other,
                 ..
             }
         ));
@@ -136,26 +136,26 @@ mod tests {
 
     #[test]
     fn deltas_deserialize_by_kind() {
-        let text: StreamEventDto = serde_json::from_str(
+        let text: WireStreamEvent = serde_json::from_str(
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
         )
         .unwrap();
         assert!(matches!(
             text,
-            StreamEventDto::ContentBlockDelta {
-                delta: BlockDeltaDto::TextDelta { text },
+            WireStreamEvent::ContentBlockDelta {
+                delta: BlockDelta::TextDelta { text },
                 ..
             } if text == "Hi"
         ));
 
-        let json: StreamEventDto = serde_json::from_str(
+        let json: WireStreamEvent = serde_json::from_str(
             r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"p\""}}"#,
         )
         .unwrap();
         assert!(matches!(
             json,
-            StreamEventDto::ContentBlockDelta {
-                delta: BlockDeltaDto::InputJsonDelta { partial_json },
+            WireStreamEvent::ContentBlockDelta {
+                delta: BlockDelta::InputJsonDelta { partial_json },
                 ..
             } if partial_json == "{\"p\""
         ));
@@ -169,9 +169,9 @@ mod tests {
             r#"{"type":"message_stop"}"#,
             r#"{"type":"ping"}"#,
         ] {
-            let event: StreamEventDto = serde_json::from_str(raw).unwrap();
+            let event: WireStreamEvent = serde_json::from_str(raw).unwrap();
             assert!(
-                matches!(event, StreamEventDto::Other),
+                matches!(event, WireStreamEvent::Other),
                 "should ignore {raw}"
             );
         }
@@ -179,26 +179,26 @@ mod tests {
 
     #[test]
     fn message_delta_carries_the_stop_reason() {
-        let event: StreamEventDto = serde_json::from_str(
+        let event: WireStreamEvent = serde_json::from_str(
             r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":3}}"#,
         )
         .unwrap();
         assert!(matches!(
             event,
-            StreamEventDto::MessageDelta {
-                delta: MessageDeltaDto { stop_reason: Some(reason) }
+            WireStreamEvent::MessageDelta {
+                delta: MessageDelta { stop_reason: Some(reason) }
             } if reason == "max_tokens"
         ));
     }
 
     #[test]
     fn error_event_carries_kind_and_message() {
-        let event: StreamEventDto = serde_json::from_str(
+        let event: WireStreamEvent = serde_json::from_str(
             r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
         )
         .unwrap();
         match event {
-            StreamEventDto::Error { error } => {
+            WireStreamEvent::Error { error } => {
                 assert_eq!(error.kind, "overloaded_error");
                 assert_eq!(error.message, "Overloaded");
             }

@@ -1,28 +1,58 @@
 use crate::modules::memory::application::project_memory::ProjectMemory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
-use crate::shared::kernel::error::AgentError;
-use async_trait::async_trait;
+use crate::shared::infra::fs::write_atomic;
+use crate::shared::kernel::error::{AgentError, AgentResult};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 
-type Result<T> = std::result::Result<T, AgentError>;
+/// Largest entry body read into memory, mirroring `docs_library`'s `MAX_FILE_BYTES`. Caps a single read
+/// so a symlinked `/dev/zero` or an over-sized committed `.md` cannot exhaust memory.
+const MAX_ENTRY_BYTES: u64 = 256 * 1024;
 
-/// Map a serialization/format failure into the kernel's memory error variant.
-fn mem<E: std::fmt::Display>(error: E) -> AgentError {
-    AgentError::Memory(error.to_string())
+/// Lexically join `rel` onto `root`, returning `None` if `rel` is absolute or contains a `..` component.
+/// A corrupted or merged `index.json` could carry a path that escapes the memory dir. This is only the
+/// lexical first stage (mirrors the sandbox's `join_checked`); `resolve_contained` adds the canonicalize
+/// backstop that also defeats a symlink escape. Total — it never touches the filesystem and never panics.
+fn contained_join(root: &Path, rel: &str) -> Option<PathBuf> {
+    for component in Path::new(rel).components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            // ParentDir escapes the root; RootDir/Prefix are absolute — reject all of them.
+            _ => return None,
+        }
+    }
+    Some(root.join(rel))
 }
 
-/// Write `content` to `path` atomically: a temp sibling then rename. A crash mid-write can otherwise
-/// truncate `index.json`/`embeddings.json`, and the next `load_index` then fails to parse and makes the
-/// whole project store inert.
-async fn write_atomic(path: &Path, content: &str) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, content).await?;
-    fs::rename(&tmp, path).await?;
-    Ok(())
+/// Resolve a stored index path to a real, symlink-resolved path asserted to stay inside the memory root,
+/// returning `None` when it is absent or escapes. `contained_join` rejects the lexical `..`/absolute case;
+/// canonicalizing both sides then closes the symlink hole — an `index.json` entry of all-`Normal`
+/// components plus a hostile committed symlink to `~/.ssh/id_rsa` would otherwise be followed by the read.
+/// Mirrors the sandbox's `resolve_existing` (lexical join → canonicalize → assert within root).
+async fn resolve_contained(root: &Path, rel: &str) -> Option<PathBuf> {
+    let real_root = fs::canonicalize(root).await.ok()?;
+    resolve_within(&real_root, root, rel).await
+}
+
+/// The inner resolve against an already-canonicalized `real_root`, so a caller iterating many entries
+/// (`search`) canonicalizes the root once for the whole loop instead of per entry.
+async fn resolve_within(real_root: &Path, root: &Path, rel: &str) -> Option<PathBuf> {
+    let candidate = contained_join(root, rel)?;
+    let real = fs::canonicalize(&candidate).await.ok()?;
+    real.starts_with(real_root).then_some(real)
+}
+
+/// Read at most `MAX_ENTRY_BYTES` of `path` as lossy UTF-8. The bounded read — not a post-hoc slice — is
+/// what caps memory even for an endless source such as `/dev/zero`.
+async fn read_capped(path: &Path) -> AgentResult<String> {
+    let file = fs::File::open(path).await?;
+    let mut buf = Vec::new();
+    file.take(MAX_ENTRY_BYTES).read_to_end(&mut buf).await?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Markdown-based project memory storage with YAML front-matter.
@@ -71,20 +101,20 @@ impl FileProjectMemory {
         self.root.join("index.json")
     }
 
-    async fn load_index(&self) -> Result<()> {
+    async fn load_index(&self) -> AgentResult<()> {
         let path = self.index_path();
         if path.exists() {
             let content = fs::read_to_string(&path).await?;
-            let index: ProjectIndex = serde_json::from_str(&content).map_err(mem)?;
+            let index: ProjectIndex = serde_json::from_str(&content).map_err(AgentError::memory)?;
             *self.index.write().await = index;
         }
         Ok(())
     }
 
-    async fn save_index(&self) -> Result<()> {
+    async fn save_index(&self) -> AgentResult<()> {
         let index = self.index.read().await.clone();
-        let content = serde_json::to_string_pretty(&index).map_err(mem)?;
-        write_atomic(&self.index_path(), &content).await?;
+        let content = serde_json::to_string_pretty(&index).map_err(AgentError::memory)?;
+        write_atomic(&self.index_path(), content.as_bytes()).await?;
         Ok(())
     }
 
@@ -92,17 +122,22 @@ impl FileProjectMemory {
         self.root.join("embeddings.json")
     }
 
-    async fn load_embeddings(&self) -> Result<HashMap<String, StoredEmbedding>> {
+    async fn load_embeddings(&self) -> AgentResult<HashMap<String, StoredEmbedding>> {
         let path = self.embeddings_path();
         if !path.exists() {
             return Ok(HashMap::new());
         }
         let content = fs::read_to_string(&path).await?;
-        serde_json::from_str(&content).map_err(mem)
+        serde_json::from_str(&content).map_err(AgentError::memory)
     }
 
     /// Persist (or replace) the embedding vector for an entry in the sidecar cache.
-    pub async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> Result<()> {
+    pub async fn save_embedding(
+        &self,
+        entry_id: &str,
+        model: &str,
+        vector: &[f32],
+    ) -> AgentResult<()> {
         let mut sidecar = self.load_embeddings().await?;
         sidecar.insert(
             entry_id.to_string(),
@@ -111,14 +146,19 @@ impl FileProjectMemory {
                 vector: vector.to_vec(),
             },
         );
-        let content = serde_json::to_string(&sidecar).map_err(mem)?;
-        write_atomic(&self.embeddings_path(), &content).await?;
+        let content = serde_json::to_string(&sidecar).map_err(AgentError::memory)?;
+        write_atomic(&self.embeddings_path(), content.as_bytes()).await?;
         Ok(())
     }
 
-    /// The most recently updated entries that carry an embedding, paired with their vector. Reads file
-    /// bodies only for the (bounded) candidates, ranked by the in-memory index's `updated_at`.
-    pub async fn embedded_candidates(&self, limit: usize) -> Result<Vec<(MemoryEntry, Vec<f32>)>> {
+    /// The most recently updated entries embedded under `model`, paired with their vector. Reads file
+    /// bodies only for the (bounded) candidates, ranked by the in-memory index's `updated_at`. Scoping
+    /// to `model` keeps cross-model vectors out of the ranking when the active embedder changes.
+    pub async fn embedded_candidates(
+        &self,
+        model: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<(MemoryEntry, Vec<f32>)>> {
         let sidecar = self.load_embeddings().await?;
         if sidecar.is_empty() {
             return Ok(Vec::new());
@@ -126,8 +166,9 @@ impl FileProjectMemory {
         let mut ids: Vec<(String, String)> = {
             let index = self.index.read().await;
             sidecar
-                .keys()
-                .filter_map(|id| {
+                .iter()
+                .filter(|(_, embedding)| embedding.model == model)
+                .filter_map(|(id, _)| {
                     index
                         .entries
                         .get(id)
@@ -154,63 +195,68 @@ impl FileProjectMemory {
         // Use the full id: a UUID v7 prefix is a millisecond timestamp, so two entries of the same kind
         // saved in the same millisecond share their leading chars — a truncated name would collide and
         // one would silently overwrite the other (data loss).
-        let filename = format!("{}-{}.md", kind.as_str(), id);
+        let filename = format!("{}-{}.md", kind.as_wire(), id);
         match kind {
             MemoryKind::Decision => self.root.join("decisions").join(filename),
             _ => self.root.join(filename),
         }
     }
 
-    fn ensure_dirs(&self) -> Result<()> {
+    fn ensure_dirs(&self) -> AgentResult<()> {
         std::fs::create_dir_all(&self.root)?;
         std::fs::create_dir_all(self.root.join("decisions"))?;
         Ok(())
     }
-
-    fn parse_markdown_file(&self, _path: &Path, content: &str) -> Result<MemoryEntry> {
-        // Extract the YAML front-matter (between the leading `---` fences).
-        let (front_matter, body) = match content.strip_prefix("---\n") {
-            Some(after) => match after.find("\n---\n") {
-                Some(end) => (Some(&after[..end]), &after[end + 5..]),
-                None => (None, content),
-            },
-            None => (None, content),
-        };
-
-        let entry = if let Some(fm) = front_matter {
-            serde_yaml::from_str(fm).map_err(mem)?
-        } else {
-            // Fallback for a file without front-matter: treat the whole body as a Fact.
-            MemoryEntry::new(MemoryKind::Fact, body.to_string(), HashSet::new(), None)
-        };
-
-        Ok(entry)
-    }
-
-    fn render_markdown_file(&self, entry: &MemoryEntry) -> Result<String> {
-        let front_matter = serde_yaml::to_string(entry).map_err(mem)?;
-        Ok(format!("---\n{}---\n\n{}", front_matter, entry.content))
-    }
 }
 
-#[async_trait]
+/// Parse a memory entry from its Markdown file body: YAML front-matter between the leading `---` fences,
+/// or — with no front-matter — the whole body as a `Fact`. Pure: it reads neither `self` nor the path.
+fn parse_markdown_file(content: &str) -> AgentResult<MemoryEntry> {
+    let (front_matter, body) = match content.strip_prefix("---\n") {
+        Some(after) => match after.find("\n---\n") {
+            Some(end) => (Some(&after[..end]), &after[end + 5..]),
+            None => (None, content),
+        },
+        None => (None, content),
+    };
+
+    let entry = if let Some(fm) = front_matter {
+        serde_norway::from_str(fm).map_err(AgentError::memory)?
+    } else {
+        // Fallback for a file without front-matter: treat the whole body as a Fact.
+        MemoryEntry::new(MemoryKind::Fact, body.to_string(), HashSet::new(), None)
+    };
+
+    Ok(entry)
+}
+
+/// Render a memory entry as a Markdown file: YAML front-matter followed by the content body.
+fn render_markdown_file(entry: &MemoryEntry) -> AgentResult<String> {
+    let front_matter = serde_norway::to_string(entry).map_err(AgentError::memory)?;
+    Ok(format!("---\n{}---\n\n{}", front_matter, entry.content))
+}
+
+#[async_trait::async_trait]
 impl ProjectMemory for FileProjectMemory {
-    async fn init(&self) -> Result<()> {
+    async fn init(&self) -> AgentResult<()> {
         self.ensure_dirs()?;
         self.load_index().await?;
         Ok(())
     }
 
-    async fn save(&self, entry: &MemoryEntry) -> Result<()> {
+    async fn save(&self, entry: &MemoryEntry) -> AgentResult<()> {
         let path = self.entry_path(entry.kind, &entry.id);
-        let content = self.render_markdown_file(entry)?;
+        let content = render_markdown_file(entry)?;
 
         // Ensure the parent directory exists.
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
         }
 
-        fs::write(&path, content).await?;
+        // Write the body atomically, then update the index. The body-before-index ordering is the
+        // recovery contract: a crash after the body but before the index leaves an orphan file that
+        // `search` simply never reaches (it walks the index), never a truncated/half-written entry.
+        write_atomic(&path, content.as_bytes()).await?;
 
         // Update the index. The path is built by joining `root`, so stripping it back cannot fail; the
         // fallback to the full path keeps this total without an `unwrap`.
@@ -230,55 +276,55 @@ impl ProjectMemory for FileProjectMemory {
         Ok(())
     }
 
-    async fn load(&self, id: &str) -> Result<Option<MemoryEntry>> {
-        let index = self.index.read().await;
-        let Some(index_entry) = index.entries.get(id) else {
+    async fn load(&self, id: &str) -> AgentResult<Option<MemoryEntry>> {
+        let rel = {
+            let index = self.index.read().await;
+            let Some(index_entry) = index.entries.get(id) else {
+                return Ok(None);
+            };
+            index_entry.path.clone()
+        };
+
+        // Re-validate the stored path resolves to a real file under `root`; an escaping or symlinked path
+        // (corrupt/merged index, or a hostile committed symlink) is treated as absent rather than read
+        // from outside the memory dir.
+        let Some(path) = resolve_contained(&self.root, &rel).await else {
             return Ok(None);
         };
-        let path = self.root.join(&index_entry.path);
-        drop(index);
 
-        let content = fs::read_to_string(&path).await?;
-        let entry = self.parse_markdown_file(&path, &content)?;
+        let content = read_capped(&path).await?;
+        let entry = parse_markdown_file(&content)?;
         Ok(Some(entry))
     }
 
-    async fn delete(&self, id: &str) -> Result<bool> {
-        let mut index = self.index.write().await;
-        let Some(index_entry) = index.entries.remove(id) else {
-            return Ok(false);
-        };
-        let path = self.root.join(&index_entry.path);
-        drop(index);
-
-        if path.exists() {
-            fs::remove_file(&path).await?;
-        }
-        self.save_index().await?;
-        Ok(true)
-    }
-
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         // Snapshot the candidate paths under the lock, then release it before any file I/O so a long
         // read can never block a concurrent writer (matches `list`/`list_by_kind`).
-        let paths: Vec<PathBuf> = {
+        let rels: Vec<String> = {
             let index = self.index.read().await;
-            index
-                .entries
-                .values()
-                .map(|index_entry| self.root.join(&index_entry.path))
-                .collect()
+            index.entries.values().map(|e| e.path.clone()).collect()
+        };
+
+        // Canonicalize the root once for the whole loop; if the memory dir is unresolvable there is
+        // nothing to read.
+        let Ok(real_root) = fs::canonicalize(&self.root).await else {
+            return Ok(Vec::new());
         };
 
         let mut results = Vec::new();
-        for path in paths {
+        for rel in rels {
             if results.len() >= limit {
                 break;
             }
+            // Skip an entry whose stored path escapes the memory root (corrupt/merged index or a hostile
+            // symlink) rather than reading outside the dir; one bad entry must not blank out other matches.
+            let Some(path) = resolve_within(&real_root, &self.root, &rel).await else {
+                continue;
+            };
             // Deliberately skip an unreadable entry rather than fail the whole search: one corrupt or
             // racing file must not blank out every other match.
-            if let Ok(content) = fs::read_to_string(&path).await
-                && let Ok(entry) = self.parse_markdown_file(&path, &content)
+            if let Ok(content) = read_capped(&path).await
+                && let Ok(entry) = parse_markdown_file(&content)
                 && entry.matches_query(query)
             {
                 results.push(entry);
@@ -287,7 +333,7 @@ impl ProjectMemory for FileProjectMemory {
         Ok(results)
     }
 
-    async fn list(&self, offset: usize, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list(&self, offset: usize, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let index = self.index.read().await;
         let ids: Vec<String> = index.entries.keys().cloned().collect();
         drop(index);
@@ -301,7 +347,7 @@ impl ProjectMemory for FileProjectMemory {
         Ok(results)
     }
 
-    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let index = self.index.read().await;
         let ids: Vec<String> = index
             .entries
@@ -320,7 +366,7 @@ impl ProjectMemory for FileProjectMemory {
         Ok(results)
     }
 
-    async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let index = self.index.read().await;
         let ids: Vec<String> = index
             .entries
@@ -337,11 +383,6 @@ impl ProjectMemory for FileProjectMemory {
             }
         }
         Ok(results)
-    }
-
-    async fn count(&self) -> Result<usize> {
-        let index = self.index.read().await;
-        Ok(index.entries.len())
     }
 }
 
@@ -374,6 +415,26 @@ mod tests {
         assert_eq!(loaded.content, entry.content);
         assert!(loaded.tags.contains("rust"));
         assert!(loaded.tags.contains("style"));
+    }
+
+    #[test]
+    fn front_matter_round_trips_after_crate_swap() {
+        // BUILD-05 regression lock: the maintained YAML crate must (de)serialize the entry
+        // front-matter so existing `.kiri/memory/*.md` files still parse after the swap.
+        let entry = MemoryEntry::new(
+            MemoryKind::Pattern,
+            "Prefer guard clauses".into(),
+            ["rust", "style"].into_iter().map(String::from).collect(),
+            None,
+        );
+        let rendered = render_markdown_file(&entry).unwrap();
+        assert!(rendered.starts_with("---\n"));
+        let parsed = parse_markdown_file(&rendered).unwrap();
+        assert_eq!(parsed.id, entry.id);
+        assert_eq!(parsed.kind, MemoryKind::Pattern);
+        assert_eq!(parsed.content, entry.content);
+        assert!(parsed.tags.contains("rust"));
+        assert!(parsed.tags.contains("style"));
     }
 
     #[tokio::test]
@@ -438,23 +499,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_project_memory_delete() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().join(".kiri").join("memory");
-        let memory = FileProjectMemory::new(root.clone());
-        memory.init().await.unwrap();
-
-        let entry = MemoryEntry::new(MemoryKind::Fact, "to delete".into(), HashSet::new(), None);
-        memory.save(&entry).await.unwrap();
-
-        let deleted = memory.delete(&entry.id).await.unwrap();
-        assert!(deleted);
-
-        let loaded = memory.load(&entry.id).await.unwrap();
-        assert!(loaded.is_none());
-    }
-
-    #[tokio::test]
     async fn file_project_memory_persists_index() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join(".kiri").join("memory");
@@ -476,8 +520,133 @@ mod tests {
         {
             let memory = FileProjectMemory::new(root.clone());
             memory.init().await.unwrap();
-            let count = memory.count().await.unwrap();
-            assert_eq!(count, 1);
+            let entries = memory.list(0, 100).await.unwrap();
+            assert_eq!(entries.len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn embedded_candidates_filters_by_model() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        let memory = FileProjectMemory::new(root);
+        memory.init().await.unwrap();
+
+        let a = MemoryEntry::new(MemoryKind::Fact, "content a".into(), HashSet::new(), None);
+        let b = MemoryEntry::new(MemoryKind::Fact, "content b".into(), HashSet::new(), None);
+        memory.save(&a).await.unwrap();
+        memory.save(&b).await.unwrap();
+        memory
+            .save_embedding(&a.id, "model-a", &[1.0, 0.0])
+            .await
+            .unwrap();
+        memory
+            .save_embedding(&b.id, "model-b", &[0.0, 1.0])
+            .await
+            .unwrap();
+
+        let candidates = memory.embedded_candidates("model-a", 10).await.unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0.id, a.id);
+    }
+
+    /// Hand-write an index whose stored path escapes the memory root, with a real file at the escaped
+    /// location, so the only thing keeping it out of reach is the containment check.
+    async fn seed_escaping_index(dir: &TempDir, root: &Path, leak_body: &str) {
+        FileProjectMemory::new(root.to_path_buf())
+            .init()
+            .await
+            .unwrap();
+        fs::write(dir.path().join(".kiri").join("escape.md"), leak_body)
+            .await
+            .unwrap();
+        let index_json = r#"{"entries":{"evil":{"path":"../escape.md","kind":"fact","tags":[],"updated_at":"2026-01-01T00:00:00Z"}}}"#;
+        fs::write(root.join("index.json"), index_json)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_skips_escaping_index_path() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        seed_escaping_index(&dir, &root, "leaked secret").await;
+
+        let memory = FileProjectMemory::new(root);
+        memory.init().await.unwrap();
+        assert!(memory.load("evil").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn search_skips_escaping_index_path() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        seed_escaping_index(&dir, &root, "leaked secret token").await;
+
+        let memory = FileProjectMemory::new(root);
+        memory.init().await.unwrap();
+        assert!(memory.search("leaked", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn entry_body_written_atomically() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        let memory = FileProjectMemory::new(root.clone());
+        memory.init().await.unwrap();
+
+        let entry = MemoryEntry::new(
+            MemoryKind::Pattern,
+            "atomic body content".into(),
+            HashSet::new(),
+            None,
+        );
+        memory.save(&entry).await.unwrap();
+
+        // A successful save leaves no temp sibling behind (the rename consumed it).
+        let mut reader = fs::read_dir(&root).await.unwrap();
+        while let Some(e) = reader.next_entry().await.unwrap() {
+            let name = e.file_name();
+            assert!(
+                !name.to_string_lossy().ends_with(".kiri-tmp"),
+                "leftover temp file: {}",
+                name.to_string_lossy()
+            );
+        }
+
+        let loaded = memory.load(&entry.id).await.unwrap().unwrap();
+        assert_eq!(loaded.content, entry.content);
+    }
+
+    /// Hand-write an index whose stored path is a plain in-root name that is actually a symlink pointing
+    /// OUTSIDE the memory root, with a real secret at the link target. The path passes the lexical guard;
+    /// only the canonicalize backstop keeps the read inside `root`.
+    #[cfg(unix)]
+    async fn seed_symlinked_index(dir: &TempDir, root: &Path, secret_body: &str) {
+        FileProjectMemory::new(root.to_path_buf())
+            .init()
+            .await
+            .unwrap();
+        let secret = dir.path().join("secret.txt");
+        fs::write(&secret, secret_body).await.unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("leak.md")).unwrap();
+        let index_json = r#"{"entries":{"evil":{"path":"leak.md","kind":"fact","tags":[],"updated_at":"2026-01-01T00:00:00Z"}}}"#;
+        fs::write(root.join("index.json"), index_json)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_and_search_skip_symlinked_index_path() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        seed_symlinked_index(&dir, &root, "PRIVATE KEY MATERIAL").await;
+
+        let memory = FileProjectMemory::new(root);
+        memory.init().await.unwrap();
+        // The symlinked entry resolves outside the memory root, so both readers must skip it.
+        assert!(memory.load("evil").await.unwrap().is_none());
+        assert!(memory.search("PRIVATE", 10).await.unwrap().is_empty());
     }
 }

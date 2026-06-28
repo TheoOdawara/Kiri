@@ -5,23 +5,22 @@ use std::fs;
 
 use serde_json::{Value, json};
 
-#[cfg(unix)]
-use crate::modules::tools::application::command_sandbox::NetworkPolicy;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema, simple_command,
+    Confirmation, Tool, ToolOutcome, function_schema, simple_command, simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{SearchArgs, parse, parse_args};
 #[cfg(unix)]
 use crate::modules::tools::infrastructure::exec;
 #[cfg(any(unix, windows))]
 use crate::modules::tools::infrastructure::sandbox::SECRET_DIRS;
-use crate::modules::tools::infrastructure::sandbox::default_accept_for;
 #[cfg(unix)]
 use crate::modules::tools::infrastructure::support::SEARCH_MAX_LINE_CHARS;
 use crate::modules::tools::infrastructure::support::SEARCH_MAX_MATCHES;
 #[cfg(windows)]
 use crate::modules::tools::infrastructure::support::search_file;
+#[cfg(unix)]
+use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct Search;
@@ -82,12 +81,12 @@ impl Tool for Search {
     }
 
     fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        let cmd = self.command_line(sandbox, call)?;
         let a: SearchArgs = parse(call.function.arguments.as_str()).ok()?;
-        Some(confirm(
-            format!("Buscar '{}'. Aprova executar: {cmd}?", a.query),
-            default_accept_for(&a.path),
-        ))
+        simple_path_confirmation(
+            &format!("Buscar '{}'", a.query),
+            self.command_line(sandbox, call),
+            &a.path,
+        )
     }
 
     async fn execute(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
@@ -129,7 +128,10 @@ impl Tool for Search {
                 &[],
                 exec::DEFAULT_TIMEOUT,
                 sandbox.confiner(),
-                &sandbox.command_policy(NetworkPolicy::Deny, &[&start]),
+                // Read-only: pass no extras. The start-dir read-allow is redundant under the macOS
+                // `(allow default)` base and, emitted last, would override the home-credential denies
+                // when the workspace root is a home ancestor (TOOL-07) — a least-privilege regression.
+                &sandbox.command_policy(NetworkPolicy::Deny, &[], &[]),
             )
             .await
             {

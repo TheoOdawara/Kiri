@@ -6,17 +6,23 @@ use crate::shared::kernel::message::Message;
 pub struct Session {
     pub id: String,
     /// The workspace this session belongs to (`project_id_from_path`), so sessions list per project.
-    /// Part of the loaded entity; read by the future sync/memory tooling, not by the resume path.
+    // load-only; surfaced once the session UI/sync lands
     #[allow(dead_code)]
     pub project_id: String,
     /// A short human label derived from the first user message; shown in the `/sessions` picker.
     pub title: String,
-    /// Persisted timestamps, part of the loaded entity; reserved for the planned session-management UI.
+    /// Persisted timestamps, part of the loaded entity.
+    // load-only; surfaced once the session UI/sync lands
     #[allow(dead_code)]
     pub created_at: String,
+    // load-only; surfaced once the session UI/sync lands
     #[allow(dead_code)]
     pub updated_at: String,
     pub messages: Vec<Message>,
+    /// How many stored rows `load` dropped as corrupt/unparseable (always 0 for a freshly created
+    /// session). The resume path surfaces a Notice when non-zero so a silently-shortened conversation is
+    /// visible instead of losing turns invisibly.
+    pub skipped_messages: usize,
 }
 
 /// A lightweight view of a session for the `/resume` and `/sessions` listings — no message bodies.
@@ -26,6 +32,10 @@ pub struct SessionSummary {
     pub updated_at: String,
     pub message_count: usize,
 }
+
+/// The fallback label shown for a session with no derivable title (e.g. an image-only first turn). Defined
+/// once here so `derive_title` and the `/sessions` picker render the same blank-session text.
+pub const UNTITLED_SESSION_LABEL: &str = "(sem título)";
 
 /// Derive a session title from the first user message: the first non-empty line, trimmed to a readable
 /// length. Falls back to a generic label when there is no usable text (e.g. an image-only first turn).
@@ -37,7 +47,7 @@ pub fn derive_title(first_user_message: &str) -> String {
         .find(|line| !line.is_empty())
         .unwrap_or("");
     if line.is_empty() {
-        return "(sem título)".to_string();
+        return UNTITLED_SESSION_LABEL.to_string();
     }
     let mut title: String = line.chars().take(MAX).collect();
     if line.chars().count() > MAX {
@@ -64,7 +74,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_title_falls_back_when_blank() {
-        assert_eq!(derive_title("   \n  "), "(sem título)");
+    fn derive_title_uses_single_untitled_const() {
+        assert_eq!(derive_title("   \n  "), UNTITLED_SESSION_LABEL);
     }
 }

@@ -1,20 +1,18 @@
-use eventsource_stream::Eventsource;
-use tokio_stream::StreamExt;
-
-use super::message_dto::MessageDto;
+use super::message_dto::WireMessage;
 use super::sse::{TurnAccumulator, handle_event};
 use super::wire::{ChatRequest, ChatTemplateKwargs};
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
-use crate::modules::provider::infrastructure::http_error::error_from_status;
+use crate::modules::provider::infrastructure::request::{apply_optional_bearer, join_url};
+use crate::modules::provider::infrastructure::streaming::{drain_sse, ensure_success};
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::{Effort, Secret};
 
-/// OpenAI-compatible chat provider (NVIDIA today). Holds the HTTP client and endpoint/credentials;
-/// translates a domain `TurnRequest` into the wire `ChatRequest`, streams the response forwarding
-/// deltas to `sink`, and assembles the turn.
+/// OpenAI-compatible chat provider (NVIDIA / OpenAI / compatible / custom / keyless local). Holds the
+/// HTTP client and endpoint/credentials; translates a domain `TurnRequest` into the wire `ChatRequest`,
+/// streams the response forwarding deltas to `sink`, and assembles the turn.
 pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
@@ -64,7 +62,7 @@ impl CompletionProvider for OpenAiProvider {
     ) -> Result<CompletedTurn, AgentError> {
         let body = ChatRequest {
             model: request.model,
-            messages: request.messages.iter().map(MessageDto::from).collect(),
+            messages: request.messages.iter().map(WireMessage::from).collect(),
             stream: true,
             chat_template_kwargs: self
                 .reasoning_enabled()
@@ -72,37 +70,16 @@ impl CompletionProvider for OpenAiProvider {
             tools: request.tools,
         };
 
-        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let mut request = self.client.post(&url);
-        // Omit the Authorization header entirely for a keyless endpoint — sending `Bearer ` (empty) makes
-        // some local servers (LM Studio / Ollama) reject the request.
-        if let Some(key) = &self.api_key {
-            request = request.bearer_auth(key.expose());
-        }
+        let url = join_url(&self.base_url, "chat/completions");
+        let request = apply_optional_bearer(self.client.post(&url), &self.api_key);
         let response =
             request.json(&body).send().await.map_err(|error| {
                 AgentError::Provider(format!("failed to reach provider: {error}"))
             })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            // The status drives the error path; the body is only diagnostic. If reading it fails, keep
-            // the failure visible in the message rather than silently blanking it.
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("<error body unavailable: {error}>"));
-            return Err(error_from_status(status, body));
-        }
+        let response = ensure_success(response).await?;
 
         let mut accumulator = TurnAccumulator::default();
-        let stream = response.bytes_stream().eventsource();
-        tokio::pin!(stream);
-        while let Some(event) = stream.next().await {
-            let event = event
-                .map_err(|error| AgentError::Provider(format!("error reading stream: {error}")))?;
-            handle_event(&event.data, &mut accumulator, sink)?;
-        }
+        drain_sse(response, |data| handle_event(data, &mut accumulator, sink)).await?;
 
         // A turn the output token cap truncated before any content or tool call: surface it instead of
         // returning an empty turn the user gets no feedback on.
@@ -121,20 +98,13 @@ impl CompletionProvider for OpenAiProvider {
 mod tests {
     use super::OpenAiProvider;
     use crate::modules::provider::application::completion_provider::{
-        CompletionProvider, EventSink, TurnRequest,
+        CompletionProvider, NullSink, TurnRequest,
     };
+    use crate::modules::provider::infrastructure::test_support;
     use crate::shared::kernel::error::AgentError;
     use crate::shared::kernel::message::Message;
     use crate::shared::kernel::provider::{Effort, Secret};
-    use crate::shared::kernel::stream_event::StreamEvent;
     use std::time::Duration;
-
-    struct NullSink;
-    impl EventSink for NullSink {
-        fn on_event(&mut self, _event: StreamEvent) -> Result<(), AgentError> {
-            Ok(())
-        }
-    }
 
     /// Run-to-verify of the timeout fix: a local listener that ACCEPTS the connection but never sends a
     /// byte models a provider that hangs after connect — the reported "first message does nothing, no
@@ -241,57 +211,22 @@ mod tests {
         }
     }
 
-    /// Drive one `complete` against a loopback server that captures the raw request bytes, then returns
-    /// the captured request text (headers + start of body). The server replies 400 so `complete` returns
-    /// promptly; the assertion is on what was sent, not the response.
+    /// Drive one `complete` (keyed or keyless) against the shared loopback capture server and return the
+    /// raw request bytes it sent — the assertion is on what was sent, not the response.
     async fn capture_request(api_key: Option<Secret>) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
-        tokio::spawn(async move {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let mut buf = vec![0u8; 4096];
-                let n = stream.read(&mut buf).await.unwrap_or(0);
-                let captured = String::from_utf8_lossy(&buf[..n]).into_owned();
-                let body = "stop";
-                let response = format!(
-                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.flush().await;
-                let _ = tx.send(captured);
-            }
-        });
-
-        let client = reqwest::Client::builder().build().unwrap();
-        let provider = OpenAiProvider::new(
-            client,
-            format!("http://{addr}/v1"),
-            api_key,
-            false,
-            Effort::Off,
-        );
-        let messages = vec![Message::user("hi")];
-        let request = TurnRequest {
-            messages: &messages,
-            model: "m",
-            tools: &[],
-        };
-        let mut sink = NullSink;
-        let _ = tokio::time::timeout(
-            Duration::from_secs(5),
-            provider.complete(request, &mut sink),
-        )
-        .await;
-        tokio::time::timeout(Duration::from_secs(5), rx)
-            .await
-            .expect("server should capture the request")
-            .expect("capture channel should deliver")
+        test_support::capture_request(|base_url| async move {
+            let client = reqwest::Client::builder().build().unwrap();
+            let provider = OpenAiProvider::new(client, base_url, api_key, false, Effort::Off);
+            let messages = vec![Message::user("hi")];
+            let request = TurnRequest {
+                messages: &messages,
+                model: "m",
+                tools: &[],
+            };
+            let mut sink = NullSink;
+            let _ = provider.complete(request, &mut sink).await;
+        })
+        .await
     }
 
     /// Regression lock for the LM Studio / Ollama fix: a keyless adapter must send NO `Authorization`

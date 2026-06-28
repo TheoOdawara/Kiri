@@ -1,23 +1,24 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use crate::modules::tools::application::command_sandbox::{
-    CommandSandbox, NetworkPolicy, SandboxPolicy,
+use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
+use crate::modules::tools::infrastructure::secret_paths::{
+    HARNESS_PRIVATE_DIR, HOME_SECRET_FILES, SECRET_DIRS,
 };
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::sandbox::NetworkPolicy;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-
-/// Credential directories under the user's home. Reads are denied even though the base profile allows
-/// reads everywhere, so a confined command cannot read keys to exfiltrate them.
-const SECRET_HOME_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker"];
 
 /// macOS OS-confinement adapter. Wraps the child in `sandbox-exec -p <profile>` with a generated
 /// Seatbelt (SBPL) profile. A system binary — no FFI, no crate — so the crate-wide
 /// `unsafe_code = "forbid"` lint is untouched. The profile shape is empirically verified on macOS:
 /// `(deny network*)` blocks outbound connections, `(deny file-write* (subpath "/"))` plus targeted
 /// allows confine writes to the workspace (and `/dev`, the temp dir, configured extras), and
-/// `(deny file-read* …)` blocks credential stores.
+/// `(deny file-read* …)` blocks credential stores — the single-sourced `SECRET_DIRS` (`~/.ssh`,
+/// `~/.aws`, …), the harness's own `~/.kiri` (which holds `credentials.json`), and the well-known home
+/// credential files (`~/.netrc`, `~/.git-credentials`, …) — so a confined `run_command` cannot read
+/// them back to the model.
 ///
 /// `sandbox-exec` is Apple-deprecated but still shipped on current macOS; the long-term successor is
 /// Endpoint Security (recorded in ADR 0009).
@@ -100,17 +101,14 @@ fn build_profile(policy: &SandboxPolicy) -> String {
         push_allow_write(&mut profile, dir);
     }
 
-    // Reads: deny credential directories under home (the base `allow default` would otherwise permit
-    // them), so a confined command cannot read keys to exfiltrate. When HOME is unset there is no
-    // per-user home whose credential dirs we could resolve, so there is nothing home-relative to deny —
-    // the `~/.ssh`-style rules simply have no target. This skip is deliberate, not silent: HOME is
+    // Reads: deny the credential set under home (the base `allow default` would otherwise permit it),
+    // so a confined command cannot read keys to exfiltrate. When HOME is unset there is no per-user home
+    // whose credential paths we could resolve, so there is nothing home-relative to deny — the
+    // `~/.ssh`-style rules simply have no target. This skip is deliberate, not silent: HOME is
     // effectively always set on the macOS v1 target, so the empty case is the headless/CI edge and the
     // base posture stands.
     if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        for dir in SECRET_HOME_DIRS {
-            push_deny_read(&mut profile, &home.join(dir));
-        }
+        push_home_denies(&mut profile, &PathBuf::from(home));
     }
     // Re-allow any explicitly configured read paths (KIRI_SANDBOX_RO_PATHS), so the user can punch a
     // read-hole through the credential-dir denies above — e.g. a deploy tool that legitimately reads
@@ -119,6 +117,19 @@ fn build_profile(policy: &SandboxPolicy) -> String {
         push_allow_read(&mut profile, dir);
     }
     profile
+}
+
+/// Emit the credential read-denies resolved relative to `home`: the single-sourced credential dirs, the
+/// harness's own `~/.kiri` store, and the well-known home credential files. Pure in `home`, so it is
+/// testable with a fixed home without mutating the process environment (edition-2024-safe).
+fn push_home_denies(profile: &mut String, home: &Path) {
+    for dir in SECRET_DIRS {
+        push_deny_read(profile, &home.join(dir));
+    }
+    push_deny_read(profile, &home.join(HARNESS_PRIVATE_DIR));
+    for file in HOME_SECRET_FILES {
+        push_deny_read(profile, &home.join(file));
+    }
 }
 
 fn push_allow_read(profile: &mut String, dir: &Path) {
@@ -187,8 +198,82 @@ mod tests {
         assert!(p.contains("(allow file-write* (subpath \"/dev\"))"));
         // The configured extra is re-allowed for writing.
         assert!(p.contains("kiri-extra"));
-        // Credential stores under home are read-denied.
-        assert!(p.contains("file-read*") && p.contains(".ssh"));
+        // Credential stores under home are read-denied: the dirs (`.ssh`), the harness's own `~/.kiri`
+        // (which holds `credentials.json`), and the well-known home credential files.
+        assert!(p.contains("file-read*"));
+        assert!(p.contains(".ssh"));
+        assert!(p.contains(".kiri"));
+        assert!(p.contains(".netrc"));
+        assert!(p.contains(".git-credentials"));
+    }
+
+    #[test]
+    fn profile_denies_kiri_credential_store() {
+        // Drive the pure helper with a fixed home so the assertion is deterministic (no reliance on the
+        // ambient HOME): `~/.kiri` — the harness's `credentials.json` store — must be read-denied.
+        let mut profile = String::new();
+        push_home_denies(&mut profile, Path::new("/Users/fake"));
+        assert!(profile.contains("(deny file-read* (subpath \"/Users/fake/.kiri\"))"));
+        assert!(profile.contains("/Users/fake/.netrc"));
+        assert!(profile.contains("/Users/fake/.ssh"));
+    }
+
+    #[test]
+    fn home_credential_denies_survive_an_empty_read_extra_but_a_home_ancestor_overrides_them() {
+        // Regression (TOOL-07): read-only tools used to route their per-call cwd through `extra_ro`,
+        // which `build_profile` emits LAST (last-match-wins). When the workspace root was a home
+        // ancestor (e.g. after `/cd ~`), the emitted `(allow file-read* (subpath $HOME))` overrode the
+        // credential denies, so a confined `search`/`read_file` could read `~/.kiri/credentials.json`.
+        // The fix makes read-only tools pass an empty `extra_ro`, so no overriding allow is emitted.
+        let Some(home) = std::env::var_os("HOME") else {
+            return; // headless/CI edge: no per-user home whose credential denies exist
+        };
+        let home = PathBuf::from(home);
+
+        // The exact deny/allow fragments `build_profile` emits, built via the same helpers so the match
+        // is byte-identical rather than a hand-rolled approximation.
+        let mut kiri_deny = String::new();
+        push_deny_read(&mut kiri_deny, &home.join(HARNESS_PRIVATE_DIR));
+        let kiri_deny = kiri_deny.trim_end();
+        let mut home_allow = String::new();
+        push_allow_read(&mut home_allow, &home);
+        let home_allow = home_allow.trim_end();
+
+        // Fixed read-only shape (empty extra_ro): the `~/.kiri` deny stands, with no overriding allow.
+        let fixed = build_profile(&SandboxPolicy {
+            root: home.clone(),
+            network: NetworkPolicy::Deny,
+            extra_ro: Vec::new(),
+            extra_rw: Vec::new(),
+        });
+        assert!(
+            fixed.contains(kiri_deny),
+            "the ~/.kiri credential deny must be present"
+        );
+        assert!(
+            !fixed.contains(home_allow),
+            "no read-allow may override the credential deny when extra_ro is empty"
+        );
+
+        // Old buggy shape (per-call cwd == home ancestor fed through extra_ro): the override returns —
+        // the home read-allow is emitted AFTER the deny, so the credential file becomes readable. This
+        // is exactly the path the call-site fix removed.
+        let buggy = build_profile(&SandboxPolicy {
+            root: home.clone(),
+            network: NetworkPolicy::Deny,
+            extra_ro: vec![home.clone()],
+            extra_rw: Vec::new(),
+        });
+        let deny_at = buggy
+            .find(kiri_deny)
+            .expect("deny present in the buggy shape");
+        let allow_at = buggy
+            .find(home_allow)
+            .expect("override allow present in the buggy shape");
+        assert!(
+            allow_at > deny_at,
+            "the buggy shape emits the overriding allow after the deny (last-match-wins)"
+        );
     }
 
     #[tokio::test]

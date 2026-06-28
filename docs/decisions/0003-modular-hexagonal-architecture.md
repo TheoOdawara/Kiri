@@ -25,8 +25,11 @@ infrastructure}` + a thin composition root.
 
 **Layers (dependencies point inward).**
 
-- `domain/` — pure data and rules, no I/O (e.g. `agent/domain`: `Role`, `Message`, `Conversation`,
-  `StreamEvent`, `CompletedTurn`).
+- `domain/` — pure data and rules, no I/O and no UI-framework dependency (e.g. `agent/domain`: `Role`,
+  `Message`, `Conversation`, `StreamEvent`, `CompletedTurn`). **One sanctioned exception:** the TUI's
+  `InputBuffer` owns a `tui_textarea::TextArea` as the editor's authoritative state — see ADR 0017, which
+  scopes it to that single file and adds a guard test forbidding any other domain file from importing
+  `ratatui`/`tui_textarea`.
 - `application/` — use-cases and the **ports** they depend on, expressed as **traits** (no `I` prefix,
   named by capability). The agent loop (`AgentLoop`) lives here, depending on `CompletionProvider`, the
   `Tool`/`ToolRegistry` contract, and the UI ports `EventSink` + `Presenter` + `ApprovalPolicy` +
@@ -49,6 +52,12 @@ holds cross-cutting infrastructure: `config` (the CLI, env loading, `Settings`).
 
 - The domain `Message` carries no serde; the provider owns a `MessageDto` (`From<&Message>`) so each
   provider can serialize messages its own way (the multi-provider seam).
+- **Kernel serde exception — `ToolCall`/`FunctionCall`.** The conversation kernel types (`Message`,
+  `Role`, …) are deliberately serde-free, mapped to the wire through provider DTOs. The one exception is
+  `ToolCall`/`FunctionCall`, which derive serde directly: they are persisted verbatim for session
+  history (`/resume`) and re-sent on the wire unchanged, and splitting a near-trivial DTO for the single
+  incidental OpenAI `type` field would add indirection for no gain (YAGNI). The exception is documented
+  in `shared/kernel/tool_call.rs`; the `Message`/`Role` docs point back to it so the rule reads one way.
 - `ChatRequest.tools` is `Vec<serde_json::Value>` — the opaque schemas the registry produces — so the
   wire layer does not depend on a typed tool struct, and a tool's `schema()` is its own concern.
 - The provider port streams via a callback (`EventSink`), not a `Stream`, to stay `dyn`-compatible for

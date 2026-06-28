@@ -1,13 +1,7 @@
 use std::path::PathBuf;
 
 use crate::shared::kernel::error::AgentError;
-
-/// Whether a confined command may open outbound network connections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NetworkPolicy {
-    Deny,
-    Allow,
-}
+use crate::shared::kernel::sandbox::NetworkPolicy;
 
 /// The OS-confinement policy for a single command: the workspace root it may write under, the network
 /// stance, and any extra paths a legitimate operation needs (toolchain dirs from config, or an

@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::infrastructure::args::parse;
+use crate::modules::tools::infrastructure::path::default_accept_for;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// The result of executing a tool. Failures are data the model reads and recovers from — never panics
@@ -42,6 +43,23 @@ pub fn confirm(action: String, default_accept: bool) -> Confirmation {
         prompt: format!("{action} {suffix} "),
         default_accept,
     }
+}
+
+/// Build the standard single-path confirmation: `{phrase}. Aprova executar: {cmd}?`, with the
+/// default-accept derived from whether `path` reaches outside the workspace (relative → accept
+/// `[S/n]`, explicit absolute/`~` → decline `[s/N]`). `None` when `command_line` is `None` (the args
+/// did not parse, so `execute` surfaces the parse error). Single-sources the prompt skeleton and the
+/// in/out-of-workspace default rule shared by the read/edit/list/create/delete/search confirmations.
+pub fn simple_path_confirmation(
+    phrase: &str,
+    command_line: Option<String>,
+    path: &str,
+) -> Option<Confirmation> {
+    let cmd = command_line?;
+    Some(confirm(
+        format!("{phrase}. Aprova executar: {cmd}?"),
+        default_accept_for(path),
+    ))
 }
 
 /// Build the bare command label for a tool whose label is a fixed render over its parsed args.
@@ -146,5 +164,28 @@ mod tests {
             ToolOutcome::Declined.into_message_content(),
             "declined by user"
         );
+    }
+
+    #[test]
+    fn simple_path_confirmation_default_accepts_relative_only() {
+        // A workspace-relative path defaults to accept ([S/n]); an explicit absolute path
+        // (potentially outside the workspace) defaults to decline ([s/N]). Locks the in/out-of-
+        // workspace default rule the single-path confirmations all funnel through.
+        let relative =
+            simple_path_confirmation("Ler o arquivo", Some("cat a.txt".to_string()), "a.txt")
+                .expect("a parsed command yields a confirmation");
+        assert!(relative.default_accept);
+        assert!(relative.prompt.contains("cat a.txt"));
+
+        let absolute = simple_path_confirmation(
+            "Ler o arquivo",
+            Some("cat /etc/hosts".to_string()),
+            "/etc/hosts",
+        )
+        .expect("a parsed command yields a confirmation");
+        assert!(!absolute.default_accept);
+
+        // No command line (the args did not parse) yields no confirmation.
+        assert!(simple_path_confirmation("Ler o arquivo", None, "a.txt").is_none());
     }
 }
