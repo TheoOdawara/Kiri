@@ -83,6 +83,30 @@ pub struct Tui {
     project_id: String,
 }
 
+/// A non-fatal degradation observed while wiring the harness (memory/session/embeddings/provider
+/// unavailable). Carried out of `app::wire` and surfaced in-transcript at boot instead of `eprintln!`,
+/// which the alternate-screen TUI would otherwise hide.
+pub struct BootNotice {
+    message: String,
+}
+
+impl BootNotice {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+/// Surface the wire-time boot degradations in the transcript as info-level notices (rendered in the
+/// warning-amber tier). Info, not Error: a degradation is non-fatal, so it must not trip the editor's
+/// error gate (`editor::gate_state`) or read as a hard failure.
+fn surface_boot_notices(model: &mut Model, notices: &[BootNotice]) {
+    for notice in notices {
+        model.notify_info(notice.message.as_str());
+    }
+}
+
 /// The wire-time inputs to [`Tui::new`], grouped so the constructor takes a single argument (no
 /// argument-count lint). Assembled in `app::wire`, the one place the adapters are chosen.
 pub struct TuiParams {
@@ -97,6 +121,7 @@ pub struct TuiParams {
     pub session_store: Arc<dyn SessionStore>,
     pub memory: Arc<dyn Memory>,
     pub project_id: String,
+    pub boot_notices: Vec<BootNotice>,
 }
 
 /// The long-lived owned run state, aggregated so the per-turn driver and the effect handlers are
@@ -148,6 +173,7 @@ impl Tui {
             session_store,
             memory,
             project_id,
+            boot_notices,
         } = params;
         let workspace = text::display_path(sandbox.root());
         let (model_id, models) = provider_swap
@@ -157,6 +183,9 @@ impl Tui {
         let mut model = Model::new(model_id, workspace)
             .with_provider_catalog(models, provider_swap.effort)
             .with_providers(provider_swap.active.clone(), provider_swap.provider_ids());
+        // Surface the wire-time degradations first, so the onboarding welcome (the call to action) lands
+        // last when both are present.
+        surface_boot_notices(&mut model, &boot_notices);
         // No usable credential at boot: come up in onboarding (welcome wizard + submit gate) instead of
         // crashing, so the user can configure a provider with zero env vars.
         if needs_onboarding {
@@ -381,6 +410,7 @@ impl RunLoop {
 #[cfg(test)]
 mod tests {
     use super::turn::{on_turn_end, turn_produced_nothing};
+    use super::{BootNotice, surface_boot_notices};
     use crate::modules::agent::application::agent_loop::TurnOutcome;
     use crate::modules::tui::domain::model::Model;
     use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
@@ -424,6 +454,30 @@ mod tests {
             .items()
             .iter()
             .any(|item| matches!(item, TranscriptItem::Notice(NoticeLevel::Error, _)))
+    }
+
+    #[test]
+    fn boot_degradation_surfaces_as_in_transcript_notice() {
+        // A wire-time degradation must reach the transcript (the alternate-screen TUI hides stderr) as a
+        // non-fatal info/warning-tier notice — never an Error, which would trip the editor's error gate.
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        surface_boot_notices(
+            &mut model,
+            &[BootNotice::new(
+                "session store unavailable; continuing without it",
+            )],
+        );
+        assert!(
+            matches!(
+                model.transcript.items().last(),
+                Some(TranscriptItem::Notice(NoticeLevel::Info, t)) if t.contains("session store unavailable")
+            ),
+            "the degradation must surface as an in-transcript info notice"
+        );
+        assert!(
+            !has_error_notice(&model),
+            "a non-fatal boot degradation must not be an Error notice"
+        );
     }
 
     /// Tests for the live provider swap. The nested module can reach `ProviderSwap`'s private fields and

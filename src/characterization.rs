@@ -7,8 +7,6 @@
 //! When the registry replaces `tool_definitions`/`confirmation_prompt`, only the call sites in
 //! `current_snapshot` change — the frozen `snapshots/characterization.json` stays byte-identical.
 
-#![cfg(test)]
-
 use std::fs;
 use std::sync::Arc;
 
