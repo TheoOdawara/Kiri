@@ -5,14 +5,11 @@ use serde_json::{Value, json};
 
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema, simple_command,
+    Confirmation, Tool, ToolOutcome, function_schema, simple_command, simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{ListArgs, parse, parse_args};
 #[cfg(unix)]
-use crate::modules::tools::infrastructure::exec;
-use crate::modules::tools::infrastructure::sandbox::default_accept_for;
-#[cfg(unix)]
-use crate::shared::kernel::sandbox::NetworkPolicy;
+use crate::modules::tools::infrastructure::support::run_fs_argv;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct ListDir;
@@ -41,12 +38,12 @@ impl Tool for ListDir {
     }
 
     fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        let cmd = self.command_line(sandbox, call)?;
         let a: ListArgs = parse(call.function.arguments.as_str()).ok()?;
-        Some(confirm(
-            format!("Listar o diretório. Aprova executar: {cmd}?"),
-            default_accept_for(&a.path),
-        ))
+        simple_path_confirmation(
+            "Listar o diretório",
+            self.command_line(sandbox, call),
+            &a.path,
+        )
     }
 
     async fn execute(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
@@ -64,44 +61,31 @@ impl Tool for ListDir {
         // `ls -1A -p` lists one entry per line, excludes `.`/`..`, and marks directories with `/`.
         // `QUOTING_STYLE=literal` stops GNU `ls` from quoting unusual names; the lines are re-sorted in
         // Rust so the order is byte-lexicographic and locale-independent (matching the native version).
+        // Read-only: pass no write dirs. `run_fs_argv` grants no read extras either, so the cwd never
+        // re-allows reads that would override the home-credential denies when the workspace root is a
+        // home ancestor (TOOL-07) — least privilege is preserved.
         #[cfg(unix)]
         let mut names: Vec<String> = {
             let cwd = sandbox.exec_cwd_for(&dir);
-            let result = match exec::run_argv(
+            let result = match run_fs_argv(
+                sandbox,
                 &[
                     OsStr::new("ls"),
                     OsStr::new("-1A"),
                     OsStr::new("-p"),
                     dir.as_os_str(),
                 ],
-                Some(&cwd),
+                &cwd,
                 None,
                 &[("QUOTING_STYLE", OsStr::new("literal"))],
-                exec::DEFAULT_TIMEOUT,
-                sandbox.confiner(),
-                // Read-only: pass no extras. The cwd read-allow is redundant under the macOS
-                // `(allow default)` base and, emitted last, would override the home-credential denies
-                // when the workspace root is a home ancestor (TOOL-07) — a least-privilege regression.
-                &sandbox.command_policy(NetworkPolicy::Deny, &[], &[]),
+                &[],
+                &format!("list {}", args.path),
             )
             .await
             {
                 Ok(result) => result,
-                Err(error) => {
-                    return ToolOutcome::Error(format!(
-                        "cannot list {}: {}",
-                        args.path,
-                        error.message()
-                    ));
-                }
+                Err(out) => return out,
             };
-            if !result.succeeded() {
-                return ToolOutcome::Error(format!(
-                    "cannot list {}: {}",
-                    args.path,
-                    result.stderr_text()
-                ));
-            }
             String::from_utf8_lossy(&result.stdout)
                 .lines()
                 .map(|line| line.to_string())

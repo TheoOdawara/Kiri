@@ -5,15 +5,13 @@ use serde_json::{Value, json};
 
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema, simple_command,
+    Confirmation, PATH_DESC, Tool, ToolOutcome, function_schema, simple_command,
+    simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
 #[cfg(unix)]
-use crate::modules::tools::infrastructure::exec;
-use crate::modules::tools::infrastructure::sandbox::default_accept_for;
+use crate::modules::tools::infrastructure::support::run_fs_argv;
 use crate::modules::tools::infrastructure::support::stat_guard;
-#[cfg(unix)]
-use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct DeleteFile;
@@ -42,12 +40,12 @@ impl Tool for DeleteFile {
     }
 
     fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
-        let cmd = self.command_line(sandbox, call)?;
         let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
-        Some(confirm(
-            format!("Excluir o arquivo. Aprova executar: {cmd}?"),
-            default_accept_for(&a.path),
-        ))
+        simple_path_confirmation(
+            "Excluir o arquivo",
+            self.command_line(sandbox, call),
+            &a.path,
+        )
     }
 
     fn confirm_in_auto(&self) -> bool {
@@ -76,28 +74,19 @@ impl Tool for DeleteFile {
         #[cfg(unix)]
         {
             let cwd = sandbox.exec_cwd_for(&path);
-            match exec::run_argv(
+            match run_fs_argv(
+                sandbox,
                 &[OsStr::new("rm"), path.as_os_str()],
-                Some(&cwd),
+                &cwd,
                 None,
                 &[],
-                exec::DEFAULT_TIMEOUT,
-                sandbox.confiner(),
-                &sandbox.command_policy(NetworkPolicy::Deny, &[], &[&cwd]),
+                &[&cwd],
+                &format!("delete {}", args.path),
             )
             .await
             {
-                Ok(result) if result.succeeded() => {
-                    ToolOutcome::Ok(format!("deleted {}", args.path))
-                }
-                Ok(result) => ToolOutcome::Error(format!(
-                    "cannot delete {}: {}",
-                    args.path,
-                    result.stderr_text()
-                )),
-                Err(error) => {
-                    ToolOutcome::Error(format!("cannot delete {}: {}", args.path, error.message()))
-                }
+                Ok(_) => ToolOutcome::Ok(format!("deleted {}", args.path)),
+                Err(out) => out,
             }
         }
 
