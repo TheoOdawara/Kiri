@@ -115,9 +115,10 @@ pub(super) fn load_net_allow() -> Result<Arc<[Regex]>> {
     compile_patterns("KIRI_SANDBOX_NET_ALLOW_CMDS", DEFAULT_NET_ALLOW)
 }
 
-/// The single read of the platform's home directory — the one extension point for home resolution.
-/// Unix-only today (`$HOME`); macOS is the v1 target. Windows: fall back to `%USERPROFILE%` here and
-/// nowhere else when Windows support lands (deferred — do not add untested Windows code now).
+/// The home-directory read for this module's path resolution — the extension point for home resolution
+/// here. Unix-only today (`$HOME`); macOS is the v1 target. Windows: fall back to `%USERPROFILE%` here
+/// when Windows support lands (deferred — do not add untested Windows code now). Note: tilde expansion
+/// for agent-supplied tool paths has its own read in `tools/infrastructure/path.rs::home()`.
 fn home_dir() -> Option<OsString> {
     std::env::var_os("HOME")
 }

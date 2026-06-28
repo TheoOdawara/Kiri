@@ -116,7 +116,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // Resolve the active provider profile and its credential (OS keyring, or a 0600 fallback file),
     // then select the adapter. This is the one place adapters are chosen.
     let profile = settings.active_profile()?.clone();
-    let credential = resolve_credential(&profile, secrets.as_ref())?;
+    let credential = resolve_credential(&profile, secrets.as_ref(), &mut boot_notices)?;
     // A keyless active provider whose id once held a key (migrated api-key -> none by hand-edit) leaves a
     // stale secret in the keyring; clear it best-effort so no orphaned credential lingers. A missing-key
     // delete is a harmless no-op.
@@ -345,7 +345,7 @@ fn build_embedder(
         )));
         return None;
     };
-    let credential = match resolve_credential(profile, secrets) {
+    let credential = match resolve_credential(profile, secrets, notices) {
         Ok(Some(credential)) => credential,
         Ok(None) => {
             notices.push(BootNotice::new(format!(
@@ -468,9 +468,13 @@ fn select_initial_provider(
 fn resolve_credential(
     profile: &ProviderProfile,
     secrets: &dyn SecretStore,
+    notices: &mut Vec<BootNotice>,
 ) -> Result<Option<Credential>> {
     // Delegate the policy to the single resolver; this adapter only maps it to the boot shape
     // (`Option<Credential>`, where `None` routes to onboarding) and reports an env-import persist outcome.
+    // The outcome is a `BootNotice` (not `eprintln!`) so it survives into the transcript rather than
+    // flashing behind the alternate-screen TUI — both the SEC-07 persistence disclosure and the
+    // persist-failure degradation must reach the user.
     match resolve_credential_policy(profile, secrets)? {
         CredentialResolution::Keyless => Ok(Some(Credential::None)),
         CredentialResolution::Stored(credential) => Ok(Some(credential)),
@@ -479,18 +483,18 @@ fn resolve_credential(
             persisted,
         } => {
             match persisted {
-                Ok(()) => eprintln!(
-                    "kiri: imported the API key for provider '{}' from the environment and saved it to \
-                     the OS credential store (keyring, or the ~/.kiri/credentials.json fallback); it now \
-                     persists across sessions on this machine. To undo this, remove the stored credential \
-                     (a /provider logout flow is planned) — unsetting the env var does NOT delete the \
-                     saved copy.",
+                Ok(()) => notices.push(BootNotice::new(format!(
+                    "imported the API key for provider '{}' from the environment and saved it to the OS \
+                     credential store (keyring, or the ~/.kiri/credentials.json fallback); it now persists \
+                     across sessions on this machine. To undo this, remove the stored credential (a \
+                     /provider logout flow is planned) — unsetting the env var does NOT delete the saved \
+                     copy.",
                     profile.id
-                ),
-                Err(error) => eprintln!(
-                    "kiri: could not persist the credential for '{}' ({error}); using it this session only",
+                ))),
+                Err(error) => notices.push(BootNotice::new(format!(
+                    "could not persist the credential for '{}' ({error}); using it this session only",
                     profile.id
-                ),
+                ))),
             }
             Ok(Some(credential))
         }
@@ -543,7 +547,7 @@ mod tests {
     fn resolve_credential_returns_the_stored_credential() {
         let store = FakeStore(Some(api_key()));
         let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
-        match resolve_credential(&p, &store).unwrap() {
+        match resolve_credential(&p, &store, &mut Vec::new()).unwrap() {
             Some(Credential::ApiKey { key }) => assert_eq!(key.expose(), "k"),
             other => panic!("expected a stored api-key, got {other:?}"),
         }
@@ -560,7 +564,11 @@ mod tests {
             AuthMethod::ApiKey,
             "m",
         );
-        assert!(resolve_credential(&p, &store).unwrap().is_none());
+        assert!(
+            resolve_credential(&p, &store, &mut Vec::new())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -574,7 +582,7 @@ mod tests {
             AuthMethod::None,
             "gemma",
         );
-        match resolve_credential(&p, &store).unwrap() {
+        match resolve_credential(&p, &store, &mut Vec::new()).unwrap() {
             Some(Credential::None) => {}
             other => panic!("expected Credential::None, got {other:?}"),
         }

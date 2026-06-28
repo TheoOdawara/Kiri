@@ -250,6 +250,8 @@ impl RunLoop {
                 // Sessions are keyed by workspace: the current one belongs to the old project, so detach
                 // and re-key. The next turn starts a fresh session under the new project_id.
                 let root = new_sandbox.root();
+                // canonicalize fails only for a missing/permission-denied path; the literal root is a safe
+                // fallback for project-id keying (the sandbox already proved the dir exists and is usable).
                 let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
                 self.project_id = project_id_from_path(&canonical_root);
                 self.cursor.session_id = None;

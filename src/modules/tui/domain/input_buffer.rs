@@ -3,7 +3,7 @@ use tui_textarea::{CursorMove, Input, TextArea, WrapMode};
 
 /// A pasted image staged for the next prompt: its data URL (base64 PNG, ready for the provider's
 /// multimodal content) and pixel dimensions for the "attached" chip. Pure data — the clipboard read and
-/// PNG encoding happen in `tui::infrastructure::clipboard`.
+/// PNG encoding happen in `tui::infrastructure::runtime::clipboard`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageAttachment {
     pub data_url: String,
