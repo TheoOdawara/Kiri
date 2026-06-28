@@ -22,7 +22,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     let width = area.width as usize;
     let (mode_label, mode_style) = mode_badge(model.approval_mode);
     let busy = if model.busy {
-        let glyph = theme::SPINNER[model.status.spinner_frame % theme::SPINNER.len()];
+        let glyph = theme::spinner_glyph(model.status.spinner_frame);
         format!("{glyph} {}", model.status.elapsed_label())
     } else {
         String::new()

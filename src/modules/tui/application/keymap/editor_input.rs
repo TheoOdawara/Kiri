@@ -1,9 +1,5 @@
 use super::*;
 
-const SCROLL_STEP: u16 = 5;
-/// A "page" scroll step, used for Shift+PageUp/PageDown. The transcript viewport height is not stored
-/// on the model, so a fixed large step stands in; the view clamps to the available history.
-const SCROLL_PAGE: u16 = 20;
 /// Double-tap window for Ctrl+C (quit) and Esc (cancel): two presses within this interval count as
 /// a double. Tuned to feel deliberate without being sluggish.
 const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(500);

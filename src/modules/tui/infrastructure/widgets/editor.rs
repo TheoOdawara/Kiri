@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::modules::tui::domain::input_buffer::InputBuffer;
 use crate::modules::tui::domain::model::{Model, Motion};
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
-use crate::modules::tui::infrastructure::text::display_width;
+use crate::modules::tui::infrastructure::text::{display_width, greedy_wrap};
 use crate::modules::tui::infrastructure::theme::{self, GateState};
 
 /// How long the gate's temper quench lasts after a turn settles.
@@ -132,32 +132,11 @@ pub fn wrapped_line_count(buffer: &InputBuffer, wrap_w: usize) -> usize {
         .max(1)
 }
 
-/// Rows a single logical line needs: greedy word packing, hard-splitting any word wider than the row.
+/// Rows a single logical line needs to estimate the input box height. Delegates to the shared
+/// [`greedy_wrap`] primitive (display-width metric) so the estimate matches how the transcript actually
+/// wraps the same line — previously this counted `chars()`, under-estimating wide-glyph lines.
 fn logical_rows(line: &str, w: usize) -> usize {
-    if line.is_empty() {
-        return 1;
-    }
-    let mut rows = 0usize;
-    let mut col = 0usize; // columns filled on the current open row
-    let mut open = false;
-    for (i, word) in line.split(' ').enumerate() {
-        let wlen = word.chars().count();
-        let sep = usize::from(i != 0); // a single space precedes every word but the first
-        if open && col + sep + wlen <= w {
-            col += sep + wlen;
-            continue;
-        }
-        if wlen <= w {
-            rows += 1;
-            col = wlen;
-        } else {
-            rows += wlen.div_ceil(w);
-            let rem = wlen % w;
-            col = if rem == 0 { w } else { rem };
-        }
-        open = true;
-    }
-    rows.max(1)
+    greedy_wrap(line, w).len().max(1)
 }
 
 /// The editor's text sub-rect inside the input region: the prompt gutter (`PROMPT_COLS`) is carved off
@@ -279,6 +258,13 @@ mod tests {
     fn greedy_word_wrap_counts_rows() {
         // "aa bb cc" at width 4 wraps to ["aa", "bb", "cc"] — each pair plus a space overflows.
         assert_eq!(wrapped_line_count(&buffer("aa bb cc"), 4), 3);
+    }
+
+    #[test]
+    fn wrapped_line_count_measures_display_width_like_the_transcript() {
+        // Each "世界" is 4 display cells, so at width 5 three of them need three rows — the same wrap the
+        // transcript produces. The old `chars().count()` metric saw each as 2 and under-counted the rows.
+        assert_eq!(wrapped_line_count(&buffer("世界 世界 世界"), 5), 3);
     }
 
     #[test]

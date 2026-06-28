@@ -48,11 +48,7 @@ fn render_stanza(
     lines.append(&mut markdown::render(action, theme::strong(), inner_w));
     lines.push(Line::default());
     for (i, option) in options.iter().enumerate() {
-        let (marker, style) = if i == selected {
-            ("❯ ", theme::accent())
-        } else {
-            ("  ", theme::dim())
-        };
+        let (marker, style) = super::option_marker(i == selected);
         lines.push(Line::from(vec![
             Span::styled(marker, style),
             Span::styled(format!("{}. {option}", i + 1), style),

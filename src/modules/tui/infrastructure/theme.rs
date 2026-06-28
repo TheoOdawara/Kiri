@@ -46,6 +46,12 @@ pub const QUENCH_RAMP: [Color; 3] = [HIGHLIGHT, TEMPER_BLUE, BRAND];
 /// The 10-frame braille spinner.
 pub const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// The spinner glyph for animation `frame`, wrapping the index into [`SPINNER`]. One source so the gate
+/// prompt and the meta rule never index the array differently.
+pub fn spinner_glyph(frame: usize) -> char {
+    SPINNER[frame % SPINNER.len()]
+}
+
 /// Linearly interpolate a colour along ordered `stops` by `t` in `[0, 1]`. Pure (no clock, no I/O) so it
 /// is unit-testable like `spinner_frame`; `t <= 0` returns the first stop, `t >= 1` the last. Stops must
 /// be `Color::Rgb` (the whole palette is); any other variant is treated as black.
@@ -127,10 +133,7 @@ pub fn gate(state: GateState) -> (char, Style) {
     match state {
         GateState::Idle => ('⬡', Style::default().fg(BRAND)),
         GateState::Typing => ('⬢', Style::default().fg(STEEL_RAMP[0])),
-        GateState::Busy(frame) => (
-            SPINNER[frame % SPINNER.len()],
-            Style::default().fg(HIGHLIGHT),
-        ),
+        GateState::Busy(frame) => (spinner_glyph(frame), Style::default().fg(HIGHLIGHT)),
         GateState::Approval => ('⬢', Style::default().fg(WARNING)),
         GateState::Error => ('⬢', Style::default().fg(ERROR)),
     }

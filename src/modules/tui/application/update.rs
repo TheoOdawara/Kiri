@@ -102,12 +102,12 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         }
         Msg::ScrollUp => {
             model.clear_screen_selection();
-            model.scroll.up(3);
+            model.scroll.up(keymap::WHEEL_STEP);
             Vec::new()
         }
         Msg::ScrollDown => {
             model.clear_screen_selection();
-            model.scroll.down(3);
+            model.scroll.down(keymap::WHEEL_STEP);
             Vec::new()
         }
         Msg::TurnEnded => {
@@ -204,6 +204,16 @@ mod tests {
         m.selection = Some(a_selection());
         update(&mut m, Msg::ScrollDown);
         assert!(m.selection.is_none());
+    }
+
+    #[test]
+    fn wheel_step_named_and_used() {
+        // A wheel notch moves the named WHEEL_STEP lines, not a bare literal.
+        let mut m = Model::default();
+        update(&mut m, Msg::ScrollUp);
+        assert_eq!(m.scroll.scrollback, keymap::WHEEL_STEP);
+        update(&mut m, Msg::ScrollDown);
+        assert_eq!(m.scroll.scrollback, 0);
     }
 
     #[test]

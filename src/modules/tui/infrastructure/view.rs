@@ -3,7 +3,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Block;
 
 use crate::modules::tui::domain::modal::ApprovalOption;
-use crate::modules::tui::domain::model::Model;
+use crate::modules::tui::domain::model::{ActiveModal, Model};
 use crate::modules::tui::infrastructure::layout::{Regions, frame_layout, h_pad};
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
@@ -25,14 +25,20 @@ pub fn view(model: &Model, frame: &mut Frame) {
     let regions = frame_regions(area, model);
     header::render(model, frame, regions.header);
     transcript_pane::render(model, frame, regions.transcript, motion);
-    if let Some(plan) = &model.pending_plan {
-        approval::render_plan_into(plan, frame, regions.prompt_box);
-    } else if let Some(pending) = &model.pending_approval {
-        approval::render(pending, frame, regions.prompt_box);
-    } else if let Some(picker) = &model.picker {
-        approval::render_picker(picker, frame, regions.prompt_box);
-    } else if let Some(provider_wizard) = &model.wizard {
-        wizard::render(provider_wizard, frame, regions.prompt_box);
+    match model.active_modal() {
+        Some(ActiveModal::Plan(plan)) => {
+            approval::render_plan_into(plan, frame, regions.prompt_box)
+        }
+        Some(ActiveModal::Approval(pending)) => {
+            approval::render(pending, frame, regions.prompt_box)
+        }
+        Some(ActiveModal::Picker(picker)) => {
+            approval::render_picker(picker, frame, regions.prompt_box)
+        }
+        Some(ActiveModal::Wizard(provider_wizard)) => {
+            wizard::render(provider_wizard, frame, regions.prompt_box)
+        }
+        None => {}
     }
     meta_rule::render(model, frame, regions.meta);
     editor::render(model, frame, regions.input, motion);
@@ -69,16 +75,18 @@ pub fn frame_regions(area: Rect, model: &Model) -> Regions {
         width: area.width.saturating_sub(2 * h_pad(area)),
         ..area
     };
-    let box_h = if model.pending_plan.is_some() {
-        approval::box_dims(content, approval::PLAN_ACTION, approval::plan_options_len()).1
-    } else if let Some(pending) = &model.pending_approval {
-        approval::box_dims(content, pending.action(), ApprovalOption::ALL.len()).1
-    } else if let Some(picker) = &model.picker {
-        approval::box_dims(content, &picker.action, picker.options.len()).1
-    } else if let Some(provider_wizard) = &model.wizard {
-        wizard::box_dims(content, provider_wizard).1
-    } else {
-        0
+    let box_h = match model.active_modal() {
+        Some(ActiveModal::Plan(_)) => {
+            approval::box_dims(content, approval::PLAN_ACTION, approval::plan_options_len()).1
+        }
+        Some(ActiveModal::Approval(pending)) => {
+            approval::box_dims(content, pending.action(), ApprovalOption::ALL.len()).1
+        }
+        Some(ActiveModal::Picker(picker)) => {
+            approval::box_dims(content, &picker.action, picker.options.len()).1
+        }
+        Some(ActiveModal::Wizard(provider_wizard)) => wizard::box_dims(content, provider_wizard).1,
+        None => 0,
     };
     frame_layout(area, input_lines, box_h)
 }

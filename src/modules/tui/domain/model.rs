@@ -142,14 +142,36 @@ pub struct Model {
     pub unconfigured: bool,
 }
 
+/// The single modal currently awaiting the user, in precedence order, borrowed from the model. Resolved
+/// once by [`Model::active_modal`] so the view's render dispatch and its region sizing never re-derive the
+/// `plan ▸ approval ▸ picker ▸ wizard` order independently.
+pub enum ActiveModal<'a> {
+    Plan(&'a PendingPlan),
+    Approval(&'a PendingApproval),
+    Picker(&'a Picker),
+    Wizard(&'a ProviderWizard),
+}
+
 impl Model {
-    /// Whether a modal (a tool approval, a finished plan, or an open picker) is awaiting the user. While
-    /// true the transcript and header recede so the decision pulls focus by depth.
+    /// The modal awaiting the user, in precedence order: a finished plan, then a tool approval, then an
+    /// open picker, then the add-provider wizard. The single source both the render dispatch and the
+    /// region sizing read, so they can never disagree on which modal is showing.
+    pub fn active_modal(&self) -> Option<ActiveModal<'_>> {
+        if let Some(plan) = &self.pending_plan {
+            Some(ActiveModal::Plan(plan))
+        } else if let Some(approval) = &self.pending_approval {
+            Some(ActiveModal::Approval(approval))
+        } else if let Some(picker) = &self.picker {
+            Some(ActiveModal::Picker(picker))
+        } else {
+            self.wizard.as_ref().map(ActiveModal::Wizard)
+        }
+    }
+
+    /// Whether a modal (a tool approval, a finished plan, or an open picker/wizard) is awaiting the user.
+    /// While true the transcript and header recede so the decision pulls focus by depth.
     pub fn has_modal(&self) -> bool {
-        self.pending_approval.is_some()
-            || self.pending_plan.is_some()
-            || self.picker.is_some()
-            || self.wizard.is_some()
+        self.active_modal().is_some()
     }
 
     pub fn new(model: String, workspace: String) -> Self {
@@ -305,5 +327,34 @@ mod tests {
             ),
             "a welcome notice must be posted"
         );
+    }
+
+    #[test]
+    fn active_modal_orders_plan_over_approval_over_picker_over_wizard() {
+        use crate::modules::tui::domain::picker::PickerKind;
+
+        let mut m = Model {
+            pending_plan: Some(PendingPlan::default()),
+            pending_approval: Some(PendingApproval::new("p".to_string(), true)),
+            picker: Some(Picker::new(
+                PickerKind::Models,
+                "m",
+                "a",
+                vec!["x".to_string()],
+                0,
+            )),
+            wizard: Some(ProviderWizard::new()),
+            ..Model::default()
+        };
+        // Peel the modals off in precedence order; each step must surface the next one down.
+        assert!(matches!(m.active_modal(), Some(ActiveModal::Plan(_))));
+        m.pending_plan = None;
+        assert!(matches!(m.active_modal(), Some(ActiveModal::Approval(_))));
+        m.pending_approval = None;
+        assert!(matches!(m.active_modal(), Some(ActiveModal::Picker(_))));
+        m.picker = None;
+        assert!(matches!(m.active_modal(), Some(ActiveModal::Wizard(_))));
+        m.wizard = None;
+        assert!(m.active_modal().is_none());
     }
 }

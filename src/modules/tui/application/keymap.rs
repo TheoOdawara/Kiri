@@ -21,6 +21,16 @@ use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::provider::{AuthMethod, Effort, Secret};
 use tui_textarea::{Input, Key as TaKey};
 
+/// Transcript scroll amounts, in lines, single-sourced here for the keymap (key scroll) and `update.rs`
+/// (wheel scroll). A key step (arrow) moves `SCROLL_STEP`; Shift pages by `SCROLL_PAGE`; a mouse-wheel
+/// notch moves `WHEEL_STEP` — deliberately gentler than a key step, since a wheel emits several events
+/// per physical notch.
+pub(crate) const SCROLL_STEP: u16 = 5;
+/// A "page" scroll step, used for Shift+PageUp/PageDown. The transcript viewport height is not stored on
+/// the model, so a fixed large step stands in; the view clamps to the available history.
+pub(crate) const SCROLL_PAGE: u16 = 20;
+pub(crate) const WHEEL_STEP: u16 = 3;
+
 mod editor_input;
 mod menu;
 mod modals;

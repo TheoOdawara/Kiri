@@ -21,11 +21,7 @@ pub fn render(menu: &CommandMenu, frame: &mut Frame, anchor: Rect) {
     let mut lines: Vec<Line> = vec![Line::styled(" comandos", theme::dim())];
     for (row, &cmd_index) in menu.filtered().iter().enumerate() {
         let spec = &crate::modules::tui::domain::command_menu::COMMANDS[cmd_index];
-        let (marker, style) = if row == menu.selected() {
-            ("❯ ", theme::accent())
-        } else {
-            ("  ", theme::dim())
-        };
+        let (marker, style) = super::option_marker(row == menu.selected());
         // Truncate the blurb so the row never overflows the list width.
         let name_cols = display_width(spec.name);
         let prefix_cols = 2 + name_cols + 2; // marker + name + gap

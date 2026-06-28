@@ -34,6 +34,41 @@ pub fn chunk_by_width(text: &str, width: usize) -> Vec<String> {
     chunks
 }
 
+/// Greedy word-wrap: split `line` on single spaces and pack words onto rows up to `width` display cells
+/// (one space between words), hard-splitting any word wider than `width` by display cells. The single
+/// source for the transcript and editor wrappers, both measuring with [`display_width`] so a wide glyph
+/// wraps identically in each — the editor previously counted `chars()`, under-wrapping wide glyphs.
+pub fn greedy_wrap(line: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    for word in line.split(' ') {
+        let word_cols = display_width(word);
+        if current.is_empty() {
+            if word_cols <= width {
+                current.push_str(word);
+            } else {
+                // The word alone exceeds the width: hard-split it by display cells.
+                rows.extend(chunk_by_width(word, width));
+            }
+        } else if display_width(&current) + 1 + word_cols <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            rows.push(std::mem::take(&mut current));
+            if word_cols <= width {
+                current.push_str(word);
+            } else {
+                rows.extend(chunk_by_width(word, width));
+            }
+        }
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    rows
+}
+
 /// A friendly, display-only rendering of a workspace root. `std::fs::canonicalize` adds the Windows
 /// verbatim prefix (`\\?\C:\…`, or `\\?\UNC\server\share` for shares); strip it and normalize
 /// separators to `/` so the meta rule shows `C:/work` rather than `\\?\C:\work`. On non-Windows the
@@ -69,6 +104,20 @@ mod tests {
         assert_eq!(chunk_by_width("世界世", 2), vec!["世", "界", "世"]);
         // A glyph wider than the width still gets its own chunk rather than being dropped or looping.
         assert_eq!(chunk_by_width("世", 1), vec!["世"]);
+    }
+
+    #[test]
+    fn word_wrap_measures_display_width() {
+        // Each "世界" is 4 display cells (2 chars). At width 5 only one fits per row, so a wide-glyph
+        // line wraps to one word per row — a `chars().count()` metric would wrongly pack two.
+        assert_eq!(
+            greedy_wrap("世界 世界 世界", 5),
+            vec!["世界", "世界", "世界"]
+        );
+        // ASCII words pack greedily up to the width.
+        assert_eq!(greedy_wrap("aa bb cc", 4), vec!["aa", "bb", "cc"]);
+        // A word wider than the row is hard-split by display cells.
+        assert_eq!(greedy_wrap("verylongword", 4), vec!["very", "long", "word"]);
     }
 
     #[test]

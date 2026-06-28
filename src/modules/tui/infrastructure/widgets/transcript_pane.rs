@@ -11,7 +11,7 @@ use crate::modules::tui::domain::transcript::{
     NoticeLevel, ToolActivity, ToolDiff, ToolStatus, TranscriptItem,
 };
 use crate::modules::tui::infrastructure::markdown;
-use crate::modules::tui::infrastructure::text::{chunk_by_width, display_width};
+use crate::modules::tui::infrastructure::text::greedy_wrap;
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::splash;
 
@@ -378,34 +378,10 @@ fn hard_wrap(text: &str, width: usize) -> Vec<String> {
     rows
 }
 
-/// Greedy word-wrap one logical line into `rows`, splitting on spaces. A word wider than `width` is
-/// chunked by chars so it fits without overflow.
+/// Greedy word-wrap one logical line into `rows` via the shared [`greedy_wrap`] primitive (display-width
+/// metric), so the transcript and the editor wrap a line identically.
 fn wrap_line(line: &str, width: usize, rows: &mut Vec<String>) {
-    let mut current = String::new();
-    for word in line.split(' ') {
-        let word_cols = display_width(word);
-        if current.is_empty() {
-            if word_cols <= width {
-                current.push_str(word);
-            } else {
-                // Word alone exceeds the width: chunk it by display cells.
-                rows.extend(chunk_by_width(word, width));
-            }
-        } else if display_width(&current) + 1 + word_cols <= width {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            rows.push(std::mem::take(&mut current));
-            if word_cols <= width {
-                current.push_str(word);
-            } else {
-                rows.extend(chunk_by_width(word, width));
-            }
-        }
-    }
-    if !current.is_empty() {
-        rows.push(current);
-    }
+    rows.extend(greedy_wrap(line, width));
 }
 
 #[cfg(test)]

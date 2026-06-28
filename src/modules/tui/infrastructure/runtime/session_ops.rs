@@ -24,9 +24,14 @@ pub(super) struct SessionCursor {
 /// How many recent sessions the `/sessions` picker lists.
 const SESSION_LIST_LIMIT: usize = 20;
 
+/// Length of an RFC3339 timestamp truncated to minute precision: `YYYY-MM-DD HH:MM` is 16 chars.
+const MINUTE_PRECISION_LEN: usize = 16;
+
 /// Trim an RFC3339 timestamp to `YYYY-MM-DD HH:MM` for the compact session-list label.
 fn short_timestamp(raw: &str) -> String {
-    raw.get(..16).unwrap_or(raw).replace('T', " ")
+    raw.get(..MINUTE_PRECISION_LEN)
+        .unwrap_or(raw)
+        .replace('T', " ")
 }
 
 /// Project a loaded conversation back into a display transcript: user and assistant text become their

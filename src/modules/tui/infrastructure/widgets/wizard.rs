@@ -47,11 +47,7 @@ pub fn render(wizard: &ProviderWizard, frame: &mut Frame, area: Rect) {
         };
         lines.push(Line::styled(prompt, theme::strong()));
         for (i, kind) in WIZARD_KINDS.iter().enumerate() {
-            let (marker, style) = if i == wizard.kind_selected {
-                ("❯ ", theme::accent())
-            } else {
-                ("  ", theme::dim())
-            };
+            let (marker, style) = super::option_marker(i == wizard.kind_selected);
             lines.push(Line::from(vec![
                 Span::styled(marker, style),
                 Span::styled(kind_label(*kind), style),
