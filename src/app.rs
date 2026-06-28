@@ -79,6 +79,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // Memory & docs: a degraded store (init failure) is surfaced and left inert, never fatal.
     let (memory_tools, memory_digest, memory) = build_memory(&settings, embedder).await?;
     // Session persistence shares the same degrade-never-abort contract as memory.
+    // canonicalize fails only for a missing/permission-denied path; the literal path is a safe fallback
+    // for project-id keying (a stable per-workspace key, not a security boundary).
     let canonical_path = settings
         .path
         .canonicalize()
@@ -273,6 +275,8 @@ async fn build_memory(
     if !settings.memory_enabled {
         return Ok((Vec::new(), String::new(), inert_memory_port(settings)?));
     }
+    // canonicalize fails only for a missing/permission-denied path; the literal path is a safe fallback
+    // for project-id keying (a stable per-workspace key, not a security boundary).
     let canonical_path = settings
         .path
         .canonicalize()

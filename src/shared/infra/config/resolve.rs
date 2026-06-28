@@ -46,6 +46,25 @@ pub(super) fn resolve_bool(config: Option<bool>, env_key: &str, default: bool) -
     config.unwrap_or_else(|| parse_bool(std::env::var(env_key).ok().as_deref(), default))
 }
 
+/// The warning for a present-but-unrecognized sandbox value, else `None` (recognized token, empty, or
+/// absent). Pure so it is unit-testable; the resolvers print the returned message to stderr. `recognized`
+/// mirrors the matching `from_config`'s exact token set, so a typo (e.g. `KIRI_SANDBOX=of`) is surfaced
+/// rather than silently collapsing to the safe default — a no-silent-no-op on a security-relevant knob.
+fn unrecognized_sandbox_warning(
+    key: &str,
+    raw: Option<&str>,
+    recognized: &[&str],
+    default: &str,
+) -> Option<String> {
+    let value = raw.filter(|v| !v.is_empty())?;
+    if recognized.contains(&value) {
+        return None;
+    }
+    Some(format!(
+        "kiri: warning: unrecognized {key}={value:?}; using the safe default {default:?}"
+    ))
+}
+
 /// `KIRI_SANDBOX` / `[sandbox].mode`: `os` (default) uses the platform adapter where available; `off`
 /// disables OS confinement; `require` refuses `run_command` when no OS sandbox is available. Returns
 /// `(enabled, require)`. The parse lives in the kernel [`SandboxMode`] so the loader and the sync trust
@@ -54,6 +73,14 @@ pub(super) fn resolve_sandbox_mode(config: Option<&str>) -> (bool, bool) {
     let raw = config
         .map(str::to_string)
         .or_else(|| std::env::var("KIRI_SANDBOX").ok());
+    if let Some(warning) = unrecognized_sandbox_warning(
+        "KIRI_SANDBOX",
+        raw.as_deref(),
+        &["os", "off", "require"],
+        "os",
+    ) {
+        eprintln!("{warning}");
+    }
     match SandboxMode::from_config(raw.as_deref()) {
         SandboxMode::Off => (false, false),
         SandboxMode::Os => (true, false),
@@ -68,6 +95,14 @@ pub(super) fn resolve_sandbox_network(config: Option<&str>) -> NetworkPolicy {
     let raw = config
         .map(str::to_string)
         .or_else(|| std::env::var("KIRI_SANDBOX_NETWORK").ok());
+    if let Some(warning) = unrecognized_sandbox_warning(
+        "KIRI_SANDBOX_NETWORK",
+        raw.as_deref(),
+        &["allow", "deny"],
+        "deny",
+    ) {
+        eprintln!("{warning}");
+    }
     match NetworkStance::from_config(raw.as_deref()) {
         NetworkStance::Allow => NetworkPolicy::Allow,
         NetworkStance::Deny => NetworkPolicy::Deny,
@@ -223,6 +258,30 @@ mod tests {
         assert_eq!(resolve_sandbox_network(Some("deny")), NetworkPolicy::Deny);
         // Unknown maps to deny — never a silent widening.
         assert_eq!(resolve_sandbox_network(Some("bogus")), NetworkPolicy::Deny);
+    }
+
+    #[test]
+    fn unrecognized_sandbox_env_warns_and_defaults_secure() {
+        // SHARED-12: a present-but-unrecognized value yields a warning and still resolves to the safe
+        // default — no silent no-op on a security-relevant knob. Recognized tokens, empty, and absent
+        // produce no warning.
+        let mode = ["os", "off", "require"];
+        assert!(
+            unrecognized_sandbox_warning("KIRI_SANDBOX", Some("of"), &mode, "os").is_some(),
+            "a typo must warn"
+        );
+        assert!(unrecognized_sandbox_warning("KIRI_SANDBOX", Some("off"), &mode, "os").is_none());
+        assert!(unrecognized_sandbox_warning("KIRI_SANDBOX", Some(""), &mode, "os").is_none());
+        assert!(unrecognized_sandbox_warning("KIRI_SANDBOX", None, &mode, "os").is_none());
+        // The resolver still falls back to the os default (sandbox stays enabled, not disabled).
+        assert_eq!(resolve_sandbox_mode(Some("of")), (true, false));
+
+        let net = ["allow", "deny"];
+        assert!(
+            unrecognized_sandbox_warning("KIRI_SANDBOX_NETWORK", Some("alow"), &net, "deny")
+                .is_some()
+        );
+        assert_eq!(resolve_sandbox_network(Some("alow")), NetworkPolicy::Deny);
     }
 
     #[test]

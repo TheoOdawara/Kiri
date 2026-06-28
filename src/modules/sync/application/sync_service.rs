@@ -71,7 +71,9 @@ impl<'a> SyncService<'a> {
         self.work_tree
             .write(&dir.join(".gitignore"), GITIGNORE)
             .await?;
-        // Set the remote, replacing any existing one so re-init can repoint it.
+        // Set the remote, replacing any existing one so re-init can repoint it. The error is
+        // deliberately discarded: a missing `origin` on first init makes `remote remove` fail, which is
+        // the expected case here (we only want it gone before `remote add`), so discarding it is safe.
         let _ = self.git.run(&["remote", "remove", "origin"], &dir).await;
         self.git_ok(&["remote", "add", "origin", remote_url], &dir)
             .await?;
