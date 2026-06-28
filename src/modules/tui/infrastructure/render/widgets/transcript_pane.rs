@@ -379,15 +379,11 @@ fn hard_wrap(text: &str, width: usize) -> Vec<String> {
             rows.push(String::new());
             continue;
         }
-        wrap_line(logical, width, &mut rows);
+        // Greedy word-wrap via the shared `greedy_wrap` primitive (display-width metric), so the
+        // transcript and the editor wrap a line identically.
+        rows.extend(greedy_wrap(logical, width));
     }
     rows
-}
-
-/// Greedy word-wrap one logical line into `rows` via the shared [`greedy_wrap`] primitive (display-width
-/// metric), so the transcript and the editor wrap a line identically.
-fn wrap_line(line: &str, width: usize, rows: &mut Vec<String>) {
-    rows.extend(greedy_wrap(line, width));
 }
 
 #[cfg(test)]

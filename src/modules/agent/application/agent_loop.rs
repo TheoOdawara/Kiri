@@ -39,15 +39,6 @@ pub enum TurnOutcome {
     Aborted,
 }
 
-/// The outcome of a runaway checkpoint's shared approval arms: either the turn continues (the user
-/// approved, optionally switching to auto) or it ends with the carried outcome (declined or aborted).
-/// The caller layers on its own end-of-turn bookkeeping (the within-round case answers the remaining
-/// calls before returning).
-enum CheckpointFlow {
-    Continue,
-    End(TurnOutcome),
-}
-
 /// Run a tool execution to completion, returning its outcome alongside how long only the execution
 /// took (so the reported duration excludes any time the user spent at an approval prompt). Async so
 /// tools that spawn processes can await them; the wall clock still measures only the await span.
@@ -213,8 +204,8 @@ impl AgentLoop {
                         &mut calls_since_checkpoint,
                         &mut mode,
                     ) {
-                        CheckpointFlow::Continue => {}
-                        CheckpointFlow::End(TurnOutcome::Aborted) => {
+                        None => {}
+                        Some(TurnOutcome::Aborted) => {
                             answer_unanswered(
                                 conversation,
                                 &calls[index..],
@@ -222,7 +213,7 @@ impl AgentLoop {
                             );
                             return Ok(TurnOutcome::Aborted);
                         }
-                        CheckpointFlow::End(outcome) => {
+                        Some(outcome) => {
                             answer_unanswered(
                                 conversation,
                                 &calls[index..],
@@ -285,8 +276,8 @@ impl AgentLoop {
                     &mut calls_since_checkpoint,
                     &mut mode,
                 ) {
-                    CheckpointFlow::Continue => {}
-                    CheckpointFlow::End(outcome) => return Ok(outcome),
+                    None => {}
+                    Some(outcome) => return Ok(outcome),
                 }
             }
         }
@@ -386,31 +377,32 @@ impl AgentLoop {
     }
 
     /// The shared approval arms of a runaway checkpoint, used by both the within-round and post-round
-    /// guards. `Approved` resets the checkpoint clock and call counter; `ApprovedAuto` additionally
-    /// switches the turn to `Auto`; `Declined`/`Aborted` end the turn (the caller adds its own
-    /// end-of-turn bookkeeping — the within-round case answers the remaining calls first).
+    /// guards. `None` means continue the turn: `Approved` resets the checkpoint clock and call counter,
+    /// `ApprovedAuto` additionally switches the turn to `Auto`. `Some(outcome)` ends the turn with that
+    /// outcome (`Declined`/`Aborted`) — the caller adds its own end-of-turn bookkeeping (the within-round
+    /// case answers the remaining calls first).
     fn checkpoint_transition(
         &self,
         decision: Approval,
         checkpoint: &mut Instant,
         calls_since_checkpoint: &mut usize,
         mode: &mut ApprovalMode,
-    ) -> CheckpointFlow {
+    ) -> Option<TurnOutcome> {
         match decision {
             Approval::Approved => {
                 *checkpoint = Instant::now();
                 *calls_since_checkpoint = 0;
-                CheckpointFlow::Continue
+                None
             }
             // "Keep going, and don't ask again": resume and run the rest of the turn unattended.
             Approval::ApprovedAuto => {
                 *mode = ApprovalMode::Auto;
                 *checkpoint = Instant::now();
                 *calls_since_checkpoint = 0;
-                CheckpointFlow::Continue
+                None
             }
-            Approval::Declined => CheckpointFlow::End(TurnOutcome::Completed),
-            Approval::Aborted => CheckpointFlow::End(TurnOutcome::Aborted),
+            Approval::Declined => Some(TurnOutcome::Completed),
+            Approval::Aborted => Some(TurnOutcome::Aborted),
         }
     }
 }
