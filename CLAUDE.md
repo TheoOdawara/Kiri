@@ -35,6 +35,12 @@ layering.
 Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`) + `src/shared/{kernel,infra}`
 + `src/modules/<context>/{domain,application,infrastructure}`.
 
+`app::wire` (TUI) and `app::wire_sync` (headless `kiri sync`) are the **only** places adapters are chosen.
+`wire` bundles the sync ports into a `SyncContext` for the runtime, with the shared store behind a
+`SharedMemoryFactory` that opens it **lazily** on the first `/sync` (so a memory-off session that never
+syncs creates no `shared.db`); boot outcomes (credential source, degraded stores) surface as `BootNotice`s
+in the transcript rather than `eprintln!` behind the alternate-screen TUI.
+
 - **Layers, depending inward:** `domain/` = pure data/rules, no I/O · `application/` = use-cases + the
   **ports** they need, as **traits** (named by capability, no `I` prefix) · `infrastructure/` = **adapters**
   implementing the ports.
@@ -46,8 +52,11 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
   `factory` that picks the adapter from `(kind, auth)`; see ADRs 0011/0012), `tools` (the `Tool` trait + `ToolRegistry`
   + the `Sandbox` port — `FsSandbox` the fs adapter — + one fs adapter per tool), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
   adapter + the ratatui runtime — the sole front-end), `memory` (durable knowledge: `MemoryEntry`/`MemoryKind`
-  domain — kinds include `preference` — + the `Memory`/`MemoryStore`/`SharedStore` ports + adapters —
-  `FileProjectMemory` for project memory in `<workspace>/.kiri/memory/`, `SqliteSharedMemory` for shared
+  domain — kinds include `preference` — + the capability port `Memory` (impl by `LayeredMemory`, composing
+  project + shared) over the use-case ports `MemoryStore`/`SharedStore` and the persistence ports
+  `ProjectMemory`/`SharedMemory` + adapters —
+  `FileProjectMemory` (a `ProjectMemory`) for project memory in `<workspace>/.kiri/memory/`,
+  `SqliteSharedMemory` (a `SharedMemory`) for shared
   memory in `~/.kiri/memory/shared.db`, `DocsLibrary` over `docs/` — the `recall_memory`/`remember`/
   `consult_docs` tools, semantic recall via the `EmbeddingProvider` port with a keyword fallback (ADR 0014),
   and the end-of-session `Distiller` that learns automatically (ADR 0013); see ADRs 0010/0013/0014),
@@ -73,6 +82,8 @@ harness-owned storage, never for agent-supplied paths (ref ADRs 0010/0013/0015);
 no UI-framework dependency — the **one** sanctioned exception is the TUI `InputBuffer` owning a
 `tui_textarea::TextArea` (ADR 0017, guarded by a recursive domain-purity test); the engine never touches
 stdin/stdout directly (all UI via the engine ports). Ports return `AgentError`; `anyhow` only at the binary edge.
+These boundaries are not just convention: `src/architecture_guards.rs` holds `#[test]`s that walk `src/`
+and fail the build if domain purity or the cross-module-import invariants are re-breached.
 
 **Extending:** a new tool = one file under `tools/infrastructure/fs/` implementing `Tool` (it receives
 the `Sandbox` port as `&dyn Sandbox`), registered in `default_fs_tools`; a new provider = one adapter implementing `CompletionProvider` + a `(kind, auth)` arm in
@@ -135,5 +146,4 @@ that is surfaced is a failure you can fix; a swallowed one costs hours).
 - **Modal nav:** all four single-choice modals (menu/picker/wizard/approval/plan) wrap on Up/Down via the one `wrapping_step` helper.
 - **clap is the convention** — record any deviation as an ADR (`docs/decisions/`).
 - Keep the provider base URL / model / key configurable; never hardcode.
-- A PostToolUse hook auto-runs `cargo fmt` (+ clippy feedback) on `.rs` edits — see `docs/claude-tooling.md`.
-- Recommended Claude Code tooling (MCPs/skills): see `docs/claude-tooling.md`.
+- A PostToolUse hook auto-runs `cargo fmt` (+ clippy feedback) on `.rs` edits (see `.claude/settings.json`).
