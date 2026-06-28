@@ -64,6 +64,10 @@ inert (`is_available() == false`), the tools report it, and the harness still st
   root.
 - Ports return `AgentError` (the WIP's `anyhow::Result` was aligned to the architecture contract;
   `anyhow` stays at the binary edge).
+- **Accepted domain exception: clock + RNG in `MemoryEntry::new`.** The constructor reads the wall clock
+  (`now_rfc3339`) and the RNG (`Uuid::now_v7`) directly in the domain layer. This is ratified as a
+  documented exception rather than injecting a `Clock`/`IdGen` port for a single constructor (YAGNI); the
+  impurity is confined to entry creation and the rest of the domain stays pure and I/O-free.
 - New dependencies: `rusqlite` (bundled), `serde_yaml`, `time`, `uuid` (v7), `blake3`; `tempfile` as a
   dev-dependency.
 - `KIRI_MEMORY=off` disables the whole context; `KIRI_DOCS_PATH` overrides the docs root.

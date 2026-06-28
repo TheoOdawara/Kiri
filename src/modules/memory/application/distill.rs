@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use crate::modules::memory::application::memory_port::MemoryPort;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
+use crate::modules::memory::domain::scope::Scope;
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, NullSink, TurnRequest,
 };
@@ -41,6 +42,15 @@ impl DistillReport {
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_ENTRIES: usize = 12;
 const DEFAULT_MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
+
+/// The first N words of a candidate's content used as the keyword recall query when checking for a
+/// duplicate — enough to find an equivalent entry without over-narrowing the search.
+const DEDUP_QUERY_WORDS: usize = 6;
+/// How many existing entries to recall as duplicate candidates per write.
+const DEDUP_RECALL_LIMIT: usize = 5;
+/// Jaccard token-overlap at/above which two entries are treated as the same fact reworded (a strict
+/// superset scores lower and survives).
+const NEAR_DUPLICATE_JACCARD: f32 = 0.8;
 
 const DISTILL_SYSTEM_PROMPT: &str = concat!(
     "You distill durable knowledge from a coding session for a long-term memory. Read the transcript ",
@@ -127,13 +137,12 @@ impl Distiller {
         let Some(kind) = MemoryKind::from_str(&raw.kind) else {
             return false;
         };
-        let scope = raw.scope.as_str();
-        if scope != "project" && scope != "shared" {
+        let Some(scope) = Scope::from_wire(&raw.scope) else {
             return false;
-        }
+        };
         let available = match scope {
-            "shared" => self.memory.shared_memory_available(),
-            _ => self.memory.project_memory_available(),
+            Scope::Shared => self.memory.shared_memory_available(),
+            Scope::Project => self.memory.project_memory_available(),
         };
         if !available {
             return false;
@@ -141,22 +150,15 @@ impl Distiller {
         if self.is_duplicate(&raw.content, scope).await {
             return false;
         }
-        // A shared (cross-project) entry is global by definition — `None` — not stamped with the
-        // originating project, which would mis-scope it and make the 'global' branch dead.
-        let project_id = if scope == "shared" {
-            None
-        } else {
-            Some(self.project_id.clone())
-        };
         let entry = MemoryEntry::new(
             kind,
             raw.content,
             raw.tags.into_iter().collect(),
-            project_id,
+            scope.project_id_for(&self.project_id),
         );
         let result = match scope {
-            "shared" => self.memory.remember_shared(entry).await,
-            _ => self.memory.remember_project(entry).await,
+            Scope::Shared => self.memory.remember_shared(entry).await,
+            Scope::Project => self.memory.remember_project(entry).await,
         };
         result.is_ok()
     }
@@ -164,14 +166,14 @@ impl Distiller {
     /// Whether an equivalent entry already exists in the target scope, so re-learning the same fact each
     /// session does not balloon the store. Recalls candidates by the content's leading words (keyword
     /// search), then compares normalized text for equality or containment.
-    async fn is_duplicate(&self, content: &str, scope: &str) -> bool {
-        let query = leading_words(content, 6);
+    async fn is_duplicate(&self, content: &str, scope: Scope) -> bool {
+        let query = leading_words(content, DEDUP_QUERY_WORDS);
         if query.is_empty() {
             return false;
         }
         let hits = match scope {
-            "shared" => self.memory.recall_shared(&query, 5).await,
-            _ => self.memory.recall_project(&query, 5).await,
+            Scope::Shared => self.memory.recall_shared(&query, DEDUP_RECALL_LIMIT).await,
+            Scope::Project => self.memory.recall_project(&query, DEDUP_RECALL_LIMIT).await,
         };
         let Ok(hits) = hits else {
             // A recall failure must not block learning — treat as "not a duplicate" and let the write
@@ -199,8 +201,9 @@ fn is_near_duplicate(a: &str, b: &str) -> bool {
     }
     let intersection = ta.intersection(&tb).count();
     let union = ta.union(&tb).count();
-    // Jaccard ≥ 0.8 ⇒ essentially the same fact reworded; a strict superset scores lower and survives.
-    (intersection as f32 / union as f32) >= 0.8
+    // Jaccard ≥ NEAR_DUPLICATE_JACCARD ⇒ essentially the same fact reworded; a strict superset scores
+    // lower and survives.
+    (intersection as f32 / union as f32) >= NEAR_DUPLICATE_JACCARD
 }
 
 /// Render a bounded transcript: user and assistant text only (system and tool noise dropped), keeping the

@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use crate::modules::memory::application::memory_port::MemoryPort;
 use crate::modules::memory::domain::entry::MemoryEntry;
+use crate::modules::memory::domain::scope::RecallScope;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
@@ -98,15 +99,15 @@ impl Tool for RecallMemory {
         if args.query.trim().is_empty() {
             return ToolOutcome::Error("query must not be empty".to_string());
         }
-        let scope = args.scope.as_str();
-        if !matches!(scope, "project" | "shared" | "both") {
+        let Some(scope) = RecallScope::from_wire(&args.scope) else {
             return ToolOutcome::Error(format!(
-                "invalid scope '{scope}': expected 'project', 'shared', or 'both'"
+                "invalid scope '{}': expected 'project', 'shared', or 'both'",
+                args.scope
             ));
-        }
+        };
 
         let mut sections: Vec<String> = Vec::new();
-        if matches!(scope, "project" | "both") && self.memory.project_memory_available() {
+        if scope.includes_project() && self.memory.project_memory_available() {
             match self.memory.recall_project(&args.query, args.limit).await {
                 Ok(entries) if !entries.is_empty() => {
                     sections.push(render("Project memory", &entries))
@@ -115,7 +116,7 @@ impl Tool for RecallMemory {
                 Err(error) => return ToolOutcome::Error(error.to_string()),
             }
         }
-        if matches!(scope, "shared" | "both") && self.memory.shared_memory_available() {
+        if scope.includes_shared() && self.memory.shared_memory_available() {
             match self.memory.recall_shared(&args.query, args.limit).await {
                 Ok(entries) if !entries.is_empty() => {
                     sections.push(render("Shared memory", &entries))

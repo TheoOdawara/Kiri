@@ -207,31 +207,33 @@ impl FileProjectMemory {
         std::fs::create_dir_all(self.root.join("decisions"))?;
         Ok(())
     }
+}
 
-    fn parse_markdown_file(&self, _path: &Path, content: &str) -> AgentResult<MemoryEntry> {
-        // Extract the YAML front-matter (between the leading `---` fences).
-        let (front_matter, body) = match content.strip_prefix("---\n") {
-            Some(after) => match after.find("\n---\n") {
-                Some(end) => (Some(&after[..end]), &after[end + 5..]),
-                None => (None, content),
-            },
+/// Parse a memory entry from its Markdown file body: YAML front-matter between the leading `---` fences,
+/// or — with no front-matter — the whole body as a `Fact`. Pure: it reads neither `self` nor the path.
+fn parse_markdown_file(content: &str) -> AgentResult<MemoryEntry> {
+    let (front_matter, body) = match content.strip_prefix("---\n") {
+        Some(after) => match after.find("\n---\n") {
+            Some(end) => (Some(&after[..end]), &after[end + 5..]),
             None => (None, content),
-        };
+        },
+        None => (None, content),
+    };
 
-        let entry = if let Some(fm) = front_matter {
-            serde_norway::from_str(fm).map_err(AgentError::memory)?
-        } else {
-            // Fallback for a file without front-matter: treat the whole body as a Fact.
-            MemoryEntry::new(MemoryKind::Fact, body.to_string(), HashSet::new(), None)
-        };
+    let entry = if let Some(fm) = front_matter {
+        serde_norway::from_str(fm).map_err(AgentError::memory)?
+    } else {
+        // Fallback for a file without front-matter: treat the whole body as a Fact.
+        MemoryEntry::new(MemoryKind::Fact, body.to_string(), HashSet::new(), None)
+    };
 
-        Ok(entry)
-    }
+    Ok(entry)
+}
 
-    fn render_markdown_file(&self, entry: &MemoryEntry) -> AgentResult<String> {
-        let front_matter = serde_norway::to_string(entry).map_err(AgentError::memory)?;
-        Ok(format!("---\n{}---\n\n{}", front_matter, entry.content))
-    }
+/// Render a memory entry as a Markdown file: YAML front-matter followed by the content body.
+fn render_markdown_file(entry: &MemoryEntry) -> AgentResult<String> {
+    let front_matter = serde_norway::to_string(entry).map_err(AgentError::memory)?;
+    Ok(format!("---\n{}---\n\n{}", front_matter, entry.content))
 }
 
 #[async_trait::async_trait]
@@ -244,7 +246,7 @@ impl ProjectMemory for FileProjectMemory {
 
     async fn save(&self, entry: &MemoryEntry) -> AgentResult<()> {
         let path = self.entry_path(entry.kind, &entry.id);
-        let content = self.render_markdown_file(entry)?;
+        let content = render_markdown_file(entry)?;
 
         // Ensure the parent directory exists.
         if let Some(parent) = path.parent() {
@@ -291,7 +293,7 @@ impl ProjectMemory for FileProjectMemory {
         };
 
         let content = read_capped(&path).await?;
-        let entry = self.parse_markdown_file(&path, &content)?;
+        let entry = parse_markdown_file(&content)?;
         Ok(Some(entry))
     }
 
@@ -322,7 +324,7 @@ impl ProjectMemory for FileProjectMemory {
             // Deliberately skip an unreadable entry rather than fail the whole search: one corrupt or
             // racing file must not blank out every other match.
             if let Ok(content) = read_capped(&path).await
-                && let Ok(entry) = self.parse_markdown_file(&path, &content)
+                && let Ok(entry) = parse_markdown_file(&content)
                 && entry.matches_query(query)
             {
                 results.push(entry);
@@ -419,18 +421,15 @@ mod tests {
     fn front_matter_round_trips_after_crate_swap() {
         // BUILD-05 regression lock: the maintained YAML crate must (de)serialize the entry
         // front-matter so existing `.kiri/memory/*.md` files still parse after the swap.
-        let memory = FileProjectMemory::new(std::path::PathBuf::from("/unused"));
         let entry = MemoryEntry::new(
             MemoryKind::Pattern,
             "Prefer guard clauses".into(),
             ["rust", "style"].into_iter().map(String::from).collect(),
             None,
         );
-        let rendered = memory.render_markdown_file(&entry).unwrap();
+        let rendered = render_markdown_file(&entry).unwrap();
         assert!(rendered.starts_with("---\n"));
-        let parsed = memory
-            .parse_markdown_file(std::path::Path::new("entry.md"), &rendered)
-            .unwrap();
+        let parsed = parse_markdown_file(&rendered).unwrap();
         assert_eq!(parsed.id, entry.id);
         assert_eq!(parsed.kind, MemoryKind::Pattern);
         assert_eq!(parsed.content, entry.content);

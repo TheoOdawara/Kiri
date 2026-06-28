@@ -11,8 +11,9 @@ use crate::shared::kernel::error::AgentResult;
 /// brute-force ranking stays cheap without a vector index.
 const SEMANTIC_CANDIDATES: usize = 200;
 
-/// Upper bound on the query-embedding call, so a slow/unreachable embeddings endpoint falls back to
-/// keyword recall promptly instead of stalling.
+/// Upper bound on any single embed call — the query embedding for recall and the content embedding on
+/// remember alike — so a slow/unreachable embeddings endpoint degrades to keyword recall (or skips the
+/// write-path embedding) promptly instead of stalling.
 const EMBED_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Minimum cosine similarity for a semantic hit to count. Below this a match is treated as noise (a
@@ -145,11 +146,13 @@ where
             }
             None => Vec::new(),
         };
+        // Short-circuit: once semantic recall already fills `limit`, skip the keyword pass. The union
+        // below is therefore best-effort — it runs only when the semantic set underfills the budget, so
+        // a keyword-only match (or an entry with no embedding) is surfaced while there is spare room, but
+        // it is not guaranteed a slot once semantic recall has saturated the limit.
         if semantic.len() >= limit {
             return Ok(semantic);
         }
-        // Union with keyword recall so a strong keyword match — or an entry that has no embedding — is
-        // never shadowed by the semantic set, and the floor's rejects are backfilled.
         let keyword = self.project_store.search(query, limit).await?;
         Ok(merge_dedup(semantic, keyword, limit))
     }
@@ -167,6 +170,7 @@ where
             }
             None => Vec::new(),
         };
+        // See recall_project: best-effort union, skipped once semantic recall fills the limit.
         if semantic.len() >= limit {
             return Ok(semantic);
         }

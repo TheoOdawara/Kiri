@@ -92,7 +92,9 @@ pub struct MemoryEntry {
 }
 
 impl MemoryEntry {
-    /// Create a new entry with current timestamps and a UUID v7.
+    /// Create a new entry with current timestamps and a UUID v7. Reading the wall clock and the RNG here
+    /// is the ADR-0010-sanctioned domain exception (injecting a `Clock`/`IdGen` for one constructor is
+    /// speculative per YAGNI).
     pub fn new(
         kind: MemoryKind,
         content: String,

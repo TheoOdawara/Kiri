@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use crate::modules::memory::application::memory_port::MemoryPort;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
+use crate::modules::memory::domain::scope::Scope;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
@@ -100,36 +101,31 @@ impl Tool for Remember {
                 args.kind
             ));
         };
-        // A shared (cross-project) entry is global — `None` — not stamped with the originating project.
-        let project_id = if args.scope.as_str() == "shared" {
-            None
-        } else {
-            Some(self.project_id.clone())
+        let Some(scope) = Scope::from_wire(&args.scope) else {
+            return ToolOutcome::Error(format!(
+                "invalid scope '{}': expected 'project' or 'shared'",
+                args.scope
+            ));
         };
         let entry = MemoryEntry::new(
             kind,
             args.content,
             args.tags.into_iter().collect(),
-            project_id,
+            scope.project_id_for(&self.project_id),
         );
 
-        let result = match args.scope.as_str() {
-            "project" => {
+        let result = match scope {
+            Scope::Project => {
                 if !self.memory.project_memory_available() {
                     return ToolOutcome::Error("project memory is unavailable".to_string());
                 }
                 self.memory.remember_project(entry).await
             }
-            "shared" => {
+            Scope::Shared => {
                 if !self.memory.shared_memory_available() {
                     return ToolOutcome::Error("shared memory is unavailable".to_string());
                 }
                 self.memory.remember_shared(entry).await
-            }
-            other => {
-                return ToolOutcome::Error(format!(
-                    "invalid scope '{other}': expected 'project' or 'shared'"
-                ));
             }
         };
 
