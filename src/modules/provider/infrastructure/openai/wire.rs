@@ -1,15 +1,15 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use super::message_dto::MessageDto;
+use super::message_dto::WireMessage;
 
 /// The OpenAI-compatible chat-completions request body. A pure wire DTO: `messages` are mapped from
-/// domain `Message`s through `MessageDto`, and `tools` are the opaque JSON schemas the tool registry
+/// domain `Message`s through `WireMessage`, and `tools` are the opaque JSON schemas the tool registry
 /// produced, passed through verbatim.
 #[derive(Debug, Serialize)]
 pub(crate) struct ChatRequest<'a> {
     pub model: &'a str,
-    pub messages: Vec<MessageDto<'a>>,
+    pub messages: Vec<WireMessage<'a>>,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<ChatTemplateKwargs>,
@@ -99,7 +99,7 @@ fn string_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<S
 #[cfg(test)]
 mod tests {
     use super::{ChatRequest, ChatTemplateKwargs, Delta, ToolCallFragment};
-    use crate::modules::provider::infrastructure::openai::message_dto::MessageDto;
+    use crate::modules::provider::infrastructure::openai::message_dto::WireMessage;
     use crate::shared::kernel::message::Message;
 
     #[test]
@@ -109,7 +109,7 @@ mod tests {
         let message = Message::user("hi");
         let request = ChatRequest {
             model,
-            messages: vec![MessageDto::from(&message)],
+            messages: vec![WireMessage::from(&message)],
             stream: true,
             chat_template_kwargs: None,
             tools: &[],

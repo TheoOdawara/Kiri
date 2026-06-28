@@ -1,4 +1,4 @@
-use super::message_dto::MessageDto;
+use super::message_dto::WireMessage;
 use super::sse::{TurnAccumulator, handle_event};
 use super::wire::{ChatRequest, ChatTemplateKwargs};
 use crate::modules::provider::application::completion_provider::{
@@ -62,7 +62,7 @@ impl CompletionProvider for OpenAiProvider {
     ) -> Result<CompletedTurn, AgentError> {
         let body = ChatRequest {
             model: request.model,
-            messages: request.messages.iter().map(MessageDto::from).collect(),
+            messages: request.messages.iter().map(WireMessage::from).collect(),
             stream: true,
             chat_template_kwargs: self
                 .reasoning_enabled()

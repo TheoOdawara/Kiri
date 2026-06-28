@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use super::wire::{BlockDeltaDto, ContentBlockStartDto, MessageDeltaDto, StreamEventDto};
+use super::wire::{BlockDelta, ContentBlockStart, MessageDelta, WireStreamEvent};
 use crate::modules::provider::application::completion_provider::EventSink;
 use crate::modules::provider::infrastructure::http_error::bounded_preview;
 use crate::modules::provider::infrastructure::streaming::{
@@ -29,58 +29,58 @@ pub(crate) fn handle_event(
     accumulator: &mut TurnAccumulator,
     sink: &mut dyn EventSink,
 ) -> Result<(), AgentError> {
-    let Ok(event) = serde_json::from_str::<StreamEventDto>(data) else {
+    let Ok(event) = serde_json::from_str::<WireStreamEvent>(data) else {
         return Ok(());
     };
     match event {
-        StreamEventDto::Error { error } => Err(AgentError::Provider(format!(
+        WireStreamEvent::Error { error } => Err(AgentError::Provider(format!(
             "stream error from provider: {} ({})",
             bounded_preview(&error.message),
             bounded_preview(&error.kind)
         ))),
-        StreamEventDto::ContentBlockStart {
+        WireStreamEvent::ContentBlockStart {
             index,
             content_block,
         } => {
-            if let ContentBlockStartDto::ToolUse { id, name } = content_block {
+            if let ContentBlockStart::ToolUse { id, name } = content_block {
                 accumulator.start_tool_use(index, id, name);
             }
             Ok(())
         }
-        StreamEventDto::ContentBlockDelta { index, delta } => {
+        WireStreamEvent::ContentBlockDelta { index, delta } => {
             apply_delta(index, delta, accumulator, sink)
         }
-        StreamEventDto::MessageDelta {
-            delta: MessageDeltaDto { stop_reason },
+        WireStreamEvent::MessageDelta {
+            delta: MessageDelta { stop_reason },
         } => {
             if let Some(reason) = stop_reason {
                 accumulator.stop_reason = Some(reason);
             }
             Ok(())
         }
-        StreamEventDto::Other => Ok(()),
+        WireStreamEvent::Other => Ok(()),
     }
 }
 
 fn apply_delta(
     index: u32,
-    delta: BlockDeltaDto,
+    delta: BlockDelta,
     accumulator: &mut TurnAccumulator,
     sink: &mut dyn EventSink,
 ) -> Result<(), AgentError> {
     match delta {
-        BlockDeltaDto::TextDelta { text } if !text.is_empty() => {
+        BlockDelta::TextDelta { text } if !text.is_empty() => {
             enforce_stream_budget(&mut accumulator.streamed_bytes, text.len())?;
             accumulator.content.push_str(&text);
             sink.on_event(StreamEvent::Content(text))
         }
-        BlockDeltaDto::ThinkingDelta { thinking } if !thinking.is_empty() => {
+        BlockDelta::ThinkingDelta { thinking } if !thinking.is_empty() => {
             // Reasoning is not persisted, but it still flows through the channel/transcript, so it must
             // count toward the same ceiling — otherwise a provider streaming thinking forever OOMs.
             enforce_stream_budget(&mut accumulator.streamed_bytes, thinking.len())?;
             sink.on_event(StreamEvent::Reasoning(thinking))
         }
-        BlockDeltaDto::InputJsonDelta { partial_json } => {
+        BlockDelta::InputJsonDelta { partial_json } => {
             enforce_stream_budget(&mut accumulator.streamed_bytes, partial_json.len())?;
             accumulator.push_tool_input(index, &partial_json);
             Ok(())
