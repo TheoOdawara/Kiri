@@ -127,71 +127,113 @@ impl Distiller {
 
         let entries = parse_entries(&completed.content)?;
         let mut report = DistillReport::empty();
+
+        // 1. Validate each proposal into a ready-to-write candidate; an invalid kind/scope or an
+        //    unavailable scope is a legitimate skip.
+        let mut candidates = Vec::new();
         for raw in entries.into_iter().take(self.max_entries) {
-            match self.persist(raw).await {
-                Ok(true) => report.written += 1,
-                Ok(false) => report.skipped += 1,
-                // ERR-01: a real durable-write failure (DB locked, disk full) is surfaced as `failed`,
-                // never folded into `skipped` where it would be indistinguishable from a dedup skip and
-                // invisible to the user. Continue the pass — one transient failure must not drop the rest.
-                Err(_) => report.failed += 1,
+            match self.validate(raw) {
+                Some(candidate) => candidates.push(candidate),
+                None => report.skipped += 1,
             }
         }
+
+        // 2. Intra-batch dedup (no I/O): drop a candidate that near-duplicates an earlier accepted one in
+        //    the same scope. Replaces the old persist-order dependency, where entry N only saw entries
+        //    1..N-1 because each was written before the next was checked.
+        let mut accepted: Vec<Candidate> = Vec::new();
+        for candidate in candidates {
+            let duplicate = accepted.iter().any(|prior| {
+                prior.scope == candidate.scope
+                    && is_near_duplicate(&prior.content, &candidate.content)
+            });
+            if duplicate {
+                report.skipped += 1;
+            } else {
+                accepted.push(candidate);
+            }
+        }
+
+        // 3. Dedup against the existing store and persist, per scope, batching the embed: one
+        //    `recall_batch` covers every candidate's dedup query in a single embed round-trip.
+        let (project, shared) = accepted
+            .into_iter()
+            .partition::<Vec<_>, _>(|c| c.scope == Scope::Project);
+        self.persist_scope(Scope::Project, project, &mut report)
+            .await;
+        self.persist_scope(Scope::Shared, shared, &mut report).await;
         Ok(report)
     }
 
-    /// Validate, dedup, and persist one proposed entry. `Ok(true)` written, `Ok(false)` a legitimate skip
-    /// (invalid kind/scope, scope unavailable, or a duplicate), `Err` the durable write itself failed.
-    async fn persist(&self, raw: DistilledEntry) -> AgentResult<bool> {
-        let Ok(kind) = raw.kind.parse::<MemoryKind>() else {
-            return Ok(false);
-        };
-        let Some(scope) = Scope::from_wire(&raw.scope) else {
-            return Ok(false);
-        };
+    /// Validate a proposal into a writable candidate. `None` for an invalid kind/scope or a scope whose
+    /// store is unavailable — all legitimate skips.
+    fn validate(&self, raw: DistilledEntry) -> Option<Candidate> {
+        let kind = raw.kind.parse::<MemoryKind>().ok()?;
+        let scope = Scope::from_wire(&raw.scope)?;
         let available = match scope {
             Scope::Shared => self.memory.shared_memory_available(),
             Scope::Project => self.memory.project_memory_available(),
         };
-        if !available {
-            return Ok(false);
-        }
-        if self.is_duplicate(&raw.content, scope).await {
-            return Ok(false);
-        }
-        let entry = MemoryEntry::new(
+        available.then_some(Candidate {
             kind,
-            raw.content,
-            raw.tags.into_iter().collect(),
-            scope.project_id_for(&self.project_id),
-        );
-        match scope {
-            Scope::Shared => self.memory.remember_shared(entry).await,
-            Scope::Project => self.memory.remember_project(entry).await,
-        }
-        .map(|()| true)
+            content: raw.content,
+            tags: raw.tags,
+            scope,
+        })
     }
 
-    /// Whether an equivalent entry already exists in the target scope, so re-learning the same fact each
-    /// session does not balloon the store. Recalls candidates by the content's leading words (keyword
-    /// search), then compares normalized text for equality or containment.
-    async fn is_duplicate(&self, content: &str, scope: Scope) -> bool {
-        let query = leading_words(content, DEDUP_QUERY_WORDS);
-        if query.is_empty() {
-            return false;
+    /// Dedup `items` (all in `scope`) against the existing store with a single batched recall, then persist
+    /// the survivors. A recall failure degrades to "not a duplicate" so a transient store error never
+    /// blocks learning (worst case one redundant entry, never lost knowledge); a durable-write failure is
+    /// counted as `failed` (ERR-01), distinct from a dedup skip, and the pass continues.
+    async fn persist_scope(&self, scope: Scope, items: Vec<Candidate>, report: &mut DistillReport) {
+        if items.is_empty() {
+            return;
         }
-        let hits = match scope {
-            Scope::Shared => self.memory.recall_shared(&query, DEDUP_RECALL_LIMIT).await,
-            Scope::Project => self.memory.recall_project(&query, DEDUP_RECALL_LIMIT).await,
-        };
-        let Ok(hits) = hits else {
-            // A recall failure must not block learning — treat as "not a duplicate" and let the write
-            // proceed (the worst case is one redundant entry, never lost knowledge).
-            return false;
-        };
-        hits.iter()
-            .any(|hit| is_near_duplicate(&hit.content, content))
+        let queries: Vec<String> = items
+            .iter()
+            .map(|item| leading_words(&item.content, DEDUP_QUERY_WORDS))
+            .collect();
+        let hits = self
+            .memory
+            .recall_batch(scope, &queries, DEDUP_RECALL_LIMIT)
+            .await
+            .unwrap_or_else(|_| vec![Vec::new(); queries.len()]);
+        for (i, item) in items.into_iter().enumerate() {
+            let query = &queries[i];
+            let entry_hits = hits.get(i).map(Vec::as_slice).unwrap_or(&[]);
+            let is_duplicate = !query.is_empty()
+                && entry_hits
+                    .iter()
+                    .any(|hit| is_near_duplicate(&hit.content, &item.content));
+            if is_duplicate {
+                report.skipped += 1;
+                continue;
+            }
+            let entry = MemoryEntry::new(
+                item.kind,
+                item.content,
+                item.tags.into_iter().collect(),
+                scope.project_id_for(&self.project_id),
+            );
+            let written = match scope {
+                Scope::Shared => self.memory.remember_shared(entry).await,
+                Scope::Project => self.memory.remember_project(entry).await,
+            };
+            match written {
+                Ok(()) => report.written += 1,
+                Err(_) => report.failed += 1,
+            }
+        }
     }
+}
+
+/// A validated, ready-to-write proposal: the parsed kind/scope plus the content and tags to persist.
+struct Candidate {
+    kind: MemoryKind,
+    content: String,
+    tags: Vec<String>,
+    scope: Scope,
 }
 
 /// Whether two entries are the same fact (normalized equality or a high token-overlap reword). Crucially
@@ -425,6 +467,14 @@ mod tests {
         async fn recall_shared(&self, _: &str, _: usize) -> AgentResult<Vec<MemoryEntry>> {
             Ok(Vec::new())
         }
+        async fn recall_batch(
+            &self,
+            _: Scope,
+            queries: &[String],
+            _: usize,
+        ) -> AgentResult<Vec<Vec<MemoryEntry>>> {
+            Ok(vec![Vec::new(); queries.len()])
+        }
         async fn remember_project(&self, _: MemoryEntry) -> AgentResult<()> {
             Err(AgentError::Memory("disk full".into()))
         }
@@ -453,6 +503,30 @@ mod tests {
         assert_eq!(report.written, 0);
         assert_eq!(report.skipped, 0);
         assert_eq!(report.failed, 1, "a write error must be counted as failed");
+    }
+
+    #[tokio::test]
+    async fn dedups_near_duplicates_within_one_pass() {
+        // Two near-identical entries in the SAME pass: the intra-batch dedup keeps the first and skips the
+        // second, without relying on persist order (the batched flow recalls the store once, so the second
+        // would not see the first via the store — the local self-dedup is what catches it).
+        let dir = TempDir::new().unwrap();
+        let memory = temp_port(&dir).await;
+        let distiller = Distiller::new(memory.clone(), "proj-a".into());
+        let provider = ScriptedProvider {
+            content: r#"[
+                {"kind":"fact","content":"the sky is blue","scope":"shared"},
+                {"kind":"fact","content":"the sky is blue","scope":"shared"}
+            ]"#
+            .into(),
+        };
+        let report = distiller
+            .distill(&provider, "m", &conversation())
+            .await
+            .unwrap();
+        assert_eq!(report.written, 1);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(memory.recall_shared("sky", 10).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

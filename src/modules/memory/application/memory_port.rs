@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::modules::memory::domain::entry::MemoryEntry;
+use crate::modules::memory::domain::scope::Scope;
 use crate::modules::memory::domain::similarity::rank_by_similarity;
 use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
 use crate::shared::kernel::error::AgentResult;
@@ -52,6 +53,17 @@ pub trait Memory: Send + Sync {
 
     /// Recall shared memories relevant to the query.
     async fn recall_shared(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
+
+    /// Recall hits for many queries in one pass, embedding ALL queries in a single batch round-trip
+    /// instead of one per query. `result[i]` holds the hits for `queries[i]`. Used by the end-of-session
+    /// distiller's dedup so N candidates cost one embed call, not N. The store is read once and not
+    /// mutated here, so the caller must dedup the queries against each other separately.
+    async fn recall_batch(
+        &self,
+        scope: Scope,
+        queries: &[String],
+        limit: usize,
+    ) -> AgentResult<Vec<Vec<MemoryEntry>>>;
 
     /// Save a memory in the project scope.
     async fn remember_project(&self, entry: MemoryEntry) -> AgentResult<()>;
@@ -127,6 +139,38 @@ async fn semantic_pick(
         .collect()
 }
 
+/// Batched sibling of `semantic_pick`: embed ALL `queries` in one call, then rank each against the same
+/// candidate set. `result[i]` is the semantic hits for `queries[i]`. Returns per-query empties when there
+/// are no candidates or the batch embed fails/misaligns, so the caller fills from keyword search.
+async fn semantic_pick_batch(
+    embedder: &dyn EmbeddingProvider,
+    candidates: &[(MemoryEntry, Vec<f32>)],
+    queries: &[String],
+    limit: usize,
+) -> Vec<Vec<MemoryEntry>> {
+    if candidates.is_empty() || queries.is_empty() {
+        return vec![Vec::new(); queries.len()];
+    }
+    let query_vecs = match tokio::time::timeout(EMBED_TIMEOUT, embedder.embed(queries)).await {
+        Ok(Ok(vecs)) if vecs.len() == queries.len() => vecs,
+        _ => return vec![Vec::new(); queries.len()],
+    };
+    let by_id: HashMap<&str, &MemoryEntry> =
+        candidates.iter().map(|(e, _)| (e.id.as_str(), e)).collect();
+    query_vecs
+        .iter()
+        .map(|query_vec| {
+            let refs = candidates
+                .iter()
+                .map(|(entry, vector)| (entry.id.as_str(), vector.as_slice()));
+            rank_by_similarity(query_vec, refs, limit, MIN_SIMILARITY)
+                .iter()
+                .filter_map(|id| by_id.get(id.as_str()).map(|e| (*e).clone()))
+                .collect()
+        })
+        .collect()
+}
+
 #[async_trait::async_trait]
 impl<P, S> Memory for LayeredMemory<P, S>
 where
@@ -176,6 +220,51 @@ where
         }
         let keyword = self.shared_store.search(query, limit).await?;
         Ok(merge_dedup(semantic, keyword, limit))
+    }
+
+    async fn recall_batch(
+        &self,
+        scope: Scope,
+        queries: &[String],
+        limit: usize,
+    ) -> AgentResult<Vec<Vec<MemoryEntry>>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Semantic hits per query in one batched embed; then the keyword union per query (each `search`
+        // is a cheap local read, mirroring `recall_*`'s best-effort union under the same limit).
+        let mut semantic = match &self.embedder {
+            Some(embedder) => {
+                let model = embedder.model();
+                let candidates = match scope {
+                    Scope::Project => self
+                        .project_store
+                        .embedded_candidates(model, SEMANTIC_CANDIDATES),
+                    Scope::Shared => self
+                        .shared_store
+                        .embedded_candidates(model, SEMANTIC_CANDIDATES),
+                }
+                .await
+                .unwrap_or_default();
+                semantic_pick_batch(embedder.as_ref(), &candidates, queries, limit).await
+            }
+            None => vec![Vec::new(); queries.len()],
+        };
+        let mut out = Vec::with_capacity(queries.len());
+        for (i, query) in queries.iter().enumerate() {
+            let sem = std::mem::take(&mut semantic[i]);
+            if sem.len() >= limit {
+                out.push(sem);
+                continue;
+            }
+            let keyword = match scope {
+                Scope::Project => self.project_store.search(query, limit),
+                Scope::Shared => self.shared_store.search(query, limit),
+            }
+            .await?;
+            out.push(merge_dedup(sem, keyword, limit));
+        }
+        Ok(out)
     }
 
     async fn remember_project(&self, entry: MemoryEntry) -> AgentResult<()> {
@@ -311,6 +400,23 @@ mod tests {
             }
         }
 
+        /// Counts how many times `embed` is invoked, to prove `recall_batch` issues a single call for N
+        /// queries rather than one per query.
+        struct CountingEmbedder {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for CountingEmbedder {
+            async fn embed(&self, texts: &[String]) -> AgentResult<Vec<Vec<f32>>> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(texts.iter().map(|t| presence_vector(t)).collect())
+            }
+            fn model(&self) -> &str {
+                "fake-embed"
+            }
+        }
+
         struct FailEmbedder;
 
         #[async_trait::async_trait]
@@ -439,6 +545,41 @@ mod tests {
             // The embedder errors on the query; recall must still find the entry by keyword.
             let hits = port.recall_shared("unique-token", 5).await.unwrap();
             assert_eq!(hits.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn recall_batch_embeds_all_queries_in_one_call() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let dir = TempDir::new().unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let port = LayeredMemory::new(project_store(&dir).await, shared_store(&dir).await)
+                .with_embedder(Arc::new(CountingEmbedder {
+                    calls: calls.clone(),
+                }));
+
+            port.remember_shared(MemoryEntry::new(
+                MemoryKind::Fact,
+                "an alpha subject".into(),
+                HashSet::new(),
+                Some("p".into()),
+            ))
+            .await
+            .unwrap();
+            // The write embeds the content once; reset so the assertion isolates the recall_batch cost.
+            calls.store(0, Ordering::SeqCst);
+
+            let queries = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+            let results = port.recall_batch(Scope::Shared, &queries, 5).await.unwrap();
+            assert_eq!(results.len(), 3, "one result list per query");
+            assert!(
+                results[0].iter().any(|e| e.content.contains("alpha")),
+                "the alpha query must recall the alpha entry"
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "three queries must cost a single batched embed call, not three"
+            );
         }
 
         #[tokio::test]
