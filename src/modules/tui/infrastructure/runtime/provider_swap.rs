@@ -202,6 +202,17 @@ fn persist_or_notice<E: std::fmt::Display>(
     }
 }
 
+/// Surface a one-time env-import persist failure as an error notice, or stay silent when the key
+/// persisted (or there was nothing to import) — the testable render for the `ProviderSwitch` warning
+/// (ERR-02), so the once-swallowed `let _ =` stays closed and locked.
+fn notice_env_import_failure(warning: Option<AgentError>, model: &mut Model) {
+    if let Some(error) = warning {
+        model.notify_error(format!(
+            "a chave importada do ambiente não foi salva: {error:#}"
+        ));
+    }
+}
+
 impl RunLoop {
     /// Apply a `/models` selection: a model change is just the per-turn `model` field — no provider
     /// rebuild. Apply it live, reflect it in the status line, and persist (best-effort) to the global
@@ -274,11 +285,7 @@ impl RunLoop {
                     .notify_info(format!("provider: {id} ({target_model})"));
                 // Surface a one-time env-import persist failure (closes the former swallowed `let _ =`):
                 // the switch still succeeded for this session, but the key was not saved for the next one.
-                if let Some(warning) = persist_warning {
-                    self.model.notify_error(format!(
-                        "a chave importada do ambiente não foi salva: {warning:#}"
-                    ));
-                }
+                notice_env_import_failure(persist_warning, &mut self.model);
                 persist_or_notice(
                     config::persist_active_provider(&self.config_path, &id),
                     &mut self.model,
@@ -382,6 +389,32 @@ mod tests {
                 "não persistiu o modelo: disco cheio".to_string()
             )),
             "a persist failure must surface a contextual error notice"
+        );
+    }
+
+    #[test]
+    fn notice_env_import_failure_some_pushes_error_notice() {
+        let mut model = Model::default();
+        // The real warning is a SecretStore persist failure (`persisted.err()`), so use that variant.
+        notice_env_import_failure(Some(AgentError::Secret("falha".to_string())), &mut model);
+        assert_eq!(
+            model.transcript.items().last(),
+            Some(&TranscriptItem::Notice(
+                NoticeLevel::Error,
+                "a chave importada do ambiente não foi salva: credential store error: falha"
+                    .to_string()
+            )),
+            "an env-import persist failure must surface the exact one-time warning"
+        );
+    }
+
+    #[test]
+    fn notice_env_import_failure_none_is_silent() {
+        let mut model = Model::default();
+        notice_env_import_failure(None, &mut model);
+        assert!(
+            model.transcript.is_empty(),
+            "a persisted (or absent) env key must add no notice"
         );
     }
 }
