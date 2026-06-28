@@ -163,7 +163,8 @@ impl FileProjectMemory {
         if sidecar.is_empty() {
             return Ok(Vec::new());
         }
-        let mut ids: Vec<(String, String)> = {
+        // Snapshot (id, rel-path, updated_at) under one read lock, then release it before any file I/O.
+        let mut candidates: Vec<(String, String, String)> = {
             let index = self.index.read().await;
             sidecar
                 .iter()
@@ -172,17 +173,28 @@ impl FileProjectMemory {
                     index
                         .entries
                         .get(id)
-                        .map(|e| (id.clone(), e.updated_at.clone()))
+                        .map(|e| (id.clone(), e.path.clone(), e.updated_at.clone()))
                 })
                 .collect()
         };
-        ids.sort_by(|a, b| b.1.cmp(&a.1));
-        ids.truncate(limit);
+        candidates.sort_by(|a, b| b.2.cmp(&a.2));
+        candidates.truncate(limit);
+
+        // PERF-02: canonicalize the root ONCE for the whole loop (mirroring `search`), instead of
+        // re-canonicalizing it — and re-locking the index — per candidate via `self.load`.
+        let Ok(real_root) = fs::canonicalize(&self.root).await else {
+            return Ok(Vec::new());
+        };
+
         let mut out = Vec::new();
-        for (id, _) in ids {
-            // Skip a missing/corrupt candidate file rather than failing the whole semantic set, matching
-            // search()'s per-file resilience (one bad entry must not disable semantic recall entirely).
-            if let Ok(Some(entry)) = self.load(&id).await
+        for (id, rel, _) in candidates {
+            // Skip a missing/corrupt/escaping candidate rather than failing the whole semantic set,
+            // matching search()'s per-file resilience (one bad entry must not disable semantic recall).
+            let Some(path) = resolve_within(&real_root, &self.root, &rel).await else {
+                continue;
+            };
+            if let Ok(content) = read_capped(&path).await
+                && let Ok(entry) = parse_markdown_file(&content)
                 && let Some(embedding) = sidecar.get(&id)
             {
                 out.push((entry, embedding.vector.clone()));
@@ -548,6 +560,25 @@ mod tests {
         let candidates = memory.embedded_candidates("model-a", 10).await.unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0.id, a.id);
+    }
+
+    #[tokio::test]
+    async fn embedded_candidates_skips_escaping_path() {
+        // The PERF-02 refactor must keep search()'s containment resilience: an escaping index path is
+        // skipped, never read from outside the memory root, even when it carries an embedding.
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        seed_escaping_index(&dir, &root, "leaked secret").await;
+
+        let memory = FileProjectMemory::new(root);
+        memory.init().await.unwrap();
+        memory.save_embedding("evil", "m", &[1.0]).await.unwrap();
+
+        let candidates = memory.embedded_candidates("m", 10).await.unwrap();
+        assert!(
+            candidates.is_empty(),
+            "an escaping candidate path must be skipped, not read"
+        );
     }
 
     /// Hand-write an index whose stored path escapes the memory root, with a real file at the escaped

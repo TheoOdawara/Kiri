@@ -83,7 +83,10 @@ no UI-framework dependency — the **one** sanctioned exception is the TUI `Inpu
 `tui_textarea::TextArea` (ADR 0017, guarded by a recursive domain-purity test); the engine never touches
 stdin/stdout directly (all UI via the engine ports). Ports return `AgentError`; `anyhow` only at the binary edge.
 These boundaries are not just convention: `src/architecture_guards.rs` holds `#[test]`s that walk `src/`
-and fail the build if domain purity or the cross-module-import invariants are re-breached.
+and fail the build if **domain purity** is re-breached — a `domain` file coupling to a UI crate
+(ratatui/tui_textarea, only `InputBuffer` sanctioned, ADR 0017) or doing fs/net/db I/O. The inward
+import-direction rule (application/domain must not import infrastructure) is enforced by convention and
+review, not yet by a guard.
 
 **Extending:** a new tool = one file under `tools/infrastructure/fs/` implementing `Tool` (it receives
 the `Sandbox` port as `&dyn Sandbox`), registered in `default_fs_tools`; a new provider = one adapter implementing `CompletionProvider` + a `(kind, auth)` arm in
