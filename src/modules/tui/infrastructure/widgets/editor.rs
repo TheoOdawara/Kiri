@@ -35,7 +35,11 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
     // The reward beat: when a turn has just settled, the idle gate quenches from the busy cyan through
     // temper-blue into its resting colour — a "strike connected" before the UI goes silent.
     if matches!(state, GateState::Idle)
-        && let Some(fg) = quench_fg(model.turn_settled_at, model.render_at, motion)
+        && let Some(fg) = quench_fg(
+            model.timeline.turn_settled_at,
+            model.timeline.render_at,
+            motion,
+        )
     {
         glyph_style = glyph_style.fg(fg);
     }
@@ -48,7 +52,11 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
     // The `_` placeholder becomes the living cursor: a thin bar that pulses between dim and the accent —
     // the one sanctioned idle motion, a banked coal that says the harness is awake. The hexagon gate to
     // its left stays perfectly still.
-    let cursor_style = Style::default().fg(cursor_fg(model.opened_at, model.render_at, motion));
+    let cursor_style = Style::default().fg(cursor_fg(
+        model.timeline.opened_at,
+        model.timeline.render_at,
+        motion,
+    ));
     let prompt = Line::from(vec![
         Span::styled(format!("{glyph} "), glyph_style),
         Span::styled("›", theme::dim()),

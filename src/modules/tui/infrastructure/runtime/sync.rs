@@ -55,7 +55,7 @@ pub(super) async fn sync_push(
     terminal: &mut DefaultTerminal,
 ) {
     model.notify_info("sincronizando (push)…");
-    model.render_at = Some(Instant::now());
+    model.timeline.render_at = Some(Instant::now());
     let _ = draw_and_copy(terminal, model);
 
     let service = SyncService::new(

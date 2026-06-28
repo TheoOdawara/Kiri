@@ -216,7 +216,7 @@ impl RunLoop {
                     biased;
                     maybe = ui.events.next() => match maybe {
                         Some(Ok(event)) => {
-                            self.model.last_event_at = Some(Instant::now());
+                            self.model.timeline.last_event_at = Some(Instant::now());
                             input::to_msg(event).map(Step::Apply).unwrap_or(Step::Idle)
                         }
                         _ => Step::Idle,
@@ -230,7 +230,7 @@ impl RunLoop {
 
                 // Stamp the frame before applying the step, so line landings (in `update`) and the draw
                 // that shows them share one instant — a freshly landed line starts at age zero.
-                self.model.render_at = Some(Instant::now());
+                self.model.timeline.render_at = Some(Instant::now());
 
                 let mut done: Option<_> = None;
                 // Forced steps redraw immediately; throttled ones (stream deltas, ticks) wait for the frame.

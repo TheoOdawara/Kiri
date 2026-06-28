@@ -65,6 +65,70 @@ impl Status {
     }
 }
 
+/// The animation/timing cluster: the motion preference plus every wall-clock instant the render reads,
+/// grouped so a lifecycle transition resets them together instead of stranding one stale instant. The
+/// runtime stamps `render_at`/`last_event_at`; the rest are derived render state.
+#[derive(Debug, Default)]
+pub struct Timeline {
+    /// Whether motion is expressed or frozen; resolved once from the environment at startup.
+    pub motion: Motion,
+    /// The wall-clock instant of the current frame, stamped by the runtime before each update/draw. All
+    /// time-derived rendering (the cooling reveal, the cursor pulse) reads this rather than calling the
+    /// clock in the pure view, so a frame is a deterministic function of the model.
+    pub render_at: Option<Instant>,
+    /// Landing instants of the completed lines of the active streaming answer (one per `\n`), stamped with
+    /// `render_at`. Drives the cooling-steel reveal; cleared at each turn and answer boundary.
+    pub stream_landings: Vec<Instant>,
+    /// When the last turn settled (`TurnEnded`), stamped with `render_at`. Drives the one-shot temper
+    /// quench on the idle gate; cleared when a new turn begins.
+    pub turn_settled_at: Option<Instant>,
+    /// When the shell opened, stamped by the runtime at startup. Drives the splash breath-in and the
+    /// living-cursor pulse; a keypress backdates it to fast-forward the splash for frequent users.
+    pub opened_at: Option<Instant>,
+    /// Timestamp of the last Ctrl+C press, for double-tap-to-quit detection.
+    pub last_ctrl_c: Option<Instant>,
+    /// Timestamp of the last Esc press, for double-tap-to-cancel detection while busy.
+    pub last_esc: Option<Instant>,
+    /// The instant the current input event arrived, stamped by the runtime right after reading it. Used as
+    /// the clock for multi-click detection — `render_at` is stamped before the event await and would be
+    /// stale, so it cannot time clicks.
+    pub last_event_at: Option<Instant>,
+}
+
+impl Timeline {
+    /// A turn began: clear the streaming-reveal landings and the settled marker so no instant from the
+    /// previous turn leaks into the new one.
+    pub fn begin_turn(&mut self) {
+        self.stream_landings.clear();
+        self.turn_settled_at = None;
+    }
+
+    /// A turn settled: the streaming reveal is done, and the idle gate quenches from the current frame.
+    /// Resets the per-turn render instants atomically so none is stranded across the boundary.
+    pub fn settle_turn(&mut self) {
+        self.stream_landings.clear();
+        self.turn_settled_at = self.render_at;
+    }
+
+    /// Drop the streaming-reveal landings at an answer boundary (a fresh assistant item), keeping the
+    /// lifecycle instants intact.
+    pub fn reset_stream(&mut self) {
+        self.stream_landings.clear();
+    }
+}
+
+/// The mouse text-selection cluster: the active screen selection plus the last mouse-down used for
+/// multi-click detection, grouped so a navigation transition clears them together.
+#[derive(Debug, Default)]
+pub struct Selection {
+    /// The active screen text selection (mouse drag / multi-click), or `None`. The overlay paints it and
+    /// the runtime scrapes the rendered cells to copy; `None` by default keeps every idle frame identical.
+    pub active: Option<ScreenSelection>,
+    /// Instant + cell of the last mouse-down and its running multiplicity (1=char, 2=word, 3+=line), for
+    /// double/triple-click detection.
+    pub last_click: Option<(Instant, (u16, u16), u8)>,
+}
+
 /// The whole TUI state — a pure value mutated only by `update`. The runtime renders it and feeds it
 /// messages; it never holds engine handles (channels/conversation live in the runtime).
 #[derive(Debug, Default)]
@@ -106,35 +170,10 @@ pub struct Model {
     pub should_quit: bool,
     /// How tool calls are gated; cycled with Shift+Tab, read at the start of each turn.
     pub approval_mode: ApprovalMode,
-    /// Timestamp of the last Ctrl+C press, for double-tap-to-quit detection.
-    pub last_ctrl_c: Option<Instant>,
-    /// Timestamp of the last Esc press, for double-tap-to-cancel detection while busy.
-    pub last_esc: Option<Instant>,
-    /// Whether motion is expressed or frozen; resolved once from the environment at startup.
-    pub motion: Motion,
-    /// The wall-clock instant of the current frame, stamped by the runtime before each update/draw.
-    /// All time-derived rendering (the cooling reveal, the cursor pulse) reads this rather than calling
-    /// the clock in the pure view, so a frame is a deterministic function of the model.
-    pub render_at: Option<Instant>,
-    /// Landing instants of the completed lines of the active streaming answer (one per `\n`), stamped
-    /// with `render_at`. Drives the cooling-steel reveal; cleared at each turn and answer boundary.
-    pub stream_landings: Vec<Instant>,
-    /// When the last turn settled (`TurnEnded`), stamped with `render_at`. Drives the one-shot temper
-    /// quench on the idle gate; cleared when a new turn begins.
-    pub turn_settled_at: Option<Instant>,
-    /// When the shell opened, stamped by the runtime at startup. Drives the splash breath-in and the
-    /// living-cursor pulse; a keypress backdates it to fast-forward the splash for frequent users.
-    pub opened_at: Option<Instant>,
-    /// The active screen text selection (mouse drag / multi-click), or `None`. The overlay paints it and
-    /// the runtime scrapes the rendered cells to copy; `None` by default keeps every idle frame identical.
-    pub selection: Option<ScreenSelection>,
-    /// Instant + cell of the last mouse-down and its running multiplicity (1=char, 2=word, 3+=line), for
-    /// double/triple-click detection.
-    pub last_click: Option<(Instant, (u16, u16), u8)>,
-    /// The instant the current input event arrived, stamped by the runtime right after reading it. Used
-    /// as the clock for multi-click detection — `render_at` is stamped before the event await and would
-    /// be stale, so it cannot time clicks.
-    pub last_event_at: Option<Instant>,
+    /// The animation/timing cluster: the motion preference plus every wall-clock instant the render reads.
+    pub timeline: Timeline,
+    /// The mouse text-selection cluster: the active screen selection plus the last mouse-down.
+    pub selection: Selection,
     /// True until a usable provider credential exists. Raised at cold start when wiring fell back to the
     /// null provider (no stored credential / no env key, or a blank active model); cleared when
     /// onboarding saves a provider. Gates prompt submission and re-opens onboarding instead of stranding
@@ -203,7 +242,7 @@ impl Model {
     /// Drop any active screen selection — the user navigated away (typed, scrolled, resized, or started a
     /// new session). Cheap and idempotent.
     pub fn clear_screen_selection(&mut self) {
-        self.selection = None;
+        self.selection.active = None;
     }
 
     /// Push an out-of-band notice at `level` — the single constructor for transcript notices, so no call
@@ -356,5 +395,29 @@ mod tests {
         assert!(matches!(m.active_modal(), Some(ActiveModal::Wizard(_))));
         m.wizard = None;
         assert!(m.active_modal().is_none());
+    }
+
+    #[test]
+    fn timeline_reset_clears_all_render_instants() {
+        let now = Instant::now();
+        let mut t = Timeline {
+            render_at: Some(now),
+            stream_landings: vec![now, now],
+            turn_settled_at: Some(now),
+            ..Timeline::default()
+        };
+        // begin_turn drops the streaming landings and the settled marker so no per-turn instant leaks
+        // into the new turn.
+        t.begin_turn();
+        assert!(t.stream_landings.is_empty());
+        assert!(t.turn_settled_at.is_none());
+
+        // settle_turn re-derives the settled marker from the current frame and clears the landings
+        // atomically, leaving none stranded across the boundary.
+        t.render_at = Some(now);
+        t.stream_landings = vec![now];
+        t.settle_turn();
+        assert!(t.stream_landings.is_empty());
+        assert_eq!(t.turn_settled_at, Some(now));
     }
 }

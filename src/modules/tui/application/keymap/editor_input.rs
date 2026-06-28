@@ -31,16 +31,16 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     if key.ctrl
         && !key.alt
         && key.code == Key::Char('c')
-        && model.selection.is_some_and(|s| !s.is_empty())
+        && model.selection.active.is_some_and(|s| !s.is_empty())
     {
-        if let Some(sel) = model.selection.as_mut() {
+        if let Some(sel) = model.selection.active.as_mut() {
             sel.state = SelectionState::CopyAndClear;
         }
         return vec![];
     }
     // Any other key means the user is editing or navigating — drop the screen highlight now (the copy
     // path above already returned).
-    model.selection = None;
+    model.selection.active = None;
 
     // Before anything else: the menu intercepts navigation and completion keys, but lets ordinary
     // typing fall through to the editor (which keeps the filter in sync after each mutation).
@@ -61,9 +61,10 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                 }
                 let now = Instant::now();
                 let double_tap = model
+                    .timeline
                     .last_ctrl_c
                     .is_some_and(|t| now.duration_since(t) < DOUBLE_TAP_WINDOW);
-                model.last_ctrl_c = Some(now);
+                model.timeline.last_ctrl_c = Some(now);
                 if double_tap {
                     model.should_quit = true;
                     return vec![Effect::Quit];
@@ -116,9 +117,10 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         Key::Esc if model.busy => {
             let now = Instant::now();
             let double_tap = model
+                .timeline
                 .last_esc
                 .is_some_and(|t| now.duration_since(t) < DOUBLE_TAP_WINDOW);
-            model.last_esc = Some(now);
+            model.timeline.last_esc = Some(now);
             if double_tap {
                 return vec![Effect::CancelTurn];
             }
@@ -193,24 +195,24 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
 }
 
 /// Interpret a left mouse gesture, mutating the screen selection. Pure: the clock comes from
-/// `model.last_event_at` (stamped by the runtime when the event arrived), and word/line ranges are
+/// `model.timeline.last_event_at` (stamped by the runtime when the event arrived), and word/line ranges are
 /// derived later from the rendered buffer — here we only set anchor/head and the granularity intent.
 /// Not gated by a pending modal: selecting and copying the text of an approval/plan box is allowed.
 pub fn on_mouse(model: &mut Model, kind: MouseKind, col: u16, row: u16) -> Vec<Effect> {
     match kind {
         MouseKind::Down => {
             let granularity = click_granularity(model, col, row);
-            model.selection = Some(ScreenSelection::new(col, row, granularity));
+            model.selection.active = Some(ScreenSelection::new(col, row, granularity));
         }
         MouseKind::Drag => {
             // A drag is always a character-range gesture, even if it began as a double-click.
-            if let Some(sel) = model.selection.as_mut() {
+            if let Some(sel) = model.selection.active.as_mut() {
                 sel.granularity = Granularity::Char;
                 sel.extend(col, row);
             }
         }
         MouseKind::Up => {
-            let bare = match model.selection.as_mut() {
+            let bare = match model.selection.active.as_mut() {
                 Some(sel) => {
                     if sel.granularity == Granularity::Char {
                         sel.extend(col, row);
@@ -223,11 +225,11 @@ pub fn on_mouse(model: &mut Model, kind: MouseKind, col: u16, row: u16) -> Vec<E
                 // A bare click (down+up on one cell) selects nothing — leave no stray highlight, and in
                 // the focused composer ask the runtime to drop the edit cursor where it landed (the
                 // runtime owns the render geometry; under a modal the editor is read-only, so do nothing).
-                model.selection = None;
+                model.selection.active = None;
                 if !model.has_modal() {
                     return vec![Effect::PlaceCursor { col, row }];
                 }
-            } else if let Some(sel) = model.selection.as_mut() {
+            } else if let Some(sel) = model.selection.active.as_mut() {
                 sel.state = SelectionState::CopyAndKeep;
             }
         }
@@ -239,8 +241,8 @@ pub fn on_mouse(model: &mut Model, kind: MouseKind, col: u16, row: u16) -> Vec<E
 /// is pressed again within `MULTI_CLICK_WINDOW`. The running count lives in `last_click` (not in the
 /// selection, which a bare click clears between presses).
 fn click_granularity(model: &mut Model, col: u16, row: u16) -> Granularity {
-    let now = model.last_event_at;
-    let count = match (now, model.last_click) {
+    let now = model.timeline.last_event_at;
+    let count = match (now, model.selection.last_click) {
         (Some(now), Some((prev, pos, n)))
             if pos == (col, row) && now.duration_since(prev) < MULTI_CLICK_WINDOW =>
         {
@@ -248,7 +250,7 @@ fn click_granularity(model: &mut Model, col: u16, row: u16) -> Granularity {
         }
         _ => 1,
     };
-    model.last_click = now.map(|t| (t, (col, row), count));
+    model.selection.last_click = now.map(|t| (t, (col, row), count));
     match count {
         1 => Granularity::Char,
         2 => Granularity::Word,

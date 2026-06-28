@@ -22,7 +22,10 @@ use crate::modules::tui::infrastructure::widgets::{editor, selection_overlay};
 pub(super) fn draw_and_copy(terminal: &mut DefaultTerminal, model: &mut Model) -> io::Result<()> {
     // Lift the pending copy out first (ScreenSelection is `Copy`), so no `&model` borrow is held across
     // the draw and the post-draw mutation below type-checks.
-    let pending = model.selection.filter(|s| s.state != SelectionState::Idle);
+    let pending = model
+        .selection
+        .active
+        .filter(|s| s.state != SelectionState::Idle);
     let completed = terminal.draw(|frame| view(model, frame))?;
     if let Some(sel) = pending {
         // `completed` borrows the terminal, not the model, so scraping it and then mutating the model
@@ -32,9 +35,9 @@ pub(super) fn draw_and_copy(terminal: &mut DefaultTerminal, model: &mut Model) -
         // Mouse-release keeps the highlight (just settle the state); Ctrl+C drops it so the next Ctrl+C
         // is free to cancel/quit. Either way the request is consumed exactly once.
         match sel.state {
-            SelectionState::CopyAndClear => model.selection = None,
+            SelectionState::CopyAndClear => model.selection.active = None,
             _ => {
-                if let Some(s) = model.selection.as_mut() {
+                if let Some(s) = model.selection.active.as_mut() {
                     s.state = SelectionState::Idle;
                 }
             }

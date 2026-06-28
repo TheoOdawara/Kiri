@@ -20,6 +20,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
     // Fold per-frame geometry into the session motion preference: a short or narrow terminal freezes
     // motion (the layout stays identical, just steady).
     let motion = model
+        .timeline
         .motion
         .and_reduce_if(area.height < 8 || area.width < 60);
     let regions = frame_regions(area, model);
@@ -49,7 +50,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
     }
     // The screen text selection paints last, over everything, so a drag can highlight any region of the
     // rendered UI. It restyles cells without touching their symbols, so the runtime can scrape the copy.
-    if let Some(sel) = model.selection {
+    if let Some(sel) = model.selection.active {
         let area = frame.area();
         selection_overlay::paint(frame.buffer_mut(), area, &sel, theme::selection());
     }

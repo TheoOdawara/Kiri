@@ -46,7 +46,13 @@ const MS_PER_SECOND: u128 = 1000;
 /// conversation is empty, the brand splash takes the pane instead.
 pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
     if model.transcript.is_empty() {
-        splash::render(frame, area, model.opened_at, model.render_at, motion);
+        splash::render(
+            frame,
+            area,
+            model.timeline.opened_at,
+            model.timeline.render_at,
+            motion,
+        );
         return;
     }
 
@@ -55,8 +61,8 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
     let last = items.len().saturating_sub(1);
     let reveal = Reveal {
         motion,
-        now: model.render_at,
-        landings: &model.stream_landings,
+        now: model.timeline.render_at,
+        landings: &model.timeline.stream_landings,
     };
     let mut lines: Vec<Line> = Vec::new();
     for (idx, item) in items.iter().enumerate() {

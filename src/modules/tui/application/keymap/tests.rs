@@ -1199,17 +1199,16 @@ fn alt_char_without_arrow_falls_through_to_editor() {
 
 /// A model whose event clock is stamped, ready for mouse-gesture tests.
 fn with_clock(now: Instant) -> Model {
-    Model {
-        last_event_at: Some(now),
-        ..Model::default()
-    }
+    let mut m = Model::default();
+    m.timeline.last_event_at = Some(now);
+    m
 }
 
 #[test]
 fn mouse_down_starts_a_char_selection() {
     let mut m = with_clock(Instant::now());
     on_mouse(&mut m, MouseKind::Down, 3, 2);
-    let sel = m.selection.expect("down starts a selection");
+    let sel = m.selection.active.expect("down starts a selection");
     assert_eq!(sel.anchor, (3, 2));
     assert_eq!(sel.head, (3, 2));
     assert_eq!(sel.granularity, Granularity::Char);
@@ -1221,7 +1220,7 @@ fn mouse_drag_extends_head_and_keeps_anchor() {
     let mut m = with_clock(Instant::now());
     on_mouse(&mut m, MouseKind::Down, 3, 2);
     on_mouse(&mut m, MouseKind::Drag, 7, 2);
-    let sel = m.selection.unwrap();
+    let sel = m.selection.active.unwrap();
     assert_eq!(sel.anchor, (3, 2));
     assert_eq!(sel.head, (7, 2));
 }
@@ -1234,6 +1233,7 @@ fn mouse_up_on_a_real_drag_requests_copy_and_keeps_highlight() {
     on_mouse(&mut m, MouseKind::Up, 7, 2);
     let sel = m
         .selection
+        .active
         .expect("a non-empty selection stays after release");
     assert_eq!(sel.state, SelectionState::CopyAndKeep);
     assert!(!sel.is_empty());
@@ -1245,7 +1245,7 @@ fn bare_click_clears_the_selection() {
     on_mouse(&mut m, MouseKind::Down, 3, 2);
     on_mouse(&mut m, MouseKind::Up, 3, 2);
     assert!(
-        m.selection.is_none(),
+        m.selection.active.is_none(),
         "a click with no drag selects nothing"
     );
 }
@@ -1256,7 +1256,10 @@ fn single_cell_selection_needs_a_one_cell_drag() {
     on_mouse(&mut m, MouseKind::Down, 3, 2);
     on_mouse(&mut m, MouseKind::Drag, 4, 2);
     on_mouse(&mut m, MouseKind::Up, 4, 2);
-    let sel = m.selection.expect("a one-cell drag is a real selection");
+    let sel = m
+        .selection
+        .active
+        .expect("a one-cell drag is a real selection");
     assert!(!sel.is_empty());
     assert_eq!(sel.state, SelectionState::CopyAndKeep);
 }
@@ -1267,9 +1270,9 @@ fn double_click_within_window_selects_a_word() {
     let mut m = with_clock(t0);
     on_mouse(&mut m, MouseKind::Down, 3, 2);
     on_mouse(&mut m, MouseKind::Up, 3, 2); // bare click clears the highlight...
-    m.last_event_at = Some(t0 + Duration::from_millis(50));
+    m.timeline.last_event_at = Some(t0 + Duration::from_millis(50));
     on_mouse(&mut m, MouseKind::Down, 3, 2);
-    let sel = m.selection.expect("the second click reselects");
+    let sel = m.selection.active.expect("the second click reselects");
     assert_eq!(sel.granularity, Granularity::Word);
     assert!(!sel.is_empty(), "a word selection is never empty");
 }
@@ -1279,12 +1282,13 @@ fn triple_click_within_window_selects_a_line() {
     let t0 = Instant::now();
     let mut m = with_clock(t0);
     for i in 0..3u64 {
-        m.last_event_at = Some(t0 + Duration::from_millis(i * 50));
+        m.timeline.last_event_at = Some(t0 + Duration::from_millis(i * 50));
         on_mouse(&mut m, MouseKind::Down, 3, 2);
         on_mouse(&mut m, MouseKind::Up, 3, 2);
     }
     let sel = m
         .selection
+        .active
         .expect("a line selection stays after the third release");
     assert_eq!(sel.granularity, Granularity::Line);
 }
@@ -1295,9 +1299,9 @@ fn second_click_after_the_window_is_a_fresh_single() {
     let mut m = with_clock(t0);
     on_mouse(&mut m, MouseKind::Down, 3, 2);
     on_mouse(&mut m, MouseKind::Up, 3, 2);
-    m.last_event_at = Some(t0 + Duration::from_millis(600)); // > MULTI_CLICK_WINDOW
+    m.timeline.last_event_at = Some(t0 + Duration::from_millis(600)); // > MULTI_CLICK_WINDOW
     on_mouse(&mut m, MouseKind::Down, 3, 2);
-    assert_eq!(m.selection.unwrap().granularity, Granularity::Char);
+    assert_eq!(m.selection.active.unwrap().granularity, Granularity::Char);
 }
 
 #[test]
@@ -1306,9 +1310,9 @@ fn double_click_far_away_is_two_singles() {
     let mut m = with_clock(t0);
     on_mouse(&mut m, MouseKind::Down, 3, 2);
     on_mouse(&mut m, MouseKind::Up, 3, 2);
-    m.last_event_at = Some(t0 + Duration::from_millis(50));
+    m.timeline.last_event_at = Some(t0 + Duration::from_millis(50));
     on_mouse(&mut m, MouseKind::Down, 9, 9); // a different cell — not a double-click
-    assert_eq!(m.selection.unwrap().granularity, Granularity::Char);
+    assert_eq!(m.selection.active.unwrap().granularity, Granularity::Char);
 }
 
 #[test]
@@ -1317,9 +1321,12 @@ fn keystroke_clears_the_screen_selection() {
     on_mouse(&mut m, MouseKind::Down, 3, 2);
     on_mouse(&mut m, MouseKind::Drag, 7, 2);
     on_mouse(&mut m, MouseKind::Up, 7, 2);
-    assert!(m.selection.is_some());
+    assert!(m.selection.active.is_some());
     on_key(&mut m, press(Key::Char('a')));
-    assert!(m.selection.is_none(), "typing drops the screen selection");
+    assert!(
+        m.selection.active.is_none(),
+        "typing drops the screen selection"
+    );
 }
 
 #[test]
@@ -1329,7 +1336,7 @@ fn esc_clears_the_screen_selection_when_idle() {
     on_mouse(&mut m, MouseKind::Drag, 7, 2);
     on_mouse(&mut m, MouseKind::Up, 7, 2);
     on_key(&mut m, press(Key::Esc));
-    assert!(m.selection.is_none());
+    assert!(m.selection.active.is_none());
 }
 
 #[test]
@@ -1345,6 +1352,7 @@ fn ctrl_c_prefers_the_screen_selection_and_requests_clearing_copy() {
     );
     assert_eq!(
         m.selection
+            .active
             .expect("selection survives until the runtime scrapes it")
             .state,
         SelectionState::CopyAndClear
@@ -1356,14 +1364,14 @@ fn ctrl_c_prefers_the_screen_selection_and_requests_clearing_copy() {
 fn mouse_selection_works_while_a_modal_is_pending() {
     let mut m = Model {
         pending_approval: Some(PendingApproval::new("ler a.txt".to_string(), true)),
-        last_event_at: Some(Instant::now()),
         ..Model::default()
     };
+    m.timeline.last_event_at = Some(Instant::now());
     on_mouse(&mut m, MouseKind::Down, 3, 2);
     on_mouse(&mut m, MouseKind::Drag, 7, 2);
     on_mouse(&mut m, MouseKind::Up, 7, 2);
     assert!(
-        m.selection.is_some(),
+        m.selection.active.is_some(),
         "mouse selection must work under a modal (to copy its text)"
     );
 }
@@ -1374,7 +1382,10 @@ fn bare_click_in_the_focused_composer_emits_place_cursor() {
     on_mouse(&mut m, MouseKind::Down, 12, 4);
     let effects = on_mouse(&mut m, MouseKind::Up, 12, 4);
     assert_eq!(effects, vec![Effect::PlaceCursor { col: 12, row: 4 }]);
-    assert!(m.selection.is_none(), "a bare click leaves no highlight");
+    assert!(
+        m.selection.active.is_none(),
+        "a bare click leaves no highlight"
+    );
 }
 
 #[test]
@@ -1387,7 +1398,10 @@ fn a_drag_selects_and_does_not_place_the_cursor() {
         effects.is_empty(),
         "a drag is a selection, not a cursor placement"
     );
-    assert_eq!(m.selection.unwrap().state, SelectionState::CopyAndKeep);
+    assert_eq!(
+        m.selection.active.unwrap().state,
+        SelectionState::CopyAndKeep
+    );
 }
 
 #[test]
@@ -1396,11 +1410,11 @@ fn bare_click_during_a_modal_does_not_place_the_cursor() {
     // move the (hidden) edit cursor.
     let mut m = Model {
         pending_approval: Some(PendingApproval::new("ler a.txt".to_string(), true)),
-        last_event_at: Some(Instant::now()),
         ..Model::default()
     };
+    m.timeline.last_event_at = Some(Instant::now());
     on_mouse(&mut m, MouseKind::Down, 12, 4);
     let effects = on_mouse(&mut m, MouseKind::Up, 12, 4);
     assert!(effects.is_empty(), "no cursor placement under a modal");
-    assert!(m.selection.is_none());
+    assert!(m.selection.active.is_none());
 }

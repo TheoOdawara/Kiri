@@ -59,7 +59,7 @@ fn the_view_is_a_pure_function_of_the_frame_instant() {
     model
         .transcript
         .push(TranscriptItem::Assistant("olá".to_string()));
-    model.render_at = Some(Instant::now());
+    model.timeline.render_at = Some(Instant::now());
     // Same model, same frame instant → byte-identical buffer (the view reads no clock of its own).
     assert_eq!(render(&model, 80, 20), render(&model, 80, 20));
 }
@@ -75,13 +75,13 @@ fn reduced_motion_idle_frame_is_byte_identical_across_time() {
     model
         .transcript
         .push(TranscriptItem::Assistant("olá".to_string()));
-    model.motion = Motion::Reduced;
+    model.timeline.motion = Motion::Reduced;
     let now = Instant::now();
-    model.render_at = Some(now);
+    model.timeline.render_at = Some(now);
     let a = render(&model, 80, 20);
     // Advance the clock five seconds: a frozen, idle frame must not change a single cell (the idle
     // zero-diff invariant — under reduced motion not even the cursor pulses).
-    model.render_at = Some(now + Duration::from_secs(5));
+    model.timeline.render_at = Some(now + Duration::from_secs(5));
     let b = render(&model, 80, 20);
     assert_eq!(a, b, "a reduced-motion idle frame must be stable over time");
 }
@@ -295,7 +295,7 @@ fn a_screen_selection_highlights_buffer_cells() {
         .push(TranscriptItem::Assistant("hello".to_string()));
     let mut sel = ScreenSelection::new(0, 0, Granularity::Char);
     sel.extend(3, 0);
-    model.selection = Some(sel);
+    model.selection.active = Some(sel);
     let buffer = render_buffer(&model, 40, 12);
     for x in 0..=3u16 {
         assert_eq!(
@@ -315,14 +315,14 @@ fn a_stable_selection_keeps_the_frame_byte_identical_across_time() {
     model
         .transcript
         .push(TranscriptItem::Assistant("olá".to_string()));
-    model.motion = Motion::Reduced;
+    model.timeline.motion = Motion::Reduced;
     let mut sel = ScreenSelection::new(0, 0, Granularity::Char);
     sel.extend(5, 0);
-    model.selection = Some(sel);
+    model.selection.active = Some(sel);
     let now = Instant::now();
-    model.render_at = Some(now);
+    model.timeline.render_at = Some(now);
     let a = render_buffer(&model, 80, 20);
-    model.render_at = Some(now + Duration::from_secs(5));
+    model.timeline.render_at = Some(now + Duration::from_secs(5));
     let b = render_buffer(&model, 80, 20);
     assert_eq!(a, b, "a stable selection must not change a cell over time");
 }

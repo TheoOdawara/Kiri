@@ -15,8 +15,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Key(key) => {
             // Any keypress fast-forwards the splash breath-in so a user who opens Kiri dozens of times a
             // day never waits on chrome. Backdating the open instant settles it on the next frame.
-            if let Some(now) = model.render_at {
-                model.opened_at = Some(now.checked_sub(SPLASH_FAST_FORWARD).unwrap_or(now));
+            if let Some(now) = model.timeline.render_at {
+                model.timeline.opened_at =
+                    Some(now.checked_sub(SPLASH_FAST_FORWARD).unwrap_or(now));
             }
             keymap::on_key(model, key)
         }
@@ -57,8 +58,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Tick => Vec::new(),
         Msg::TurnBegan => {
             model.status.streaming = true;
-            model.stream_landings.clear();
-            model.turn_settled_at = None;
+            model.timeline.begin_turn();
             Vec::new()
         }
         Msg::StreamDelta(StreamKind::Reasoning, text) => {
@@ -70,11 +70,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // fresh assistant item (e.g. after a tool ran) resets the cooling state. Each completed line
             // (a `\n`) lands at the current frame's instant, driving its cooling-steel reveal.
             if !model.transcript.last_is_assistant() {
-                model.stream_landings.clear();
+                model.timeline.reset_stream();
             }
-            if let Some(now) = model.render_at {
+            if let Some(now) = model.timeline.render_at {
                 for _ in 0..text.matches('\n').count() {
-                    model.stream_landings.push(now);
+                    model.timeline.stream_landings.push(now);
                 }
             }
             model.transcript.push_content_delta(&text);
@@ -114,8 +114,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.busy = false;
             model.status.streaming = false;
             model.pending_approval = None;
-            model.stream_landings.clear();
-            model.turn_settled_at = model.render_at;
+            model.timeline.settle_turn();
             Vec::new()
         }
     }
@@ -195,15 +194,13 @@ mod tests {
 
     #[test]
     fn scroll_clears_the_screen_selection() {
-        let mut m = Model {
-            selection: Some(a_selection()),
-            ..Model::default()
-        };
+        let mut m = Model::default();
+        m.selection.active = Some(a_selection());
         update(&mut m, Msg::ScrollUp);
-        assert!(m.selection.is_none());
-        m.selection = Some(a_selection());
+        assert!(m.selection.active.is_none());
+        m.selection.active = Some(a_selection());
         update(&mut m, Msg::ScrollDown);
-        assert!(m.selection.is_none());
+        assert!(m.selection.active.is_none());
     }
 
     #[test]
@@ -239,28 +236,27 @@ mod tests {
 
     #[test]
     fn resize_clears_the_screen_selection() {
-        let mut m = Model {
-            selection: Some(a_selection()),
-            ..Model::default()
-        };
+        let mut m = Model::default();
+        m.selection.active = Some(a_selection());
         update(&mut m, Msg::Resize);
-        assert!(m.selection.is_none());
+        assert!(m.selection.active.is_none());
     }
 
     #[test]
     fn streamed_content_keeps_the_screen_selection() {
         // Async content must NOT drop the selection: a delta arriving mid-drag/mid-copy would otherwise
         // make it impossible to select streaming output.
-        let mut m = Model {
-            selection: Some(a_selection()),
-            ..Model::default()
-        };
+        let mut m = Model::default();
+        m.selection.active = Some(a_selection());
         update(&mut m, Msg::StreamDelta(StreamKind::Content, "hi".into()));
         assert!(
-            m.selection.is_some(),
+            m.selection.active.is_some(),
             "a stream delta must keep the selection"
         );
         update(&mut m, Msg::Tick);
-        assert!(m.selection.is_some(), "a tick must keep the selection");
+        assert!(
+            m.selection.active.is_some(),
+            "a tick must keep the selection"
+        );
     }
 }

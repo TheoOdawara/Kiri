@@ -74,7 +74,7 @@ impl RunLoop {
             .notify_info("destilando memórias da sessão… (^C pula)");
         self.model.busy = true;
         let started = Instant::now();
-        self.model.render_at = Some(started);
+        self.model.timeline.render_at = Some(started);
         let _ = draw_and_copy(ui.terminal, &mut self.model);
 
         let outcome = {
@@ -96,7 +96,7 @@ impl RunLoop {
                     DistillStep::Skip => break None,
                     DistillStep::Tick => {
                         self.model.status.spinner_frame = spinner_frame(started.elapsed());
-                        self.model.render_at = Some(Instant::now());
+                        self.model.timeline.render_at = Some(Instant::now());
                         // A draw failure ends the best-effort distillation rather than looping blind.
                         if draw_and_copy(ui.terminal, &mut self.model).is_err() {
                             break None;

@@ -210,10 +210,10 @@ impl Tui {
             .set_styles(theme::base(), cursor, theme::selection());
         // Resolve the motion preference once: reading the environment is infrastructure's job, kept out
         // of the pure domain. The view folds in per-frame geometry on top of this.
-        model.motion = render::resolve_motion();
+        model.timeline.motion = render::resolve_motion();
         // Stamp the open instant for the splash breath-in and the cursor pulse (clock stays out of the
         // domain constructor).
-        model.opened_at = Some(Instant::now());
+        model.timeline.opened_at = Some(Instant::now());
 
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel::<EngineMsg>();
         let cancel = CancelToken::new();
@@ -283,7 +283,7 @@ impl Tui {
         }
 
         while !run_loop.model.should_quit {
-            run_loop.model.render_at = Some(Instant::now());
+            run_loop.model.timeline.render_at = Some(Instant::now());
             render::draw_and_copy(ui.terminal, &mut run_loop.model)?;
 
             // Resolve one input into a message, then handle it outside the select so the engine
@@ -293,7 +293,7 @@ impl Tui {
                 maybe = ui.events.next() => match maybe {
                     Some(Ok(event)) => {
                         // Stamp arrival time for multi-click detection (before the reducer reads it).
-                        run_loop.model.last_event_at = Some(Instant::now());
+                        run_loop.model.timeline.last_event_at = Some(Instant::now());
                         input::to_msg(event)
                     }
                     Some(Err(_)) => None,
