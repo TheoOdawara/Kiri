@@ -302,33 +302,10 @@ impl AgentLoop {
             // confirmation. This is what keeps an unattended turn — including a prompt-injected
             // one — from silently destroying data or reaching outside the workspace, and it is
             // the only such guard on platforms without an OS sandbox.
-            ApprovalMode::Auto => match self.registry.confirm(sandbox, call) {
-                Some(confirmation)
-                    if self.registry.confirm_in_auto(&call.function.name)
-                        || !confirmation.default_accept =>
-                {
-                    match io.decide(&confirmation).await {
-                        // Already in auto, so "approve and don't ask again" is just "approve":
-                        // destructive calls keep being confirmed for the rest of the turn.
-                        Approval::Approved | Approval::ApprovedAuto => {
-                            io.tool_started(call, command);
-                            Some(timed(self.registry.execute(sandbox, call)).await)
-                        }
-                        Approval::Declined => {
-                            io.tool_started(call, command);
-                            Some((ToolOutcome::Declined, Duration::ZERO))
-                        }
-                        Approval::Aborted => None,
-                    }
-                }
-                _ => {
-                    io.tool_started(call, command);
-                    Some(timed(self.registry.execute(sandbox, call)).await)
-                }
-            },
+            ApprovalMode::Auto => self.run_gated(sandbox, call, command, io).await,
             // Plan: non-plannable tools are withheld from the schema; if the model still names
             // one, refuse it without touching the filesystem. Plannable tools (read-only +
-            // run_command) run directly so the agent can investigate while drafting its plan.
+            // run_command) run while drafting the plan.
             ApprovalMode::Plan if !self.registry.is_plannable(&call.function.name) => {
                 io.tool_started(call, command);
                 Some((
@@ -344,8 +321,12 @@ impl AgentLoop {
                     io.tool_started(call, command);
                     Some((ToolOutcome::Error(reason), Duration::ZERO))
                 } else {
-                    io.tool_started(call, command);
-                    Some(timed(self.registry.execute(sandbox, call)).await)
+                    // SEC-01: a plannable tool is not a free pass. Apply the SAME confirmation gate auto
+                    // enforces — run_command (`confirm_in_auto`) and any out-of-root target
+                    // (`!default_accept`) still require a live confirmation — so a prompt-injected plan
+                    // turn cannot read an out-of-root file (`~/.ssh/id_rsa`, `/etc/passwd`) back to the
+                    // model or run an arbitrary command unattended. In-root reads/searches still run free.
+                    self.run_gated(sandbox, call, command, io).await
                 }
             }
             // Default: confirm each call through the UI before running it.
@@ -373,6 +354,43 @@ impl AgentLoop {
                     Some(timed(self.registry.execute(sandbox, call)).await)
                 }
             },
+        }
+    }
+
+    /// Run a call under the auto-mode confirmation gate: a high-blast-radius tool (`confirm_in_auto`) or
+    /// an out-of-root target (`!default_accept`) still requires a live confirmation; everything else runs
+    /// directly. Shared by `Auto` and (after `plan_check`) `Plan`, so plan mode never executes an
+    /// out-of-root read or an arbitrary command without the same confirmation auto enforces (SEC-01).
+    /// `ApprovedAuto` is treated as `Approved` here (no mode switch) — the caller owns any transition.
+    /// `None` means the user aborted at this call.
+    async fn run_gated<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
+        &self,
+        sandbox: &dyn Sandbox,
+        call: &ToolCall,
+        command: &str,
+        io: &mut IO,
+    ) -> Option<(ToolOutcome, Duration)> {
+        match self.registry.confirm(sandbox, call) {
+            Some(confirmation)
+                if self.registry.confirm_in_auto(&call.function.name)
+                    || !confirmation.default_accept =>
+            {
+                match io.decide(&confirmation).await {
+                    Approval::Approved | Approval::ApprovedAuto => {
+                        io.tool_started(call, command);
+                        Some(timed(self.registry.execute(sandbox, call)).await)
+                    }
+                    Approval::Declined => {
+                        io.tool_started(call, command);
+                        Some((ToolOutcome::Declined, Duration::ZERO))
+                    }
+                    Approval::Aborted => None,
+                }
+            }
+            _ => {
+                io.tool_started(call, command);
+                Some(timed(self.registry.execute(sandbox, call)).await)
+            }
         }
     }
 

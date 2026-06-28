@@ -367,6 +367,89 @@ async fn plan_mode_allows_read_only_tools() {
 }
 
 #[tokio::test]
+async fn plan_mode_confirms_run_command() {
+    // SEC-01: run_command is plannable, but plan mode must still confirm it (confirm_in_auto) — a
+    // prompt-injected plan turn cannot run an arbitrary command unattended. Declined → not executed.
+    let dir = TempDir::new().unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let agent_loop = agent_loop_with(vec![
+        CompletedTurn {
+            content: "running".to_string(),
+            tool_calls: vec![tool_call("run_command", r#"{"command":"echo hi"}"#)],
+        },
+        CompletedTurn {
+            content: "plan".to_string(),
+            tool_calls: vec![],
+        },
+    ]);
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("run a command while planning"));
+    let mut io = TestIo::new(Approval::Declined);
+
+    let outcome = agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(
+        io.decide_calls, 1,
+        "run_command must be confirmed even in plan mode (SEC-01)"
+    );
+    assert!(matches!(io.finished.as_slice(), [ToolOutcome::Declined]));
+}
+
+#[tokio::test]
+async fn plan_mode_confirms_out_of_root_read() {
+    // SEC-01: an out-of-root read while planning must be confirmed (not default-accepted), so a
+    // prompt-injected plan turn cannot exfiltrate `~/.ssh/id_rsa` / `/etc/passwd` back to the model.
+    let outside = TempDir::new().unwrap();
+    let secret = outside.path().join("secret.txt");
+    std::fs::write(&secret, b"top secret").unwrap();
+    let dir = TempDir::new().unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let args = serde_json::json!({ "path": secret.to_str().unwrap() }).to_string();
+    let agent_loop = agent_loop_with(vec![
+        CompletedTurn {
+            content: "reading".to_string(),
+            tool_calls: vec![tool_call("read_file", &args)],
+        },
+        CompletedTurn {
+            content: "plan".to_string(),
+            tool_calls: vec![],
+        },
+    ]);
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("read an out-of-root file while planning"));
+    let mut io = TestIo::new(Approval::Declined);
+
+    let outcome = agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(
+        io.decide_calls, 1,
+        "an out-of-root read must be confirmed even in plan mode (SEC-01)"
+    );
+    let tool_msg = conversation
+        .messages()
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .unwrap();
+    assert!(
+        !tool_msg
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("top secret"),
+        "a declined out-of-root read must not leak the file to the model"
+    );
+    assert!(matches!(io.finished.as_slice(), [ToolOutcome::Declined]));
+}
+
+#[tokio::test]
 async fn plan_mode_present_plan_proposes_the_plan_and_keeps_the_wire_valid() {
     // The explicit plan signal: a `present_plan` call in plan mode ends the turn as `PlanProposed`
     // (no execution), and the conversation stays a valid tool round (assistant tool_call answered

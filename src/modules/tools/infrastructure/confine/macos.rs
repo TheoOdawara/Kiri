@@ -101,14 +101,21 @@ fn build_profile(policy: &SandboxPolicy) -> String {
         push_allow_write(&mut profile, dir);
     }
 
-    // Reads: deny the credential set under home (the base `allow default` would otherwise permit it),
-    // so a confined command cannot read keys to exfiltrate. When HOME is unset there is no per-user home
-    // whose credential paths we could resolve, so there is nothing home-relative to deny — the
-    // `~/.ssh`-style rules simply have no target. This skip is deliberate, not silent: HOME is
-    // effectively always set on the macOS v1 target, so the empty case is the headless/CI edge and the
-    // base posture stands.
+    // Credential set under home (the base `allow default` would otherwise permit it). When HOME is unset
+    // there is no per-user home whose credential paths we could resolve, so there is nothing home-relative
+    // to deny. This skip is deliberate, not silent: HOME is effectively always set on the macOS v1 target,
+    // so the empty case is the headless/CI edge and the base posture stands.
     if let Some(home) = std::env::var_os("HOME") {
-        push_home_denies(&mut profile, &PathBuf::from(home));
+        let home = PathBuf::from(home);
+        // Writes: deny the credential set, emitted AFTER the write-allows above so they win even when the
+        // workspace root (or a configured `extra_rw`) is a home ancestor (e.g. after `/cd ~`), where
+        // `(allow file-write* (subpath <root>))` would otherwise cover all of home (last-match-wins) and
+        // let a confined command clobber `~/.ssh/authorized_keys` or `~/.kiri/credentials.json`. Unlike
+        // reads (the `extra_ro` allow below can punch a read hole), credential writes are never
+        // punch-through-able — clobbering a credential store is strictly more dangerous (SEC-03).
+        push_home_write_denies(&mut profile, &home);
+        // Reads: deny the same set so a confined command cannot read keys to exfiltrate.
+        push_home_denies(&mut profile, &home);
     }
     // Re-allow any explicitly configured read paths (KIRI_SANDBOX_RO_PATHS), so the user can punch a
     // read-hole through the credential-dir denies above — e.g. a deploy tool that legitimately reads
@@ -132,6 +139,19 @@ fn push_home_denies(profile: &mut String, home: &Path) {
     }
 }
 
+/// The write-side mirror of `push_home_denies`: refuse writes into the same credential set, so a confined
+/// command cannot clobber `~/.ssh/authorized_keys`, `~/.aws/credentials`, or `~/.kiri/credentials.json`
+/// when the workspace root is a home ancestor. Pure in `home`, like its read sibling (SEC-03).
+fn push_home_write_denies(profile: &mut String, home: &Path) {
+    for dir in SECRET_DIRS {
+        push_deny_write(profile, &home.join(dir));
+    }
+    push_deny_write(profile, &home.join(HARNESS_PRIVATE_DIR));
+    for file in HOME_SECRET_FILES {
+        push_deny_write(profile, &home.join(file));
+    }
+}
+
 fn push_allow_read(profile: &mut String, dir: &Path) {
     profile.push_str(&format!(
         "(allow file-read* (subpath \"{}\"))\n",
@@ -149,6 +169,13 @@ fn push_allow_write(profile: &mut String, dir: &Path) {
 fn push_deny_read(profile: &mut String, dir: &Path) {
     profile.push_str(&format!(
         "(deny file-read* (subpath \"{}\"))\n",
+        sbpl_escape(&canon(dir))
+    ));
+}
+
+fn push_deny_write(profile: &mut String, dir: &Path) {
+    profile.push_str(&format!(
+        "(deny file-write* (subpath \"{}\"))\n",
         sbpl_escape(&canon(dir))
     ));
 }
@@ -273,6 +300,42 @@ mod tests {
         assert!(
             allow_at > deny_at,
             "the buggy shape emits the overriding allow after the deny (last-match-wins)"
+        );
+    }
+
+    #[test]
+    fn credential_write_denies_win_when_the_root_is_a_home_ancestor() {
+        // SEC-03: with the workspace root == home, the root write-allow `(allow file-write* (subpath
+        // $HOME))` would cover the whole credential set. The credential write-deny must be emitted AFTER
+        // that allow (last-match-wins), so `~/.kiri`/`~/.ssh` stay write-protected even after `/cd ~`.
+        let Some(home) = std::env::var_os("HOME") else {
+            return; // headless/CI edge: no per-user home whose credential denies exist
+        };
+        let home = PathBuf::from(home);
+
+        let mut kiri_write_deny = String::new();
+        push_deny_write(&mut kiri_write_deny, &home.join(HARNESS_PRIVATE_DIR));
+        let kiri_write_deny = kiri_write_deny.trim_end();
+        let mut home_write_allow = String::new();
+        push_allow_write(&mut home_write_allow, &home);
+        let home_write_allow = home_write_allow.trim_end();
+
+        let profile = build_profile(&SandboxPolicy {
+            root: home.clone(),
+            network: NetworkPolicy::Deny,
+            extra_ro: Vec::new(),
+            extra_rw: Vec::new(),
+        });
+
+        let allow_at = profile
+            .find(home_write_allow)
+            .expect("the root write-allow is present");
+        let deny_at = profile
+            .find(kiri_write_deny)
+            .expect("the credential write-deny must be present");
+        assert!(
+            deny_at > allow_at,
+            "the credential write-deny must come AFTER the root write-allow so it wins (last-match-wins)"
         );
     }
 
