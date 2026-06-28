@@ -113,10 +113,7 @@ impl SessionStore for SqliteSessionStore {
                 .map_err(AgentError::session)?;
                 Ok(Session {
                     id,
-                    project_id,
                     title: String::new(),
-                    created_at: now.clone(),
-                    updated_at: now,
                     messages: Vec::new(),
                     skipped_messages: 0,
                 })
@@ -264,25 +261,17 @@ impl SessionStore for SqliteSessionStore {
         run_blocking(
             move || -> AgentResult<Option<Session>> {
                 let conn = lock(&conn, AgentError::session)?;
-                let header = match conn.query_row(
-                    "SELECT project_id, title, created_at, updated_at FROM sessions WHERE id = ?1",
+                let title = match conn.query_row(
+                    "SELECT title FROM sessions WHERE id = ?1",
                     params![session_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    },
+                    |row| row.get::<_, String>(0),
                 ) {
-                    Ok(header) => header,
+                    Ok(title) => title,
                     // Absent session is `Ok(None)`; a real DB error (locked/corrupt/IO) must surface, not be
                     // reported to the user as "session not found".
                     Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
                     Err(error) => return Err(AgentError::session(error)),
                 };
-                let (project_id, title, created_at, updated_at) = header;
                 let mut stmt = conn
                     .prepare(
                         "SELECT role, content, images, tool_calls, tool_call_id
@@ -330,36 +319,10 @@ impl SessionStore for SqliteSessionStore {
                 }
                 Ok(Some(Session {
                     id: session_id,
-                    project_id,
                     title,
-                    created_at,
-                    updated_at,
                     messages,
                     skipped_messages: skipped,
                 }))
-            },
-            AgentError::session,
-        )
-        .await
-    }
-
-    async fn delete(&self, session_id: &str) -> AgentResult<bool> {
-        let conn = self.conn.clone();
-        let session_id = session_id.to_string();
-        run_blocking(
-            move || -> AgentResult<bool> {
-                let conn = lock(&conn, AgentError::session)?;
-                // Delete child rows explicitly: ON DELETE CASCADE needs the per-connection PRAGMA, which is
-                // only guaranteed on the init connection — this is unconditionally correct.
-                conn.execute(
-                    "DELETE FROM messages WHERE session_id = ?1",
-                    params![session_id],
-                )
-                .map_err(AgentError::session)?;
-                let affected = conn
-                    .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
-                    .map_err(AgentError::session)?;
-                Ok(affected > 0)
             },
             AgentError::session,
         )
@@ -569,27 +532,6 @@ mod tests {
 
         let latest = store.latest_for_project("proj-a").await.unwrap().unwrap();
         assert_eq!(latest.id, s2.id);
-    }
-
-    #[tokio::test]
-    async fn delete_removes_session_and_messages() {
-        let dir = TempDir::new().unwrap();
-        let store = store(&dir).await;
-        let session = store.create("proj-a").await.unwrap();
-        store
-            .append_messages(&session.id, &[Message::user("x")])
-            .await
-            .unwrap();
-
-        assert!(store.delete(&session.id).await.unwrap());
-        assert!(store.load(&session.id).await.unwrap().is_none());
-        assert!(
-            store
-                .list_for_project("proj-a", 10)
-                .await
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[tokio::test]

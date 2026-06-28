@@ -5,19 +5,8 @@ use crate::shared::kernel::message::Message;
 /// message is never stored — it is regenerated per session from the current memory digest.
 pub struct Session {
     pub id: String,
-    /// The workspace this session belongs to (`project_id_from_path`), so sessions list per project.
-    // load-only; surfaced once the session UI/sync lands
-    #[allow(dead_code)]
-    pub project_id: String,
     /// A short human label derived from the first user message; shown in the `/sessions` picker.
     pub title: String,
-    /// Persisted timestamps, part of the loaded entity.
-    // load-only; surfaced once the session UI/sync lands
-    #[allow(dead_code)]
-    pub created_at: String,
-    // load-only; surfaced once the session UI/sync lands
-    #[allow(dead_code)]
-    pub updated_at: String,
     pub messages: Vec<Message>,
     /// How many stored rows `load` dropped as corrupt/unparseable (always 0 for a freshly created
     /// session). The resume path surfaces a Notice when non-zero so a silently-shortened conversation is
