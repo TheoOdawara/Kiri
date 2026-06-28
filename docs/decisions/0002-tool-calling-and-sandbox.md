@@ -33,7 +33,7 @@ feed results back → continue), which the current single-turn REPL does not hav
   directories — the CLI prompts `[s/N]`. A decline returns a "declined by user" result to the model
   rather than executing. Create-in-existing-dir, read, list, and search run without a prompt.
 
-**Sandbox root** is the clap flag `--path <dir>` (also `T_CLI_PATH`), defaulting to the current working
+**Sandbox root** is the clap flag `--path <dir>` (also `KIRI_PATH`), defaulting to the current working
 directory, canonicalized at boot with fail-fast on a missing or non-directory path. The flag uses clap's
 derive `env`, consistent with the established CLI convention.
 

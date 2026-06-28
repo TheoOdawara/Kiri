@@ -9,7 +9,7 @@ use crate::shared::kernel::provider::{Effort, ProviderProfile};
 use crate::shared::kernel::sandbox::NetworkPolicy;
 
 use super::defaults::{
-    DEFAULT_PLAN_BLACKLIST, DEFAULT_RW_DIRS, HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT,
+    DEFAULT_PLAN_ALLOW, DEFAULT_RW_DIRS, HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT,
     MAX_TOOL_CALLS_PER_CHECKPOINT, TOOL_CHECKPOINT,
 };
 use super::raw::{
@@ -36,7 +36,7 @@ pub struct Settings {
     pub seed: Option<String>,
     pub checkpoint_budget: Duration,
     pub max_tool_calls: usize,
-    pub plan_blacklist: Arc<[Regex]>,
+    pub plan_allow: Arc<[Regex]>,
     /// Whether OS-level command confinement is active (`KIRI_SANDBOX` ≠ `off`, facility available).
     pub sandbox_enabled: bool,
     /// `KIRI_SANDBOX=require`: refuse `run_command` when no OS sandbox is available.
@@ -97,9 +97,7 @@ impl Settings {
     /// hands the values here. No `.env`: the harness owns its config (TOML) and secrets (keyring); a
     /// first run with no config seeds a default NVIDIA provider and writes a starter `~/.kiri/config.toml`.
     pub fn resolve(cli_path: Option<PathBuf>, cli_prompt: Option<String>) -> Result<Self> {
-        let path = cli_path
-            .or_else(|| std::env::var_os("T_CLI_PATH").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("."));
+        let path = cli_path.unwrap_or_else(|| PathBuf::from("."));
 
         let global_dir = kiri_global_dir();
         // Keep the kiri dir owner-only so the non-secret config.toml (co-located with credentials.json)
@@ -153,7 +151,7 @@ impl Settings {
             seed: cli_prompt,
             checkpoint_budget: TOOL_CHECKPOINT,
             max_tool_calls: MAX_TOOL_CALLS_PER_CHECKPOINT,
-            plan_blacklist: compile_patterns("KIRI_PLAN_BLACKLIST", DEFAULT_PLAN_BLACKLIST)?,
+            plan_allow: compile_patterns("KIRI_PLAN_ALLOW", DEFAULT_PLAN_ALLOW)?,
             sandbox_enabled,
             require_confinement,
             sandbox_network: resolve_sandbox_network(config.sandbox.network.as_deref()),

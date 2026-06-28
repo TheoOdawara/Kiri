@@ -22,8 +22,9 @@ identity: (a) a real name, and (b) how a full-screen TUI fits the modular-hexago
 The paulownia — the family kamon, and the wood of the chest (*kiri-dansu*) that protects a household's
 most precious goods (the harness's safety-first thesis). Homophone with 切り ("cut", i.e. code). The
 binary and command are `kiri`. The rename is strings/config only — package name, clap command name,
-the system-prompt identity, and docs. The sandbox-root env var becomes `KIRI_PATH`; the legacy
-`T_CLI_PATH` is still honored as a fallback (resolved in `Settings::load`, no `unsafe` env mutation).
+the system-prompt identity, and docs. The sandbox-root env var becomes `KIRI_PATH`. (The legacy
+`T_CLI_PATH` fallback was kept transitionally and later removed pre-launch — no legacy users — so only
+`KIRI_PATH` remains.)
 
 ### TUI: a new `tui` module, additive to the engine
 

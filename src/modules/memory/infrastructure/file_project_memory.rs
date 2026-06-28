@@ -55,7 +55,7 @@ async fn read_capped(path: &Path) -> AgentResult<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Markdown-based project memory storage with YAML front-matter.
+/// Markdown-based project memory storage with TOML front-matter.
 /// Structure:
 ///   .kiri/memory/
 ///   ├── index.json          # Index: id -> { path, kind, tags, updated_at }
@@ -221,31 +221,34 @@ impl FileProjectMemory {
     }
 }
 
-/// Parse a memory entry from its Markdown file body: YAML front-matter between the leading `---` fences,
-/// or — with no front-matter — the whole body as a `Fact`. Pure: it reads neither `self` nor the path.
+/// Parse a memory entry from its Markdown file body: TOML front-matter between leading `+++` fences,
+/// or — with no front-matter — the whole body as a `Fact`. TOML (not YAML) removes a YAML parser from
+/// the attack surface of attacker-influenceable memory files, reusing the `toml` crate the config layer
+/// already depends on. A file without `+++` fences — including a legacy `---` YAML file from before the
+/// switch — has no parseable front-matter and falls through to the `Fact` body case (graceful, never a
+/// parse error). Pure: it reads neither `self` nor the path.
+// ponytail: no on-disk migration of pre-existing `---` files — pre-launch, there are no released users,
+// so legacy dev files simply re-distill via the Fact fallback. Upgrade path: write a one-time `---`→`+++`
+// converter here if a TOML-format change ships after there is an installed base.
 fn parse_markdown_file(content: &str) -> AgentResult<MemoryEntry> {
-    let (front_matter, body) = match content.strip_prefix("---\n") {
-        Some(after) => match after.find("\n---\n") {
-            Some(end) => (Some(&after[..end]), &after[end + 5..]),
-            None => (None, content),
-        },
-        None => (None, content),
-    };
+    let front_matter = content
+        .strip_prefix("+++\n")
+        .and_then(|after| after.find("\n+++\n").map(|end| &after[..end]));
 
     let entry = if let Some(fm) = front_matter {
-        serde_norway::from_str(fm).map_err(AgentError::memory)?
+        toml::from_str(fm).map_err(AgentError::memory)?
     } else {
-        // Fallback for a file without front-matter: treat the whole body as a Fact.
-        MemoryEntry::new(MemoryKind::Fact, body.to_string(), HashSet::new(), None)
+        // Fallback for a file without `+++` front-matter: treat the whole body as a Fact.
+        MemoryEntry::new(MemoryKind::Fact, content.to_string(), HashSet::new(), None)
     };
 
     Ok(entry)
 }
 
-/// Render a memory entry as a Markdown file: YAML front-matter followed by the content body.
+/// Render a memory entry as a Markdown file: TOML front-matter between `+++` fences, then the content body.
 fn render_markdown_file(entry: &MemoryEntry) -> AgentResult<String> {
-    let front_matter = serde_norway::to_string(entry).map_err(AgentError::memory)?;
-    Ok(format!("---\n{}---\n\n{}", front_matter, entry.content))
+    let front_matter = toml::to_string(entry).map_err(AgentError::memory)?;
+    Ok(format!("+++\n{}+++\n\n{}", front_matter, entry.content))
 }
 
 #[async_trait::async_trait]
@@ -430,9 +433,8 @@ mod tests {
     }
 
     #[test]
-    fn front_matter_round_trips_after_crate_swap() {
-        // BUILD-05 regression lock: the maintained YAML crate must (de)serialize the entry
-        // front-matter so existing `.kiri/memory/*.md` files still parse after the swap.
+    fn front_matter_round_trips_as_toml() {
+        // BUILD-05: front-matter is TOML between `+++` fences; render→parse must round-trip the entry.
         let entry = MemoryEntry::new(
             MemoryKind::Pattern,
             "Prefer guard clauses".into(),
@@ -440,13 +442,23 @@ mod tests {
             None,
         );
         let rendered = render_markdown_file(&entry).unwrap();
-        assert!(rendered.starts_with("---\n"));
+        assert!(rendered.starts_with("+++\n"));
         let parsed = parse_markdown_file(&rendered).unwrap();
         assert_eq!(parsed.id, entry.id);
         assert_eq!(parsed.kind, MemoryKind::Pattern);
         assert_eq!(parsed.content, entry.content);
         assert!(parsed.tags.contains("rust"));
         assert!(parsed.tags.contains("style"));
+    }
+
+    #[test]
+    fn legacy_yaml_front_matter_falls_back_to_fact() {
+        // A pre-switch `---` YAML file has no `+++` front-matter, so it must parse as a Fact body rather
+        // than erroring — the graceful, no-migration path for pre-launch dev files.
+        let legacy = "---\nid: x\nkind: pattern\n---\n\nold body";
+        let parsed = parse_markdown_file(legacy).unwrap();
+        assert_eq!(parsed.kind, MemoryKind::Fact);
+        assert!(parsed.content.contains("old body"));
     }
 
     #[tokio::test]
