@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 
 use crate::modules::agent::application::agent_loop::AgentLoop;
-use crate::modules::memory::application::memory_port::{MemoryPort, MemoryPortImpl};
+use crate::modules::memory::application::memory_port::{LayeredMemory, Memory};
 use crate::modules::memory::application::project_memory::ProjectMemory;
 use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::domain::entry::MemoryEntry;
@@ -271,7 +271,7 @@ async fn build_sync_memory(settings: &Settings) -> Result<Arc<dyn SharedMemory>>
 async fn build_memory(
     settings: &Settings,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
-) -> Result<(Vec<Box<dyn Tool>>, String, Arc<dyn MemoryPort>)> {
+) -> Result<(Vec<Box<dyn Tool>>, String, Arc<dyn Memory>)> {
     if !settings.memory_enabled {
         return Ok((Vec::new(), String::new(), inert_memory_port(settings)?));
     }
@@ -329,11 +329,11 @@ async fn build_memory(
         Vec::new()
     };
 
-    let port = MemoryPortImpl::new(
+    let port = LayeredMemory::new(
         FileProjectStore::new(project_memory, project_ok),
         SqliteSharedStore::new(shared_memory, shared_ok),
     );
-    let memory: Arc<dyn MemoryPort> = match embedder {
+    let memory: Arc<dyn Memory> = match embedder {
         Some(embedder) => Arc::new(port.with_embedder(embedder)),
         None => Arc::new(port),
     };
@@ -396,11 +396,11 @@ fn build_embedder(
 }
 
 /// Build an inert memory port (both scopes unavailable) for the memory-disabled boot, so the runtime can
-/// hold a non-optional `Arc<dyn MemoryPort>` whose every write is a graceful no-op.
-fn inert_memory_port(settings: &Settings) -> Result<Arc<dyn MemoryPort>> {
+/// hold a non-optional `Arc<dyn Memory>` whose every write is a graceful no-op.
+fn inert_memory_port(settings: &Settings) -> Result<Arc<dyn Memory>> {
     let project = FileProjectMemory::new(settings.path.join(".kiri").join("memory"));
     let shared = SqliteSharedMemory::in_memory()?;
-    Ok(Arc::new(MemoryPortImpl::new(
+    Ok(Arc::new(LayeredMemory::new(
         FileProjectStore::new(project, false),
         SqliteSharedStore::new(shared, false),
     )))

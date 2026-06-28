@@ -31,7 +31,7 @@ use tokio_stream::StreamExt;
 
 use crate::modules::agent::application::agent_loop::AgentLoop;
 use crate::modules::agent::application::approval_policy::Approval;
-use crate::modules::memory::application::memory_port::MemoryPort;
+use crate::modules::memory::application::memory_port::Memory;
 use crate::modules::session::application::session_store::SessionStore;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
@@ -78,7 +78,7 @@ pub struct Tui {
     /// disabled or the store failed to initialize — every call is then a graceful no-op.
     session_store: Arc<dyn SessionStore>,
     /// The durable memory, used to drive the end-of-session distillation. Inert scopes make it a no-op.
-    memory: Arc<dyn MemoryPort>,
+    memory: Arc<dyn Memory>,
     /// The workspace id sessions are keyed by; recomputed on `/cd`.
     project_id: String,
 }
@@ -95,7 +95,7 @@ pub struct TuiParams {
     pub sync_context: SyncContext,
     pub needs_onboarding: bool,
     pub session_store: Arc<dyn SessionStore>,
-    pub memory: Arc<dyn MemoryPort>,
+    pub memory: Arc<dyn Memory>,
     pub project_id: String,
 }
 
@@ -112,7 +112,7 @@ pub(super) struct RunLoop {
     config_path: PathBuf,
     sync_context: SyncContext,
     session_store: Arc<dyn SessionStore>,
-    memory: Arc<dyn MemoryPort>,
+    memory: Arc<dyn Memory>,
     project_id: String,
     cursor: SessionCursor,
 }

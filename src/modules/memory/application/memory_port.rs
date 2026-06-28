@@ -220,11 +220,6 @@ where
     }
 }
 
-// Back-compat aliases for the composition root (`app.rs`) and the TUI runtime, which still import the old
-// `MemoryPort`/`MemoryPortImpl` names. Temporary: drop once those two files adopt `Memory`/`LayeredMemory`.
-pub use LayeredMemory as MemoryPortImpl;
-pub use Memory as MemoryPort;
-
 #[cfg(test)]
 mod tests {
     use super::*;
