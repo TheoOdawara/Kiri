@@ -66,19 +66,6 @@ fn allows_absolute_path_outside_root() {
 }
 
 #[test]
-fn expand_tilde_expands_leading_home() {
-    let home = Path::new("/home/u");
-    assert_eq!(expand_tilde("~", Some(home)), PathBuf::from("/home/u"));
-    assert_eq!(
-        expand_tilde("~/dev/x", Some(home)),
-        PathBuf::from("/home/u/dev/x")
-    );
-    assert_eq!(expand_tilde("dev/x", Some(home)), PathBuf::from("dev/x"));
-    assert_eq!(expand_tilde("/abs", Some(home)), PathBuf::from("/abs"));
-    assert_eq!(expand_tilde("~/x", None), PathBuf::from("~/x"));
-}
-
-#[test]
 fn secret_dir_component_flags_credential_directories() {
     let dir = TempDir::new().unwrap();
     let sb = sandbox(&dir);

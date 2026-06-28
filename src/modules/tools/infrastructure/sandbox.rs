@@ -7,6 +7,7 @@ use crate::modules::tools::application::command_sandbox::{CommandSandbox, Sandbo
 use crate::modules::tools::application::sandbox::{CreateResolution, Sandbox};
 #[cfg(test)]
 use crate::modules::tools::infrastructure::confine::noop::NoConfinement;
+use crate::modules::tools::infrastructure::path::{expand_tilde, home};
 use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::sandbox::NetworkPolicy;
@@ -333,38 +334,6 @@ impl FsSandbox {
         }
         Ok(())
     }
-}
-
-/// Expand a leading `~` (alone) or `~/…` to `home`; any other path is returned unchanged. `~user` is
-/// intentionally not expanded. Pure, for testability.
-fn expand_tilde(path: &str, home: Option<&Path>) -> PathBuf {
-    if let Some(home) = home {
-        if path == "~" {
-            return home.to_path_buf();
-        }
-        if let Some(rest) = path.strip_prefix("~/") {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(path)
-}
-
-fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-/// Whether a tool path targets an explicit absolute location (after `~` expansion) — i.e. potentially
-/// outside the active workspace. Used to pick the confirmation default (accept inside, decline outside).
-/// The model emits Unix-style paths, so a leading `/` is treated as absolute on every platform
-/// (`Path::is_absolute` would miss it on Windows, where a drive prefix is required).
-pub(crate) fn is_absolute_target(path: &str) -> bool {
-    path.starts_with('/') || expand_tilde(path, home().as_deref()).is_absolute()
-}
-
-/// The confirmation default for a tool path: accept inside the workspace, decline for an explicit
-/// absolute/`~` target (potentially outside it). The single source of the in/out-of-workspace rule.
-pub(crate) fn default_accept_for(path: &str) -> bool {
-    !is_absolute_target(path)
 }
 
 #[path = "sandbox_tests.rs"]

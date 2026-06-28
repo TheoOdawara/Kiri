@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::infrastructure::args::parse;
-use crate::modules::tools::infrastructure::sandbox::default_accept_for;
+use crate::modules::tools::infrastructure::path::default_accept_for;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// The result of executing a tool. Failures are data the model reads and recovers from — never panics
