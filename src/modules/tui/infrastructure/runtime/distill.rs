@@ -111,6 +111,11 @@ impl RunLoop {
         self.model.busy = false;
         match outcome {
             None => self.model.notify_info("destilação pulada"),
+            // ERR-01: a durable-write failure must be surfaced, never folded silently into "nothing kept".
+            Some(Ok(report)) if report.failed > 0 => self.model.notify_info(format!(
+                "memória: {} aprendizado(s) salvos, {} falha(s) ao gravar",
+                report.written, report.failed
+            )),
             Some(Ok(report)) if report.written > 0 => self.model.notify_info(format!(
                 "memória atualizada: {} aprendizado(s)",
                 report.written

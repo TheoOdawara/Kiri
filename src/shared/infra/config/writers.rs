@@ -49,7 +49,10 @@ fn update_global_config(
             AgentError::Config(format!("failed to create {}: {e}", parent.display()))
         })?;
     }
-    std::fs::write(config_path, body).map_err(|e| {
+    // DATA-01: write atomically (temp sibling + rename). A plain truncate-then-write could leave the
+    // boot-critical `~/.kiri/config.toml` truncated on a crash mid-write, and the fail-fast global loader
+    // would then abort the next boot. The sync path already writes this file atomically — match it here.
+    crate::shared::infra::fs::write_atomic_sync(config_path, body.as_bytes()).map_err(|e| {
         AgentError::Config(format!(
             "failed to write config at {}: {e}",
             config_path.display()
@@ -136,7 +139,10 @@ pub(super) fn write_starter_config(
     };
     let body = toml::to_string_pretty(&config)
         .map_err(|e| anyhow!("failed to serialize starter config: {e}"))?;
-    std::fs::write(path, body).map_err(|e| anyhow!("failed to write {}: {e}", path.display()))?;
+    // DATA-01: atomic write (see `update_global_config`) so a crash mid-write never leaves a truncated
+    // boot-critical config behind.
+    crate::shared::infra::fs::write_atomic_sync(path, body.as_bytes())
+        .map_err(|e| anyhow!("failed to write {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -211,6 +217,20 @@ read_timeout_ms = 99000
             persist_active_model(&bad, "nvidia", "m"),
             Err(AgentError::Config(_))
         ));
+    }
+
+    #[test]
+    fn config_writes_are_atomic_no_temp_sibling_lingers() {
+        // DATA-01: the live writers must go through the atomic temp-then-rename path, so no temp sibling
+        // lingers after a successful write and a crash can never leave config.toml truncated.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        persist_effort(&path, Effort::High).unwrap();
+        assert!(path.exists());
+        assert!(
+            !dir.path().join(".config.toml.kiri-tmp").exists(),
+            "the atomic write must consume the temp sibling"
+        );
     }
 
     #[test]

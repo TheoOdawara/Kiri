@@ -34,6 +34,17 @@ pub async fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Synchronous sibling of `write_atomic`, for the config writers that run outside an async context (the
+/// live `/effort`/`/models`/`/provider` handlers). Same crash-safety: write the temp sibling, then rename
+/// it over `path`, so a crash mid-write can never leave the boot-critical `config.toml` truncated. Returns
+/// the raw `io::Result` so the caller maps it to its own `AgentError` variant.
+pub(crate) fn write_atomic_sync(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let tmp = temp_sibling(path);
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +80,19 @@ mod tests {
                 entry.file_name()
             );
         }
+    }
+
+    #[test]
+    fn write_atomic_sync_overwrites_and_leaves_no_temp() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("config.toml");
+        write_atomic_sync(&target, b"first").unwrap();
+        write_atomic_sync(&target, b"second").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "second");
+        assert!(
+            !dir.path().join(".config.toml.kiri-tmp").exists(),
+            "the sync atomic write must consume the temp sibling"
+        );
     }
 
     #[tokio::test]

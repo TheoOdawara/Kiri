@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rusqlite::{Connection, params};
 use uuid::Uuid;
@@ -7,10 +8,18 @@ use uuid::Uuid;
 use crate::modules::session::application::session_store::SessionStore;
 use crate::modules::session::domain::session::{Session, SessionSummary};
 use crate::modules::session::infrastructure::message_dto::StoredMessage;
-use crate::shared::infra::sqlite::{DB_OP_TIMEOUT, lock, open_with_parent, run_blocking};
+use crate::shared::infra::sqlite::{lock, open_with_parent, run_blocking};
 use crate::shared::kernel::error::{AgentError, AgentResult};
 use crate::shared::kernel::message::Message;
 use crate::shared::kernel::time::now_rfc3339;
+
+/// `busy_timeout` for cross-process write contention on the global sessions DB. Kept STRICTLY BELOW
+/// `DB_OP_TIMEOUT` so a persistent lock surfaces as a deterministic `SQLITE_BUSY` error *before* the
+/// op-level `tokio::time` timeout fires. If they were equal, the timeout could win the race and cancel
+/// the awaiting future while the detached blocking commit is still in flight: `flush_session` would
+/// return early without advancing `persisted_len`, and the next flush would re-append the same delta
+/// with fresh ordinals, duplicating messages on resume (BUG-01).
+const SESSION_BUSY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Conversation persistence in a single SQLite database (`~/.kiri/sessions.db`). Mirrors
 /// `SqliteSharedMemory`: the blocking `rusqlite` connection lives behind `Arc<Mutex<_>>` and every query
@@ -32,9 +41,10 @@ impl SqliteSessionStore {
         let conn = open_with_parent(&db_path, AgentError::session)?;
         // ~/.kiri/sessions.db is global across every workspace and terminal, so a second running Kiri
         // can contend for a write. SQLITE_BUSY returns instantly (the op timeout cannot wait it out), so
-        // a busy_timeout lets brief cross-process contention be waited out instead of failing. WAL is a
-        // best-effort throughput win that also reduces reader/writer contention.
-        conn.busy_timeout(DB_OP_TIMEOUT)
+        // a busy_timeout lets brief cross-process contention be waited out instead of failing — kept below
+        // DB_OP_TIMEOUT (see SESSION_BUSY_TIMEOUT) so a persistent lock fails deterministically before the
+        // op timeout fires. WAL is a best-effort throughput win that also reduces reader/writer contention.
+        conn.busy_timeout(SESSION_BUSY_TIMEOUT)
             .map_err(AgentError::session)?;
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         Ok(Self {
@@ -344,6 +354,17 @@ mod tests {
         let store = SqliteSessionStore::new(db).unwrap();
         store.init().await.unwrap();
         store
+    }
+
+    #[test]
+    fn busy_timeout_is_strictly_below_the_op_timeout() {
+        // BUG-01: if busy_timeout == DB_OP_TIMEOUT, the op-level tokio timeout can cancel an in-flight
+        // commit on a persistent cross-process lock, leaving flush_session to re-append the same delta
+        // and duplicate messages on resume. The busy_timeout must resolve SQLITE_BUSY first.
+        assert!(
+            SESSION_BUSY_TIMEOUT < crate::shared::infra::sqlite::DB_OP_TIMEOUT,
+            "SESSION_BUSY_TIMEOUT {SESSION_BUSY_TIMEOUT:?} must be < DB_OP_TIMEOUT to fail deterministically first"
+        );
     }
 
     #[tokio::test]

@@ -24,10 +24,14 @@ struct DistilledEntry {
     scope: String,
 }
 
-/// What a distillation pass wrote and skipped, for a user-facing summary.
+/// What a distillation pass wrote, skipped, and failed to write, for a user-facing summary. `failed`
+/// counts entries whose durable write itself errored (DB locked, disk full) — kept distinct from
+/// `skipped` (a legitimate dedup/validation/unavailable skip) so a real persistence failure is surfaced,
+/// not silently swallowed (ERR-01).
 pub struct DistillReport {
     pub written: usize,
     pub skipped: usize,
+    pub failed: usize,
 }
 
 impl DistillReport {
@@ -35,6 +39,7 @@ impl DistillReport {
         Self {
             written: 0,
             skipped: 0,
+            failed: 0,
         }
     }
 }
@@ -123,32 +128,36 @@ impl Distiller {
         let entries = parse_entries(&completed.content)?;
         let mut report = DistillReport::empty();
         for raw in entries.into_iter().take(self.max_entries) {
-            if self.persist(raw).await {
-                report.written += 1;
-            } else {
-                report.skipped += 1;
+            match self.persist(raw).await {
+                Ok(true) => report.written += 1,
+                Ok(false) => report.skipped += 1,
+                // ERR-01: a real durable-write failure (DB locked, disk full) is surfaced as `failed`,
+                // never folded into `skipped` where it would be indistinguishable from a dedup skip and
+                // invisible to the user. Continue the pass — one transient failure must not drop the rest.
+                Err(_) => report.failed += 1,
             }
         }
         Ok(report)
     }
 
-    /// Validate, dedup, and persist one proposed entry. Returns whether it was written.
-    async fn persist(&self, raw: DistilledEntry) -> bool {
+    /// Validate, dedup, and persist one proposed entry. `Ok(true)` written, `Ok(false)` a legitimate skip
+    /// (invalid kind/scope, scope unavailable, or a duplicate), `Err` the durable write itself failed.
+    async fn persist(&self, raw: DistilledEntry) -> AgentResult<bool> {
         let Ok(kind) = raw.kind.parse::<MemoryKind>() else {
-            return false;
+            return Ok(false);
         };
         let Some(scope) = Scope::from_wire(&raw.scope) else {
-            return false;
+            return Ok(false);
         };
         let available = match scope {
             Scope::Shared => self.memory.shared_memory_available(),
             Scope::Project => self.memory.project_memory_available(),
         };
         if !available {
-            return false;
+            return Ok(false);
         }
         if self.is_duplicate(&raw.content, scope).await {
-            return false;
+            return Ok(false);
         }
         let entry = MemoryEntry::new(
             kind,
@@ -156,11 +165,11 @@ impl Distiller {
             raw.tags.into_iter().collect(),
             scope.project_id_for(&self.project_id),
         );
-        let result = match scope {
+        match scope {
             Scope::Shared => self.memory.remember_shared(entry).await,
             Scope::Project => self.memory.remember_project(entry).await,
-        };
-        result.is_ok()
+        }
+        .map(|()| true)
     }
 
     /// Whether an equivalent entry already exists in the target scope, so re-learning the same fact each
@@ -403,6 +412,47 @@ mod tests {
             .unwrap();
         assert_eq!(report.written, 0);
         assert_eq!(report.skipped, 2);
+    }
+
+    /// A `Memory` whose scopes are available but every durable write errors — to exercise ERR-01.
+    struct FailingMemory;
+
+    #[async_trait::async_trait]
+    impl Memory for FailingMemory {
+        async fn recall_project(&self, _: &str, _: usize) -> AgentResult<Vec<MemoryEntry>> {
+            Ok(Vec::new())
+        }
+        async fn recall_shared(&self, _: &str, _: usize) -> AgentResult<Vec<MemoryEntry>> {
+            Ok(Vec::new())
+        }
+        async fn remember_project(&self, _: MemoryEntry) -> AgentResult<()> {
+            Err(AgentError::Memory("disk full".into()))
+        }
+        async fn remember_shared(&self, _: MemoryEntry) -> AgentResult<()> {
+            Err(AgentError::Memory("disk full".into()))
+        }
+        fn project_memory_available(&self) -> bool {
+            true
+        }
+        fn shared_memory_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_failure_is_counted_as_failed_not_skipped() {
+        // ERR-01: a durable-write error must surface as `failed`, distinct from a dedup/validation skip.
+        let distiller = Distiller::new(Arc::new(FailingMemory), "proj-a".into());
+        let provider = ScriptedProvider {
+            content: r#"[{"kind":"fact","content":"the sky is blue","scope":"shared"}]"#.into(),
+        };
+        let report = distiller
+            .distill(&provider, "m", &conversation())
+            .await
+            .unwrap();
+        assert_eq!(report.written, 0);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(report.failed, 1, "a write error must be counted as failed");
     }
 
     #[tokio::test]
