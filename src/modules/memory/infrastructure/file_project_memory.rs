@@ -195,7 +195,7 @@ impl FileProjectMemory {
         // Use the full id: a UUID v7 prefix is a millisecond timestamp, so two entries of the same kind
         // saved in the same millisecond share their leading chars — a truncated name would collide and
         // one would silently overwrite the other (data loss).
-        let filename = format!("{}-{}.md", kind.as_str(), id);
+        let filename = format!("{}-{}.md", kind.as_wire(), id);
         match kind {
             MemoryKind::Decision => self.root.join("decisions").join(filename),
             _ => self.root.join(filename),

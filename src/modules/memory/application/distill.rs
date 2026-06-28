@@ -134,7 +134,7 @@ impl Distiller {
 
     /// Validate, dedup, and persist one proposed entry. Returns whether it was written.
     async fn persist(&self, raw: DistilledEntry) -> bool {
-        let Some(kind) = MemoryKind::from_str(&raw.kind) else {
+        let Ok(kind) = raw.kind.parse::<MemoryKind>() else {
             return false;
         };
         let Some(scope) = Scope::from_wire(&raw.scope) else {

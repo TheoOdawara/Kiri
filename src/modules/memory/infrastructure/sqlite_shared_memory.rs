@@ -126,7 +126,7 @@ fn row_to_entry(row: &Row) -> rusqlite::Result<MemoryEntry> {
     let tags: String = row.get("tags")?;
     Ok(MemoryEntry {
         id: row.get("id")?,
-        kind: MemoryKind::from_str(&kind).unwrap_or(MemoryKind::Fact),
+        kind: kind.parse::<MemoryKind>().unwrap_or(MemoryKind::Fact),
         content: row.get("content")?,
         tags: serde_json::from_str(&tags).unwrap_or_default(),
         project_id: row.get("project_id")?,
@@ -208,7 +208,7 @@ impl SharedMemory for SqliteSharedMemory {
                     kind = ?2, content = ?3, tags = ?4, project_id = ?5, updated_at = ?7",
                 params![
                     entry.id,
-                    entry.kind.as_str(),
+                    entry.kind.as_wire(),
                     entry.content,
                     tags,
                     entry.project_id,
@@ -272,7 +272,7 @@ impl SharedMemory for SqliteSharedMemory {
         query_entries(
             self.conn.clone(),
             format!("SELECT {SELECT_COLUMNS} WHERE kind = ?1 ORDER BY updated_at DESC LIMIT ?2"),
-            vec![Box::new(kind.as_str().to_string()), Box::new(limit as i64)],
+            vec![Box::new(kind.as_wire().to_string()), Box::new(limit as i64)],
         )
         .await
     }

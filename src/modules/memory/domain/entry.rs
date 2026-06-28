@@ -1,6 +1,8 @@
+use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::time::now_rfc3339;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::str::FromStr;
 use uuid::Uuid;
 
 /// Memory entry kind — categorizes the content to ease search and use.
@@ -38,7 +40,9 @@ impl MemoryKind {
         ]
     }
 
-    pub fn as_str(&self) -> &'static str {
+    /// The wire string for this kind, used in tool schemas, the SQLite `kind` column, and the Markdown
+    /// filename. Paired with the `FromStr` impl so the enum has one round-trippable wire shape.
+    pub fn as_wire(&self) -> &'static str {
         match self {
             MemoryKind::Decision => "decision",
             MemoryKind::Pattern => "pattern",
@@ -49,24 +53,28 @@ impl MemoryKind {
             MemoryKind::Preference => "preference",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for MemoryKind {
+    type Err = AgentError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "decision" => Some(MemoryKind::Decision),
-            "pattern" => Some(MemoryKind::Pattern),
-            "anti-pattern" => Some(MemoryKind::AntiPattern),
-            "snippet" => Some(MemoryKind::Snippet),
-            "heuristic" => Some(MemoryKind::Heuristic),
-            "fact" => Some(MemoryKind::Fact),
-            "preference" => Some(MemoryKind::Preference),
-            _ => None,
+            "decision" => Ok(MemoryKind::Decision),
+            "pattern" => Ok(MemoryKind::Pattern),
+            "anti-pattern" => Ok(MemoryKind::AntiPattern),
+            "snippet" => Ok(MemoryKind::Snippet),
+            "heuristic" => Ok(MemoryKind::Heuristic),
+            "fact" => Ok(MemoryKind::Fact),
+            "preference" => Ok(MemoryKind::Preference),
+            other => Err(AgentError::Memory(format!("unknown memory kind '{other}'"))),
         }
     }
 }
 
 impl std::fmt::Display for MemoryKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(self.as_wire())
     }
 }
 
@@ -127,7 +135,7 @@ impl MemoryEntry {
         let q = query.to_lowercase();
         self.content.to_lowercase().contains(&q)
             || self.tags.iter().any(|t| t.to_lowercase().contains(&q))
-            || self.kind.as_str().contains(&q)
+            || self.kind.as_wire().contains(&q)
     }
 
     /// Format for display in the agent's context.
@@ -153,12 +161,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_kind_roundtrip() {
+    fn memory_kind_round_trips_through_wire() {
         for kind in MemoryKind::all() {
-            let s = kind.as_str();
-            assert_eq!(MemoryKind::from_str(s), Some(*kind));
+            assert_eq!(kind.as_wire().parse::<MemoryKind>().unwrap(), *kind);
         }
-        assert_eq!(MemoryKind::from_str("invalid"), None);
+    }
+
+    #[test]
+    fn memory_kind_parse_rejects_unknown() {
+        assert!("invalid".parse::<MemoryKind>().is_err());
+    }
+
+    #[test]
+    fn fact_parses_via_fromstr() {
+        assert_eq!("fact".parse::<MemoryKind>().unwrap(), MemoryKind::Fact);
     }
 
     #[test]

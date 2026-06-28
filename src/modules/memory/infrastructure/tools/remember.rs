@@ -94,7 +94,7 @@ impl Tool for Remember {
             Ok(args) => args,
             Err(out) => return out,
         };
-        let Some(kind) = MemoryKind::from_str(&args.kind) else {
+        let Ok(kind) = args.kind.parse::<MemoryKind>() else {
             return ToolOutcome::Error(format!(
                 "invalid kind '{}': expected one of decision, pattern, anti-pattern, snippet, \
                  heuristic, fact, preference",
