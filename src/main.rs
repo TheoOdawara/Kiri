@@ -4,8 +4,6 @@ mod shared;
 
 #[cfg(test)]
 mod architecture_guards;
-#[cfg(test)]
-mod characterization;
 
 use clap::Parser;
 

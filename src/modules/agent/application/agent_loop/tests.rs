@@ -866,7 +866,7 @@ async fn wall_clock_checkpoint_fires_with_an_elapsed_reason() {
 /// spinner / streaming on. A regression here is exactly "first message does nothing, no spinner".
 #[tokio::test]
 async fn run_through_the_real_bridge_emits_began_first_then_content() {
-    use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
+    use crate::modules::tui::infrastructure::runtime::bridge::{Bridge, CancelToken, EngineMsg};
     use crate::shared::kernel::stream_event::StreamEvent;
     use tokio::sync::mpsc;
 

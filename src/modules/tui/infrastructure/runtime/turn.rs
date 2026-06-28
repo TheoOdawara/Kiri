@@ -9,6 +9,8 @@ use anyhow::Result;
 use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 
+use super::bridge::EngineMsg;
+use super::input;
 use crate::modules::agent::application::agent_loop::TurnOutcome;
 use crate::modules::agent::application::approval_policy::Approval;
 use crate::modules::tui::application::effect::Effect;
@@ -17,8 +19,6 @@ use crate::modules::tui::application::update::update;
 use crate::modules::tui::domain::modal::PendingPlan;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::TranscriptItem;
-use crate::modules::tui::infrastructure::bridge::EngineMsg;
-use crate::modules::tui::infrastructure::input;
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::conversation::Conversation;
 use crate::shared::kernel::error::AgentError;

@@ -7,11 +7,11 @@ use ratatui::backend::Backend;
 use ratatui::layout::Rect;
 use ratatui::{DefaultTerminal, Terminal};
 
+use super::clipboard::{self, ClipboardContent};
 use crate::modules::tui::application::msg::Msg;
 use crate::modules::tui::application::update::update;
 use crate::modules::tui::domain::model::{Model, Motion};
 use crate::modules::tui::domain::selection::SelectionState;
-use crate::modules::tui::infrastructure::clipboard::{self, ClipboardContent};
 use crate::modules::tui::infrastructure::view::{frame_regions, view};
 use crate::modules::tui::infrastructure::widgets::{editor, selection_overlay};
 

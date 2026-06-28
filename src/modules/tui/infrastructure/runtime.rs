@@ -5,6 +5,14 @@
 //! render/clipboard glue. Re-exports keep `runtime::Tui`/`runtime::ProviderSwap`/`runtime::SyncContext`
 //! stable for `app::wire`.
 
+// The IO spine, folded in by STRUCT-08: the bridge to the engine, terminal input decoding, the system
+// clipboard, and the alternate-screen guard. Public and re-exported at the infrastructure root so the
+// `tui::infrastructure::{bridge,input,clipboard,terminal_guard}` paths keep resolving.
+pub mod bridge;
+pub mod clipboard;
+pub mod input;
+pub mod terminal_guard;
+
 mod distill;
 mod provider_swap;
 mod render;
@@ -29,6 +37,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{self, Interval};
 use tokio_stream::StreamExt;
 
+use self::bridge::{Bridge, CancelToken, EngineMsg};
+use self::terminal_guard::TerminalGuard;
 use crate::modules::agent::application::agent_loop::AgentLoop;
 use crate::modules::agent::application::approval_policy::Approval;
 use crate::modules::memory::application::memory_port::Memory;
@@ -40,9 +50,6 @@ use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::update::update;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::TranscriptItem;
-use crate::modules::tui::infrastructure::bridge::{Bridge, CancelToken, EngineMsg};
-use crate::modules::tui::infrastructure::input;
-use crate::modules::tui::infrastructure::terminal_guard::TerminalGuard;
 use crate::modules::tui::infrastructure::text;
 use crate::modules::tui::infrastructure::theme;
 use crate::shared::kernel::conversation::Conversation;
