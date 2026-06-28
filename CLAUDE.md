@@ -39,14 +39,14 @@ Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`
   **ports** they need, as **traits** (named by capability, no `I` prefix) · `infrastructure/` = **adapters**
   implementing the ports.
 - **Modules (bounded contexts):** `agent` (the `AgentLoop` + the UI
-  ports `Presenter`/`ApprovalPolicy`, plus the provider's `EventSink`; the conversation types it drives
-  live in shared/kernel), `provider` (the `CompletionProvider`
+  ports `Presenter`/`ApprovalPolicy`/`ToolObserver`, plus the provider's `EventSink`; the conversation
+  types it drives live in shared/kernel), `provider` (the `CompletionProvider`
   port + two API-key adapters — `openai` (chat-completions: NVIDIA / compatible / custom / OpenAI) and
   `anthropic` (Messages API) — plus the `SecretStore` port with `keyring`/`0600`-file adapters and the
   `factory` that picks the adapter from `(kind, auth)`; see ADRs 0011/0012), `tools` (the `Tool` trait + `ToolRegistry`
   + the `Sandbox` port — `FsSandbox` the fs adapter — + one fs adapter per tool), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
   adapter + the ratatui runtime — the sole front-end), `memory` (durable knowledge: `MemoryEntry`/`MemoryKind`
-  domain — kinds include `preference` — + the `MemoryPort`/`ProjectStore`/`SharedStore` ports + adapters —
+  domain — kinds include `preference` — + the `Memory`/`MemoryStore`/`SharedStore` ports + adapters —
   `FileProjectMemory` for project memory in `<workspace>/.kiri/memory/`, `SqliteSharedMemory` for shared
   memory in `~/.kiri/memory/shared.db`, `DocsLibrary` over `docs/` — the `recall_memory`/`remember`/
   `consult_docs` tools, semantic recall via the `EmbeddingProvider` port with a keyword fallback (ADR 0014),
@@ -129,6 +129,10 @@ that is surfaced is a failure you can fix; a swallowed one costs hours).
 - **Module convention:** declare submodules from the sibling `<name>.rs`, never an inner `mod.rs` (edition-2024 default, matches the whole tree).
 - **`async_trait` spelling:** always path-qualified `#[async_trait::async_trait]`; add `(?Send)` only for the single-threaded engine ports (and any test double impl'ing one). Never the bare-import `use async_trait::async_trait;` + `#[async_trait]` form.
 - **`Result` alias:** fallible port/adapter signatures use `AgentResult<T>` from `shared/kernel/error`; never a per-module `type Result<T>` shadow. `anyhow::Result` only at the binary edge.
+- **enum ↔ wire shape:** one rule — `fn as_wire(&self) -> &'static str` (or a `const fn`) plus `impl std::str::FromStr` (or a clearly-named `from_wire`); never a half-trait/half-inherent `from_str` that shadows the trait.
+- **DTO naming:** name a DTO for its role; no generic `Dto` suffix. Prefix `Wire`/`Stored` only where the bare name would collide with a kernel type.
+- **Module-header `//!`:** a re-export root or a kernel module file carries **no** descriptive `//!` banner (per-item `///` docs cover the *what*); a `//!` is reserved for a non-obvious structural *WHY* (e.g. the single-layer `modules/agent.rs`).
+- **Modal nav:** all four single-choice modals (menu/picker/wizard/approval/plan) wrap on Up/Down via the one `wrapping_step` helper.
 - **clap is the convention** — record any deviation as an ADR (`docs/decisions/`).
 - Keep the provider base URL / model / key configurable; never hardcode.
 - A PostToolUse hook auto-runs `cargo fmt` (+ clippy feedback) on `.rs` edits — see `docs/claude-tooling.md`.
