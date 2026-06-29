@@ -1,3 +1,6 @@
 /target
 
 /.env
+
+# Machine-local derived data under the project memory dir.
+/.kiri/memory/embeddings.json

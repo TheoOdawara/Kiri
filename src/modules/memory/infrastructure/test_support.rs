@@ -12,9 +12,7 @@ use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::application::shared_store::SharedStore;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::modules::memory::infrastructure::file_project_memory::FileProjectMemory;
-use crate::modules::memory::infrastructure::file_project_store::FileProjectStore;
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
-use crate::modules::memory::infrastructure::sqlite_shared_store::SqliteSharedStore;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
 use crate::shared::kernel::error::AgentResult;
@@ -23,13 +21,10 @@ use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 /// A `Memory` backed by real file (project) and SQLite (shared) stores under `dir`.
 pub async fn temp_port(dir: &TempDir) -> Arc<dyn Memory> {
     let project = FileProjectMemory::new(dir.path().join(".kiri").join("memory"));
-    let project_ok = project.init().await.is_ok();
+    project.init().await.unwrap();
     let shared = SqliteSharedMemory::new(dir.path().join("shared.db")).unwrap();
-    let shared_ok = shared.init().await.is_ok();
-    Arc::new(LayeredMemory::new(
-        FileProjectStore::new(project, project_ok),
-        SqliteSharedStore::new(shared, shared_ok),
-    ))
+    shared.init().await.unwrap();
+    Arc::new(LayeredMemory::new(project, shared))
 }
 
 /// A single in-memory store double covering both the base `MemoryStore` surface and the `SharedStore`

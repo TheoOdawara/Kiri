@@ -354,13 +354,10 @@ mod tests {
     /// content shares its keyword first.
     mod semantic {
         use super::*;
-        use crate::modules::memory::application::memory_store::MemoryStore;
         use crate::modules::memory::application::project_memory::ProjectMemory;
         use crate::modules::memory::application::shared_memory::SharedMemory;
         use crate::modules::memory::infrastructure::file_project_memory::FileProjectMemory;
-        use crate::modules::memory::infrastructure::file_project_store::FileProjectStore;
         use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
-        use crate::modules::memory::infrastructure::sqlite_shared_store::SqliteSharedStore;
         use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
         use tempfile::TempDir;
 
@@ -429,16 +426,16 @@ mod tests {
             }
         }
 
-        async fn shared_store(dir: &TempDir) -> SqliteSharedStore {
-            let inner = SqliteSharedMemory::new(dir.path().join("shared.db")).unwrap();
-            let ok = inner.init().await.is_ok();
-            SqliteSharedStore::new(inner, ok)
+        async fn shared_store(dir: &TempDir) -> SqliteSharedMemory {
+            let store = SqliteSharedMemory::new(dir.path().join("shared.db")).unwrap();
+            store.init().await.unwrap();
+            store
         }
 
-        async fn project_store(dir: &TempDir) -> FileProjectStore {
-            let inner = FileProjectMemory::new(dir.path().join(".kiri").join("memory"));
-            let ok = inner.init().await.is_ok();
-            FileProjectStore::new(inner, ok)
+        async fn project_store(dir: &TempDir) -> FileProjectMemory {
+            let store = FileProjectMemory::new(dir.path().join(".kiri").join("memory"));
+            store.init().await.unwrap();
+            store
         }
 
         #[tokio::test]
@@ -596,7 +593,7 @@ mod tests {
                 HashSet::new(),
                 Some("p".into()),
             );
-            shared.save(entry.clone()).await.unwrap();
+            SharedMemory::save(&shared, &entry).await.unwrap();
             shared
                 .save_embedding(&entry.id, "a", &[1.0, 0.0, 0.0])
                 .await

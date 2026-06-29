@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, Row, params};
@@ -16,6 +17,7 @@ const SELECT_COLUMNS: &str =
 /// blocking thread (`spawn_blocking`), so a slow disk never stalls the single-threaded TUI runtime.
 pub struct SqliteSharedMemory {
     conn: Arc<Mutex<Connection>>,
+    initialized: Arc<AtomicBool>,
 }
 
 impl SqliteSharedMemory {
@@ -25,6 +27,7 @@ impl SqliteSharedMemory {
         let conn = open_with_parent(&db_path, AgentError::memory)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            initialized: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -34,6 +37,7 @@ impl SqliteSharedMemory {
         let conn = Connection::open_in_memory().map_err(AgentError::memory)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            initialized: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -191,7 +195,9 @@ impl SharedMemory for SqliteSharedMemory {
             },
             AgentError::memory,
         )
-        .await
+        .await?;
+        self.initialized.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     async fn save(&self, entry: &MemoryEntry) -> AgentResult<()> {
@@ -316,6 +322,54 @@ impl SharedMemory for SqliteSharedMemory {
             AgentError::memory,
         )
         .await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::modules::memory::application::memory_store::MemoryStore for SqliteSharedMemory {
+    async fn save(&self, entry: MemoryEntry) -> AgentResult<()> {
+        SharedMemory::save(self, &entry).await
+    }
+
+    async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
+        SharedMemory::search(self, query, limit).await
+    }
+
+    #[allow(dead_code)]
+    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
+        SharedMemory::list_by_kind(self, kind, limit).await
+    }
+
+    #[allow(dead_code)]
+    async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
+        SharedMemory::list_by_tag(self, tag, limit).await
+    }
+
+    async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> AgentResult<()> {
+        SqliteSharedMemory::save_embedding(self, entry_id, model, vector).await
+    }
+
+    async fn embedded_candidates(
+        &self,
+        model: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<(MemoryEntry, Vec<f32>)>> {
+        SqliteSharedMemory::embedded_candidates(self, model, limit).await
+    }
+
+    fn is_available(&self) -> bool {
+        self.initialized.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::modules::memory::application::shared_store::SharedStore for SqliteSharedMemory {
+    async fn list_by_project(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<MemoryEntry>> {
+        SharedMemory::list_by_project(self, project_id, limit).await
     }
 }
 

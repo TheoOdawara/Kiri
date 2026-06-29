@@ -23,9 +23,7 @@ use crate::modules::memory::application::shared_memory::SharedMemory;
 use crate::modules::memory::domain::project_id::project_id_from_path;
 use crate::modules::memory::infrastructure::docs_library::DocsLibrary;
 use crate::modules::memory::infrastructure::file_project_memory::FileProjectMemory;
-use crate::modules::memory::infrastructure::file_project_store::FileProjectStore;
 use crate::modules::memory::infrastructure::sqlite_shared_memory::SqliteSharedMemory;
-use crate::modules::memory::infrastructure::sqlite_shared_store::SqliteSharedStore;
 use crate::modules::memory::infrastructure::tools::default_memory_tools;
 use crate::modules::provider::application::completion_provider::CompletionProvider;
 use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
@@ -325,10 +323,7 @@ async fn build_memory(
         Vec::new()
     };
 
-    let port = LayeredMemory::new(
-        FileProjectStore::new(project_memory, project_ok),
-        SqliteSharedStore::new(shared_memory, shared_ok),
-    );
+    let port = LayeredMemory::new(project_memory, shared_memory);
     let memory: Arc<dyn Memory> = match embedder {
         Some(embedder) => Arc::new(port.with_embedder(embedder)),
         None => Arc::new(port),
@@ -399,10 +394,8 @@ fn build_embedder(
 fn inert_memory_port(settings: &Settings) -> Result<Arc<dyn Memory>> {
     let project = FileProjectMemory::new(settings.path.join(".kiri").join("memory"));
     let shared = SqliteSharedMemory::in_memory()?;
-    Ok(Arc::new(LayeredMemory::new(
-        FileProjectStore::new(project, false),
-        SqliteSharedStore::new(shared, false),
-    )))
+    // Neither store has init() called — both report is_available() = false (inert mode).
+    Ok(Arc::new(LayeredMemory::new(project, shared)))
 }
 
 /// Wire the session store (SQLite at `~/.kiri/sessions.db`). Mirrors the memory contract: a store whose

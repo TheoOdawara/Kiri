@@ -5,6 +5,7 @@ use crate::shared::kernel::error::{AgentError, AgentResult};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
@@ -66,6 +67,7 @@ async fn read_capped(path: &Path) -> AgentResult<String> {
 pub struct FileProjectMemory {
     root: PathBuf,
     index: Arc<RwLock<ProjectIndex>>,
+    initialized: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -94,6 +96,7 @@ impl FileProjectMemory {
         Self {
             root,
             index: Arc::new(RwLock::new(ProjectIndex::default())),
+            initialized: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -256,6 +259,7 @@ impl ProjectMemory for FileProjectMemory {
     async fn init(&self) -> AgentResult<()> {
         self.ensure_dirs()?;
         self.load_index().await?;
+        self.initialized.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -398,6 +402,43 @@ impl ProjectMemory for FileProjectMemory {
             }
         }
         Ok(results)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::modules::memory::application::memory_store::MemoryStore for FileProjectMemory {
+    async fn save(&self, entry: MemoryEntry) -> AgentResult<()> {
+        ProjectMemory::save(self, &entry).await
+    }
+
+    async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
+        ProjectMemory::search(self, query, limit).await
+    }
+
+    #[allow(dead_code)]
+    async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
+        ProjectMemory::list_by_kind(self, kind, limit).await
+    }
+
+    #[allow(dead_code)]
+    async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
+        ProjectMemory::list_by_tag(self, tag, limit).await
+    }
+
+    async fn save_embedding(&self, entry_id: &str, model: &str, vector: &[f32]) -> AgentResult<()> {
+        FileProjectMemory::save_embedding(self, entry_id, model, vector).await
+    }
+
+    async fn embedded_candidates(
+        &self,
+        model: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<(MemoryEntry, Vec<f32>)>> {
+        FileProjectMemory::embedded_candidates(self, model, limit).await
+    }
+
+    fn is_available(&self) -> bool {
+        self.initialized.load(Ordering::Relaxed)
     }
 }
 
