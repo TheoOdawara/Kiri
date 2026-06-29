@@ -147,6 +147,10 @@ pub enum CredentialResolution {
         credential: Credential,
         persisted: Result<(), AgentError>,
     },
+    /// An env-var import the user opted out of persisting (`KIRI_NO_KEY_IMPORT`): the key is used for
+    /// this session only, the secret store is never written, so a single run / CI invocation leaves no
+    /// durable copy behind (SEC-07).
+    ImportedSessionOnly { credential: Credential },
     /// Nothing configured (no stored key, no env var) — a first-run signal, never a fatal abort.
     Absent,
 }
@@ -159,16 +163,30 @@ pub fn resolve_credential(
     profile: &ProviderProfile,
     secrets: &dyn SecretStore,
 ) -> Result<CredentialResolution, AgentError> {
-    resolve_credential_with_env(profile, secrets, api_key_from_env)
+    resolve_credential_with_env(profile, secrets, api_key_from_env, no_key_import_opt_out())
 }
 
-/// The testable core of [`resolve_credential`]: the env lookup is injected so the import path can be
-/// exercised without mutating process env (the crate forbids `unsafe`, so `set_var` is unavailable in
-/// tests). Production passes [`api_key_from_env`].
+/// Whether the user opted out of persisting a first-run env-key import via `KIRI_NO_KEY_IMPORT`
+/// (`1`/`true`, case-insensitive). Lets an env key drive a single session / CI run without writing a
+/// durable copy to the keyring or the `0600` fallback (SEC-07).
+fn no_key_import_opt_out() -> bool {
+    std::env::var("KIRI_NO_KEY_IMPORT")
+        .map(|v| {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("1") || v.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
+}
+
+/// The testable core of [`resolve_credential`]: the env lookup and the no-persist opt-out are injected
+/// so the import path can be exercised without mutating process env (the crate forbids `unsafe`, so
+/// `set_var` is unavailable in tests). Production passes [`api_key_from_env`] and
+/// [`no_key_import_opt_out`].
 fn resolve_credential_with_env(
     profile: &ProviderProfile,
     secrets: &dyn SecretStore,
     env_key: impl Fn(&ProviderProfile) -> Option<Secret>,
+    no_import: bool,
 ) -> Result<CredentialResolution, AgentError> {
     // Keyless: the key-presence decision was recorded in `profile.auth` at save time, so never consult
     // the store/env and ignore any stale key left from a prior keyed config of this id.
@@ -184,6 +202,11 @@ fn resolve_credential_with_env(
         && let Some(key) = env_key(profile)
     {
         let credential = Credential::ApiKey { key };
+        // SEC-07 opt-out: use the env key for this session only, never touching the store, so a single
+        // run / CI invocation leaves no durable copy behind.
+        if no_import {
+            return Ok(CredentialResolution::ImportedSessionOnly { credential });
+        }
         // Best-effort persist so later sessions need no env var; the Result is *returned*, not swallowed,
         // so each caller can surface a failure (boot via eprintln, the live swap via a transcript Notice).
         let persisted = secrets.set(&profile.id, &credential);
@@ -312,7 +335,7 @@ mod tests {
             "m",
         );
         assert!(matches!(
-            resolve_credential_with_env(&p, &store, env_some).unwrap(),
+            resolve_credential_with_env(&p, &store, env_some, false).unwrap(),
             CredentialResolution::Keyless
         ));
     }
@@ -326,7 +349,7 @@ mod tests {
             ..FakeStore::empty()
         };
         let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
-        match resolve_credential_with_env(&p, &store, env_none).unwrap() {
+        match resolve_credential_with_env(&p, &store, env_none, false).unwrap() {
             CredentialResolution::Stored(Credential::ApiKey { key }) => {
                 assert_eq!(key.expose(), "stored");
             }
@@ -338,7 +361,7 @@ mod tests {
     fn resolves_env_import_and_reports_persist_ok() {
         let store = FakeStore::empty();
         let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
-        match resolve_credential_with_env(&p, &store, env_some).unwrap() {
+        match resolve_credential_with_env(&p, &store, env_some, false).unwrap() {
             CredentialResolution::Imported {
                 credential: Credential::ApiKey { key },
                 persisted,
@@ -351,6 +374,35 @@ mod tests {
     }
 
     #[test]
+    fn no_import_uses_env_key_session_only_without_persisting() {
+        // SEC-07: with the opt-out set, an env key resolves to ImportedSessionOnly and the store's `set`
+        // is never reached — `set_fails` would surface as an Err if it were, proving no persist happened.
+        let store = FakeStore {
+            set_fails: true,
+            ..FakeStore::empty()
+        };
+        let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
+        match resolve_credential_with_env(&p, &store, env_some, true).unwrap() {
+            CredentialResolution::ImportedSessionOnly {
+                credential: Credential::ApiKey { key },
+            } => assert_eq!(key.expose(), "env-key"),
+            _ => panic!("expected ImportedSessionOnly(ApiKey)"),
+        }
+    }
+
+    #[test]
+    fn import_persists_when_opt_out_is_unset() {
+        // The mirror of the opt-out: without it, the same env key persists (Imported), locking that the
+        // new branch only diverts behavior when KIRI_NO_KEY_IMPORT is set.
+        let store = FakeStore::empty();
+        let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
+        assert!(matches!(
+            resolve_credential_with_env(&p, &store, env_some, false).unwrap(),
+            CredentialResolution::Imported { .. }
+        ));
+    }
+
+    #[test]
     fn resolves_env_import_surfaces_persist_failure() {
         // ERR-02 regression lock: a failed persist is *returned* in `Imported.persisted`, never swallowed.
         let store = FakeStore {
@@ -358,7 +410,7 @@ mod tests {
             ..FakeStore::empty()
         };
         let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
-        match resolve_credential_with_env(&p, &store, env_some).unwrap() {
+        match resolve_credential_with_env(&p, &store, env_some, false).unwrap() {
             CredentialResolution::Imported { persisted, .. } => {
                 assert!(matches!(persisted, Err(AgentError::Secret(_))));
             }
@@ -371,7 +423,7 @@ mod tests {
         let store = FakeStore::empty();
         let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
         assert!(matches!(
-            resolve_credential_with_env(&p, &store, env_none).unwrap(),
+            resolve_credential_with_env(&p, &store, env_none, false).unwrap(),
             CredentialResolution::Absent
         ));
     }
@@ -381,9 +433,12 @@ mod tests {
         // A non-ApiKey auth must never import from env: pass an env closure that would panic if called.
         let store = FakeStore::empty();
         let p = profile("gpt", ProviderKind::Openai, AuthMethod::Oauth, "m");
-        let resolution = resolve_credential_with_env(&p, &store, |_| {
-            panic!("env must not be consulted for non-api-key auth")
-        })
+        let resolution = resolve_credential_with_env(
+            &p,
+            &store,
+            |_| panic!("env must not be consulted for non-api-key auth"),
+            false,
+        )
         .unwrap();
         assert!(matches!(resolution, CredentialResolution::Absent));
     }

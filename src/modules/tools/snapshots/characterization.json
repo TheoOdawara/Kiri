@@ -221,17 +221,17 @@
     },
     {
       "function": {
-        "description": "Move or rename a file or directory. Creates missing parent directories of the destination (with user confirmation) and overwrites an existing destination (with confirmation). Both paths are relative to the workspace root.",
+        "description": "Move or rename a file or directory. Creates missing parent directories of the destination (with user confirmation) and overwrites an existing destination (with confirmation). Each path is relative to the workspace root, or an absolute / ~ path to reach outside it.",
         "name": "move_path",
         "parameters": {
           "additionalProperties": false,
           "properties": {
             "destination": {
-              "description": "New path, relative to the workspace root.",
+              "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it.",
               "type": "string"
             },
             "source": {
-              "description": "Existing file or directory to move, relative to the workspace root.",
+              "description": "Path relative to the active workspace root, or an absolute / ~ path to reach outside it.",
               "type": "string"
             }
           },

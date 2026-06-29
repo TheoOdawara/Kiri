@@ -111,6 +111,8 @@ impl ProviderSwap {
                 credential,
                 persisted,
             } => Ok((credential, persisted.err())),
+            // SEC-07 opt-out: env key used for this session only, never persisted — no persist warning.
+            CredentialResolution::ImportedSessionOnly { credential } => Ok((credential, None)),
             CredentialResolution::Absent => Err(AgentError::Provider(format!(
                 "no credential for provider '{}'. Configure it via /provider or set its API-key env var.",
                 profile.id

@@ -13,8 +13,7 @@ pub struct Cli {
     pub command: Option<CliCommand>,
     /// Optional first message; the chat then continues interactively
     pub prompt: Option<String>,
-    /// Sandbox root for file tools (also via KIRI_PATH; legacy T_CLI_PATH still honored).
-    /// Defaults to the current directory.
+    /// Sandbox root for file tools (also via KIRI_PATH). Defaults to the current directory.
     #[arg(long, env = "KIRI_PATH")]
     pub path: Option<PathBuf>,
 }

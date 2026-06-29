@@ -23,38 +23,61 @@ pub(super) const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(300);
 /// (and the no-regression target). See docs/decisions/0001-openai-compatible-provider.md.
 pub(super) const DEFAULT_PROVIDER_ID: &str = "nvidia";
 
-/// Patterns blocked in plan mode — commands that mutate the project or escalate privilege.
-/// The shell can bypass these (eval, base64, ANSI-C quoting), so this is best-effort; the
-/// real fix is OS-level sandboxing (tracked as security-debt in ADR 0002). Override via
-/// `KIRI_PLAN_BLACKLIST` (newline-separated, `#` comments, replaces this default).
-pub(super) const DEFAULT_PLAN_BLACKLIST: &[&str] = &[
-    r"\brm\b",
-    r"\bdel\b",
-    r"\brmdir\b",
-    r"\brd\b",
-    r"\bunlink\b",
-    r"\btee\b",
-    r"\bdd\b",
-    r"\bmv\b",
-    r"\bmove\b",
-    r"\brename\b",
-    r"\bcp\b",
-    r"\bcopy\b",
-    r"\bformat\b",
-    r"\bmkfs\b",
-    r"\bdiskpart\b",
-    r"\bsudo\b",
-    r"\bsu\b",
-    r"\brunas\b",
-    r"git\s+(commit|push|reset|clean|checkout|merge|rebase)",
-    r"(npm|pip|cargo|gem|go)\s+install",
-    r"\bkill\b",
-    r"\bkillall\b",
-    r"\btaskkill\b",
+/// Leading programs `run_command` may invoke in plan mode — an **allow-list** of safe
+/// inspection/build/test binaries, replacing the former best-effort denylist (a denylist let any
+/// unlisted command through and was trivially bypassable; an allow-list defaults to *deny*). Matched
+/// against the command's leading program only, and a command that chains a second program is rejected
+/// outright (see `run_command::plan_check`), so `cargo test && rm -rf x` never qualifies. Build/test
+/// tools (`cargo`, `npm`, …) are included so plan-mode investigation stays fluid; a mutating
+/// subcommand of an allowed binary (`git commit`, `cargo install`) still hits the per-call confirmation
+/// gate before it runs. Override via `KIRI_PLAN_ALLOW` (newline-separated regexes, replaces this default).
+pub(super) const DEFAULT_PLAN_ALLOW: &[&str] = &[
+    // Pure inspection.
+    r"\bls\b",
+    r"\bcat\b",
+    r"\bhead\b",
+    r"\btail\b",
+    r"\bwc\b",
+    r"\becho\b",
+    r"\bpwd\b",
+    r"\bwhich\b",
+    r"\benv\b",
+    r"\bprintenv\b",
+    r"\btree\b",
+    r"\bstat\b",
+    r"\bfile\b",
+    r"\bgrep\b",
+    r"\brg\b",
+    r"\bfind\b",
+    r"\bfd\b",
+    // Version control (read use; mutating subcommands still hit the confirmation gate).
+    r"\bgit\b",
+    // Rust toolchain.
+    r"\bcargo\b",
+    r"\brustc\b",
+    r"\brustup\b",
+    // JS toolchain.
+    r"\bnode\b",
+    r"\bnpm\b",
+    r"\bnpx\b",
+    r"\bpnpm\b",
+    r"\byarn\b",
+    r"\bdeno\b",
+    r"\bbun\b",
+    // Python toolchain.
+    r"\bpython3?\b",
+    r"\bpip3?\b",
+    r"\buv\b",
+    // Other build runners.
+    r"\bmake\b",
+    r"\bgo\b",
 ];
 
 /// Shell commands allowed to reach the network under OS confinement: dev / package-manager tools, so
-/// builds and dependency installs stay fluid while arbitrary outbound calls are denied by default.
+/// builds and dependency installs stay fluid while arbitrary outbound calls are denied by default. The
+/// grant is disclosed in the `run_command` confirmation (informed per-call consent, not silent).
+/// Residual: an allow-listed tool's build script still runs with network and could exfiltrate — the real
+/// fix is per-host egress filtering, deferred to the cross-OS sandbox work (see `RunCommand::network_for`).
 /// Override via `KIRI_SANDBOX_NET_ALLOW_CMDS` (newline-separated regexes, replaces this default).
 pub(super) const DEFAULT_NET_ALLOW: &[&str] = &[
     r"\bcargo\b",

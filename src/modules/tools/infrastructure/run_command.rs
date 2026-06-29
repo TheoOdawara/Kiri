@@ -99,27 +99,33 @@ fn effective_timeout_ms(requested: u64) -> u64 {
 }
 
 pub struct RunCommand {
-    plan_blacklist: Arc<[Regex]>,
+    plan_allow: Arc<[Regex]>,
     net_allow: Arc<[Regex]>,
     require_confinement: bool,
 }
 
 impl RunCommand {
     pub fn new(
-        plan_blacklist: Arc<[Regex]>,
+        plan_allow: Arc<[Regex]>,
         net_allow: Arc<[Regex]>,
         require_confinement: bool,
     ) -> Self {
         Self {
-            plan_blacklist,
+            plan_allow,
             net_allow,
             require_confinement,
         }
     }
 
     /// Decide the network stance for a command: allowed when the sandbox's base stance already permits
-    /// it or the command matches the dev/package-manager allow-list, otherwise denied. Keeps
-    /// `cargo build` / `npm install` fluid while blocking arbitrary outbound calls by default.
+    /// it or the command's leading program matches the dev/package-manager allow-list, otherwise denied.
+    /// Keeps `cargo build` / `npm install` fluid while blocking arbitrary outbound calls by default; the
+    /// grant is disclosed in `confirmation` so it is an informed per-call consent, not silent.
+    ///
+    /// **Residual (security-debt):** the allow-list is leading-program-based, so an allow-listed tool's
+    /// build/post-install script runs with network and could exfiltrate, and a wrapper/alias can shift
+    /// classification. The real fix is per-host egress filtering (allow only known registry hosts),
+    /// deferred to the cross-OS sandbox work. On macOS the Seatbelt profile still confines fs/secret reads.
     fn network_for(&self, command: &str, base: NetworkPolicy) -> NetworkPolicy {
         if base == NetworkPolicy::Allow {
             return NetworkPolicy::Allow;
@@ -222,6 +228,16 @@ impl Tool for RunCommand {
                  é a proteção real; revise antes de aprovar. {action}"
             );
         }
+        // SEC (network-grant disclosure): when the default stance is deny but this command is widened to
+        // network by the dev/package-manager allow-list, the grant used to be silent. Surface it in the
+        // confirmation that already happens for every run_command — so approving is an *informed*, per-call
+        // consent — without adding any new prompt. Residual: an allow-listed tool's build script can still
+        // exfiltrate; the real fix is per-host egress filtering (deferred).
+        if sandbox.network() == NetworkPolicy::Deny
+            && self.network_for(&args.command, NetworkPolicy::Deny) == NetworkPolicy::Allow
+        {
+            action = format!("ATENÇÃO: este comando terá acesso à rede. {action}");
+        }
         // run_command is the single highest-blast-radius tool (a full shell), so it always
         // default-declines ([s/N]) regardless of the cwd — a stray Enter must never run an arbitrary
         // command. The cwd location says where it runs, not how dangerous it is.
@@ -295,15 +311,22 @@ impl Tool for RunCommand {
 
     fn plan_check(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         let args: RunCommandArgs = parse_args(call).ok()?;
-        for pattern in self.plan_blacklist.iter() {
-            if pattern.is_match(&args.command) {
-                return Some(format!(
-                    "blocked in plan mode: command matches '{}'",
-                    pattern.as_str()
-                ));
-            }
+        // Allow-list semantics (default deny): run only when the leading program is explicitly allowed
+        // AND the command does not chain a second program — so an allowed prefix can never smuggle a
+        // mutating command behind it (`cargo test && rm -rf x`). Reuses the same leading-program /
+        // chaining heuristics the network gate relies on.
+        let program = leading_program(&args.command);
+        let allowed = !program.is_empty()
+            && !introduces_another_command(&args.command)
+            && self.plan_allow.iter().any(|p| p.is_match(program));
+        if allowed {
+            None
+        } else {
+            Some(format!(
+                "blocked in plan mode: '{program}' is not in the plan-mode allow-list (read-only \
+                 investigation and build/test commands only). Run it outside plan mode."
+            ))
         }
-        None
     }
 }
 
@@ -357,6 +380,65 @@ mod tests {
     fn run_command_with_allow(allow: &[&str]) -> RunCommand {
         let regexes: Vec<Regex> = allow.iter().map(|p| Regex::new(p).unwrap()).collect();
         RunCommand::new(Arc::from(Vec::<Regex>::new()), Arc::from(regexes), false)
+    }
+
+    fn run_command_with_plan_allow(allow: &[&str]) -> RunCommand {
+        let regexes: Vec<Regex> = allow.iter().map(|p| Regex::new(p).unwrap()).collect();
+        RunCommand::new(Arc::from(regexes), Arc::from(Vec::<Regex>::new()), false)
+    }
+
+    #[test]
+    fn plan_check_allows_listed_programs_and_blocks_the_rest() {
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        let rc = run_command_with_plan_allow(&[r"\bcargo\b", r"\brg\b"]);
+        // An allow-listed leading program (and a benign 2>&1 redirect) is permitted.
+        assert!(
+            rc.plan_check(&sb, &call("run_command", json!({"command": "cargo test"})))
+                .is_none()
+        );
+        assert!(
+            rc.plan_check(
+                &sb,
+                &call("run_command", json!({"command": "rg foo src 2>&1"}))
+            )
+            .is_none()
+        );
+        // An unlisted program is blocked (default deny).
+        assert!(
+            rc.plan_check(&sb, &call("run_command", json!({"command": "rm -rf x"})))
+                .is_some()
+        );
+        // Chaining a second program behind an allowed one is blocked outright.
+        assert!(
+            rc.plan_check(
+                &sb,
+                &call("run_command", json!({"command": "cargo test && rm -rf x"}))
+            )
+            .is_some()
+        );
+        assert!(
+            rc.plan_check(
+                &sb,
+                &call(
+                    "run_command",
+                    json!({"command": "cargo metadata; curl http://evil"})
+                )
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn plan_check_blocks_when_allow_list_is_empty() {
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        let rc = run_command_with_plan_allow(&[]);
+        assert!(
+            rc.plan_check(&sb, &call("run_command", json!({"command": "ls"})))
+                .is_some(),
+            "an empty allow-list must deny everything"
+        );
     }
 
     #[test]
@@ -416,6 +498,33 @@ mod tests {
             rc.network_for("cargo build; curl x", NetworkPolicy::Allow),
             NetworkPolicy::Allow
         );
+    }
+
+    #[test]
+    fn confirmation_discloses_network_grant_for_allowlisted_command() {
+        // SEC: when a command is widened to network by the allow-list, the confirmation must say so
+        // (informed per-call consent) — but a non-allow-listed command carries no such claim.
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir); // deny-network base
+        let rc = run_command_with_allow(&[r"\bcargo\b"]);
+        let granted = rc
+            .confirmation(&sb, &call("run_command", json!({"command": "cargo build"})))
+            .unwrap();
+        assert!(
+            granted.prompt.contains("acesso à rede"),
+            "an allow-listed command's network grant must be disclosed: {}",
+            granted.prompt
+        );
+        let denied = rc
+            .confirmation(&sb, &call("run_command", json!({"command": "echo hi"})))
+            .unwrap();
+        assert!(
+            !denied.prompt.contains("acesso à rede"),
+            "a denied-network command must not claim network access: {}",
+            denied.prompt
+        );
+        // The disclosure must not flip the default — run_command always default-declines.
+        assert!(!granted.default_accept);
     }
 
     #[test]

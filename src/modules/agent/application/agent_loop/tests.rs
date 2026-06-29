@@ -128,8 +128,11 @@ fn tool_call_id(name: &str, args: &str, id: &str) -> ToolCall {
 
 /// The full fs tool set with no sensitive-path matchers, the single construction every test shares.
 fn registry_for_tests() -> ToolRegistry {
+    // Plan-mode allow-list with `echo` so the SEC-01 "run_command is still confirmed in plan mode"
+    // test reaches the confirmation gate; destructive tools (write_file) are blocked by being
+    // non-plannable, independent of this list.
     ToolRegistry::new(default_fs_tools(
-        Arc::from(Vec::<Regex>::new()),
+        Arc::from(vec![Regex::new(r"\becho\b").unwrap()]),
         Arc::from(Vec::<Regex>::new()),
         false,
     ))

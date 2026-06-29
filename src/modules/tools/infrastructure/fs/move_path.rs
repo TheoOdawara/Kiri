@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use crate::modules::tools::application::path::default_accept_for;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{MoveArgs, parse, parse_args};
 #[cfg(unix)]
@@ -26,15 +26,15 @@ impl Tool for MovePath {
         function_schema(
             self.name(),
             "Move or rename a file or directory. Creates missing parent directories of the destination \
-             (with user confirmation) and overwrites an existing destination (with confirmation). Both \
-             paths are relative to the workspace root.",
+             (with user confirmation) and overwrites an existing destination (with confirmation). Each \
+             path is relative to the workspace root, or an absolute / ~ path to reach outside it.",
             json!({
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["source", "destination"],
                 "properties": {
-                    "source": { "type": "string", "description": "Existing file or directory to move, relative to the workspace root." },
-                    "destination": { "type": "string", "description": "New path, relative to the workspace root." }
+                    "source": { "type": "string", "description": PATH_DESC },
+                    "destination": { "type": "string", "description": PATH_DESC }
                 }
             }),
         )

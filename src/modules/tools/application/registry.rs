@@ -27,8 +27,8 @@ impl ToolRegistry {
 
     /// The schema array advertised for `mode`. In plan mode only plannable tools are offered, so the
     /// model can investigate (read files, run dev servers, search logs) but not mutate the project
-    /// directly — `run_command` is plannable but its plan-mode blacklist handles destructive shell
-    /// commands at execution time.
+    /// directly — `run_command` is plannable but its plan-mode allow-list permits only safe
+    /// inspection/build/test programs at execution time.
     pub fn schemas_for(&self, mode: ApprovalMode) -> Vec<serde_json::Value> {
         if mode == ApprovalMode::Plan {
             self.tools

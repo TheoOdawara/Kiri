@@ -33,8 +33,10 @@ cross-project `list_by_project`; `MemoryPort` (with `MemoryPortImpl<P, S>`) unif
 recall/remember.
 
 **Adapters.**
-- `FileProjectMemory` — Markdown files with YAML front-matter plus a JSON index, under
-  `<workspace>/.kiri/memory/`. Human-readable and diffable, so project memory lives in the repo.
+- `FileProjectMemory` — Markdown files with TOML front-matter (between `+++` fences) plus a JSON
+  index, under `<workspace>/.kiri/memory/`. Human-readable and diffable, so project memory lives in
+  the repo. (TOML, not YAML, keeps a YAML parser off the attack surface of attacker-influenceable
+  memory files and reuses the config layer's `toml` dependency.)
 - `SqliteSharedMemory` — a single SQLite database at `~/.kiri/memory/shared.db`. SQLite (over a
   file-per-entry scheme) was chosen for the shared store because it scales to many cross-project
   entries with indexed queries, and a future memory-management GUI will read/edit it directly. The

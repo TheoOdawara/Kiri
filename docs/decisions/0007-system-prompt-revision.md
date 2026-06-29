@@ -119,12 +119,14 @@ logs while planning. The plan-mode schema now filters by `is_plannable`, not `is
 The engine's plan-mode check changed from `is_destructive` to `!is_plannable`. The prompt's
 plan-mode bullet was updated to reflect this.
 
-**C1 — plan-mode blacklist.** `KIRI_PLAN_BLACKLIST` env var (newline-separated regex, `#`
-comments, replaces a hardcoded default of ~23 patterns: `rm`, `del`, `mv`, `git commit`,
-`sudo`, etc.). `run_command::plan_check` scans the command string before spawning; a match
-returns `Error("blocked in plan mode: command matches '…'")`. Best-effort — the shell can
-bypass via `eval`, `base64`, ANSI-C quoting; OS-level sandboxing remains the real fix
-(`security-debt`, ADR 0002).
+**C1 — plan-mode command gate.** Originally a denylist (`KIRI_PLAN_BLACKLIST`); later replaced by
+an **allow-list** (`KIRI_PLAN_ALLOW`, newline-separated regex, `#` comments) because a denylist let
+any unlisted command through and was trivially bypassable. `run_command::plan_check` now permits a
+command only when its leading program is allow-listed *and* it chains no second program (so
+`cargo test && rm -rf x` never qualifies); anything else returns `Error("blocked in plan mode: …")`.
+The allow-list includes build/test tools so investigation stays fluid; a mutating subcommand of an
+allowed binary still hits the per-call confirmation gate. OS-level sandboxing remains the real
+enforcement boundary (macOS Seatbelt; ADR 0009).
 
 **Phase 6 — sensitive file guard.** `KIRI_SENSITIVE_PATTERNS` env var (newline-separated
 globs, `#` comments, replaces a hardcoded default of ~29 patterns: `.env*`, `id_rsa`,

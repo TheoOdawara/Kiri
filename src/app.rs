@@ -135,7 +135,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // The file tools plus the plan-mode control tool. `present_plan` is advertised only in plan mode
     // (it carries `plan_only`); the registry's `schemas()` withholds it everywhere else.
     let mut tools = default_fs_tools(
-        settings.plan_blacklist.clone(),
+        settings.plan_allow.clone(),
         settings.net_allow.clone(),
         settings.require_confinement,
     );
@@ -517,6 +517,15 @@ fn resolve_credential(
             }
             Ok(Some(credential))
         }
+        CredentialResolution::ImportedSessionOnly { credential } => {
+            notices.push(BootNotice::new(format!(
+                "imported the API key for provider '{}' from the environment for THIS SESSION ONLY \
+                 (KIRI_NO_KEY_IMPORT is set); it was not saved to the credential store and does not \
+                 persist across sessions.",
+                profile.id
+            )));
+            Ok(Some(credential))
+        }
         CredentialResolution::Absent => Ok(None),
     }
 }
@@ -641,7 +650,7 @@ mod tests {
             seed: None,
             checkpoint_budget: Duration::from_secs(1),
             max_tool_calls: 1,
-            plan_blacklist: Arc::from(Vec::new()),
+            plan_allow: Arc::from(Vec::new()),
             sandbox_enabled: false,
             require_confinement: false,
             sandbox_network: NetworkPolicy::Deny,
