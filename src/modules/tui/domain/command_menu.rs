@@ -38,6 +38,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         blurb: "envia config + memória ao seu repo privado (push)",
     },
     CommandSpec {
+        name: "/instructions",
+        aliases: &["/instrucoes"],
+        blurb: "exibe as instruções ativas e os arquivos carregados",
+    },
+    CommandSpec {
         name: "/plan",
         aliases: &[],
         blurb: "modo plan (só leitura; planeja e executa após aprovação)",

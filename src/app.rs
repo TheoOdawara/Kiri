@@ -101,11 +101,13 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // matcher's globs, the enforced run_command limits, and the checkpoint budget — before `sensitive`
     // moves into the sandbox, so an override is reflected and the prompt cannot lie about what the
     // harness blocks/enforces (SEC-06).
+    let instructions_display = settings.instructions_display();
     let base_system_prompt = render_system_prompt(
         &sensitive.globs(),
         RUN_COMMAND_DEFAULT_TIMEOUT_MS,
         EXEC_MAX_BYTES,
         settings.checkpoint_budget,
+        settings.instructions.as_deref(),
     );
     let sandbox = FsSandbox::with_confinement(
         &settings.path,
@@ -187,6 +189,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         memory,
         project_id,
         boot_notices,
+        instructions_display,
     }))
 }
 
@@ -664,6 +667,8 @@ mod tests {
             active_provider: String::new(),
             effort: Effort::High,
             embeddings: None,
+            instructions: None,
+            instruction_paths: vec![],
         }
     }
 

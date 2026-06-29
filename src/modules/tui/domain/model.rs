@@ -165,6 +165,9 @@ pub struct Model {
     /// When set, tool outputs and edit diffs render in full instead of a bounded preview. Toggled
     /// with Ctrl+O.
     pub expand_tools: bool,
+    /// The pre-formatted `/instructions` display text (paths header + merged content). `None` when no
+    /// instructions file was found at boot.
+    pub instructions_display: Option<String>,
     /// A turn is running (the agent loop future is armed).
     pub busy: bool,
     pub should_quit: bool,
@@ -236,6 +239,12 @@ impl Model {
     pub fn with_providers(mut self, active: String, providers: Vec<String>) -> Self {
         self.status.provider = active;
         self.providers = providers;
+        self
+    }
+
+    /// Seed the instructions display text for the `/instructions` command.
+    pub fn with_instructions(mut self, display: Option<String>) -> Self {
+        self.instructions_display = display;
         self
     }
 

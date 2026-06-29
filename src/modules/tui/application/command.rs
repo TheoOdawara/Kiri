@@ -28,6 +28,8 @@ pub enum Command {
     Sessions,
     /// `/sync`: push the portable profile (config + memory) to the configured private repo.
     Sync,
+    /// `/instructions`: show the active instructions files and their merged content.
+    Instructions,
     /// A `/`-prefixed token that is not a known command.
     Unknown,
 }
@@ -58,6 +60,7 @@ pub fn parse(line: &str) -> Option<Command> {
         "/resume" | "/retomar" => Command::Resume,
         "/sessions" | "/sessoes" => Command::Sessions,
         "/sync" => Command::Sync,
+        "/instructions" | "/instrucoes" => Command::Instructions,
         _ => Command::Unknown,
     };
     Some(command)
@@ -130,6 +133,12 @@ mod tests {
     #[test]
     fn sync_parses() {
         assert_eq!(parse("/sync"), Some(Command::Sync));
+    }
+
+    #[test]
+    fn instructions_parses() {
+        assert_eq!(parse("/instructions"), Some(Command::Instructions));
+        assert_eq!(parse("/instrucoes"), Some(Command::Instructions));
     }
 
     #[test]
@@ -221,6 +230,8 @@ mod tests {
             "/sessions",
             "/sessoes",
             "/sync",
+            "/instructions",
+            "/instrucoes",
         ]
         .into_iter()
         .collect();
