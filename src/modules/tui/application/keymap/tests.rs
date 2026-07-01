@@ -81,7 +81,8 @@ fn wizard_ctrl_v_routes_to_paste_not_a_literal_char() {
 
 #[test]
 fn provider_picker_add_row_opens_the_wizard() {
-    let mut m = Model::default().with_providers("nvidia".to_string(), vec!["nvidia".to_string()]);
+    let mut m =
+        Model::default().with_providers("nvidia".to_string(), vec!["nvidia".to_string()], vec![]);
     submit_line(&mut m, "/provider");
     // options = ["nvidia", "+ adicionar..."]; Down lands on the add row, Enter opens the wizard.
     on_key(&mut m, press(Key::Down));
@@ -108,6 +109,8 @@ fn wizard_completes_with_staged_secret_out_of_the_effect() {
     }
     on_key(&mut m, press(Key::Enter));
     // ExtraModels: skip.
+    on_key(&mut m, press(Key::Enter));
+    // Thinking: accept default.
     on_key(&mut m, press(Key::Enter));
     // ApiKey: type, then finalize.
     for c in "sk-ant-secret".chars() {
@@ -194,6 +197,8 @@ fn onboarding_wizard_completes_to_nvidia_save_provider() {
     on_key(&mut m, press(Key::Enter));
     // ExtraModels: skip.
     on_key(&mut m, press(Key::Enter));
+    // Thinking: accept default.
+    on_key(&mut m, press(Key::Enter));
     // ApiKey: type, then finalize.
     for c in "nvapi-secret".chars() {
         on_key(&mut m, press(Key::Char(c)));
@@ -245,7 +250,8 @@ fn wizard_blank_key_compatible_emits_none_auth_and_no_credential() {
         on_key(&mut m, press(Key::Char(c)));
     }
     on_key(&mut m, press(Key::Enter));
-    // ExtraModels: skip.
+    // ExtraModels: skip. OpenAiCompatible has no thinking capability, so this jumps straight to
+    // ApiKey — no Thinking step to accept.
     on_key(&mut m, press(Key::Enter));
     // ApiKey: leave blank and finalize -> keyless save.
     let effects = on_key(&mut m, press(Key::Enter));
@@ -274,6 +280,58 @@ fn wizard_blank_key_compatible_emits_none_auth_and_no_credential() {
 }
 
 #[test]
+fn wizard_edit_keeps_existing_key_for_a_compatible_provider_with_blank_key() {
+    // Regression lock: editing a keyless-CAPABLE kind (OpenAiCompatible/Custom) that already HAS a
+    // stored key, then leaving the key field blank ("keep existing"), must not collapse `auth` to
+    // `None` — that would make `apply_save_provider` delete the real stored key from the keyring.
+    use crate::shared::kernel::provider::{AuthMethod, ProviderKind, ProviderProfile};
+
+    let existing = ProviderProfile {
+        id: "openrouter".to_string(),
+        kind: ProviderKind::OpenAiCompatible,
+        base_url: "https://openrouter.ai/api/v1".to_string(),
+        model: "gemma".to_string(),
+        models: vec!["gemma".to_string()],
+        auth: AuthMethod::ApiKey,
+        thinking: None,
+    };
+    let mut m = Model {
+        wizard: Some(ProviderWizard::from_profile(&existing)),
+        ..Default::default()
+    };
+    // BaseUrl: accept the pre-filled value -> Model.
+    on_key(&mut m, press(Key::Enter));
+    // Model: accept the pre-filled value -> ExtraModels.
+    on_key(&mut m, press(Key::Enter));
+    // ExtraModels: OpenAiCompatible has no thinking capability, so this jumps straight to ApiKey.
+    on_key(&mut m, press(Key::Enter));
+    // ApiKey: leave blank ("keep existing key") and finalize.
+    let effects = on_key(&mut m, press(Key::Enter));
+    assert!(m.wizard.is_none(), "the wizard closes on finalize");
+    match effects.as_slice() {
+        [
+            Effect::SaveProvider {
+                auth,
+                keep_existing_key,
+                ..
+            },
+        ] => {
+            assert_eq!(
+                *auth,
+                AuthMethod::ApiKey,
+                "a blank key while editing a previously-keyed provider must stay ApiKey, not collapse to None"
+            );
+            assert!(*keep_existing_key);
+        }
+        other => panic!("expected SaveProvider, got {other:?}"),
+    }
+    assert!(
+        m.pending_credential.is_none(),
+        "no new key was typed, so none is staged"
+    );
+}
+
+#[test]
 fn wizard_vendor_blank_key_stays_on_step() {
     let mut m = Model {
         wizard: Some(ProviderWizard::new()), // NVIDIA (index 0) is a vendor kind
@@ -283,7 +341,11 @@ fn wizard_vendor_blank_key_stays_on_step() {
     on_key(&mut m, press(Key::Enter)); // BaseUrl -> Model
     on_key(&mut m, press(Key::Char('m')));
     on_key(&mut m, press(Key::Enter)); // Model -> ExtraModels
-    on_key(&mut m, press(Key::Enter)); // ExtraModels -> ApiKey
+    // ExtraModels -> ApiKey directly: model "m" has no recognized NVIDIA thinking family, so the
+    // Thinking step is skipped. The extra Enter below lands on ApiKey too and no-ops identically
+    // (blank key, vendor kind) — kept so the assertion below holds regardless of step-skip changes.
+    on_key(&mut m, press(Key::Enter));
+    on_key(&mut m, press(Key::Enter));
     // A vendor kind requires a key: a blank key must not finalize.
     let effects = on_key(&mut m, press(Key::Enter));
     assert!(effects.is_empty(), "a vendor kind cannot finalize keyless");
@@ -335,7 +397,9 @@ fn wizard_names_custom_provider_id() {
         on_key(&mut m, press(Key::Char(c)));
     }
     on_key(&mut m, press(Key::Enter)); // Model -> ExtraModels
-    on_key(&mut m, press(Key::Enter)); // ExtraModels -> ApiKey
+    // ExtraModels -> ApiKey directly: Custom has no thinking capability, so the Thinking step is
+    // skipped.
+    on_key(&mut m, press(Key::Enter));
     let effects = on_key(&mut m, press(Key::Enter)); // blank key -> keyless finalize
     match effects.as_slice() {
         [Effect::SaveProvider { id, kind, .. }] => {
@@ -344,6 +408,51 @@ fn wizard_names_custom_provider_id() {
         }
         other => panic!("expected SaveProvider, got {other:?}"),
     }
+}
+
+#[test]
+fn extra_models_step_skips_thinking_when_the_capability_is_unsupported() {
+    let mut m = Model {
+        wizard: Some(ProviderWizard::new()), // NVIDIA is index 0
+        ..Default::default()
+    };
+    on_key(&mut m, press(Key::Enter)); // Kind -> BaseUrl (seeded)
+    on_key(&mut m, press(Key::Enter)); // BaseUrl -> Model
+    for c in "google/gemma-3-27b-it".chars() {
+        on_key(&mut m, press(Key::Char(c)));
+    }
+    on_key(&mut m, press(Key::Enter)); // Model -> ExtraModels
+    on_key(&mut m, press(Key::Enter)); // ExtraModels -> (skip Thinking) -> ApiKey
+    assert_eq!(
+        m.wizard.as_ref().map(|w| w.step),
+        Some(WizardStep::ApiKey),
+        "an NVIDIA model with no recognized thinking family must skip the Thinking step"
+    );
+    assert_eq!(
+        m.wizard.as_ref().map(|w| w.thinking),
+        Some(false),
+        "the skip must not leave a stale thinking=true from the kind's seeded default"
+    );
+}
+
+#[test]
+fn extra_models_step_still_reaches_thinking_when_the_capability_is_supported() {
+    let mut m = Model {
+        wizard: Some(ProviderWizard::new()), // NVIDIA is index 0
+        ..Default::default()
+    };
+    on_key(&mut m, press(Key::Enter)); // Kind -> BaseUrl (seeded)
+    on_key(&mut m, press(Key::Enter)); // BaseUrl -> Model
+    for c in "nvidia/llama-3.3-nemotron-super-49b-v1".chars() {
+        on_key(&mut m, press(Key::Char(c)));
+    }
+    on_key(&mut m, press(Key::Enter)); // Model -> ExtraModels
+    on_key(&mut m, press(Key::Enter)); // ExtraModels -> Thinking
+    assert_eq!(
+        m.wizard.as_ref().map(|w| w.step),
+        Some(WizardStep::Thinking),
+        "a recognized NVIDIA thinking family must still reach the Thinking step"
+    );
 }
 
 #[test]
@@ -406,7 +515,8 @@ fn submit_while_unconfigured_is_gated_and_reopens_wizard() {
 
 #[test]
 fn slash_provider_works_while_unconfigured() {
-    let mut m = Model::default().with_providers("nvidia".to_string(), vec!["nvidia".to_string()]);
+    let mut m =
+        Model::default().with_providers("nvidia".to_string(), vec!["nvidia".to_string()], vec![]);
     m.unconfigured = true;
     let effects = submit_line(&mut m, "/provider");
     assert!(effects.is_empty());
@@ -417,18 +527,29 @@ fn slash_provider_works_while_unconfigured() {
 }
 
 #[test]
-fn provider_command_opens_a_picker_and_enter_emits_set_provider() {
+fn provider_command_opens_a_picker_then_action_submenu_then_set_provider() {
+    use crate::modules::tui::domain::picker::PickerKind;
     let mut m = Model::default().with_providers(
         "nvidia".to_string(),
         vec!["nvidia".to_string(), "claude".to_string()],
+        vec![],
     );
     let effects = submit_line(&mut m, "/provider");
     assert!(effects.is_empty());
     let picker = m.picker.as_ref().expect("the provider picker should open");
     assert_eq!(picker.kind, PickerKind::Provider);
-    assert_eq!(picker.selected, 0); // the active provider (nvidia) is pre-selected
-    // Down to "claude", then Enter.
+    // Down to "claude", Enter → opens ProviderAction sub-menu (no effect yet).
     assert!(on_key(&mut m, press(Key::Down)).is_empty());
+    assert!(on_key(&mut m, press(Key::Enter)).is_empty());
+    // The action sub-menu is now open for "claude".
+    assert!(
+        matches!(
+            m.picker.as_ref().map(|p| &p.kind),
+            Some(PickerKind::ProviderAction(id)) if id == "claude"
+        ),
+        "ProviderAction sub-menu must open for the selected provider"
+    );
+    // Enter on the first option ("Ativar") emits SetProvider.
     let effects = on_key(&mut m, press(Key::Enter));
     assert_eq!(effects, vec![Effect::SetProvider("claude".to_string())]);
 }

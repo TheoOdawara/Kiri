@@ -1,7 +1,7 @@
 use zeroize::Zeroize;
 
 use crate::modules::tui::domain::nav::wrapping_step;
-use crate::shared::kernel::provider::ProviderKind;
+use crate::shared::kernel::provider::{AuthMethod, ProviderKind, ProviderProfile};
 
 /// The last row of the `/provider` picker — selecting it opens the add-provider wizard instead of
 /// switching. A sentinel label, never a real provider id.
@@ -28,6 +28,8 @@ pub enum WizardStep {
     BaseUrl,
     Model,
     ExtraModels,
+    /// Boolean chooser: whether to enable thinking/reasoning for this provider.
+    Thinking,
     ApiKey,
 }
 
@@ -44,9 +46,21 @@ pub struct ProviderWizard {
     pub model: String,
     pub extra_models: String,
     pub api_key: String,
+    /// Whether thinking/reasoning is enabled for this provider. Toggled on the `Thinking` step;
+    /// pre-set to `kind.thinking_default()` when the `Kind` step advances.
+    pub thinking: bool,
     /// True when the wizard is the first-run onboarding flow (welcome framing; cancelling keeps the
     /// submit gate up instead of stranding a credential-less app).
     pub onboarding: bool,
+    /// True when editing an existing provider. In this mode the `Kind` step is skipped, the fields
+    /// are pre-populated, and a blank `api_key` on the final step means "keep the existing key".
+    pub edit_mode: bool,
+    /// True when the profile being edited already had an `AuthMethod::ApiKey` credential (set by
+    /// `from_profile`, `false` for a fresh `new()` wizard). A keyless-capable kind (compatible/custom)
+    /// has `key_required() == false`, so without this the finalize step could not tell "this provider
+    /// never had a key" apart from "this provider has a key I'm keeping" when the field is left blank —
+    /// collapsing `auth` to `None` and deleting the real stored key out from under the user.
+    pub had_key: bool,
 }
 
 impl std::fmt::Debug for ProviderWizard {
@@ -59,7 +73,10 @@ impl std::fmt::Debug for ProviderWizard {
             .field("model", &self.model)
             .field("extra_models", &self.extra_models)
             .field("api_key", &"***")
+            .field("thinking", &self.thinking)
             .field("onboarding", &self.onboarding)
+            .field("edit_mode", &self.edit_mode)
+            .field("had_key", &self.had_key)
             .finish()
     }
 }
@@ -74,7 +91,39 @@ impl ProviderWizard {
             model: String::new(),
             extra_models: String::new(),
             api_key: String::new(),
+            thinking: true,
             onboarding: false,
+            edit_mode: false,
+            had_key: false,
+        }
+    }
+
+    /// Open the wizard in edit mode, pre-populated from an existing profile. The `Kind` step is
+    /// skipped (kind is locked); `api_key` starts empty ("keep existing" unless the user types one).
+    pub fn from_profile(profile: &ProviderProfile) -> Self {
+        let kind_selected = WIZARD_KINDS
+            .iter()
+            .position(|k| *k == profile.kind)
+            .unwrap_or(0);
+        let extra_models = profile
+            .models
+            .iter()
+            .filter(|m| *m != &profile.model)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        Self {
+            step: WizardStep::BaseUrl,
+            kind_selected,
+            id: profile.id.clone(),
+            base_url: profile.base_url.clone(),
+            model: profile.model.clone(),
+            extra_models,
+            api_key: String::new(),
+            thinking: profile.thinking.unwrap_or(profile.kind.thinking_default()),
+            onboarding: false,
+            edit_mode: true,
+            had_key: profile.auth == AuthMethod::ApiKey,
         }
     }
 
@@ -155,15 +204,23 @@ impl ProviderWizard {
         models
     }
 
-    /// The field the current step edits, or `None` on the `Kind` step.
+    /// The field the current step edits, or `None` on the `Kind`/`Thinking` steps (both are choosers,
+    /// not text fields).
     fn field_mut(&mut self) -> Option<&mut String> {
         match self.step {
-            WizardStep::Kind => None,
+            WizardStep::Kind | WizardStep::Thinking => None,
             WizardStep::ProviderId => Some(&mut self.id),
             WizardStep::BaseUrl => Some(&mut self.base_url),
             WizardStep::Model => Some(&mut self.model),
             WizardStep::ExtraModels => Some(&mut self.extra_models),
             WizardStep::ApiKey => Some(&mut self.api_key),
+        }
+    }
+
+    /// Toggle the thinking flag (only meaningful on the `Thinking` step).
+    pub fn toggle_thinking(&mut self) {
+        if self.step == WizardStep::Thinking {
+            self.thinking = !self.thinking;
         }
     }
 
@@ -194,6 +251,11 @@ impl ProviderWizard {
             return;
         }
         self.kind_selected = wrapping_step(self.kind_selected, delta, WIZARD_KINDS.len());
+    }
+
+    /// Whether the thinking toggle is "sim" (up/index 0) or "não" (down/index 1). Used by the renderer.
+    pub fn thinking_selected_index(&self) -> usize {
+        if self.thinking { 0 } else { 1 }
     }
 }
 
@@ -284,5 +346,48 @@ mod tests {
         assert_eq!(w.kind_selected, 0);
         assert_eq!(w.kind(), ProviderKind::Nvidia);
         assert_eq!(w.step, WizardStep::Kind);
+    }
+
+    fn saved_profile(
+        kind: ProviderKind,
+        auth: crate::shared::kernel::provider::AuthMethod,
+    ) -> ProviderProfile {
+        ProviderProfile {
+            id: "openrouter".to_string(),
+            kind,
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            model: "m1".to_string(),
+            models: vec!["m1".to_string(), "m2".to_string()],
+            auth,
+            thinking: None,
+        }
+    }
+
+    #[test]
+    fn from_profile_pre_populates_fields_in_edit_mode() {
+        let profile = saved_profile(ProviderKind::OpenAiCompatible, AuthMethod::ApiKey);
+        let w = ProviderWizard::from_profile(&profile);
+        assert!(w.edit_mode);
+        assert_eq!(w.step, WizardStep::BaseUrl);
+        assert_eq!(w.id, "openrouter");
+        assert_eq!(w.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(w.model, "m1");
+        assert_eq!(w.extra_models, "m2");
+        assert!(
+            w.api_key.is_empty(),
+            "the key field starts blank in edit mode"
+        );
+    }
+
+    #[test]
+    fn from_profile_captures_had_key_from_the_saved_auth_method() {
+        let keyed = saved_profile(ProviderKind::OpenAiCompatible, AuthMethod::ApiKey);
+        assert!(ProviderWizard::from_profile(&keyed).had_key);
+
+        let keyless = saved_profile(ProviderKind::OpenAiCompatible, AuthMethod::None);
+        assert!(!ProviderWizard::from_profile(&keyless).had_key);
+
+        // A fresh (non-edit) wizard never had a key.
+        assert!(!ProviderWizard::new().had_key);
     }
 }

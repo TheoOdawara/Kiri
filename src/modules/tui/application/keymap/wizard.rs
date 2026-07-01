@@ -28,12 +28,14 @@ pub(super) fn on_wizard_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         return vec![];
     };
 
-    // The Kind step is a chooser; the rest are text fields.
+    // The Kind and Thinking steps are choosers; the rest are text fields.
     if wizard.step == WizardStep::Kind {
         match key.code {
             Key::Up => wizard.move_kind(-1),
             Key::Down => wizard.move_kind(1),
             Key::Enter => {
+                // Seed the thinking toggle from the kind's default now that the kind is confirmed.
+                wizard.thinking = wizard.kind().thinking_default();
                 if wizard.key_required() {
                     // Vendor kinds use a canonical id; go straight to the base URL, seeded with the
                     // kind's default so the common case is one keystroke (Enter).
@@ -48,6 +50,19 @@ pub(super) fn on_wizard_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                     if wizard.id.is_empty() {
                         wizard.id = wizard.provider_id();
                     }
+                }
+            }
+            _ => {}
+        }
+        return vec![];
+    }
+
+    if wizard.step == WizardStep::Thinking {
+        match key.code {
+            Key::Up | Key::Down => wizard.toggle_thinking(),
+            Key::Enter => {
+                if let Some(w) = model.wizard.as_mut() {
+                    w.step = WizardStep::ApiKey;
                 }
             }
             _ => {}
@@ -124,10 +139,21 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
         }
         WizardStep::ExtraModels => {
             if let Some(wizard) = model.wizard.as_mut() {
-                wizard.step = WizardStep::ApiKey;
+                // Skip a Sim/Não question that would be a no-op: a kind/model with no thinking
+                // capability at all (e.g. Gemma on NVIDIA, or a compatible/custom endpoint) goes
+                // straight to the key step instead of asking about a toggle that does nothing.
+                wizard.step = if wizard.kind().thinking_capability(&wizard.model)
+                    == ThinkingCapability::Unsupported
+                {
+                    wizard.thinking = false;
+                    WizardStep::ApiKey
+                } else {
+                    WizardStep::Thinking
+                };
             }
             vec![]
         }
+        WizardStep::Thinking => vec![], // handled in on_wizard_key above; advance_wizard is not called here
         WizardStep::ApiKey => {
             // The key is optional for keyless-capable kinds and required for vendor kinds; its presence
             // decides the auth method, so the two can never disagree.
@@ -136,9 +162,13 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
                 .as_ref()
                 .is_some_and(|w| !w.api_key.trim().is_empty());
             let key_required = model.wizard.as_ref().is_some_and(|w| w.key_required());
-            if !has_key && key_required {
-                return vec![]; // a vendor kind requires a key
+            let edit_mode = model.wizard.as_ref().is_some_and(|w| w.edit_mode);
+            let had_key = model.wizard.as_ref().is_some_and(|w| w.had_key);
+            // In edit mode a blank key means "keep the existing credential" — skip the require check.
+            if !has_key && key_required && !edit_mode {
+                return vec![]; // a vendor kind requires a key on first save
             }
+            let keep_existing_key = edit_mode && !has_key;
             // Finalize: take the wizard, stage the key as a Secret (out of the effect) only when present,
             // emit SaveProvider. `mem::take` extracts the key without moving the field out of the `Drop`
             // type; the emptied buffer is then zeroized when `wizard` drops at the end of this scope.
@@ -150,11 +180,18 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
             } else {
                 wizard.base_url.trim().to_string()
             };
-            let auth = if has_key {
+            // A blank key in edit mode means "keep the existing credential" — but only if there was one.
+            // Gating solely on `key_required` (a kind-level constant, false for compatible/custom) would
+            // collapse a keyless-capable provider that DOES have a stored key to `AuthMethod::None` here,
+            // silently deleting that key later (`apply_save_provider`'s `AuthMethod::None` arm never
+            // consults `keep_existing_key`). `had_key` (captured from the profile being edited) closes
+            // that gap.
+            let auth = if has_key || (edit_mode && (key_required || had_key)) {
                 AuthMethod::ApiKey
             } else {
                 AuthMethod::None
             };
+            let thinking = Some(wizard.thinking);
             let effect = Effect::SaveProvider {
                 id: wizard.provider_id(),
                 kind: wizard.kind(),
@@ -162,6 +199,8 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
                 model: wizard.model.trim().to_string(),
                 models: wizard.models(),
                 auth,
+                thinking,
+                keep_existing_key,
             };
             if has_key {
                 model.pending_credential = Some(Secret::new(std::mem::take(&mut wizard.api_key)));

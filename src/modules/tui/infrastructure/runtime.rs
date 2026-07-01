@@ -193,7 +193,11 @@ impl Tui {
             .unwrap_or_default();
         let mut model = Model::new(model_id, workspace)
             .with_provider_catalog(models, provider_swap.effort)
-            .with_providers(provider_swap.active.clone(), provider_swap.provider_ids())
+            .with_providers(
+                provider_swap.active.clone(),
+                provider_swap.provider_ids(),
+                provider_swap.profiles().to_vec(),
+            )
             .with_instructions(instructions_display);
         // Surface the wire-time degradations first, so the onboarding welcome (the call to action) lands
         // last when both are present.
@@ -402,6 +406,8 @@ impl RunLoop {
                 model: model_id,
                 models,
                 auth,
+                thinking,
+                keep_existing_key,
             } => {
                 let profile = ProviderProfile {
                     id,
@@ -410,9 +416,11 @@ impl RunLoop {
                     model: model_id,
                     models,
                     auth,
+                    thinking,
                 };
-                self.apply_save_provider(profile);
+                self.apply_save_provider(profile, keep_existing_key);
             }
+            Effect::DeleteProvider(id) => self.apply_delete_provider(id),
             Effect::AnswerApproval(_) | Effect::CancelTurn => {}
         }
         Ok(())
@@ -527,6 +535,7 @@ mod tests {
                 model: model.into(),
                 models: vec![model.into()],
                 auth: AuthMethod::ApiKey,
+                thinking: None,
             }
         }
 
@@ -539,6 +548,7 @@ mod tests {
                 model: model.into(),
                 models: vec![model.into()],
                 auth: AuthMethod::None,
+                thinking: None,
             }
         }
 

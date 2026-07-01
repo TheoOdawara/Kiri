@@ -1,12 +1,16 @@
 use crate::modules::tui::domain::nav::wrapping_step;
 
 /// Which setting a generic picker chooses, so the keymap maps the highlighted row to the right effect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerKind {
     Models,
     Effort,
     Provider,
     Sessions,
+    /// The action sub-menu for a specific provider: Ativar / Editar / Remover.
+    ProviderAction(String),
+    /// The delete-confirmation picker for a provider: Sim, remover / Cancelar.
+    ProviderDeleteConfirm(String),
 }
 
 /// A generic single-choice picker modal (used by `/models` and `/effort`), rendered with the same
