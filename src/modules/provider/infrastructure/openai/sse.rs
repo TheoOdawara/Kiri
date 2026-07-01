@@ -206,6 +206,7 @@ impl TurnAccumulator {
         CompletedTurn {
             content: self.content,
             tool_calls,
+            thinking: None,
         }
     }
 }

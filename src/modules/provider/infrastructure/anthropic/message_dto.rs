@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::modules::provider::infrastructure::tool_args;
-use crate::shared::kernel::message::Message;
+use crate::shared::kernel::message::{Message, ThinkingBlock};
 use crate::shared::kernel::role::Role;
 
 /// One Anthropic message: a `user`/`assistant` role and its content blocks. Built owned (rather than
@@ -24,6 +24,14 @@ pub(crate) struct AnthropicMessage {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ContentBlock {
+    Thinking {
+        thinking: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    RedactedThinking {
+        data: String,
+    },
     Text {
         text: String,
     },
@@ -108,7 +116,8 @@ fn blocks_for(message: &Message) -> Vec<ContentBlock> {
             })
             .unwrap_or_default(),
         Role::Assistant if !message.tool_calls.is_empty() => {
-            let mut blocks = Vec::with_capacity(message.tool_calls.len() + 1);
+            let mut blocks = Vec::with_capacity(message.tool_calls.len() + 2);
+            push_thinking(&mut blocks, message);
             if let Some(text) = message.content.as_deref().filter(|t| !t.is_empty()) {
                 blocks.push(ContentBlock::Text {
                     text: text.to_string(),
@@ -123,7 +132,32 @@ fn blocks_for(message: &Message) -> Vec<ContentBlock> {
             }
             blocks
         }
+        Role::Assistant => {
+            let mut blocks = Vec::new();
+            push_thinking(&mut blocks, message);
+            blocks.extend(text_and_images(message));
+            blocks
+        }
         _ => text_and_images(message),
+    }
+}
+
+/// Emit a `Thinking`/`RedactedThinking` block first, ahead of any `Text`/`ToolUse` block, when `message`
+/// carries one — the Messages API requires it to lead an assistant turn's content array. This only stays
+/// correct because `build_messages`'s same-role merge never puts a *second* thinking-carrying assistant
+/// message after a first one in the same merged turn (`agent_loop` pushes exactly one assistant message
+/// per turn); a thinking block on the second of two merged assistant messages would land after the
+/// first's content instead of leading the turn.
+fn push_thinking(blocks: &mut Vec<ContentBlock>, message: &Message) {
+    match &message.thinking {
+        Some(ThinkingBlock::Visible { text, signature }) => blocks.push(ContentBlock::Thinking {
+            thinking: text.clone(),
+            signature: signature.clone(),
+        }),
+        Some(ThinkingBlock::Redacted { data }) => {
+            blocks.push(ContentBlock::RedactedThinking { data: data.clone() })
+        }
+        None => {}
     }
 }
 
@@ -375,5 +409,112 @@ mod tests {
         let tools = vec![json!({"type": "function", "function": {"name": "noop"}})];
         let translated = translate_tools(&tools);
         assert_eq!(translated[0]["input_schema"], json!({"type": "object"}));
+    }
+
+    #[test]
+    fn thinking_block_leads_a_tool_use_turn() {
+        let message = Message::assistant_tool_calls(
+            Some("let me read it".to_string()),
+            vec![ToolCall {
+                id: "toolu_1".to_string(),
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path":"a.txt"}"#.to_string(),
+                },
+            }],
+        )
+        .with_thinking(ThinkingBlock::Visible {
+            text: "I should read the file first".to_string(),
+            signature: Some("sig-abc".to_string()),
+        });
+        let (_system, out) = build_messages(&[message]);
+        let value = to_value(&out);
+        let content = value[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["thinking"], "I should read the file first");
+        assert_eq!(content[0]["signature"], "sig-abc");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[2]["type"], "tool_use");
+    }
+
+    #[test]
+    fn redacted_thinking_block_leads_a_tool_use_turn() {
+        let message = Message::assistant_tool_calls(
+            Some("let me read it".to_string()),
+            vec![ToolCall {
+                id: "toolu_1".to_string(),
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+        )
+        .with_thinking(ThinkingBlock::Redacted {
+            data: "encrypted-blob".to_string(),
+        });
+        let (_system, out) = build_messages(&[message]);
+        let value = to_value(&out);
+        let content = value[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "redacted_thinking");
+        assert_eq!(content[0]["data"], "encrypted-blob");
+        assert!(content[0].get("thinking").is_none());
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[2]["type"], "tool_use");
+    }
+
+    #[test]
+    fn thinking_block_leads_a_plain_text_turn_with_no_tool_calls() {
+        let message =
+            Message::assistant_text("the answer is 4").with_thinking(ThinkingBlock::Visible {
+                text: "2 + 2".to_string(),
+                signature: Some("sig-1".to_string()),
+            });
+        let (_system, out) = build_messages(&[message]);
+        let value = to_value(&out);
+        let content = value[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "the answer is 4");
+    }
+
+    #[test]
+    fn thinking_block_stays_first_even_when_a_following_assistant_message_merges_in() {
+        // `build_messages` merges consecutive same-role messages; a misplaced thinking block is a hard
+        // 400 from Anthropic, not a soft failure, so this pins it stays first after the merge.
+        let first = Message::assistant_tool_calls(
+            None,
+            vec![ToolCall {
+                id: "toolu_1".to_string(),
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+        )
+        .with_thinking(ThinkingBlock::Visible {
+            text: "reasoning".to_string(),
+            signature: Some("sig".to_string()),
+        });
+        let second = Message::assistant_text("more");
+        let (_system, out) = build_messages(&[first, second]);
+        assert_eq!(out.len(), 1, "consecutive assistant messages must merge");
+        let value = to_value(&out);
+        let content = value[0]["content"].as_array().unwrap();
+        assert_eq!(
+            content[0]["type"], "thinking",
+            "the thinking block must stay first after the merge, got {content:?}"
+        );
+    }
+
+    #[test]
+    fn no_thinking_means_no_thinking_block() {
+        let message = Message::assistant_text("hi");
+        let (_system, out) = build_messages(&[message]);
+        let value = to_value(&out);
+        let content = value[0]["content"].as_array().unwrap();
+        assert!(content.iter().all(|block| block["type"] != "thinking"));
     }
 }

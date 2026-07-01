@@ -354,6 +354,7 @@ mod tests {
             Ok(CompletedTurn {
                 content: self.content.clone(),
                 tool_calls: Vec::new(),
+                thinking: None,
             })
         }
     }

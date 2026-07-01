@@ -558,6 +558,7 @@ mod tests {
             model: model.to_string(),
             models: vec![],
             auth,
+            thinking: None,
         }
     }
 
