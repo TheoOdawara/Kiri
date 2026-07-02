@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 
 use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
-use crate::modules::tools::application::path::{expand_tilde, home};
+use crate::modules::tools::application::path::{expand_tilde, home, is_absolute_path};
 use crate::modules::tools::application::sandbox::{CreateResolution, Sandbox};
 #[cfg(test)]
 use crate::modules::tools::infrastructure::confine::noop::NoConfinement;
@@ -21,13 +21,13 @@ pub(crate) use crate::modules::tools::infrastructure::secret_paths::SECRET_DIRS;
 /// whose name matches a sensitive pattern (secrets, keys, credentials). All file tools resolve
 /// their path through this type; nothing else touches the filesystem with a raw, unvalidated path.
 ///
-// ponytail: the path-resolution methods (`with_confinement`, `resolve_existing`, `resolve_create`,
-// `exec_cwd_for`) run blocking `std::fs` calls (canonicalize/exists/is_dir) directly on the
-// single-threaded TUI runtime, with no timeout — accepted because the workspace root is a LOCAL
-// filesystem, where these calls return promptly. Upgrade path if a remote/automount fs ever backs the
-// root: make the `Sandbox` port async and route each call through `run_blocking_with_timeout`
-// (shared/infra/sqlite), as the SQLite adapter does. Not done now: a sync→async port flip ripples to
-// every tool, disproportionate to a local-fs hang.
+// ponytail: the path-resolution methods (`with_confinement`, `resolve_existing`, `resolve_create`) run
+// blocking `std::fs` calls (canonicalize/exists/is_dir) directly on the single-threaded TUI runtime,
+// with no timeout — accepted because the workspace root is a LOCAL filesystem, where these calls
+// return promptly. Upgrade path if a remote/automount fs ever backs the root: make the `Sandbox` port
+// async and route each call through `run_blocking_with_timeout` (shared/infra/sqlite), as the SQLite
+// adapter does. Not done now: a sync→async port flip ripples to every tool, disproportionate to a
+// local-fs hang.
 #[derive(Debug, Clone)]
 pub struct FsSandbox {
     root: PathBuf,
@@ -92,7 +92,7 @@ impl FsSandbox {
     /// `Self`, so it stays inherent on the concrete adapter rather than on the object-safe port.
     pub fn relocated(&self, arg: &str) -> Result<Self> {
         let expanded = expand_tilde(arg, home().as_deref());
-        let target = if expanded.is_absolute() {
+        let target = if is_absolute_path(arg, &expanded) {
             expanded
         } else {
             self.root.join(arg)
@@ -160,41 +160,12 @@ impl Sandbox for FsSandbox {
         })
     }
 
-    /// Whether a resolved absolute path lies outside the active workspace root. Used by the file tools
-    /// to phrase the out-of-jail case and pick the working directory the command runs in.
-    fn is_outside_root(&self, resolved: &Path) -> bool {
-        !resolved.starts_with(&self.root)
-    }
-
-    /// The working directory a command should run in for `resolved`. Inside the jail every command runs
-    /// at the workspace root. When the user has approved an out-of-jail target, the command runs at that
-    /// target's nearest existing directory — the harness "moves" there for that one call and, since each
-    /// call builds its own process, is back at the root for the next (no process-global `chdir`).
-    fn exec_cwd_for(&self, resolved: &Path) -> PathBuf {
-        if !self.is_outside_root(resolved) {
-            return self.root.clone();
-        }
-        let mut dir = resolved;
-        loop {
-            if dir.is_dir() {
-                return dir.to_path_buf();
-            }
-            match dir.parent() {
-                // Don't let the walk climb out to a filesystem root like `/`: if no existing ancestor
-                // is found within the target's own subtree, run at the workspace root instead, so a
-                // command never executes at `/` or the user's home for a deep nonexistent target.
-                Some(parent) if parent.parent().is_some() => dir = parent,
-                _ => return self.root.clone(),
-            }
-        }
-    }
-
     /// Resolve a path that must already exist (read/edit/overwrite/delete/list/search). A relative path
     /// resolves under the active root and is asserted to stay within it; an absolute path (or `~/…`) is
     /// resolved as given — allowed outside the root, since the CLI gates it with explicit confirmation.
     fn resolve_existing(&self, rel: &str) -> Result<PathBuf, AgentError> {
         let expanded = expand_tilde(rel, home().as_deref());
-        if expanded.is_absolute() {
+        if is_absolute_path(rel, &expanded) {
             let real = std::fs::canonicalize(&expanded)
                 .map_err(|_| AgentError::Sandbox(format!("path not found: {rel}")))?;
             self.assert_not_sensitive(&real, rel)?;
@@ -221,7 +192,7 @@ impl Sandbox for FsSandbox {
     /// secret paths are rejected regardless.
     fn resolve_create(&self, rel: &str) -> Result<CreateResolution, AgentError> {
         let expanded = expand_tilde(rel, home().as_deref());
-        let (candidate, confined) = if expanded.is_absolute() {
+        let (candidate, confined) = if is_absolute_path(rel, &expanded) {
             // Absolute/tilde-expanded paths are user-approved out-of-root targets — not confined here;
             // see the security model above.
             (expanded, false)

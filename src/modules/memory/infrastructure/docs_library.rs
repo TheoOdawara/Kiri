@@ -59,11 +59,16 @@ impl DocsLibrary {
             };
             let content = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_FILE_BYTES)]);
             if let Some(found) = score_content(&content, &terms) {
+                // Forward slashes on every platform: the model re-reads this path via `read_file`,
+                // which resolves the workspace-relative paths it emits as Unix-style regardless of host
+                // OS (`tools::application::path::is_absolute_target`), and a native `\` on Windows would
+                // make the displayed path inconsistent with that convention (though `Path` itself accepts
+                // either separator, so re-reading would still work either way).
                 let rel = path
                     .strip_prefix(&self.root)
                     .unwrap_or(path.as_path())
                     .to_string_lossy()
-                    .to_string();
+                    .replace('\\', "/");
                 matches.push(DocMatch {
                     path: rel,
                     excerpt: found.excerpt,

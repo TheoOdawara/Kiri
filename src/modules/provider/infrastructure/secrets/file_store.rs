@@ -69,7 +69,8 @@ impl SecretStore for FileSecretStore {
 /// Write `bytes` to `path` readable/writable by the owner only. On Unix this is an atomic `0600` write
 /// (temp sibling created `0600`, then renamed over `path`) so a crash mid-write can never leave the
 /// credentials file empty or partial — losing every stored key. On Windows std exposes no ACL control, so
-/// the file inherits the user-profile DACL (owner + SYSTEM/Administrators) — the accepted equivalent.
+/// the file inherits the user-profile DACL (owner + SYSTEM/Administrators) — the accepted equivalent; the
+/// write is still crash-atomic (temp sibling + rename) via the same portable helper `write_atomic` uses.
 #[cfg(unix)]
 fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), AgentError> {
     crate::shared::infra::fs::write_atomic_owner_only(path, bytes)
@@ -78,7 +79,8 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), AgentError> {
 
 #[cfg(not(unix))]
 fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), AgentError> {
-    fs::write(path, bytes).map_err(|e| AgentError::Secret(format!("write {}: {e}", path.display())))
+    crate::shared::infra::fs::write_atomic_sync(path, bytes)
+        .map_err(|e| AgentError::Secret(format!("write {}: {e}", path.display())))
 }
 
 #[cfg(test)]

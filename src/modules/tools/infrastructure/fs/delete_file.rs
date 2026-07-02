@@ -1,6 +1,3 @@
-#[cfg(unix)]
-use std::ffi::OsStr;
-
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::sandbox::Sandbox;
@@ -9,8 +6,6 @@ use crate::modules::tools::application::tool::{
     simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
-#[cfg(unix)]
-use crate::modules::tools::infrastructure::support::run_fs_argv;
 use crate::modules::tools::infrastructure::support::stat_guard;
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -71,31 +66,56 @@ impl Tool for DeleteFile {
             return out;
         }
 
-        #[cfg(unix)]
-        {
-            let cwd = sandbox.exec_cwd_for(&path);
-            match run_fs_argv(
-                sandbox,
-                &[OsStr::new("rm"), path.as_os_str()],
-                &cwd,
-                None,
-                &[],
-                &[&cwd],
-                &format!("delete {}", args.path),
-            )
-            .await
-            {
-                Ok(_) => ToolOutcome::Ok(format!("deleted {}", args.path)),
-                Err(out) => out,
-            }
+        match std::fs::remove_file(&path) {
+            Ok(()) => ToolOutcome::Ok(format!("deleted {}", args.path)),
+            Err(error) => ToolOutcome::Error(format!("cannot delete {}: {error}", args.path)),
         }
+    }
+}
 
-        #[cfg(windows)]
-        {
-            match std::fs::remove_file(&path) {
-                Ok(()) => ToolOutcome::Ok(format!("deleted {}", args.path)),
-                Err(error) => ToolOutcome::Error(format!("cannot delete {}: {error}", args.path)),
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
+    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    use crate::shared::kernel::tool_call::FunctionCall;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn call(args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "1".to_string(),
+            kind: "function".to_string(),
+            function: FunctionCall {
+                name: "delete_file".to_string(),
+                arguments: args.to_string(),
+            },
         }
+    }
+
+    #[tokio::test]
+    async fn delete_file_removes_the_file() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("f.txt");
+        fs::write(&target, b"x").unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = DeleteFile
+            .execute(&sb, &call(json!({"path": "f.txt"})))
+            .await;
+        assert!(matches!(outcome, ToolOutcome::Ok(_)));
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_file_refuses_a_directory() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = DeleteFile.execute(&sb, &call(json!({"path": "sub"}))).await;
+        match outcome {
+            ToolOutcome::Error(msg) => assert!(msg.contains("directory"), "got: {msg}"),
+            other => panic!("expected refusal, got {other:?}"),
+        }
+        assert!(dir.path().join("sub").is_dir());
     }
 }

@@ -1,6 +1,3 @@
-#[cfg(unix)]
-use std::ffi::OsStr;
-
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::sandbox::Sandbox;
@@ -9,13 +6,7 @@ use crate::modules::tools::application::tool::{
     simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
-#[cfg(unix)]
-use crate::modules::tools::infrastructure::exec;
-use crate::modules::tools::infrastructure::support::READ_FILE_MAX_BYTES;
-#[cfg(windows)]
-use crate::modules::tools::infrastructure::support::read_capped;
-#[cfg(unix)]
-use crate::shared::kernel::sandbox::NetworkPolicy;
+use crate::modules::tools::infrastructure::support::{READ_FILE_MAX_BYTES, read_capped};
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct ReadFile;
@@ -60,51 +51,8 @@ impl Tool for ReadFile {
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
 
-        // `head -c (cap+1)` bounds the read just like the native `read_capped`; the truncation marker
-        // below is still decided here, so the model sees the exact same output as before.
-        #[cfg(unix)]
-        let bytes = {
-            let cap = (READ_FILE_MAX_BYTES + 1).to_string();
-            let cwd = sandbox.exec_cwd_for(&path);
-            let result = match exec::run_argv(
-                &[
-                    OsStr::new("head"),
-                    OsStr::new("-c"),
-                    OsStr::new(&cap),
-                    path.as_os_str(),
-                ],
-                Some(&cwd),
-                None,
-                &[],
-                exec::DEFAULT_TIMEOUT,
-                sandbox.confiner(),
-                // Read-only: pass no extras. The cwd read-allow is redundant under the macOS
-                // `(allow default)` base and, emitted last, would override the home-credential denies
-                // when the workspace root is a home ancestor (TOOL-07) — a least-privilege regression.
-                &sandbox.command_policy(NetworkPolicy::Deny, &[], &[]),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    return ToolOutcome::Error(format!(
-                        "cannot read {}: {}",
-                        args.path,
-                        error.message()
-                    ));
-                }
-            };
-            if !result.succeeded() {
-                return ToolOutcome::Error(format!(
-                    "cannot read {}: {}",
-                    args.path,
-                    result.stderr_text()
-                ));
-            }
-            result.stdout
-        };
-
-        #[cfg(windows)]
+        // Bound the read at `READ_FILE_MAX_BYTES + 1` (the `+1` lets the truncation check below tell
+        // "exactly at the cap" from "more data follows" without re-stating the file).
         let bytes = match read_capped(&path, READ_FILE_MAX_BYTES + 1) {
             Ok(bytes) => bytes,
             Err(error) => return ToolOutcome::Error(format!("cannot read {}: {error}", args.path)),
@@ -122,5 +70,66 @@ impl Tool for ReadFile {
 
     fn is_read_only(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
+    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    use crate::shared::kernel::tool_call::FunctionCall;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn call(args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "1".to_string(),
+            kind: "function".to_string(),
+            function: FunctionCall {
+                name: "read_file".to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn read_file_returns_the_content() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("f.txt"), "héllo").unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = ReadFile.execute(&sb, &call(json!({"path": "f.txt"}))).await;
+        match outcome {
+            ToolOutcome::Ok(text) => assert_eq!(text, "héllo"),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_file_truncates_at_the_byte_cap() {
+        let dir = TempDir::new().unwrap();
+        let big = "a".repeat(READ_FILE_MAX_BYTES + 100);
+        fs::write(dir.path().join("big.txt"), &big).unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = ReadFile
+            .execute(&sb, &call(json!({"path": "big.txt"})))
+            .await;
+        match outcome {
+            ToolOutcome::Ok(text) => assert!(
+                text.contains("truncated at"),
+                "expected a truncation marker: {text}"
+            ),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_file_errors_on_a_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = ReadFile
+            .execute(&sb, &call(json!({"path": "nope.txt"})))
+            .await;
+        assert!(matches!(outcome, ToolOutcome::Error(_)));
     }
 }

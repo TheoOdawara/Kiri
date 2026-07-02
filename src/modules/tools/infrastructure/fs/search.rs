@@ -1,6 +1,3 @@
-#[cfg(unix)]
-use std::ffi::{OsStr, OsString};
-#[cfg(windows)]
 use std::fs;
 
 use serde_json::{Value, json};
@@ -10,46 +7,12 @@ use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, function_schema, simple_command, simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{SearchArgs, parse, parse_args};
-#[cfg(unix)]
-use crate::modules::tools::infrastructure::exec;
-#[cfg(any(unix, windows))]
 use crate::modules::tools::infrastructure::sandbox::SECRET_DIRS;
-#[cfg(unix)]
-use crate::modules::tools::infrastructure::support::SEARCH_MAX_LINE_CHARS;
 use crate::modules::tools::infrastructure::support::SEARCH_MAX_MATCHES;
-#[cfg(windows)]
 use crate::modules::tools::infrastructure::support::search_file;
-#[cfg(unix)]
-use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct Search;
-
-/// Reformat one `grep -rIFn` line (`./path:line:content`) to the native shape `path:line: content`:
-/// drop the `./` grep prepends, and bound the content to the per-line char cap. (Parsing splits on the
-/// first two `:` — `-Z`/`--null` would disambiguate a `:` in a filename, but its meaning differs across
-/// grep implementations on PATH, e.g. ugrep treats `-Z` as fuzzy-match, so it is not relied upon.)
-#[cfg(unix)]
-fn format_grep_line(line: &str) -> String {
-    let mut parts = line.splitn(3, ':');
-    let path = parts.next().unwrap_or_default();
-    let number = parts.next().unwrap_or_default();
-    let content = parts.next().unwrap_or_default();
-    let path = path.strip_prefix("./").unwrap_or(path);
-    let shown: String = content.chars().take(SEARCH_MAX_LINE_CHARS).collect();
-    format!("{path}:{number}: {shown}")
-}
-
-/// Whether a raw `grep` match line comes from a sensitive file (by its last path component). Such
-/// matches are dropped so `search` cannot leak the contents of a `.env`/`id_rsa` the scan reached.
-#[cfg(unix)]
-fn is_sensitive_match(sandbox: &dyn Sandbox, grep_line: &str) -> bool {
-    let path = grep_line.split(':').next().unwrap_or_default();
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| sandbox.is_sensitive_name(name))
-}
 
 #[async_trait::async_trait(?Send)]
 impl Tool for Search {
@@ -105,139 +68,64 @@ impl Tool for Search {
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
 
-        // `grep -rIFn` does the recursive scan: `-r` recurse (without following symlinked dirs), `-I`
-        // skip binary files, `-F` fixed-string (literal, case-sensitive) match, `-n` line numbers.
-        // `--exclude-dir` (supported by GNU/BSD/ugrep alike) keeps the scan out of credential
-        // directories whose files (e.g. `.aws/config`) the file-name guard misses. The query is its own
-        // argv element, so it is never shell-interpreted. The command runs *in* the resolved start
-        // directory and searches `.`, so the paths grep prints are relative to it.
-        #[cfg(unix)]
-        {
-            let mut argv: Vec<OsString> = vec![OsString::from("grep"), OsString::from("-rIFn")];
-            for dir in SECRET_DIRS {
-                argv.push(OsString::from(format!("--exclude-dir={dir}")));
-            }
-            argv.push(OsString::from("-e"));
-            argv.push(OsString::from(args.query.as_str()));
-            argv.push(OsString::from("."));
-            let argv: Vec<&OsStr> = argv.iter().map(OsString::as_os_str).collect();
-            let result = match exec::run_argv(
-                &argv,
-                Some(&start),
-                None,
-                &[],
-                exec::DEFAULT_TIMEOUT,
-                sandbox.confiner(),
-                // Read-only: pass no extras. The start-dir read-allow is redundant under the macOS
-                // `(allow default)` base and, emitted last, would override the home-credential denies
-                // when the workspace root is a home ancestor (TOOL-07) — a least-privilege regression.
-                &sandbox.command_policy(NetworkPolicy::Deny, &[], &[]),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    return ToolOutcome::Error(format!(
-                        "cannot search {}: {}",
-                        args.path,
-                        error.message()
-                    ));
-                }
+        let mut matches: Vec<String> = Vec::new();
+        // Bound the recursion (and the displayed paths) to the resolved start directory, so a search
+        // begun outside the active workspace stays within its own subtree.
+        let base = start.clone();
+        let mut stack = vec![start];
+        let mut truncated = false;
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
             };
-            // grep exit status: 0 = matches found, 1 = none, >= 2 = a real error.
-            if result.exit_code.unwrap_or(2) >= 2 {
-                return ToolOutcome::Error(format!(
-                    "cannot search {}: {}",
-                    args.path,
-                    result.stderr_text()
-                ));
-            }
-
-            let stdout = String::from_utf8_lossy(&result.stdout);
-            let mut matches: Vec<String> = Vec::new();
-            let mut truncated = false;
-            for line in stdout.lines() {
-                if matches.len() >= SEARCH_MAX_MATCHES {
-                    truncated = true;
-                    break;
-                }
-                if is_sensitive_match(sandbox, line) {
-                    continue;
-                }
-                matches.push(format_grep_line(line));
-            }
-
-            if matches.is_empty() {
-                return ToolOutcome::Ok("no matches".to_string());
-            }
-            let mut output = matches.join("\n");
-            if truncated {
-                output.push_str(&format!("\n… (truncated at {SEARCH_MAX_MATCHES} matches)"));
-            }
-            ToolOutcome::Ok(output)
-        }
-
-        #[cfg(windows)]
-        {
-            let mut matches: Vec<String> = Vec::new();
-            // Bound the recursion (and the displayed paths) to the resolved start directory, so a search
-            // begun outside the active workspace stays within its own subtree.
-            let base = start.clone();
-            let mut stack = vec![start];
-            let mut truncated = false;
-            while let Some(dir) = stack.pop() {
-                let Ok(entries) = fs::read_dir(&dir) else {
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
                     continue;
                 };
-                for entry in entries.flatten() {
-                    let Ok(file_type) = entry.file_type() else {
+                if file_type.is_symlink() {
+                    continue; // never follow symlinks: avoids escape and traversal loops
+                }
+                let path = entry.path();
+                if !path.starts_with(&base) {
+                    continue;
+                }
+                if file_type.is_dir() {
+                    // Never descend into a credential directory, so files there with non-sensitive
+                    // names (e.g. `.aws/config`) are not scanned.
+                    if entry.file_name().to_str().is_some_and(|name| {
+                        SECRET_DIRS.iter().any(|dir| dir.eq_ignore_ascii_case(name))
+                    }) {
                         continue;
-                    };
-                    if file_type.is_symlink() {
-                        continue; // never follow symlinks: avoids escape and traversal loops
                     }
-                    let path = entry.path();
-                    if !path.starts_with(&base) {
-                        continue;
+                    stack.push(path);
+                } else if file_type.is_file() {
+                    if entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| sandbox.is_sensitive_name(name))
+                    {
+                        continue; // never leak the contents of a sensitive file
                     }
-                    if file_type.is_dir() {
-                        // Never descend into a credential directory (matches the Unix `--exclude-dir`),
-                        // so files there with non-sensitive names (e.g. `.aws\config`) are not scanned.
-                        if entry.file_name().to_str().is_some_and(|name| {
-                            SECRET_DIRS.iter().any(|dir| dir.eq_ignore_ascii_case(name))
-                        }) {
-                            continue;
-                        }
-                        stack.push(path);
-                    } else if file_type.is_file() {
-                        if entry
-                            .file_name()
-                            .to_str()
-                            .is_some_and(|name| sandbox.is_sensitive_name(name))
-                        {
-                            continue; // never leak the contents of a sensitive file
-                        }
-                        search_file(&path, &args.query, &base, &mut matches);
-                        if matches.len() >= SEARCH_MAX_MATCHES {
-                            truncated = true;
-                            break;
-                        }
+                    search_file(&path, &args.query, &base, &mut matches);
+                    if matches.len() >= SEARCH_MAX_MATCHES {
+                        truncated = true;
+                        break;
                     }
                 }
-                if truncated {
-                    break;
-                }
             }
-
-            if matches.is_empty() {
-                return ToolOutcome::Ok("no matches".to_string());
-            }
-            let mut output = matches.join("\n");
             if truncated {
-                output.push_str(&format!("\n… (truncated at {SEARCH_MAX_MATCHES} matches)"));
+                break;
             }
-            ToolOutcome::Ok(output)
         }
+
+        if matches.is_empty() {
+            return ToolOutcome::Ok("no matches".to_string());
+        }
+        let mut output = matches.join("\n");
+        if truncated {
+            output.push_str(&format!("\n… (truncated at {SEARCH_MAX_MATCHES} matches)"));
+        }
+        ToolOutcome::Ok(output)
     }
 
     fn is_read_only(&self) -> bool {
@@ -245,9 +133,9 @@ impl Tool for Search {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
-    use super::{SEARCH_MAX_LINE_CHARS, Search, format_grep_line};
+    use super::Search;
     use crate::modules::tools::application::tool::{Tool, ToolOutcome};
     use crate::modules::tools::infrastructure::sandbox::FsSandbox;
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
@@ -264,23 +152,6 @@ mod tests {
                 arguments: args.to_string(),
             },
         }
-    }
-
-    #[test]
-    fn format_grep_line_strips_dot_slash_and_inserts_the_space() {
-        assert_eq!(
-            format_grep_line("./sub/f.txt:2:NEEDLE here"),
-            "sub/f.txt:2: NEEDLE here"
-        );
-    }
-
-    #[test]
-    fn format_grep_line_truncates_long_content_at_a_char_boundary() {
-        let long = "é".repeat(300);
-        let shown = format_grep_line(&format!("f.txt:1:{long}"));
-        let content = shown.rsplit_once(": ").unwrap().1;
-        assert_eq!(content.chars().count(), SEARCH_MAX_LINE_CHARS);
-        assert!(content.chars().all(|c| c == 'é'));
     }
 
     #[tokio::test]

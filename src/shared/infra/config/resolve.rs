@@ -1,11 +1,11 @@
-use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use regex::Regex;
 
+use crate::shared::infra::home;
 use crate::shared::kernel::sandbox::{NetworkPolicy, NetworkStance, SandboxMode};
 
 use super::defaults::DEFAULT_NET_ALLOW;
@@ -115,34 +115,31 @@ pub(super) fn load_net_allow() -> Result<Arc<[Regex]>> {
     compile_patterns("KIRI_SANDBOX_NET_ALLOW_CMDS", DEFAULT_NET_ALLOW)
 }
 
-/// The home-directory read for this module's path resolution — the extension point for home resolution
-/// here. Unix-only today (`$HOME`); macOS is the v1 target. Windows: fall back to `%USERPROFILE%` here
-/// when Windows support lands (deferred — do not add untested Windows code now). Note: tilde expansion
-/// for agent-supplied tool paths has its own read in `tools/infrastructure/path.rs::home()`.
-fn home_dir() -> Option<OsString> {
-    std::env::var_os("HOME")
-}
-
-/// The separator between entries in a colon-list env var (the extra docs/memory paths). Unix-only today
-/// (`:`); Windows uses `;` — change it here, the single site, when Windows support lands (deferred).
+/// The separator between entries in a list env var (the extra docs/memory/sandbox paths) — `:` on Unix,
+/// `;` on Windows, matching each platform's own `PATH` convention.
+#[cfg(not(windows))]
 const PATH_LIST_SEPARATOR: char = ':';
+#[cfg(windows)]
+const PATH_LIST_SEPARATOR: char = ';';
 
-/// Expand a leading `~`/`~/…` to the home dir; any other path is taken as given.
+/// Expand a leading `~`/`~/…` to the home dir; any other path is taken as given. Home resolution lives in
+/// [`crate::shared::infra::home`] — the single cross-platform source also used by the agent tool-path
+/// tilde expander (`tools/application/path.rs::home()`), so both readers agree on one home directory.
 pub(super) fn expand_home(path: &str) -> PathBuf {
-    expand_home_with(path, home_dir().as_ref())
+    expand_home_with(path, home::home_dir().as_deref())
 }
 
 /// Pure tilde expansion against an explicit `home`: `~` and `~/…` expand when `home` is `Some`, else
 /// (and for any non-tilde path) the input is taken verbatim. The env read lives in `expand_home`.
-fn expand_home_with(path: &str, home: Option<&OsString>) -> PathBuf {
+fn expand_home_with(path: &str, home: Option<&Path>) -> PathBuf {
     if path == "~" {
         if let Some(home) = home {
-            return PathBuf::from(home);
+            return home.to_path_buf();
         }
     } else if let Some(rest) = path.strip_prefix("~/")
         && let Some(home) = home
     {
-        return PathBuf::from(home).join(rest);
+        return home.join(rest);
     }
     PathBuf::from(path)
 }
@@ -314,13 +311,13 @@ mod tests {
 
     #[test]
     fn expand_home_with_cases() {
-        let home = OsString::from("/home/alice");
+        let home = Path::new("/home/alice");
         assert_eq!(
-            expand_home_with("~", Some(&home)),
+            expand_home_with("~", Some(home)),
             PathBuf::from("/home/alice")
         );
         assert_eq!(
-            expand_home_with("~/x/y", Some(&home)),
+            expand_home_with("~/x/y", Some(home)),
             PathBuf::from("/home/alice/x/y")
         );
         // No home → the tilde is not expanded (taken verbatim).
@@ -328,7 +325,7 @@ mod tests {
         assert_eq!(expand_home_with("~/x", None), PathBuf::from("~/x"));
         // A non-tilde path is unchanged regardless of home.
         assert_eq!(
-            expand_home_with("/abs/path", Some(&home)),
+            expand_home_with("/abs/path", Some(home)),
             PathBuf::from("/abs/path")
         );
     }

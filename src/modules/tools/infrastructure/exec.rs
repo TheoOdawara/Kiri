@@ -1,14 +1,12 @@
-//! The single place the tools layer spawns a child process. Every file tool translates its validated
-//! arguments into a terminal command and runs it here; `run_command` runs an arbitrary model command
-//! through the platform shell. Centralizes the process plumbing — piped stdio, concurrent stdin
-//! writing, a timeout that kills the child, and the 64 KiB output cap — so no tool reimplements it.
+//! The single place the tools layer spawns a child process — `run_command` runs an arbitrary model
+//! command through the platform shell (the file tools operate the filesystem natively, via `std::fs`,
+//! and never reach this module). Centralizes the process plumbing — piped stdio, a timeout that kills
+//! the child, and the 64 KiB output cap — so `run_command` does not reimplement it.
 
-use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
@@ -19,70 +17,19 @@ pub const EXEC_MAX_BYTES: usize = 64 * 1024;
 /// The bound for a file tool's command. `run_command` overrides it with its own configurable timeout.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The captured result of a finished subprocess. `stdout`/`stderr` are raw and uncapped — each caller
-/// decides how to combine and bound them (`run_command` caps the combined stream; `read_file` applies
-/// its own read cap to `stdout`).
+/// The captured result of a finished subprocess. `stdout`/`stderr` are raw and uncapped; `run_command`
+/// caps the combined stream via `capped_combined`.
 pub struct ExecResult {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
 }
 
-impl ExecResult {
-    pub fn succeeded(&self) -> bool {
-        self.exit_code == Some(0)
-    }
-
-    /// The child's stderr as text, trimmed — the detail interpolated into a tool's error message.
-    pub fn stderr_text(&self) -> String {
-        String::from_utf8_lossy(&self.stderr).trim().to_string()
-    }
-}
-
-/// Why a command did not produce a result: the shell/binary failed to launch, or it ran past the bound.
+/// Why a command did not produce a result: the shell failed to launch, or it ran past the bound.
 #[derive(Debug)]
 pub enum ExecError {
     Spawn(String),
     Timeout(u64),
-}
-
-impl ExecError {
-    pub fn message(&self) -> String {
-        match self {
-            ExecError::Spawn(error) => format!("failed to run command: {error}"),
-            ExecError::Timeout(ms) => format!("command timed out after {ms}ms"),
-        }
-    }
-}
-
-/// Run an explicit argv (no shell). The validated absolute path is passed as its own OS-level argument,
-/// so there is no shell quoting or word-splitting — the workhorse for the translated file tools.
-/// `stdin` feeds raw bytes to the child (e.g. `tee` writing a file's content); `env` sets process
-/// environment without interpolating values into the command (e.g. `edit_file`'s old/new strings).
-pub async fn run_argv(
-    argv: &[&OsStr],
-    cwd: Option<&Path>,
-    stdin: Option<&[u8]>,
-    env: &[(&str, &OsStr)],
-    timeout: Duration,
-    confiner: &dyn CommandSandbox,
-    policy: &SandboxPolicy,
-) -> Result<ExecResult, ExecError> {
-    let (program, rest) = argv
-        .split_first()
-        .ok_or_else(|| ExecError::Spawn("argv must not be empty".to_string()))?;
-    let mut cmd = Command::new(program);
-    cmd.args(rest);
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    for (key, value) in env {
-        cmd.env(key, value);
-    }
-    let cmd = confiner
-        .confine(cmd, policy)
-        .map_err(|error| ExecError::Spawn(error.to_string()))?;
-    run(cmd, stdin, timeout).await
 }
 
 /// Run a command line through the platform shell (`sh -c` / `cmd /C`). Used only by `run_command`,
@@ -109,7 +56,7 @@ pub async fn run_shell(
     let cmd = confiner
         .confine(cmd, policy)
         .map_err(|error| ExecError::Spawn(error.to_string()))?;
-    run(cmd, None, timeout).await
+    run(cmd, timeout).await
 }
 
 /// Combine `stdout` then `stderr` (as `run_command` reports them) and truncate at `EXEC_MAX_BYTES`.
@@ -130,57 +77,29 @@ pub fn capped_combined(result: &ExecResult) -> String {
     }
 }
 
-/// Spawn, feed stdin while draining stdout/stderr (so a child echoing its input — e.g. `tee` — cannot
-/// deadlock against a full pipe), and bound the whole thing by `timeout`. `kill_on_drop` ensures a
-/// timed-out child is killed when the future is dropped. Stdin is `null` when no input is supplied, so
-/// a command that would otherwise prompt (`rm` on a write-protected file) sees EOF instead of hanging.
-async fn run(
-    mut cmd: Command,
-    stdin: Option<&[u8]>,
-    timeout: Duration,
-) -> Result<ExecResult, ExecError> {
-    cmd.stdin(if stdin.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    });
+/// Spawn, capture stdout/stderr, and bound the whole thing by `timeout`. `kill_on_drop` ensures a
+/// timed-out child is killed when the future is dropped. Stdin is always `null` — `run_command` is the
+/// sole caller and never feeds input, so a command that would otherwise prompt (e.g. on a
+/// write-protected target) sees EOF instead of hanging.
+async fn run(mut cmd: Command, timeout: Duration) -> Result<ExecResult, ExecError> {
+    cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
 
     let ms = timeout.as_millis() as u64;
     let fut = async {
-        let mut child = cmd
+        let output = cmd
             .spawn()
+            .map_err(|error| ExecError::Spawn(error.to_string()))?
+            .wait_with_output()
+            .await
             .map_err(|error| ExecError::Spawn(error.to_string()))?;
-        let sink = child.stdin.take();
-        let writer = async move {
-            // Write the payload, then drop `sink` (at scope end) to close the pipe so the child reads
-            // EOF and finishes. The write result is returned, not swallowed: a partial stdin write means
-            // the payload (e.g. a file's content) did not fully reach the child.
-            match (sink, stdin) {
-                (Some(mut sink), Some(bytes)) => sink.write_all(bytes).await,
-                _ => Ok(()),
-            }
-        };
-        let (write_result, output) = tokio::join!(writer, child.wait_with_output());
-        let output = output.map_err(|error| ExecError::Spawn(error.to_string()))?;
-        let result = ExecResult {
+        Ok(ExecResult {
             stdout: output.stdout,
             stderr: output.stderr,
             exit_code: output.status.code(),
-        };
-        // Surface a failed stdin write only when the child otherwise reported success — a truncated
-        // write that the child silently accepted (a wrong file) must fail loudly; a child that itself
-        // failed keeps its own (more useful) stderr/exit code instead.
-        if result.succeeded()
-            && let Err(error) = write_result
-        {
-            return Err(ExecError::Spawn(format!(
-                "failed to write command input: {error}"
-            )));
-        }
-        Ok(result)
+        })
     };
 
     match tokio::time::timeout(timeout, fut).await {
@@ -189,7 +108,7 @@ async fn run(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::modules::tools::application::command_sandbox::SandboxPolicy;
@@ -198,71 +117,40 @@ mod tests {
 
     fn policy() -> SandboxPolicy {
         SandboxPolicy {
-            root: std::path::PathBuf::from("/"),
+            root: std::path::PathBuf::from("."),
             network: NetworkPolicy::Allow,
             extra_ro: Vec::new(),
             extra_rw: Vec::new(),
         }
     }
 
-    #[tokio::test]
-    async fn run_argv_captures_stdout_and_exit_code() {
-        let result = run_argv(
-            &[OsStr::new("printf"), OsStr::new("hi")],
-            None,
-            None,
-            &[],
-            DEFAULT_TIMEOUT,
-            &NoConfinement,
-            &policy(),
-        )
-        .await
-        .expect("printf runs");
-        assert_eq!(result.stdout, b"hi");
-        assert!(result.succeeded());
+    /// `sh`'s builtins differ from `cmd`'s, so each test picks its own per-platform script; `run_shell`
+    /// itself already branches the same way in production.
+    fn script(unix: &'static str, windows: &'static str) -> &'static str {
+        if cfg!(windows) { windows } else { unix }
     }
 
     #[tokio::test]
-    async fn run_argv_feeds_stdin() {
-        // `cat` echoes stdin to stdout — exercises the concurrent stdin-writer / stdout-drainer path.
-        let result = run_argv(
-            &[OsStr::new("cat")],
+    async fn run_shell_captures_stdout_and_exit_code() {
+        let result = run_shell(
+            script("printf hi", "echo hi"),
             None,
-            Some(b"piped payload"),
-            &[],
             DEFAULT_TIMEOUT,
             &NoConfinement,
             &policy(),
         )
         .await
-        .expect("cat runs");
-        assert_eq!(result.stdout, b"piped payload");
-    }
-
-    #[tokio::test]
-    async fn run_argv_passes_env_without_interpolation() {
-        let result = run_argv(
-            &[
-                OsStr::new("sh"),
-                OsStr::new("-c"),
-                OsStr::new("printf %s \"$KIRI_TEST\""),
-            ],
-            None,
-            None,
-            &[("KIRI_TEST", OsStr::new("$(whoami) literal"))],
-            DEFAULT_TIMEOUT,
-            &NoConfinement,
-            &policy(),
-        )
-        .await
-        .expect("sh runs");
-        assert_eq!(result.stdout, b"$(whoami) literal");
+        .expect("script runs");
+        // `cmd /C echo` appends a CRLF that `printf` (no implicit newline) does not; trim so the
+        // assertion is platform-independent.
+        assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "hi");
+        assert_eq!(result.exit_code, Some(0));
     }
 
     #[tokio::test]
     async fn run_shell_times_out_and_reports_ms() {
         let error = run_shell(
-            "sleep 5",
+            script("sleep 5", "ping -n 6 127.0.0.1 >NUL"),
             None,
             Duration::from_millis(100),
             &NoConfinement,
@@ -271,7 +159,23 @@ mod tests {
         .await
         .err()
         .expect("expected a timeout");
-        assert!(error.message().contains("timed out"));
+        assert!(matches!(error, ExecError::Timeout(_)));
+    }
+
+    #[tokio::test]
+    async fn run_shell_reports_a_failing_command_by_exit_code_not_spawn_error() {
+        // The shell itself always launches; a failing inner command is a normal non-zero exit, never
+        // `ExecError::Spawn` (that variant is reserved for the shell/binary failing to launch at all).
+        let result = run_shell(
+            script("exit 3", "exit 3"),
+            None,
+            DEFAULT_TIMEOUT,
+            &NoConfinement,
+            &policy(),
+        )
+        .await
+        .expect("the shell launches even though the inner command fails");
+        assert_eq!(result.exit_code, Some(3));
     }
 
     #[tokio::test]
@@ -284,43 +188,5 @@ mod tests {
         let text = capped_combined(&result);
         assert!(text.contains("truncated at"));
         assert!(text.len() <= EXEC_MAX_BYTES + 200);
-    }
-
-    #[tokio::test]
-    async fn run_argv_reports_spawn_failure_for_missing_binary() {
-        let error = run_argv(
-            &[OsStr::new("kiri_no_such_binary_zzz")],
-            None,
-            None,
-            &[],
-            DEFAULT_TIMEOUT,
-            &NoConfinement,
-            &policy(),
-        )
-        .await
-        .err()
-        .expect("missing binary fails to spawn");
-        assert!(matches!(error, ExecError::Spawn(_)));
-    }
-
-    #[tokio::test]
-    async fn run_argv_surfaces_a_failed_stdin_write() {
-        // A child that reads nothing and exits 0 closes the read end of the pipe; writing a payload
-        // larger than the pipe buffer then fails with EPIPE. That must surface as an error — a silently
-        // truncated stdin write (e.g. a partial file write) is a defect, not a success.
-        let big = vec![b'x'; 1 << 20]; // 1 MiB, well over the OS pipe buffer
-        let error = run_argv(
-            &[OsStr::new("sh"), OsStr::new("-c"), OsStr::new("exit 0")],
-            None,
-            Some(&big),
-            &[],
-            DEFAULT_TIMEOUT,
-            &NoConfinement,
-            &policy(),
-        )
-        .await
-        .err()
-        .expect("a failed stdin write must surface, not be swallowed");
-        assert!(matches!(error, ExecError::Spawn(_)));
     }
 }

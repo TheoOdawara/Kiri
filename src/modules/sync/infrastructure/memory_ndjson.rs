@@ -150,7 +150,8 @@ pub async fn import(memory: &dyn SharedMemory, path: &Path) -> AgentResult<Merge
 /// Write `bytes` to `path` readable/writable by the owner only. On Unix this is `0600` set at `open` (no
 /// post-write chmod window) and re-coerced afterwards so a pre-existing wider mode is tightened; on
 /// Windows the file inherits the user-profile DACL (std exposes no ACL control) — the accepted
-/// equivalent. Mirrors `provider/infrastructure/secrets/file_store.rs`.
+/// equivalent, but the write is still crash-atomic (temp sibling + rename) via `write_atomic`. Mirrors
+/// `provider/infrastructure/secrets/file_store.rs`.
 #[cfg(unix)]
 async fn write_owner_only(path: &Path, bytes: &[u8]) -> AgentResult<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -196,7 +197,7 @@ async fn write_owner_only(path: &Path, bytes: &[u8]) -> AgentResult<()> {
 
 #[cfg(not(unix))]
 async fn write_owner_only(path: &Path, bytes: &[u8]) -> AgentResult<()> {
-    fs::write(path, bytes).await?;
+    crate::shared::infra::fs::write_atomic(path, bytes).await?;
     Ok(())
 }
 

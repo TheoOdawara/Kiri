@@ -1,6 +1,3 @@
-#[cfg(unix)]
-use std::ffi::OsStr;
-
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::sandbox::Sandbox;
@@ -8,8 +5,6 @@ use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, function_schema, simple_command, simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
-#[cfg(unix)]
-use crate::modules::tools::infrastructure::support::run_fs_argv;
 use crate::modules::tools::infrastructure::support::stat_guard;
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -73,31 +68,53 @@ impl Tool for DeleteDir {
             return out;
         }
 
-        #[cfg(unix)]
-        {
-            let cwd = sandbox.exec_cwd_for(&path);
-            match run_fs_argv(
-                sandbox,
-                &[OsStr::new("rm"), OsStr::new("-rf"), path.as_os_str()],
-                &cwd,
-                None,
-                &[],
-                &[&cwd],
-                &format!("delete {}", args.path),
-            )
-            .await
-            {
-                Ok(_) => ToolOutcome::Ok(format!("deleted directory {}", args.path)),
-                Err(out) => out,
-            }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => ToolOutcome::Ok(format!("deleted directory {}", args.path)),
+            Err(error) => ToolOutcome::Error(format!("cannot delete {}: {error}", args.path)),
         }
+    }
+}
 
-        #[cfg(windows)]
-        {
-            match std::fs::remove_dir_all(&path) {
-                Ok(()) => ToolOutcome::Ok(format!("deleted directory {}", args.path)),
-                Err(error) => ToolOutcome::Error(format!("cannot delete {}: {error}", args.path)),
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
+    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    use crate::shared::kernel::tool_call::FunctionCall;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn call(args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "1".to_string(),
+            kind: "function".to_string(),
+            function: FunctionCall {
+                name: "delete_dir".to_string(),
+                arguments: args.to_string(),
+            },
         }
+    }
+
+    #[tokio::test]
+    async fn delete_dir_removes_the_tree_recursively() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("sub/nested")).unwrap();
+        fs::write(dir.path().join("sub/nested/f.txt"), b"x").unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = DeleteDir.execute(&sb, &call(json!({"path": "sub"}))).await;
+        assert!(matches!(outcome, ToolOutcome::Ok(_)));
+        assert!(!dir.path().join("sub").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_dir_refuses_the_workspace_root() {
+        let dir = TempDir::new().unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = DeleteDir.execute(&sb, &call(json!({"path": "."}))).await;
+        match outcome {
+            ToolOutcome::Error(msg) => assert!(msg.contains("workspace root"), "got: {msg}"),
+            other => panic!("expected refusal, got {other:?}"),
+        }
+        assert!(dir.path().is_dir());
     }
 }

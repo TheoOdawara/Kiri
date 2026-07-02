@@ -1,6 +1,3 @@
-#[cfg(unix)]
-use std::ffi::OsStr;
-
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::path::default_accept_for;
@@ -9,8 +6,6 @@ use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, WriteArgs, parse, parse_args};
-#[cfg(unix)]
-use crate::modules::tools::infrastructure::support::run_fs_argv;
 use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -76,41 +71,63 @@ impl Tool for WriteFile {
             return out;
         }
 
-        // Pipe the content through the child's stdin so arbitrary bytes (newlines, quotes, `$`) reach
-        // `tee` untouched — nothing is interpolated into the command. `tee` truncates/creates the file.
-        #[cfg(unix)]
-        {
-            let cwd = sandbox.exec_cwd_for(&resolution.target);
-            match run_fs_argv(
-                sandbox,
-                &[OsStr::new("tee"), resolution.target.as_os_str()],
-                &cwd,
-                Some(args.content.as_bytes()),
-                &[],
-                &[&cwd],
-                &format!("write {}", args.path),
-            )
-            .await
-            {
-                Ok(_) => ToolOutcome::Ok(format!(
-                    "wrote {} bytes to {}",
-                    args.content.len(),
-                    args.path
-                )),
-                Err(out) => out,
-            }
+        match std::fs::write(&resolution.target, args.content.as_bytes()) {
+            Ok(()) => ToolOutcome::Ok(format!(
+                "wrote {} bytes to {}",
+                args.content.len(),
+                args.path
+            )),
+            Err(error) => ToolOutcome::Error(format!("cannot write {}: {error}", args.path)),
         }
+    }
+}
 
-        #[cfg(windows)]
-        {
-            match std::fs::write(&resolution.target, args.content.as_bytes()) {
-                Ok(()) => ToolOutcome::Ok(format!(
-                    "wrote {} bytes to {}",
-                    args.content.len(),
-                    args.path
-                )),
-                Err(error) => ToolOutcome::Error(format!("cannot write {}: {error}", args.path)),
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
+    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    use crate::shared::kernel::tool_call::FunctionCall;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn call(args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "1".to_string(),
+            kind: "function".to_string(),
+            function: FunctionCall {
+                name: "write_file".to_string(),
+                arguments: args.to_string(),
+            },
         }
+    }
+
+    #[tokio::test]
+    async fn write_file_creates_missing_parent_dirs_and_writes_content() {
+        let dir = TempDir::new().unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = WriteFile
+            .execute(&sb, &call(json!({"path": "a/b/c.txt", "content": "hello"})))
+            .await;
+        assert!(
+            matches!(outcome, ToolOutcome::Ok(_)),
+            "expected Ok, got {outcome:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a/b/c.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_overwrites_an_existing_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("f.txt"), b"old").unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = WriteFile
+            .execute(&sb, &call(json!({"path": "f.txt", "content": "new"})))
+            .await;
+        assert!(matches!(outcome, ToolOutcome::Ok(_)));
+        assert_eq!(fs::read_to_string(dir.path().join("f.txt")).unwrap(), "new");
     }
 }

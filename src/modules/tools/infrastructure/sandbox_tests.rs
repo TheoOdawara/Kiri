@@ -222,60 +222,6 @@ fn resolve_create_rejects_root_only_path() {
     assert!(sb.resolve_create(".").is_err());
 }
 
-#[test]
-fn exec_cwd_for_stays_at_root_inside_the_jail() {
-    let dir = TempDir::new().unwrap();
-    let sb = sandbox(&dir);
-    fs::write(sb.root().join("f.txt"), b"x").unwrap();
-    let inside = sb.resolve_existing("f.txt").unwrap();
-    assert!(!sb.is_outside_root(&inside));
-    assert_eq!(sb.exec_cwd_for(&inside), sb.root());
-}
-
-#[test]
-fn exec_cwd_for_uses_the_external_dir_outside_the_jail() {
-    let outside = TempDir::new().unwrap();
-    let file = outside.path().join("f.txt");
-    fs::write(&file, b"x").unwrap();
-    let dir = TempDir::new().unwrap();
-    let sb = sandbox(&dir);
-
-    let resolved = sb.resolve_existing(file.to_str().unwrap()).unwrap();
-    assert!(sb.is_outside_root(&resolved));
-    // The command runs in the target file's directory, not the workspace root.
-    assert_eq!(
-        sb.exec_cwd_for(&resolved),
-        fs::canonicalize(outside.path()).unwrap()
-    );
-}
-
-#[test]
-fn exec_cwd_for_falls_back_to_nearest_existing_ancestor() {
-    let outside = TempDir::new().unwrap();
-    let sb = sandbox(&TempDir::new().unwrap());
-    // A deep, not-yet-created target outside the jail: cwd must be an existing directory.
-    let target = sb
-        .resolve_create(outside.path().join("a/b/c.txt").to_str().unwrap())
-        .unwrap()
-        .target;
-    assert_eq!(
-        sb.exec_cwd_for(&target),
-        fs::canonicalize(outside.path()).unwrap()
-    );
-}
-
-#[test]
-fn exec_cwd_for_never_escapes_to_the_filesystem_root() {
-    let sb = sandbox(&TempDir::new().unwrap());
-    // A nonexistent target directly under `/`: its only existing ancestor is `/` itself, which
-    // must never become the working directory — fall back to the workspace root instead.
-    let target = sb
-        .resolve_create("/t-cli-nonexistent-top-zzz-9999/f.txt")
-        .unwrap()
-        .target;
-    assert_eq!(sb.exec_cwd_for(&target), sb.root());
-}
-
 // Least privilege: a read-only tool passes its cwd as a read extra (never a write grant), and a
 // mutating tool passes its cwd as a write extra. The policy must reflect exactly that split.
 #[test]

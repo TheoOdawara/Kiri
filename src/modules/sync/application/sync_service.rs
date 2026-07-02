@@ -281,7 +281,10 @@ impl<'a> SyncService<'a> {
             return Ok(false);
         }
         let path = Path::new(url);
-        Ok(path.is_absolute() || self.work_tree.exists(path).await?)
+        // A leading `/` is always an absolute local path, even on Windows, where `Path::is_absolute`
+        // requires a drive prefix and would otherwise misclassify a Unix-style path as relative (mirrors
+        // `tools::application::path::is_absolute_target`'s documented rationale for the same gotcha).
+        Ok(url.starts_with('/') || path.is_absolute() || self.work_tree.exists(path).await?)
     }
 }
 

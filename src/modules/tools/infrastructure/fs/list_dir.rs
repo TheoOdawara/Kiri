@@ -1,6 +1,3 @@
-#[cfg(unix)]
-use std::ffi::OsStr;
-
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::sandbox::Sandbox;
@@ -8,8 +5,6 @@ use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, function_schema, simple_command, simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{ListArgs, parse, parse_args};
-#[cfg(unix)]
-use crate::modules::tools::infrastructure::support::run_fs_argv;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct ListDir;
@@ -58,56 +53,22 @@ impl Tool for ListDir {
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
 
-        // `ls -1A -p` lists one entry per line, excludes `.`/`..`, and marks directories with `/`.
-        // `QUOTING_STYLE=literal` stops GNU `ls` from quoting unusual names; the lines are re-sorted in
-        // Rust so the order is byte-lexicographic and locale-independent (matching the native version).
-        // Read-only: pass no write dirs. `run_fs_argv` grants no read extras either, so the cwd never
-        // re-allows reads that would override the home-credential denies when the workspace root is a
-        // home ancestor (TOOL-07) — least privilege is preserved.
-        #[cfg(unix)]
-        let mut names: Vec<String> = {
-            let cwd = sandbox.exec_cwd_for(&dir);
-            let result = match run_fs_argv(
-                sandbox,
-                &[
-                    OsStr::new("ls"),
-                    OsStr::new("-1A"),
-                    OsStr::new("-p"),
-                    dir.as_os_str(),
-                ],
-                &cwd,
-                None,
-                &[("QUOTING_STYLE", OsStr::new("literal"))],
-                &[],
-                &format!("list {}", args.path),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(out) => return out,
-            };
-            String::from_utf8_lossy(&result.stdout)
-                .lines()
-                .map(|line| line.to_string())
-                .collect()
-        };
-
-        #[cfg(windows)]
-        let mut names: Vec<String> = {
-            let entries = match std::fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(error) => {
-                    return ToolOutcome::Error(format!("cannot list {}: {error}", args.path));
-                }
-            };
-            let mut names = Vec::new();
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-                names.push(if is_dir { format!("{name}/") } else { name });
+        // One entry per line, excluding `.`/`..`, directories suffixed with `/`. `file_type()` reads the
+        // entry's own type without following a symlink, so a symlink (including a symlink-to-directory)
+        // is never marked as a directory — the lines are sorted below so the order is
+        // byte-lexicographic and locale-independent.
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                return ToolOutcome::Error(format!("cannot list {}: {error}", args.path));
             }
-            names
         };
+        let mut names: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            names.push(if is_dir { format!("{name}/") } else { name });
+        }
 
         names.sort();
         if names.is_empty() {
@@ -156,5 +117,28 @@ mod tests {
             "expected the real command in the prompt: {}",
             c.prompt
         );
+    }
+
+    #[tokio::test]
+    async fn list_dir_sorts_entries_and_suffixes_directories() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"x").unwrap();
+        std::fs::create_dir(dir.path().join("a_dir")).unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = ListDir.execute(&sb, &call("{}")).await;
+        match outcome {
+            ToolOutcome::Ok(text) => {
+                assert_eq!(text, "a_dir/\nb.txt");
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_dir_reports_empty_for_an_empty_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = ListDir.execute(&sb, &call("{}")).await;
+        assert!(matches!(outcome, ToolOutcome::Ok(text) if text == "(empty)"));
     }
 }

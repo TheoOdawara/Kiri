@@ -15,15 +15,23 @@ pub(crate) fn expand_tilde(path: &str, home: Option<&Path>) -> PathBuf {
 }
 
 pub(crate) fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    crate::shared::infra::home::home_dir()
+}
+
+/// Whether `raw` (as written, before expansion) denotes an absolute location, given its tilde-expanded
+/// form. A leading `/` is always absolute, even on Windows, where `Path::is_absolute` alone requires a
+/// drive prefix and would otherwise misclassify a Unix-style path as relative — the model (and the
+/// sandbox's own path-resolution methods) emit/accept such paths regardless of host OS. `expanded` still
+/// covers a native `C:\…` a Windows user might type, and a tilde expansion (`home()` already resolves to
+/// a platform-native absolute path).
+pub(crate) fn is_absolute_path(raw: &str, expanded: &Path) -> bool {
+    raw.starts_with('/') || expanded.is_absolute()
 }
 
 /// Whether a tool path targets an explicit absolute location (after `~` expansion) — i.e. potentially
 /// outside the active workspace. Used to pick the confirmation default (accept inside, decline outside).
-/// The model emits Unix-style paths, so a leading `/` is treated as absolute on every platform
-/// (`Path::is_absolute` would miss it on Windows, where a drive prefix is required).
 pub(crate) fn is_absolute_target(path: &str) -> bool {
-    path.starts_with('/') || expand_tilde(path, home().as_deref()).is_absolute()
+    is_absolute_path(path, &expand_tilde(path, home().as_deref()))
 }
 
 /// The confirmation default for a tool path: accept inside the workspace, decline for an explicit

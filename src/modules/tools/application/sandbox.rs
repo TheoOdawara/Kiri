@@ -35,13 +35,6 @@ pub trait Sandbox {
     /// reported, with the same sensitive-name and credential-directory guards applied.
     fn resolve_create(&self, rel: &str) -> Result<CreateResolution, AgentError>;
 
-    /// The working directory a command should run in for `resolved`: the root inside the jail, or the
-    /// target's nearest existing directory for an approved out-of-root target.
-    fn exec_cwd_for(&self, resolved: &Path) -> PathBuf;
-
-    /// Whether a resolved absolute path lies outside the active workspace root.
-    fn is_outside_root(&self, resolved: &Path) -> bool;
-
     /// The name of a secret directory (`.ssh`, `.aws`, …) that `real` lies within, if any, so the
     /// recursive tools can refuse to poke inside a credential store.
     fn secret_dir_component(&self, real: &Path) -> Option<&'static str>;

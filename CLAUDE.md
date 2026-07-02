@@ -50,7 +50,9 @@ in the transcript rather than `eprintln!` behind the alternate-screen TUI.
   port + two API-key adapters — `openai` (chat-completions: NVIDIA / compatible / custom / OpenAI) and
   `anthropic` (Messages API) — plus the `SecretStore` port with `keyring`/`0600`-file adapters and the
   `factory` that picks the adapter from `(kind, auth)`; see ADRs 0011/0012), `tools` (the `Tool` trait + `ToolRegistry`
-  + the `Sandbox` port — `FsSandbox` the fs adapter — + one fs adapter per tool), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
+  + the `Sandbox` port — `FsSandbox` the fs adapter — + one fs adapter per tool, each doing native
+  `std::fs` I/O on every platform; `run_command` is the sole shell-out surface (`sh -c` / `cmd /C`), see
+  ADR 0018), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
   adapter + the ratatui runtime — the sole front-end), `memory` (durable knowledge: `MemoryEntry`/`MemoryKind`
   domain — kinds include `preference` — + the capability port `Memory` (impl by `LayeredMemory`, composing
   project + shared) over the use-case ports `MemoryStore`/`SharedStore` and the persistence ports
@@ -69,7 +71,9 @@ in the transcript rather than `eprintln!` behind the alternate-screen TUI.
   the shared data between `agent` and `provider` — their home here is what breaks the agent↔provider cycle),
   and the provider primitives (`ProviderKind`/`AuthMethod`/`Effort`/`ProviderProfile`/`Credential`/`Secret`),
   shared across `agent`, `provider`, `session`, `memory`, `config`, and `tui`. **shared/infra:** `config`
-  (layered TOML + env + CLI → `Settings`, plus the global-config writers).
+  (layered TOML + env + CLI → `Settings`, plus the global-config writers), `home` (cross-platform
+  home-directory resolution — `$HOME` / `%USERPROFILE%` / `%HOMEDRIVE%%HOMEPATH%`, ADR 0018 — the single
+  source `config` and `tools/application::path` both read).
 
 **Invariants:** network I/O only in `provider/infrastructure` — **except** `sync/infrastructure`, which
 shells out to `git` to reach the user's profile repo (ADR 0015); filesystem I/O only in

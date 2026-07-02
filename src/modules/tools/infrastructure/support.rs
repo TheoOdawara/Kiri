@@ -1,31 +1,21 @@
-#[cfg(windows)]
 use std::borrow::Cow;
-#[cfg(unix)]
-use std::ffi::OsStr;
 use std::fs;
 use std::fs::Metadata;
-#[cfg(windows)]
 use std::io::Read;
 use std::path::Path;
 
 use crate::modules::tools::application::sandbox::{CreateResolution, Sandbox};
 use crate::modules::tools::application::tool::ToolOutcome;
 use crate::modules::tools::infrastructure::exec;
-#[cfg(unix)]
-use crate::shared::kernel::sandbox::NetworkPolicy;
 
 pub const READ_FILE_MAX_BYTES: usize = 64 * 1024;
 pub const EDIT_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 pub const SEARCH_MAX_MATCHES: usize = 100;
 pub const SEARCH_MAX_LINE_CHARS: usize = 200;
-#[cfg(windows)]
 pub const SEARCH_FILE_MAX_BYTES: u64 = 1024 * 1024;
-#[cfg(windows)]
 pub const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
-/// Read at most `cap` bytes from `path`, bounding allocation against very large files. The Unix tools
-/// shell out (`head -c`) for the same effect; this backs the native Windows file tools.
-#[cfg(windows)]
+/// Read at most `cap` bytes from `path`, bounding allocation against very large files.
 pub fn read_capped(path: &Path, cap: usize) -> std::io::Result<Vec<u8>> {
     let mut buffer = Vec::new();
     fs::File::open(path)?
@@ -35,9 +25,7 @@ pub fn read_capped(path: &Path, cap: usize) -> std::io::Result<Vec<u8>> {
 }
 
 /// Scan one file for `query`, appending `relative:line: text` matches (capped) to `matches`. Skips
-/// files over the size cap and NUL-containing (binary) files. The Unix `search` tool delegates the
-/// scan to `grep`; this backs the native Windows implementation.
-#[cfg(windows)]
+/// files over the size cap and NUL-containing (binary) files.
 pub fn search_file(path: &Path, query: &str, root: &Path, matches: &mut Vec<String>) {
     match fs::metadata(path) {
         Ok(metadata) if metadata.len() > SEARCH_FILE_MAX_BYTES => return, // skip large files
@@ -128,86 +116,7 @@ pub async fn stat_guard(
     }
 }
 
-/// Spawn a mutating fs argv under the deny-network confinement policy and apply the security-relevant
-/// three-arm result mapping every mutating file tool shares: a zero exit yields the `ExecResult` for
-/// the caller to phrase its own success from; a non-zero exit (the `succeeded()` gate) or a spawn/
-/// timeout failure yields `cannot {subject}: {detail}`. Centralized so the `succeeded()` gate cannot
-/// drift or be forgotten across the six tools, and so the deny-network + default-timeout + confiner
-/// wiring lives in one place. `write_dirs` are the per-call write grants (the target's cwd, plus a
-/// move's source dir); read-only callers pass `&[]`. Unix-only — the Windows tools use native
-/// `std::fs` and never reach this argv path.
-#[cfg(unix)]
-pub(crate) async fn run_fs_argv(
-    sandbox: &dyn Sandbox,
-    argv: &[&OsStr],
-    cwd: &Path,
-    stdin: Option<&[u8]>,
-    env: &[(&str, &OsStr)],
-    write_dirs: &[&Path],
-    subject: &str,
-) -> Result<exec::ExecResult, ToolOutcome> {
-    let policy = sandbox.command_policy(NetworkPolicy::Deny, &[], write_dirs);
-    match exec::run_argv(
-        argv,
-        Some(cwd),
-        stdin,
-        env,
-        exec::DEFAULT_TIMEOUT,
-        sandbox.confiner(),
-        &policy,
-    )
-    .await
-    {
-        Ok(result) if result.succeeded() => Ok(result),
-        Ok(result) => Err(ToolOutcome::Error(format!(
-            "cannot {subject}: {}",
-            result.stderr_text()
-        ))),
-        Err(error) => Err(ToolOutcome::Error(format!(
-            "cannot {subject}: {}",
-            error.message()
-        ))),
-    }
-}
-
-#[cfg(all(test, unix))]
-mod unix_tests {
-    use super::run_fs_argv;
-    use crate::modules::tools::application::sandbox::Sandbox;
-    use crate::modules::tools::application::tool::ToolOutcome;
-    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
-    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
-    use std::ffi::OsStr;
-    use tempfile::TempDir;
-
-    #[tokio::test]
-    async fn run_fs_argv_maps_nonzero_exit_to_error() {
-        // The shared succeeded() gate must turn a non-zero exit into an Error, never an Ok(ExecResult)
-        // a caller could mistake for success — the security-relevant arm the six fs tools rely on.
-        let dir = TempDir::new().unwrap();
-        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
-        let outcome = run_fs_argv(
-            &sandbox,
-            &[OsStr::new("sh"), OsStr::new("-c"), OsStr::new("exit 3")],
-            sandbox.root(),
-            None,
-            &[],
-            &[],
-            "run the failing probe",
-        )
-        .await;
-        match outcome {
-            Ok(_) => panic!("a non-zero exit must not map to Ok — the succeeded() gate failed"),
-            Err(ToolOutcome::Error(message)) => assert!(
-                message.starts_with("cannot run the failing probe"),
-                "unexpected error message: {message}"
-            ),
-            Err(_) => panic!("expected ToolOutcome::Error from a non-zero exit"),
-        }
-    }
-}
-
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::{SEARCH_MAX_LINE_CHARS, search_file};
     use std::fs;

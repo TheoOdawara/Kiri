@@ -1,6 +1,3 @@
-#[cfg(unix)]
-use std::ffi::OsStr;
-
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::sandbox::Sandbox;
@@ -8,8 +5,6 @@ use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, function_schema, simple_command, simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
-#[cfg(unix)]
-use crate::modules::tools::infrastructure::support::run_fs_argv;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct CreateDir;
@@ -56,35 +51,54 @@ impl Tool for CreateDir {
             return ToolOutcome::Ok(format!("directory already exists: {}", args.path));
         }
 
-        #[cfg(unix)]
-        {
-            let cwd = sandbox.exec_cwd_for(&resolution.target);
-            match run_fs_argv(
-                sandbox,
-                &[
-                    OsStr::new("mkdir"),
-                    OsStr::new("-p"),
-                    resolution.target.as_os_str(),
-                ],
-                &cwd,
-                None,
-                &[],
-                &[&cwd],
-                &format!("create {}", args.path),
-            )
-            .await
-            {
-                Ok(_) => ToolOutcome::Ok(format!("created directory {}", args.path)),
-                Err(out) => out,
-            }
+        match std::fs::create_dir_all(&resolution.target) {
+            Ok(()) => ToolOutcome::Ok(format!("created directory {}", args.path)),
+            Err(error) => ToolOutcome::Error(format!("cannot create {}: {error}", args.path)),
         }
+    }
+}
 
-        #[cfg(windows)]
-        {
-            match std::fs::create_dir_all(&resolution.target) {
-                Ok(()) => ToolOutcome::Ok(format!("created directory {}", args.path)),
-                Err(error) => ToolOutcome::Error(format!("cannot create {}: {error}", args.path)),
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
+    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    use crate::shared::kernel::tool_call::FunctionCall;
+    use tempfile::TempDir;
+
+    fn call(args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "1".to_string(),
+            kind: "function".to_string(),
+            function: FunctionCall {
+                name: "create_dir".to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn create_dir_makes_missing_intermediate_dirs() {
+        let dir = TempDir::new().unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = CreateDir
+            .execute(&sb, &call(json!({"path": "a/b/c"})))
+            .await;
+        assert!(matches!(outcome, ToolOutcome::Ok(_)));
+        assert!(dir.path().join("a/b/c").is_dir());
+    }
+
+    #[tokio::test]
+    async fn create_dir_is_a_noop_ok_when_already_present() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("existing")).unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = CreateDir
+            .execute(&sb, &call(json!({"path": "existing"})))
+            .await;
+        match outcome {
+            ToolOutcome::Ok(msg) => assert!(msg.contains("already exists"), "got: {msg}"),
+            other => panic!("expected Ok, got {other:?}"),
         }
     }
 }

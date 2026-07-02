@@ -1,5 +1,4 @@
-#[cfg(unix)]
-use std::ffi::OsStr;
+use std::path::Path;
 
 use serde_json::{Value, json};
 
@@ -9,8 +8,6 @@ use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{MoveArgs, parse, parse_args};
-#[cfg(unix)]
-use crate::modules::tools::infrastructure::support::run_fs_argv;
 use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -88,41 +85,106 @@ impl Tool for MovePath {
             return out;
         }
 
-        #[cfg(unix)]
-        {
-            let cwd = sandbox.exec_cwd_for(&resolution.target);
-            // A move writes at both ends: it creates the destination and unlinks the source. When
-            // either is an approved out-of-root target, its directory must be in the write allow-list.
-            let source_cwd = sandbox.exec_cwd_for(&source);
-            match run_fs_argv(
-                sandbox,
-                &[
-                    OsStr::new("mv"),
-                    source.as_os_str(),
-                    resolution.target.as_os_str(),
-                ],
-                &cwd,
-                None,
-                &[],
-                &[&cwd, &source_cwd],
-                &format!("move {} to {}", args.source, args.destination),
-            )
-            .await
-            {
-                Ok(_) => ToolOutcome::Ok(format!("moved {} to {}", args.source, args.destination)),
-                Err(out) => out,
-            }
+        match rename_or_copy(&source, &resolution.target) {
+            Ok(()) => ToolOutcome::Ok(format!("moved {} to {}", args.source, args.destination)),
+            Err(error) => ToolOutcome::Error(format!(
+                "cannot move {} to {}: {error}",
+                args.source, args.destination
+            )),
         }
+    }
+}
 
-        #[cfg(windows)]
-        {
-            match std::fs::rename(&source, &resolution.target) {
-                Ok(()) => ToolOutcome::Ok(format!("moved {} to {}", args.source, args.destination)),
-                Err(error) => ToolOutcome::Error(format!(
-                    "cannot move {} to {}: {error}",
-                    args.source, args.destination
-                )),
-            }
+/// Move `source` to `target`, falling back to copy-then-remove when `rename` cannot move across
+/// filesystems (`ErrorKind::CrossesDevices` — e.g. two different drives on Windows, or a bind-mounted
+/// `/tmp` on Linux). Only a plain file gets the fallback: a directory's cross-device move would need a
+/// recursive copy, and copying nested symlinks safely (without following one into an arbitrary target
+/// outside the tree) is a feature of its own — until it exists, a cross-device directory move surfaces
+/// this `CrossesDevices` error rather than silently mishandling a nested symlink.
+fn rename_or_copy(source: &Path, target: &Path) -> std::io::Result<()> {
+    match std::fs::rename(source, target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices && source.is_file() => {
+            std::fs::copy(source, target)?;
+            std::fs::remove_file(source)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
+    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    use crate::shared::kernel::tool_call::FunctionCall;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn call(args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "1".to_string(),
+            kind: "function".to_string(),
+            function: FunctionCall {
+                name: "move_path".to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    // The cross-device (`CrossesDevices`) fallback in `rename_or_copy` needs two real filesystems/
+    // devices to exercise, which a single `TempDir` cannot simulate portably — these tests cover the
+    // same-device `rename` path `move_path` takes the overwhelming majority of the time.
+
+    #[tokio::test]
+    async fn move_path_renames_a_file_and_creates_missing_dest_dirs() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.txt"), b"content").unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = MovePath
+            .execute(
+                &sb,
+                &call(json!({"source": "a.txt", "destination": "sub/b.txt"})),
+            )
+            .await;
+        assert!(
+            matches!(outcome, ToolOutcome::Ok(_)),
+            "expected Ok, got {outcome:?}"
+        );
+        assert!(!dir.path().join("a.txt").exists());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("sub/b.txt")).unwrap(),
+            "content"
+        );
+    }
+
+    #[tokio::test]
+    async fn move_path_moves_a_directory() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/f.txt"), b"x").unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = MovePath
+            .execute(&sb, &call(json!({"source": "src", "destination": "dst"})))
+            .await;
+        assert!(matches!(outcome, ToolOutcome::Ok(_)));
+        assert!(!dir.path().join("src").exists());
+        assert!(dir.path().join("dst/f.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn move_path_refuses_to_move_the_workspace_root() {
+        let dir = TempDir::new().unwrap();
+        let sb = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let outcome = MovePath
+            .execute(
+                &sb,
+                &call(json!({"source": ".", "destination": "elsewhere"})),
+            )
+            .await;
+        match outcome {
+            ToolOutcome::Error(msg) => assert!(msg.contains("workspace root"), "got: {msg}"),
+            other => panic!("expected refusal, got {other:?}"),
         }
     }
 }
