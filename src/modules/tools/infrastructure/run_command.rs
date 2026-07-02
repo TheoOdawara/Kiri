@@ -912,4 +912,113 @@ mod tests {
             other => panic!("expected Ok, got {other:?}"),
         }
     }
+
+    // Same end-to-end proof as the macOS block above, through the Linux bwrap adapter.
+    #[cfg(target_os = "linux")]
+    fn confined_sandbox(dir: &TempDir) -> FsSandbox {
+        use crate::modules::tools::infrastructure::confine::linux::BwrapSandbox;
+        FsSandbox::with_confinement(
+            dir.path(),
+            SensitiveMatcher::empty(),
+            Arc::new(BwrapSandbox),
+            NetworkPolicy::Deny,
+            Arc::from(Vec::new()),
+            Arc::from(Vec::new()),
+        )
+        .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn confined_run_command_cannot_write_outside_root() {
+        use crate::modules::tools::infrastructure::confine::linux::BwrapSandbox;
+        if BwrapSandbox::detect().is_none() {
+            return; // bwrap unavailable/non-functional on this host
+        }
+        let dir = TempDir::new().unwrap();
+        let sb = confined_sandbox(&dir);
+        let reg = registry();
+        let probe = format!(
+            "{}/kiri-sbx-must-not-exist-{}",
+            std::env::var("HOME").unwrap(),
+            std::process::id()
+        );
+        let _ = fs::remove_file(&probe);
+        let cmd = format!("echo leaked > '{probe}' 2>&1; echo done");
+        let _ = reg
+            .execute(&sb, &call("run_command", json!({ "command": cmd })))
+            .await;
+        let leaked = std::path::Path::new(&probe).exists();
+        let _ = fs::remove_file(&probe);
+        assert!(
+            !leaked,
+            "a confined run_command must not be able to write outside the workspace root"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn confined_run_command_still_works_inside_root() {
+        use crate::modules::tools::infrastructure::confine::linux::BwrapSandbox;
+        if BwrapSandbox::detect().is_none() {
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        let sb = confined_sandbox(&dir);
+        let reg = registry();
+        let outcome = reg
+            .execute(
+                &sb,
+                &call(
+                    "run_command",
+                    json!({ "command": "echo hi > inside.txt && cat inside.txt" }),
+                ),
+            )
+            .await;
+        match outcome {
+            ToolOutcome::Ok(text) => {
+                assert!(
+                    text.contains("hi"),
+                    "confinement must not break in-jail work: {text}"
+                )
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn confined_run_command_cannot_read_credential_dir() {
+        use crate::modules::tools::infrastructure::confine::linux::BwrapSandbox;
+        if BwrapSandbox::detect().is_none() {
+            return;
+        }
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        let ssh_dir = std::path::Path::new(&home).join(".ssh");
+        if !ssh_dir.is_dir() {
+            return; // nothing to probe reading on this host
+        }
+        let dir = TempDir::new().unwrap();
+        let sb = confined_sandbox(&dir);
+        let reg = registry();
+        let outcome = reg
+            .execute(
+                &sb,
+                &call(
+                    "run_command",
+                    json!({ "command": format!("ls {}", ssh_dir.display()) }),
+                ),
+            )
+            .await;
+        match outcome {
+            ToolOutcome::Ok(text) => assert!(
+                !text.contains("exit code 0"),
+                "listing a shadowed credential dir must not succeed: {text}"
+            ),
+            ToolOutcome::Error(_) => {}
+            ToolOutcome::Declined => panic!("unexpected Declined"),
+        }
+    }
 }

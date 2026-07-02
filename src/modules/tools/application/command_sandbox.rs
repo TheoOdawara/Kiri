@@ -8,10 +8,10 @@ use crate::shared::kernel::sandbox::NetworkPolicy;
 /// approved out-of-root target for that one call). Pure data — no I/O — so it lives in the
 /// application layer alongside the port that consumes it.
 #[derive(Debug, Clone)]
-// The macOS Seatbelt adapter is the only consumer of these fields today; non-macOS platforms
-// resolve to the no-op adapter (Linux Landlock is tracked follow-up), so they read as dead there.
-// The lint stays active on macOS to catch a field that becomes genuinely unused on the v1 target.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// The macOS Seatbelt and Linux bwrap adapters are the only consumers of these fields; Windows
+// resolves to the no-op adapter (tracked follow-up), so they read as dead there. The lint stays
+// active on macOS/Linux to catch a field that becomes genuinely unused on either target.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 pub struct SandboxPolicy {
     pub root: PathBuf,
     pub network: NetworkPolicy,

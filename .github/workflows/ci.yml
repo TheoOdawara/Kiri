@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -23,7 +23,13 @@ jobs:
           components: rustfmt, clippy
       - name: Install Linux deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: |
+          sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config bubblewrap
+          # Ubuntu 23.10+ blocks unprivileged user namespaces by default (AppArmor), which makes an
+          # installed bwrap fail at runtime even though it's on PATH — the exact case BwrapSandbox::detect()
+          # probes for. Disable it here so the Linux OS-confinement tests get real coverage instead of a
+          # silent detect()-is-None skip; the key may not exist on older kernels, hence `|| true`.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
