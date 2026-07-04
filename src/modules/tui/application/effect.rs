@@ -45,10 +45,11 @@ pub enum Effect {
     /// Switch the active provider (from the `/provider` picker). The runtime rebuilds the adapter with
     /// the target's stored credential, adopts its model, and persists the active selection.
     SetProvider(String),
-    /// Save a new provider from the add wizard and make it active. Carries only non-secret fields — the
-    /// typed API key (when present) is staged separately in `Model::pending_credential` (taken by the
+    /// Save a new or edited provider from the wizard and make it active. Carries only non-secret fields —
+    /// the typed API key (when present) is staged separately in `Model::pending_credential` (taken by the
     /// runtime), so it never rides in a `Debug`-printable effect. `auth` is derived from key presence:
-    /// `ApiKey` when a key was typed, `None` for a keyless local endpoint.
+    /// `ApiKey` when a key was typed, `None` for a keyless local endpoint. `keep_existing_key` is `true`
+    /// in edit mode when the user left the key field blank — the runtime keeps the stored credential.
     SaveProvider {
         id: String,
         kind: ProviderKind,
@@ -56,7 +57,11 @@ pub enum Effect {
         model: String,
         models: Vec<String>,
         auth: AuthMethod,
+        thinking: Option<bool>,
+        keep_existing_key: bool,
     },
+    /// Remove a provider by id: keyring secret, in-memory catalog, and TOML config entry.
+    DeleteProvider(String),
     /// Place the edit cursor at the composer click (absolute screen cell). The runtime resolves it
     /// against the rendered editor geometry — a no-op when the click is outside the box or the layout
     /// is ambiguous (wrapped/scrolled), since the reducer has no render geometry to map it itself.

@@ -155,14 +155,22 @@ impl AgentLoop {
 
             if turn.tool_calls.is_empty() {
                 // Plain text turn (also covers a degenerate tool-call finish with no parsed calls).
-                conversation.push(Message::assistant_text(turn.content));
+                let mut message = Message::assistant_text(turn.content);
+                if let Some(thinking) = turn.thinking {
+                    message = message.with_thinking(thinking);
+                }
+                conversation.push(message);
                 return Ok(TurnOutcome::Completed);
             }
 
             let calls = turn.tool_calls;
             let content = turn.content;
             let narration = (!content.is_empty()).then_some(content.clone());
-            conversation.push(Message::assistant_tool_calls(narration, calls.clone()));
+            let mut assistant_message = Message::assistant_tool_calls(narration, calls.clone());
+            if let Some(thinking) = turn.thinking {
+                assistant_message = assistant_message.with_thinking(thinking);
+            }
+            conversation.push(assistant_message);
 
             // Plan mode: a `present_plan` call is the explicit "plan is ready" signal — surface the
             // plan for approval and end the planning turn without executing anything. Every call in the

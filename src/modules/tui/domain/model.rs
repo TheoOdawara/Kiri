@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::shared::kernel::approval_mode::ApprovalMode;
-use crate::shared::kernel::provider::{Effort, Secret};
+use crate::shared::kernel::provider::{Effort, ProviderProfile, Secret};
 
 use super::command_menu::CommandMenu;
 use super::history::History;
@@ -148,6 +148,9 @@ pub struct Model {
     pub models: Vec<String>,
     /// The configured provider ids, offered by the `/provider` picker.
     pub providers: Vec<String>,
+    /// Full profiles parallel to `providers`; used by the action sub-menu to display details and
+    /// pre-populate the edit wizard. Kept in sync by the runtime alongside `providers`.
+    pub provider_profiles: Vec<ProviderProfile>,
     /// The ids of the workspace's recent sessions, parallel to the `/sessions` picker rows, so the
     /// keymap maps a highlighted row back to a session id without coupling the domain to the session
     /// store. Filled by the runtime just before opening the picker.
@@ -165,6 +168,9 @@ pub struct Model {
     /// When set, tool outputs and edit diffs render in full instead of a bounded preview. Toggled
     /// with Ctrl+O.
     pub expand_tools: bool,
+    /// The pre-formatted `/instructions` display text (paths header + merged content). `None` when no
+    /// instructions file was found at boot.
+    pub instructions_display: Option<String>,
     /// A turn is running (the agent loop future is armed).
     pub busy: bool,
     pub should_quit: bool,
@@ -232,10 +238,23 @@ impl Model {
         self
     }
 
-    /// Seed the `/provider` picker: the active provider id (status display) and the configured catalog.
-    pub fn with_providers(mut self, active: String, providers: Vec<String>) -> Self {
+    /// Seed the `/provider` picker: the active provider id (status display), the configured id catalog,
+    /// and the full profiles (for the action sub-menu and edit wizard).
+    pub fn with_providers(
+        mut self,
+        active: String,
+        providers: Vec<String>,
+        profiles: Vec<ProviderProfile>,
+    ) -> Self {
         self.status.provider = active;
         self.providers = providers;
+        self.provider_profiles = profiles;
+        self
+    }
+
+    /// Seed the instructions display text for the `/instructions` command.
+    pub fn with_instructions(mut self, display: Option<String>) -> Self {
+        self.instructions_display = display;
         self
     }
 

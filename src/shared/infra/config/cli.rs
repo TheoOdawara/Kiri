@@ -16,6 +16,9 @@ pub struct Cli {
     /// Sandbox root for file tools (also via KIRI_PATH). Defaults to the current directory.
     #[arg(long, env = "KIRI_PATH")]
     pub path: Option<PathBuf>,
+    /// Override the auto-discovered instructions file (KIRI.md / AGENTS.md / CLAUDE.md).
+    #[arg(long)]
+    pub instructions: Option<PathBuf>,
 }
 
 /// The top-level subcommands. Absent → the interactive TUI; present → a headless command that runs

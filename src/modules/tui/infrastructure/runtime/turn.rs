@@ -286,7 +286,8 @@ impl RunLoop {
                                 | Effect::SetModel(_)
                                 | Effect::SetEffort(_)
                                 | Effect::SetProvider(_)
-                                | Effect::SaveProvider { .. } => {}
+                                | Effect::SaveProvider { .. }
+                                | Effect::DeleteProvider(_) => {}
                             }
                         }
                         // Coalesce a burst: drain every engine message already queued before drawing, so

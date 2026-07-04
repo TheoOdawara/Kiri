@@ -17,6 +17,7 @@ use crate::shared::kernel::provider::ProviderKind;
 pub fn box_dims(area: Rect, wizard: &ProviderWizard) -> (u16, u16) {
     let body = match wizard.step {
         WizardStep::Kind => 1 + WIZARD_KINDS.len(),
+        WizardStep::Thinking => 3, // prompt + "Sim" + "Não"
         _ => 2,
     };
     // header + blank + body + blank + hint
@@ -30,6 +31,8 @@ pub fn render(wizard: &ProviderWizard, frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     let title = if wizard.onboarding {
         "Bem-vindo ao Kiri"
+    } else if wizard.edit_mode {
+        "editar provider"
     } else {
         "novo provider"
     };
@@ -51,6 +54,19 @@ pub fn render(wizard: &ProviderWizard, frame: &mut Frame, area: Rect) {
             lines.push(Line::from(vec![
                 Span::styled(marker, style),
                 Span::styled(kind_label(*kind), style),
+            ]));
+        }
+    } else if wizard.step == WizardStep::Thinking {
+        lines.push(Line::styled(
+            " Ativar raciocínio estendido (thinking) para este provider?",
+            theme::strong(),
+        ));
+        for (i, label) in ["Sim", "Não"].iter().enumerate() {
+            let selected = wizard.thinking_selected_index() == i;
+            let (marker, style) = super::option_marker(selected);
+            lines.push(Line::from(vec![
+                Span::styled(marker, style),
+                Span::styled(*label, style),
             ]));
         }
     } else {
@@ -81,22 +97,27 @@ fn step_label(step: WizardStep) -> &'static str {
         WizardStep::BaseUrl => "endpoint",
         WizardStep::Model => "modelo",
         WizardStep::ExtraModels => "modelos extras",
+        WizardStep::Thinking => "thinking",
         WizardStep::ApiKey => "chave",
     }
 }
 
 /// The prompt for the current text step, kind-aware: the API-key prompt advertises that the key is
-/// optional for keyless-capable kinds (Ollama / LM Studio).
+/// optional for keyless-capable kinds (Ollama / LM Studio), or that a blank key keeps the existing one
+/// in edit mode.
 fn wizard_prompt(wizard: &ProviderWizard) -> String {
     match wizard.step {
-        WizardStep::ApiKey if !wizard.key_required() => {
-            "API key (opcional — vazia p/ Ollama / LM Studio):".to_string()
-        }
-        WizardStep::Kind => String::new(),
+        WizardStep::Kind | WizardStep::Thinking => String::new(),
         WizardStep::ProviderId => "Identificador (ex.: lmstudio, openrouter):".to_string(),
         WizardStep::BaseUrl => "Base URL:".to_string(),
         WizardStep::Model => "Modelo default:".to_string(),
         WizardStep::ExtraModels => "Modelos extras (separados por vírgula, opcional):".to_string(),
+        WizardStep::ApiKey if wizard.edit_mode => {
+            "API key (vazio = manter chave atual):".to_string()
+        }
+        WizardStep::ApiKey if !wizard.key_required() => {
+            "API key (opcional — vazia p/ Ollama / LM Studio):".to_string()
+        }
         WizardStep::ApiKey => "API key:".to_string(),
     }
 }
@@ -120,6 +141,6 @@ fn field_display(wizard: &ProviderWizard) -> String {
         WizardStep::Model => wizard.model.clone(),
         WizardStep::ExtraModels => wizard.extra_models.clone(),
         WizardStep::ApiKey => "•".repeat(wizard.api_key.chars().count()),
-        WizardStep::Kind => String::new(),
+        WizardStep::Kind | WizardStep::Thinking => String::new(),
     }
 }

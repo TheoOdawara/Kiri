@@ -96,6 +96,7 @@ const SYSTEM_PROMPT_TEMPLATE: &str = concat!(
     "(decisions, patterns, anti-patterns, snippets, heuristics, facts); skip ephemeral, task-specific ",
     "details. When this session ends the harness also distills what was learned, so you need not ",
     "summarize at the end — just capture preferences as they surface.\n\n",
+    "{INSTRUCTIONS}",
     "# Security\n",
     "Never read, write, edit, delete, or move files matching a sensitive pattern — the harness ",
     "enforces this at the sandbox; a call against one returns an error before touching the ",
@@ -110,19 +111,25 @@ const SYSTEM_PROMPT_TEMPLATE: &str = concat!(
     "what you saw.",
 );
 
-/// Render the system prompt, filling the four placeholders from live single sources so the prompt always
-/// reflects what the harness actually enforces (SEC-06): the sensitive list from the active matcher's
-/// globs, the run_command limits from the default-timeout / output-cap constants, and the checkpoint from
-/// the effective budget. The values arrive as parameters, so this leaf module gains no dependency on the
-/// `tools` layer — the composition root (`app::wire`) reads the constants and the live matcher and passes
-/// them in.
+/// Render the system prompt, filling the four runtime placeholders plus the optional user
+/// instructions block (injected before `# Security` so the Security section always takes
+/// precedence over any user-supplied text). The values arrive as parameters so this leaf module
+/// gains no dependency on the `tools` layer (SEC-06).
 pub fn render_system_prompt(
     sensitive_globs: &[&str],
     default_timeout_ms: u64,
     output_cap_bytes: usize,
     checkpoint: Duration,
+    instructions: Option<&str>,
 ) -> String {
+    let instructions_block = match instructions {
+        Some(text) if !text.trim().is_empty() => {
+            format!("# User Instructions\n{}\n\n", text.trim())
+        }
+        _ => String::new(),
+    };
     SYSTEM_PROMPT_TEMPLATE
+        .replace("{INSTRUCTIONS}", &instructions_block)
         .replace("{SENSITIVE_LIST}", &sensitive_globs.join(", "))
         .replace(
             "{TIMEOUT_SECONDS}",
@@ -145,6 +152,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
+            None,
         )
     }
 
@@ -164,6 +172,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
+            None,
         );
         assert!(
             prompt.contains("Sensitive names: *.secret, vault.json."),
@@ -188,6 +197,7 @@ mod tests {
             timeout_ms,
             cap_bytes,
             Duration::from_secs(30 * 60),
+            None,
         );
         assert!(
             prompt.contains(&format!("{}s timeout enforced", timeout_ms / 1000)),
@@ -201,8 +211,13 @@ mod tests {
 
     #[test]
     fn system_prompt_renders_the_checkpoint_minutes_from_the_budget() {
-        let prompt =
-            render_system_prompt(&[".env"], 30_000, 64 * 1024, Duration::from_secs(45 * 60));
+        let prompt = render_system_prompt(
+            &[".env"],
+            30_000,
+            64 * 1024,
+            Duration::from_secs(45 * 60),
+            None,
+        );
         assert!(
             prompt.contains("Every ~45 minutes"),
             "the checkpoint interval must render the budget's minutes"
@@ -225,5 +240,41 @@ mod tests {
         ] {
             assert!(prompt.contains(header), "missing section header: {header}");
         }
+    }
+
+    #[test]
+    fn no_instructions_leaves_no_instructions_section() {
+        let prompt = render();
+        assert!(!prompt.contains("# User Instructions"));
+    }
+
+    #[test]
+    fn instructions_block_is_injected_before_security() {
+        let prompt = render_system_prompt(
+            &[".env"],
+            30_000,
+            64 * 1024,
+            Duration::from_secs(30 * 60),
+            Some("Always use Rust."),
+        );
+        assert!(prompt.contains("# User Instructions\nAlways use Rust."));
+        let instr_pos = prompt.find("# User Instructions").unwrap();
+        let sec_pos = prompt.find("# Security").unwrap();
+        assert!(
+            instr_pos < sec_pos,
+            "instructions must appear before # Security"
+        );
+    }
+
+    #[test]
+    fn blank_instructions_are_treated_as_none() {
+        let prompt = render_system_prompt(
+            &[".env"],
+            30_000,
+            64 * 1024,
+            Duration::from_secs(30 * 60),
+            Some("   \n  "),
+        );
+        assert!(!prompt.contains("# User Instructions"));
     }
 }

@@ -210,12 +210,55 @@ pub(super) fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
             // The configured ids come first; the last row (`index == providers.len()`) is the
             // "+ adicionar" sentinel, which opens the add wizard instead of switching.
             if index < model.providers.len() {
-                match picker.options.get(index) {
-                    Some(id) => vec![Effect::SetProvider(id.clone())],
-                    None => vec![],
-                }
+                let id = match picker.options.get(index) {
+                    Some(id) => id.clone(),
+                    None => return vec![],
+                };
+                let detail = model
+                    .provider_profiles
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(provider_detail_line)
+                    .unwrap_or_default();
+                model.picker = Some(Picker::new(
+                    PickerKind::ProviderAction(id),
+                    "provider",
+                    detail,
+                    vec!["Ativar".into(), "Editar".into(), "Remover".into()],
+                    0,
+                ));
+                vec![]
             } else {
                 model.wizard = Some(ProviderWizard::new());
+                vec![]
+            }
+        }
+        PickerKind::ProviderAction(ref id) => {
+            let id = id.clone();
+            match index {
+                0 => vec![Effect::SetProvider(id)],
+                1 => {
+                    if let Some(profile) = model.provider_profiles.iter().find(|p| p.id == id) {
+                        model.wizard = Some(ProviderWizard::from_profile(profile));
+                    }
+                    vec![]
+                }
+                _ => {
+                    model.picker = Some(Picker::new(
+                        PickerKind::ProviderDeleteConfirm(id),
+                        "confirmar",
+                        "esta ação não pode ser desfeita",
+                        vec!["Sim, remover".into(), "Cancelar".into()],
+                        1,
+                    ));
+                    vec![]
+                }
+            }
+        }
+        PickerKind::ProviderDeleteConfirm(ref id) => {
+            if index == 0 {
+                vec![Effect::DeleteProvider(id.clone())]
+            } else {
                 vec![]
             }
         }
@@ -226,4 +269,22 @@ pub(super) fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
             None => vec![],
         },
     }
+}
+
+/// One-line summary of a provider profile shown as the action picker's description line.
+fn provider_detail_line(p: &ProviderProfile) -> String {
+    let kind = format!("{:?}", p.kind).to_ascii_lowercase();
+    let thinking_tag = match p.thinking {
+        Some(true) => " · thinking: sim",
+        Some(false) => " · thinking: não",
+        None => "",
+    };
+    format!(
+        "[{}] {} · {} · {}{}",
+        kind,
+        p.base_url,
+        p.model,
+        p.auth.as_wire(),
+        thinking_tag,
+    )
 }

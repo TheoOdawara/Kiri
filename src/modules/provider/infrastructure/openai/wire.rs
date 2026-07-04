@@ -11,17 +11,27 @@ pub(crate) struct ChatRequest<'a> {
     pub model: &'a str,
     pub messages: Vec<WireMessage<'a>>,
     pub stream: bool,
+    /// NVIDIA Nemotron-style reasoning toggle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<ChatTemplateKwargs>,
+    /// OpenAI proper (o3/o4) reasoning effort: `"low"`, `"medium"`, or `"high"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     pub tools: &'a [Value],
 }
 
 /// Provider-specific knob that asks the model to emit reasoning. Reasoning models stream it by
-/// default; sending this makes the intent explicit.
+/// default; sending this makes the intent explicit. NVIDIA hosts families with two different confirmed
+/// keys for the same concept (see `NvidiaFamily`): `thinking` (Nemotron, Kimi) and `enable_thinking`
+/// (Qwen, GLM) — exactly one is ever populated per family; unconfirmed families (DeepSeek, MiniMax,
+/// Gemma, …) send neither.
 #[derive(Debug, Serialize)]
 pub(crate) struct ChatTemplateKwargs {
-    pub thinking: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +122,7 @@ mod tests {
             messages: vec![WireMessage::from(&message)],
             stream: true,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             tools: &[],
         };
 
@@ -129,6 +140,7 @@ mod tests {
             messages: vec![],
             stream: true,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             tools: &[],
         };
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();
@@ -136,16 +148,43 @@ mod tests {
     }
 
     #[test]
-    fn chat_template_kwargs_serializes_nested() {
+    fn chat_template_kwargs_serializes_the_thinking_key() {
         let request = ChatRequest {
             model: "m",
             messages: vec![],
             stream: true,
-            chat_template_kwargs: Some(ChatTemplateKwargs { thinking: true }),
+            chat_template_kwargs: Some(ChatTemplateKwargs {
+                thinking: Some(true),
+                enable_thinking: None,
+            }),
+            reasoning_effort: None,
             tools: &[],
         };
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();
         assert_eq!(value["chat_template_kwargs"]["thinking"], true);
+        assert!(
+            value["chat_template_kwargs"]
+                .get("enable_thinking")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn chat_template_kwargs_serializes_the_enable_thinking_key() {
+        let request = ChatRequest {
+            model: "m",
+            messages: vec![],
+            stream: true,
+            chat_template_kwargs: Some(ChatTemplateKwargs {
+                thinking: None,
+                enable_thinking: Some(true),
+            }),
+            reasoning_effort: None,
+            tools: &[],
+        };
+        let value: serde_json::Value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["chat_template_kwargs"]["enable_thinking"], true);
+        assert!(value["chat_template_kwargs"].get("thinking").is_none());
     }
 
     #[test]
@@ -179,6 +218,7 @@ mod tests {
             messages: vec![],
             stream: true,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             tools: &[],
         };
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();
@@ -200,6 +240,7 @@ mod tests {
             messages: vec![],
             stream: true,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             tools: &tools,
         };
         let value: serde_json::Value = serde_json::to_value(&request).unwrap();

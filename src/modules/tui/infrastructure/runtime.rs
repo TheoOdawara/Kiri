@@ -129,6 +129,9 @@ pub struct TuiParams {
     pub memory: Arc<dyn Memory>,
     pub project_id: String,
     pub boot_notices: Vec<BootNotice>,
+    /// The formatted `/instructions` display text (paths + merged content). `None` when no
+    /// instructions file was found.
+    pub instructions_display: Option<String>,
 }
 
 /// The long-lived owned run state, aggregated so the per-turn driver and the effect handlers are
@@ -181,6 +184,7 @@ impl Tui {
             memory,
             project_id,
             boot_notices,
+            instructions_display,
         } = params;
         let workspace = text::display_path(sandbox.root());
         let (model_id, models) = provider_swap
@@ -189,7 +193,12 @@ impl Tui {
             .unwrap_or_default();
         let mut model = Model::new(model_id, workspace)
             .with_provider_catalog(models, provider_swap.effort)
-            .with_providers(provider_swap.active.clone(), provider_swap.provider_ids());
+            .with_providers(
+                provider_swap.active.clone(),
+                provider_swap.provider_ids(),
+                provider_swap.profiles().to_vec(),
+            )
+            .with_instructions(instructions_display);
         // Surface the wire-time degradations first, so the onboarding welcome (the call to action) lands
         // last when both are present.
         surface_boot_notices(&mut model, &boot_notices);
@@ -397,6 +406,8 @@ impl RunLoop {
                 model: model_id,
                 models,
                 auth,
+                thinking,
+                keep_existing_key,
             } => {
                 let profile = ProviderProfile {
                     id,
@@ -405,9 +416,11 @@ impl RunLoop {
                     model: model_id,
                     models,
                     auth,
+                    thinking,
                 };
-                self.apply_save_provider(profile);
+                self.apply_save_provider(profile, keep_existing_key);
             }
+            Effect::DeleteProvider(id) => self.apply_delete_provider(id),
             Effect::AnswerApproval(_) | Effect::CancelTurn => {}
         }
         Ok(())
@@ -522,6 +535,7 @@ mod tests {
                 model: model.into(),
                 models: vec![model.into()],
                 auth: AuthMethod::ApiKey,
+                thinking: None,
             }
         }
 
@@ -534,6 +548,7 @@ mod tests {
                 model: model.into(),
                 models: vec![model.into()],
                 auth: AuthMethod::None,
+                thinking: None,
             }
         }
 

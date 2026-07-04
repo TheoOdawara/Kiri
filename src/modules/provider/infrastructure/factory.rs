@@ -68,6 +68,8 @@ pub fn build_provider(
                 client,
                 profile.base_url.clone(),
                 key,
+                effective_thinking(profile, thinking),
+                effort,
             )))
         }
         // NVIDIA / OpenAI / OpenAI-compatible / custom over the chat-completions adapter. The key is
@@ -78,11 +80,21 @@ pub fn build_provider(
                 client,
                 profile.base_url.clone(),
                 key,
-                thinking,
+                profile.kind,
+                effective_thinking(profile, thinking),
                 effort,
             )))
         }
     }
+}
+
+/// Per-profile `thinking` overrides the global toggle; fall back to the kind's default. Shared by both
+/// adapter branches so they cannot drift.
+fn effective_thinking(profile: &ProviderProfile, thinking: bool) -> bool {
+    profile
+        .thinking
+        .unwrap_or_else(|| profile.kind.thinking_default())
+        && thinking
 }
 
 /// Build the embeddings adapter for `profile` + `credential` + `model`. Only the OpenAI-compatible
@@ -269,8 +281,8 @@ fn optional_key(
 #[cfg(test)]
 mod tests {
     use super::{
-        CredentialResolution, api_key_of, build_provider, resolve_credential_with_env,
-        secret_from_env_value,
+        CredentialResolution, api_key_of, build_provider, effective_thinking,
+        resolve_credential_with_env, secret_from_env_value,
     };
     use crate::modules::provider::application::secret_store::SecretStore;
     use crate::shared::kernel::error::AgentError;
@@ -451,6 +463,7 @@ mod tests {
             model: model.to_string(),
             models: vec![],
             auth,
+            thinking: None,
         }
     }
 
@@ -531,6 +544,50 @@ mod tests {
         let client = reqwest::Client::new();
         let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "");
         assert!(build_provider(client, &p, api_key(), true, Effort::High).is_err());
+    }
+
+    #[test]
+    fn effective_thinking_falls_back_to_the_kind_default_when_the_profile_is_unset() {
+        // `profile()` leaves `thinking: None`, so this exercises `kind.thinking_default()` directly:
+        // Nvidia defaults on, OpenAiCompatible defaults off.
+        let nvidia = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
+        assert!(effective_thinking(&nvidia, true));
+        let compatible = profile(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            AuthMethod::ApiKey,
+            "m",
+        );
+        assert!(!effective_thinking(&compatible, true));
+    }
+
+    #[test]
+    fn effective_thinking_profile_override_beats_the_kind_default() {
+        let mut off_override = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
+        off_override.thinking = Some(false);
+        assert!(
+            !effective_thinking(&off_override, true),
+            "an explicit Some(false) must beat Nvidia's on-by-default"
+        );
+
+        let mut on_override = profile(
+            "local",
+            ProviderKind::OpenAiCompatible,
+            AuthMethod::ApiKey,
+            "m",
+        );
+        on_override.thinking = Some(true);
+        assert!(
+            effective_thinking(&on_override, true),
+            "an explicit Some(true) must beat OpenAiCompatible's off-by-default"
+        );
+    }
+
+    #[test]
+    fn effective_thinking_is_false_when_the_global_toggle_is_off() {
+        // The global flag gates even a kind/profile that otherwise wants thinking on.
+        let nvidia = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
+        assert!(!effective_thinking(&nvidia, false));
     }
 
     #[test]

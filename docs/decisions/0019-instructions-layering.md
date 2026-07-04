@@ -1,0 +1,66 @@
+# ADR 0019 — Instructions Layering
+
+**Status:** Accepted  
+**Date:** 2026-06-29  
+**Relates to:** ADR 0007 (system prompt), ADR 0012 (config layering)
+
+## Context
+
+Users need a way to give Kiri persistent, project-specific or global behavioural guidance — equivalent to
+a `CLAUDE.md` / `AGENTS.md` in other agent harnesses. The guidance must be injected into the session
+system prompt so it is present on every turn without the user re-stating it.
+
+## Decision
+
+### Discovery order
+
+At boot, `Settings::resolve` searches for an instructions file in each directory using the precedence:
+
+```
+KIRI.md → AGENTS.md → CLAUDE.md
+```
+
+The first file found in a directory wins for that layer. Two layers are searched:
+
+| Layer | Directory | Typical use |
+|---|---|---|
+| Global | `~/.kiri/` | Cross-project preferences |
+| Project | workspace root | Per-project rules |
+
+Both layers are loaded and merged (`global\n\n project`). A CLI flag `--instructions <file>` overrides
+both layers entirely with the given file's content.
+
+### System prompt placement
+
+The merged instructions text is injected at a single `{INSTRUCTIONS}` placeholder that sits **before
+`# Security`**. The Security section must always be the final authority; placing instructions before it
+ensures the harness's security policy cannot be downgraded by user-supplied text.
+
+Final prompt shape:
+```
+[Static sections: Identity … Memory & preferences]
+# User Instructions
+{merged_text}
+
+# Security
+[Security section]
+[Memory digest, if any]
+```
+
+When no instructions file is found the placeholder expands to the empty string — no extra blank line, no
+section header.
+
+### TUI surface
+
+`/instructions` (alias `/instrucoes`) shows the active instructions and their source paths as a
+transcript notice. View-only in v1; no inline editor.
+
+## Consequences
+
+- Adding a `KIRI.md` at the workspace root or at `~/.kiri/` takes effect on the next session start
+  (the prompt is rendered once at boot, not per-turn).
+- A `CLAUDE.md` at the workspace root is picked up as a fallback so Kiri is usable in repos that
+  already have one without renaming.
+- The `--instructions` override is useful for scripted or CI invocations that need a specific prompt.
+- The project layer is read from the workspace root only — it is never parsed from `.kiri/` to keep
+  the semantics clear: `.kiri/` is harness state, the root is the project contract.

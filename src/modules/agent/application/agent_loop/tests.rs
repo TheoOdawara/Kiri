@@ -12,6 +12,7 @@ use crate::modules::tools::application::tool::Confirmation;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::shared::kernel::completed_turn::CompletedTurn;
+use crate::shared::kernel::message::ThinkingBlock;
 use crate::shared::kernel::role::Role;
 use crate::shared::kernel::stream_event::StreamEvent;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
@@ -161,10 +162,12 @@ async fn run_drives_a_tool_turn_then_a_text_turn() {
         CompletedTurn {
             content: "reading".to_string(),
             tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+            thinking: None,
         },
         CompletedTurn {
             content: "done".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
 
@@ -195,12 +198,86 @@ async fn run_drives_a_tool_turn_then_a_text_turn() {
 }
 
 #[tokio::test]
+async fn thinking_attaches_to_the_pushed_message_on_a_plain_text_turn() {
+    let dir = TempDir::new().unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let agent_loop = agent_loop_with(vec![CompletedTurn {
+        content: "done".to_string(),
+        tool_calls: vec![],
+        thinking: Some(ThinkingBlock::Visible {
+            text: "reasoning".to_string(),
+            signature: Some("sig".to_string()),
+        }),
+    }]);
+
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("hi"));
+    let mut io = TestIo::new(Approval::Approved);
+
+    agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
+        .await
+        .unwrap();
+
+    let pushed = conversation.messages().last().unwrap();
+    match pushed.thinking.as_ref().expect("thinking must be attached") {
+        ThinkingBlock::Visible { text, signature } => {
+            assert_eq!(text, "reasoning");
+            assert_eq!(signature.as_deref(), Some("sig"));
+        }
+        other => panic!("expected Visible, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn thinking_attaches_to_the_pushed_message_on_a_tool_call_turn() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let agent_loop = agent_loop_with(vec![
+        CompletedTurn {
+            content: "reading".to_string(),
+            tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+            thinking: Some(ThinkingBlock::Redacted {
+                data: "encrypted-blob".to_string(),
+            }),
+        },
+        CompletedTurn {
+            content: "done".to_string(),
+            tool_calls: vec![],
+            thinking: None,
+        },
+    ]);
+
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("read a.txt"));
+    let mut io = TestIo::new(Approval::Approved);
+
+    agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Default, &mut io)
+        .await
+        .unwrap();
+
+    // messages: System, User, Assistant(tool call + thinking), Tool, Assistant(text, no thinking)
+    let tool_call_message = &conversation.messages()[2];
+    match tool_call_message
+        .thinking
+        .as_ref()
+        .expect("thinking must be attached to the tool-call turn")
+    {
+        ThinkingBlock::Redacted { data } => assert_eq!(data, "encrypted-blob"),
+        other => panic!("expected Redacted, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn run_aborts_when_the_user_ends_the_session_at_a_prompt() {
     let dir = TempDir::new().unwrap();
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
     let agent_loop = agent_loop_with(vec![CompletedTurn {
         content: String::new(),
         tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+        thinking: None,
     }]);
 
     let mut conversation = Conversation::new("system");
@@ -225,10 +302,12 @@ async fn auto_mode_runs_tools_without_asking() {
                 "write_file",
                 r#"{"path":"a.txt","content":"hi"}"#,
             )],
+            thinking: None,
         },
         CompletedTurn {
             content: "done".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -260,10 +339,12 @@ async fn approved_auto_stops_asking_for_the_rest_of_the_turn() {
                 tool_call_id("write_file", r#"{"path":"a.txt","content":"a"}"#, "c1"),
                 tool_call_id("write_file", r#"{"path":"b.txt","content":"b"}"#, "c2"),
             ],
+            thinking: None,
         },
         CompletedTurn {
             content: "done".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -301,10 +382,12 @@ async fn plan_mode_blocks_destructive_tools() {
                 "write_file",
                 r#"{"path":"a.txt","content":"hi"}"#,
             )],
+            thinking: None,
         },
         CompletedTurn {
             content: "plan".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -344,10 +427,12 @@ async fn plan_mode_allows_read_only_tools() {
         CompletedTurn {
             content: "reading".to_string(),
             tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+            thinking: None,
         },
         CompletedTurn {
             content: "plan".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -379,10 +464,12 @@ async fn plan_mode_confirms_run_command() {
         CompletedTurn {
             content: "running".to_string(),
             tool_calls: vec![tool_call("run_command", r#"{"command":"echo hi"}"#)],
+            thinking: None,
         },
         CompletedTurn {
             content: "plan".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -416,10 +503,12 @@ async fn plan_mode_confirms_out_of_root_read() {
         CompletedTurn {
             content: "reading".to_string(),
             tool_calls: vec![tool_call("read_file", &args)],
+            thinking: None,
         },
         CompletedTurn {
             content: "plan".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -462,6 +551,7 @@ async fn plan_mode_present_plan_proposes_the_plan_and_keeps_the_wire_valid() {
     let agent_loop = agent_loop_with(vec![CompletedTurn {
         content: "vou planejar".to_string(),
         tool_calls: vec![tool_call("present_plan", r#"{"plan":"Plano final"}"#)],
+        thinking: None,
     }]);
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("faça um plano"));
@@ -506,10 +596,12 @@ async fn auto_mode_emits_tool_started_and_finished() {
                 "write_file",
                 r#"{"path":"a.txt","content":"hi"}"#,
             )],
+            thinking: None,
         },
         CompletedTurn {
             content: "done".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -535,10 +627,12 @@ async fn default_mode_emits_around_execution() {
         CompletedTurn {
             content: "reading".to_string(),
             tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+            thinking: None,
         },
         CompletedTurn {
             content: "done".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -565,10 +659,12 @@ async fn plan_block_emits_started_and_error_finish() {
                 "write_file",
                 r#"{"path":"a.txt","content":"hi"}"#,
             )],
+            thinking: None,
         },
         CompletedTurn {
             content: "plan".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -600,10 +696,12 @@ async fn declined_emits_started_and_declined_finish() {
         CompletedTurn {
             content: "deleting".to_string(),
             tool_calls: vec![tool_call("delete_file", r#"{"path":"a.txt"}"#)],
+            thinking: None,
         },
         CompletedTurn {
             content: "done".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -632,10 +730,12 @@ async fn auto_mode_runs_inroot_read_without_confirming() {
         CompletedTurn {
             content: "reading".to_string(),
             tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+            thinking: None,
         },
         CompletedTurn {
             content: "done".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -662,10 +762,12 @@ async fn auto_mode_confirms_destructive_delete() {
         CompletedTurn {
             content: "deleting".to_string(),
             tool_calls: vec![tool_call("delete_file", r#"{"path":"a.txt"}"#)],
+            thinking: None,
         },
         CompletedTurn {
             content: "done".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -699,10 +801,12 @@ async fn auto_mode_confirms_out_of_root_target() {
         CompletedTurn {
             content: "writing".to_string(),
             tool_calls: vec![tool_call("write_file", &args)],
+            thinking: None,
         },
         CompletedTurn {
             content: "done".to_string(),
             tool_calls: vec![],
+            thinking: None,
         },
     ]);
     let mut conversation = Conversation::new("system");
@@ -736,10 +840,12 @@ async fn iteration_cap_fires_the_checkpoint() {
             CompletedTurn {
                 content: "first".to_string(),
                 tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+                thinking: None,
             },
             CompletedTurn {
                 content: "second".to_string(),
                 tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+                thinking: None,
             },
         ])),
     });
@@ -787,6 +893,7 @@ async fn the_call_cap_pauses_within_a_single_oversized_round() {
                 tool_call_id("write_file", r#"{"path":"b.txt","content":"x"}"#, "c1"),
                 tool_call_id("write_file", r#"{"path":"c.txt","content":"x"}"#, "c2"),
             ],
+            thinking: None,
         }])),
     });
     let agent_loop = AgentLoop::new(
@@ -834,6 +941,7 @@ async fn aborting_mid_round_answers_every_tool_call() {
                 tool_call_id("delete_file", r#"{"path":"a.txt"}"#, "c0"),
                 tool_call_id("delete_file", r#"{"path":"b.txt"}"#, "c1"),
             ],
+            thinking: None,
         }])),
     });
     let agent_loop = AgentLoop::new(
@@ -920,6 +1028,7 @@ async fn wall_clock_checkpoint_fires_with_an_elapsed_reason() {
         turns: Mutex::new(VecDeque::from(vec![CompletedTurn {
             content: "x".to_string(),
             tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+            thinking: None,
         }])),
     });
     let agent_loop = AgentLoop::new(
@@ -969,6 +1078,7 @@ async fn run_through_the_real_bridge_emits_began_first_then_content() {
             Ok(CompletedTurn {
                 content: "hi".to_string(),
                 tool_calls: vec![],
+                thinking: None,
             })
         }
     }

@@ -65,6 +65,34 @@ impl SqliteSessionStore {
     }
 }
 
+/// Add the `thinking` column to `messages` if it is missing. No migration framework exists in this
+/// codebase; `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists, so a database created
+/// before this column was introduced needs it added in place. Idempotent (checked on every `init()`,
+/// altered at most once) — mirrors the existing `DROP INDEX IF EXISTS` + recreate precedent for evolving
+/// this same table.
+fn add_thinking_column_if_missing(conn: &Connection) -> AgentResult<()> {
+    let has_column: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'thinking'")
+        .and_then(|mut stmt| stmt.exists([]))
+        .map_err(AgentError::session)?;
+    if has_column {
+        return Ok(());
+    }
+    match conn.execute("ALTER TABLE messages ADD COLUMN thinking TEXT", []) {
+        Ok(_) => Ok(()),
+        // Two Kiri processes can race this exact check-then-ALTER window on a shared, not-yet-migrated
+        // `~/.kiri/sessions.db` (e.g. simultaneous first launch after upgrading). SQLite has no distinct
+        // error code for this, only the message text, so the loser recognizes and tolerates it instead of
+        // degrading its whole session store to the in-memory inert fallback over a column that now exists.
+        Err(error) if is_duplicate_column_error(&error) => Ok(()),
+        Err(error) => Err(AgentError::session(error)),
+    }
+}
+
+fn is_duplicate_column_error(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::SqliteFailure(_, Some(message)) if message.contains("duplicate column name"))
+}
+
 #[async_trait::async_trait]
 impl SessionStore for SqliteSessionStore {
     async fn init(&self) -> AgentResult<()> {
@@ -102,6 +130,7 @@ impl SessionStore for SqliteSessionStore {
                     ON messages(session_id, ordinal);",
             )
             .map_err(AgentError::session)?;
+            add_thinking_column_if_missing(&conn)?;
             Ok(())
         }, AgentError::session)
         .await
@@ -140,14 +169,35 @@ impl SessionStore for SqliteSessionStore {
         let conn = self.conn.clone();
         let session_id = session_id.to_string();
         // Serialize off the lock: turn each domain message into its stored columns up front.
-        let rows: Vec<(String, Option<String>, String, String, Option<String>)> = messages
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        )> = messages
             .iter()
             .map(|message| {
                 let dto = StoredMessage::from(message);
                 let images = serde_json::to_string(&dto.images).map_err(AgentError::session)?;
                 let tool_calls =
                     serde_json::to_string(&dto.tool_calls).map_err(AgentError::session)?;
-                Ok((dto.role, dto.content, images, tool_calls, dto.tool_call_id))
+                let thinking = dto
+                    .thinking
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(AgentError::session)?;
+                Ok((
+                    dto.role,
+                    dto.content,
+                    images,
+                    tool_calls,
+                    dto.tool_call_id,
+                    thinking,
+                ))
             })
             .collect::<AgentResult<_>>()?;
         run_blocking(
@@ -167,14 +217,14 @@ impl SessionStore for SqliteSessionStore {
                         |row| row.get(0),
                     )
                     .map_err(AgentError::session)?;
-                for (offset, (role, content, images, tool_calls, tool_call_id)) in
+                for (offset, (role, content, images, tool_calls, tool_call_id, thinking)) in
                     rows.iter().enumerate()
                 {
                     let ordinal = base + offset as i64;
                     tx.execute(
                         "INSERT INTO messages
-                        (session_id, ordinal, role, content, images, tool_calls, tool_call_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        (session_id, ordinal, role, content, images, tool_calls, tool_call_id, thinking)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         params![
                             session_id,
                             ordinal,
@@ -182,7 +232,8 @@ impl SessionStore for SqliteSessionStore {
                             content,
                             images,
                             tool_calls,
-                            tool_call_id
+                            tool_call_id,
+                            thinking
                         ],
                     )
                     .map_err(AgentError::session)?;
@@ -284,7 +335,7 @@ impl SessionStore for SqliteSessionStore {
                 };
                 let mut stmt = conn
                     .prepare(
-                        "SELECT role, content, images, tool_calls, tool_call_id
+                        "SELECT role, content, images, tool_calls, tool_call_id, thinking
                      FROM messages WHERE session_id = ?1 ORDER BY ordinal",
                     )
                     .map_err(AgentError::session)?;
@@ -292,10 +343,11 @@ impl SessionStore for SqliteSessionStore {
                     .query_map(params![session_id], |row| {
                         let images_raw: String = row.get(2)?;
                         let tool_calls_raw: String = row.get(3)?;
-                        // A corrupt images/tool_calls column makes the row unsafe to keep: silently emptying
-                        // tool_calls would leave an assistant message whose calls vanished while its answers
-                        // (Role::Tool rows) still reference them — an orphaned exchange the provider rejects.
-                        // Skip the whole message instead (returned as None, dropped below).
+                        let thinking_raw: Option<String> = row.get(5)?;
+                        // A corrupt images/tool_calls/thinking column makes the row unsafe to keep: silently
+                        // emptying tool_calls would leave an assistant message whose calls vanished while its
+                        // answers (Role::Tool rows) still reference them — an orphaned exchange the provider
+                        // rejects. Skip the whole message instead (returned as None, dropped below).
                         let images = match serde_json::from_str(&images_raw) {
                             Ok(value) => value,
                             Err(_) => return Ok(None),
@@ -304,12 +356,20 @@ impl SessionStore for SqliteSessionStore {
                             Ok(value) => value,
                             Err(_) => return Ok(None),
                         };
+                        let thinking = match thinking_raw {
+                            None => None,
+                            Some(raw) => match serde_json::from_str(&raw) {
+                                Ok(value) => value,
+                                Err(_) => return Ok(None),
+                            },
+                        };
                         Ok(Some(StoredMessage {
                             role: row.get(0)?,
                             content: row.get(1)?,
                             images,
                             tool_calls,
                             tool_call_id: row.get(4)?,
+                            thinking,
                         }))
                     })
                     .map_err(AgentError::session)?;
@@ -611,5 +671,124 @@ mod tests {
         );
         assert_eq!(loaded.messages.len(), 1, "the intact message survives");
         assert_eq!(loaded.messages[0].content.as_deref(), Some("intact"));
+    }
+
+    #[tokio::test]
+    async fn append_and_load_round_trip_thinking_blocks() {
+        use crate::shared::kernel::message::ThinkingBlock;
+
+        let dir = TempDir::new().unwrap();
+        let store = store(&dir).await;
+        let session = store.create("proj-a").await.unwrap();
+
+        let visible = Message::assistant_text("2 + 2 = 4").with_thinking(ThinkingBlock::Visible {
+            text: "adding".to_string(),
+            signature: Some("sig".to_string()),
+        });
+        let redacted = Message::assistant_text("done").with_thinking(ThinkingBlock::Redacted {
+            data: "encrypted-blob".to_string(),
+        });
+        store
+            .append_messages(
+                &session.id,
+                &[visible, redacted, Message::user("no thinking")],
+            )
+            .await
+            .unwrap();
+
+        let loaded = store.load(&session.id).await.unwrap().unwrap();
+        assert_eq!(loaded.messages.len(), 3);
+        match loaded.messages[0].thinking.as_ref().unwrap() {
+            ThinkingBlock::Visible { text, signature } => {
+                assert_eq!(text, "adding");
+                assert_eq!(signature.as_deref(), Some("sig"));
+            }
+            other => panic!("expected Visible, got {other:?}"),
+        }
+        match loaded.messages[1].thinking.as_ref().unwrap() {
+            ThinkingBlock::Redacted { data } => assert_eq!(data, "encrypted-blob"),
+            other => panic!("expected Redacted, got {other:?}"),
+        }
+        assert!(loaded.messages[2].thinking.is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_messages_table_gets_the_thinking_column_and_old_rows_load_as_none() {
+        // Simulate a `~/.kiri/sessions.db` created before the `thinking` column existed: a `messages`
+        // table matching the pre-migration schema exactly, with a row already in it. `init()` must add
+        // the column in place (not just on a brand-new table) and the pre-existing row must load with
+        // `thinking: None` rather than being dropped as corrupt.
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("sessions.db");
+        let store = SqliteSessionStore::new(db).unwrap();
+        {
+            let guard = lock(&store.conn, AgentError::session).unwrap();
+            guard
+                .execute_batch(
+                    "CREATE TABLE sessions (
+                        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                        ordinal INTEGER NOT NULL, role TEXT NOT NULL, content TEXT,
+                        images TEXT NOT NULL DEFAULT '[]', tool_calls TEXT NOT NULL DEFAULT '[]',
+                        tool_call_id TEXT
+                    );
+                    INSERT INTO sessions (id, project_id, created_at, updated_at)
+                        VALUES ('s1', 'proj-a', 't', 't');
+                    INSERT INTO messages (session_id, ordinal, role, content)
+                        VALUES ('s1', 0, 'user', 'from before the migration');",
+                )
+                .unwrap();
+        }
+
+        store.init().await.unwrap();
+
+        let has_column: bool = {
+            let guard = lock(&store.conn, AgentError::session).unwrap();
+            guard
+                .prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'thinking'")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        };
+        assert!(
+            has_column,
+            "init() must add the thinking column to a legacy messages table"
+        );
+
+        let loaded = store.load("s1").await.unwrap().unwrap();
+        assert_eq!(
+            loaded.messages.len(),
+            1,
+            "the legacy row must not be dropped"
+        );
+        assert_eq!(
+            loaded.messages[0].content.as_deref(),
+            Some("from before the migration")
+        );
+        assert!(
+            loaded.messages[0].thinking.is_none(),
+            "a NULL thinking column on a legacy row must load as None, not a corrupt-row drop"
+        );
+    }
+
+    #[test]
+    fn duplicate_column_alter_is_recognized_as_a_benign_race() {
+        // Deterministically reproduces the exact error SQLite returns when a second process wins the
+        // check-then-ALTER race: the column already exists, so a raw ALTER against it fails with
+        // "duplicate column name", not a distinct error code.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE messages (id INTEGER PRIMARY KEY, thinking TEXT)")
+            .unwrap();
+        let error = conn
+            .execute("ALTER TABLE messages ADD COLUMN thinking TEXT", [])
+            .unwrap_err();
+        assert!(
+            is_duplicate_column_error(&error),
+            "expected a duplicate-column error, got {error}"
+        );
     }
 }

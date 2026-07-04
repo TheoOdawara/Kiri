@@ -79,6 +79,27 @@ impl ProviderSwap {
         self.providers.iter().map(|p| p.id.clone()).collect()
     }
 
+    /// The full provider catalog — the action sub-menu reads this to display details.
+    pub(super) fn profiles(&self) -> &[ProviderProfile] {
+        &self.providers
+    }
+
+    /// Remove a provider from the in-memory catalog and delete its secret. Best-effort on the secret
+    /// (a missing key is a harmless no-op). If the deleted provider was active, falls back to the first
+    /// remaining one (or clears `active` when the catalog becomes empty).
+    pub(super) fn remove_provider(&mut self, id: &str) {
+        let _ = self.secrets.delete(id);
+        self.providers.retain(|p| p.id != id);
+        if self.active == id {
+            self.active = self
+                .providers
+                .first()
+                .map(|p| p.id.clone())
+                .unwrap_or_default();
+            self.credential = None;
+        }
+    }
+
     /// Build an adapter for a specific profile/credential/effort without committing any state, so a
     /// failed rebuild leaves the current provider untouched.
     fn build(
@@ -300,15 +321,33 @@ impl RunLoop {
         }
     }
 
-    /// Apply a wizard `SaveProvider`: derive the credential from the profile's `auth` (keyed takes the
-    /// staged key; keyless stores nothing), build and store the new provider, make it active, drop the
-    /// onboarding submit gate, and persist the profile + active selection. Commit only on success; a
-    /// missing key (keyed), an unsupported auth method, or a build/store failure is surfaced. The profile
-    /// is assembled by the caller (the wizard fields plus its `auth`).
-    pub(super) fn apply_save_provider(&mut self, profile: ProviderProfile) {
-        // Build the credential from the wizard-derived auth (carried on the profile). A keyed save takes
-        // the key staged in `pending_credential`; a keyless save (auth = none) stores nothing.
+    /// Apply a wizard `SaveProvider` or edit: derive the credential, build and store the provider, make
+    /// it active, drop the onboarding gate, and persist. `keep_existing_key` skips the keyring write
+    /// (edit mode, user left key field blank — the stored secret is reused). Commit only on success.
+    pub(super) fn apply_save_provider(
+        &mut self,
+        profile: ProviderProfile,
+        keep_existing_key: bool,
+    ) {
         let credential = match &profile.auth {
+            AuthMethod::ApiKey if keep_existing_key => {
+                // Editing with a blank key: reuse the cached credential from the last switch/save.
+                // If no credential is cached (corner case: editing a provider that was never activated),
+                // fall back to resolving from the keyring so the provider stays functional.
+                self.model.pending_credential = None;
+                match self.provider_swap.credential.clone() {
+                    Some(c) => c,
+                    None => match self.provider_swap.resolve_credential(&profile) {
+                        Ok((c, _)) => c,
+                        Err(error) => {
+                            self.model.notify_error(format!(
+                                "não foi possível recuperar a chave existente: {error:#}"
+                            ));
+                            return;
+                        }
+                    },
+                }
+            }
             AuthMethod::ApiKey => {
                 let Some(key) = self.model.pending_credential.take() else {
                     self.model
@@ -318,12 +357,10 @@ impl RunLoop {
                 Credential::ApiKey { key }
             }
             AuthMethod::None => {
-                // Keyless: drop any stray staged secret and store no credential.
                 self.model.pending_credential = None;
                 Credential::None
             }
             other => {
-                // The wizard never emits OAuth or an unrecognized method; guard, never panic.
                 self.model.pending_credential = None;
                 self.model.notify_error(format!(
                     "método de auth não suportado pelo wizard ({other:?}); provider não foi salvo"
@@ -339,17 +376,14 @@ impl RunLoop {
             Ok((provider, target_model)) => {
                 self.agent_loop.set_provider(provider);
                 self.agent_loop.set_model(target_model.clone());
-                // Onboarding (or a re-add) succeeded: a real adapter is live, so drop the
-                // submit gate and let the user into the normal chat.
                 self.model.unconfigured = false;
                 self.model.status.model = target_model;
                 self.model.status.provider = id.clone();
                 self.model.models = profile.models.clone();
                 self.model.providers = self.provider_swap.provider_ids();
+                self.model.provider_profiles = self.provider_swap.profiles().to_vec();
                 self.model
-                    .notify_info(format!("provider '{id}' adicionado e ativo"));
-                // Persist the profile (config) and the active selection; the credential
-                // already went to the keyring above.
+                    .notify_info(format!("provider '{id}' salvo e ativo"));
                 let persisted = config::upsert_provider(&self.config_path, &profile)
                     .and_then(|()| config::persist_active_provider(&self.config_path, &id));
                 persist_or_notice(
@@ -361,6 +395,51 @@ impl RunLoop {
             Err(error) => self
                 .model
                 .notify_error(format!("não foi possível salvar o provider: {error:#}")),
+        }
+    }
+
+    /// Apply a `DeleteProvider` effect: remove from in-memory catalog + keyring, persist to TOML,
+    /// rebuild the adapter for the new active provider (or revert to the null/unconfigured state), and
+    /// update model state.
+    pub(super) fn apply_delete_provider(&mut self, id: String) {
+        let was_active = self.provider_swap.active == id;
+        self.provider_swap.remove_provider(&id);
+        persist_or_notice(
+            config::delete_provider(&self.config_path, &id),
+            &mut self.model,
+            "provider removido, mas não persistiu no config",
+        );
+        self.model.providers = self.provider_swap.provider_ids();
+        self.model.provider_profiles = self.provider_swap.profiles().to_vec();
+        self.model.notify_info(format!("provider '{id}' removido"));
+
+        if !was_active {
+            return;
+        }
+        let new_active = self.provider_swap.active.clone();
+        if new_active.is_empty() {
+            // No providers left: revert to the unconfigured/onboarding state.
+            self.model.status.provider = String::new();
+            self.model.status.model = String::new();
+            self.model.enter_onboarding();
+            return;
+        }
+        // Rebuild the adapter for the new active provider.
+        match self.provider_swap.switch_to(&new_active) {
+            Ok(ProviderSwitch {
+                provider,
+                model: target_model,
+                persist_warning,
+            }) => {
+                self.agent_loop.set_provider(provider);
+                self.agent_loop.set_model(target_model.clone());
+                self.model.status.model = target_model;
+                self.model.status.provider = new_active;
+                notice_env_import_failure(persist_warning, &mut self.model);
+            }
+            Err(error) => self.model.notify_error(format!(
+                "não foi possível ativar o próximo provider: {error:#}"
+            )),
         }
     }
 }

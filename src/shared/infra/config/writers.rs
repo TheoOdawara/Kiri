@@ -91,10 +91,21 @@ pub fn persist_active_provider(config_path: &Path, provider_id: &str) -> Result<
 
 /// Add or replace a provider profile in the global config (from the add wizard). The profile's `id`
 /// keys the table (and is itself `#[serde(skip)]` in the body); the secret material is stored separately
-/// in the keyring, never here.
+/// in the credential store (the `0600` `credentials.json`), never here.
 pub fn upsert_provider(config_path: &Path, profile: &ProviderProfile) -> Result<(), AgentError> {
     update_global_config(config_path, |config| {
         config.providers.insert(profile.id.clone(), profile.clone());
+    })
+}
+
+/// Remove a provider from the global config. If it was the active provider, the active selection is
+/// cleared (the runtime then falls back to the first remaining provider or enters onboarding).
+pub fn delete_provider(config_path: &Path, id: &str) -> Result<(), AgentError> {
+    update_global_config(config_path, |config| {
+        config.providers.remove(id);
+        if config.active_provider.as_deref() == Some(id) {
+            config.active_provider = config.providers.keys().next().cloned();
+        }
     })
 }
 
@@ -115,6 +126,7 @@ pub(super) fn default_provider() -> ProviderProfile {
         model,
         models,
         auth: AuthMethod::ApiKey,
+        thinking: None,
     }
 }
 
@@ -185,6 +197,7 @@ read_timeout_ms = 99000
             model: "claude-opus-4-8".into(),
             models: vec!["claude-opus-4-8".into()],
             auth: AuthMethod::ApiKey,
+            thinking: None,
         };
         upsert_provider(&path, &claude).unwrap();
         persist_active_provider(&path, "claude").unwrap();
@@ -253,6 +266,7 @@ read_timeout_ms = 99000
             model: "claude-opus-4-8".into(),
             models: vec!["claude-opus-4-8".into()],
             auth: AuthMethod::ApiKey,
+            thinking: None,
         };
         // Mirror the runtime's `.and_then` chain (upsert then activate) under the new error type.
         upsert_provider(&path, &claude)
@@ -263,6 +277,28 @@ read_timeout_ms = 99000
         assert_eq!(config.active_provider.as_deref(), Some("claude"));
     }
 
+    #[test]
+    fn delete_provider_removes_it_and_clears_active_when_it_was_active() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let nvidia = ProviderProfile {
+            id: "nvidia".into(),
+            kind: ProviderKind::Nvidia,
+            base_url: "https://integrate.api.nvidia.com/v1".into(),
+            model: "m".into(),
+            models: vec![],
+            auth: AuthMethod::ApiKey,
+            thinking: None,
+        };
+        upsert_provider(&path, &nvidia).unwrap();
+        persist_active_provider(&path, "nvidia").unwrap();
+        delete_provider(&path, "nvidia").unwrap();
+        let config = read_config_file(&path).unwrap();
+        assert!(!config.providers.contains_key("nvidia"));
+        // active_provider was pointing at "nvidia"; after delete it must be cleared or point elsewhere.
+        assert_ne!(config.active_provider.as_deref(), Some("nvidia"));
+    }
+
     // Compile-asserting regression lock: the writers expose the typed signature, not anyhow.
     #[test]
     fn config_writers_do_not_return_anyhow() {
@@ -270,6 +306,7 @@ read_timeout_ms = 99000
         let _: fn(&Path, &str, &str) -> Result<(), AgentError> = persist_active_model;
         let _: fn(&Path, &str) -> Result<(), AgentError> = persist_active_provider;
         let _: fn(&Path, &ProviderProfile) -> Result<(), AgentError> = upsert_provider;
+        let _: fn(&Path, &str) -> Result<(), AgentError> = delete_provider;
     }
 
     #[cfg(unix)]

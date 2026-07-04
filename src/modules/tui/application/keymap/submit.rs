@@ -18,6 +18,14 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
         Some(Command::Resume) => vec![Effect::ResumeLast],
         Some(Command::Sessions) => vec![Effect::ListSessions],
         Some(Command::Sync) => vec![Effect::SyncPush],
+        Some(Command::Instructions) => {
+            let text = model
+                .instructions_display
+                .clone()
+                .unwrap_or_else(|| "Nenhuma instrução ativa.".to_string());
+            model.notify_info(text);
+            vec![]
+        }
         Some(Command::Help) => {
             model.notify_info(command::help_text());
             vec![]

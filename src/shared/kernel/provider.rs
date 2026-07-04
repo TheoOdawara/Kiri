@@ -45,6 +45,97 @@ impl ProviderKind {
             ProviderKind::OpenAiCompatible | ProviderKind::Custom => false,
         }
     }
+
+    /// Whether this kind sends a thinking/reasoning parameter by default. NVIDIA uses
+    /// `chat_template_kwargs.thinking`; OpenAI proper uses `reasoning_effort`. Other kinds send nothing.
+    pub fn thinking_default(self) -> bool {
+        matches!(self, ProviderKind::Nvidia | ProviderKind::Openai)
+    }
+
+    /// The reasoning/thinking capability this kind (and, for NVIDIA, this specific model) exposes. No
+    /// vendor API exposes this as discoverable metadata (confirmed for OpenAI, Anthropic, and NVIDIA
+    /// NIM) — it is a maintained, static table, same as [`thinking_default`](Self::thinking_default).
+    /// Drives whether the `/provider` wizard's `Thinking` step is shown at all.
+    pub fn thinking_capability(self, model: &str) -> ThinkingCapability {
+        match self {
+            ProviderKind::Openai => ThinkingCapability::Discrete,
+            ProviderKind::Anthropic => ThinkingCapability::Budget,
+            ProviderKind::Nvidia => NvidiaFamily::classify(model).capability(),
+            ProviderKind::OpenAiCompatible | ProviderKind::Custom => {
+                ThinkingCapability::Unsupported
+            }
+        }
+    }
+}
+
+/// How a provider/model exposes reasoning ("thinking") control, if at all. See
+/// [`ProviderKind::thinking_capability`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingCapability {
+    /// No reasoning control exists for this kind/model (e.g. Gemma, or an unrecognized endpoint) — the
+    /// wizard skips asking about it.
+    Unsupported,
+    /// A single on/off switch, no granularity (an NVIDIA family using a boolean chat-template kwarg).
+    Toggle,
+    /// A discrete low/medium/high-style dial (OpenAI's `reasoning_effort`).
+    Discrete,
+    /// A token-budget dial (Anthropic's `thinking.budget_tokens`).
+    Budget,
+}
+
+/// An NVIDIA-hosted open-weight model family, classified by a substring match on the model id. NVIDIA's
+/// NIM catalog hosts many families (DeepSeek, Qwen3, Kimi, MiniMax, GLM, Nemotron, Gemma, …) under one
+/// OpenAI-compatible endpoint, each with a different (or absent) reasoning-toggle convention.
+/// Unrecognized/unverified families default to `Unsupported` rather than guessing a wire shape that might
+/// silently no-op or 400 — extend `capability`/the wire construction only once a family's convention is
+/// confirmed against a real deployment (an official NVIDIA reference page, not a guess).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NvidiaFamily {
+    /// `chat_template_kwargs.thinking: bool` — the convention Kiri already sends.
+    Nemotron,
+    /// `chat_template_kwargs.thinking: bool` (same key as Nemotron) — confirmed by NVIDIA's own
+    /// Kimi-K2.5 API reference page for third-party (vLLM/SGLang) deployments, the stack NIM runs on.
+    Kimi,
+    /// `chat_template_kwargs.enable_thinking: bool` — confirmed by NVIDIA's own Qwen3.5/3.6 API
+    /// reference pages; matches Qwen3's well-documented public chat-template convention.
+    Qwen,
+    /// `chat_template_kwargs.enable_thinking: bool` — confirmed by NVIDIA's own `z-ai-glm4-7`/
+    /// `z-ai-glm5.1` reference pages (the vLLM/SGLang convention NIM proxies; Zhipu's own hosted API
+    /// uses a different, top-level `thinking: {type: "enabled"}` shape that does not apply here).
+    Glm,
+    /// DeepSeek, MiniMax, Gemma, and anything unrecognized: no reliable toggle convention. DeepSeek in
+    /// particular is not just unverified — a reported bug shows NIM hanging on DeepSeek V4 reasoning
+    /// models when `chat_template_kwargs` is absent, and a separate vLLM issue shows the toggle not
+    /// being honored on `deepseek-r1-0528`; shipping a guessed shape here risks reintroducing that
+    /// instability rather than fixing it.
+    Other,
+}
+
+impl NvidiaFamily {
+    pub(crate) fn classify(model: &str) -> Self {
+        let model = model.to_ascii_lowercase();
+        if model.contains("nemotron") {
+            NvidiaFamily::Nemotron
+        } else if model.contains("kimi") {
+            NvidiaFamily::Kimi
+        } else if model.contains("qwen") {
+            NvidiaFamily::Qwen
+        } else if model.contains("glm") {
+            NvidiaFamily::Glm
+        } else {
+            NvidiaFamily::Other
+        }
+    }
+
+    fn capability(self) -> ThinkingCapability {
+        match self {
+            NvidiaFamily::Nemotron
+            | NvidiaFamily::Kimi
+            | NvidiaFamily::Qwen
+            | NvidiaFamily::Glm => ThinkingCapability::Toggle,
+            NvidiaFamily::Other => ThinkingCapability::Unsupported,
+        }
+    }
 }
 
 /// How a provider authenticates, selecting which credential the adapter sends.
@@ -72,7 +163,7 @@ pub enum AuthMethod {
 
 impl AuthMethod {
     /// The wire token for the known variants; `Unknown` carries its original (unrecognized) text.
-    fn as_wire(&self) -> &str {
+    pub fn as_wire(&self) -> &str {
         match self {
             AuthMethod::ApiKey => "api-key",
             AuthMethod::None => "none",
@@ -101,7 +192,7 @@ impl<'de> Deserialize<'de> for AuthMethod {
 }
 
 /// Reasoning / output effort. A provider-agnostic dial each adapter maps to its native parameter
-/// (OpenAI-compatible `reasoning_effort` / nemotron `thinking`, Anthropic `output_config.effort`).
+/// (OpenAI-compatible `reasoning_effort` / nemotron `thinking`, Anthropic `thinking.budget_tokens`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
@@ -138,6 +229,39 @@ impl Effort {
             Effort::Max => "max",
         }
     }
+
+    /// The `reasoning_effort` value OpenAI proper (o3/o4) accepts, or `None` when effort is `Off`
+    /// (reasoning disabled). Only meaningful for `ProviderKind::Openai`.
+    pub fn as_openai_reasoning_effort(self) -> Option<&'static str> {
+        match self {
+            Effort::Off => None,
+            Effort::Low => Some("low"),
+            Effort::Medium => Some("medium"),
+            Effort::High | Effort::Xhigh | Effort::Max => Some("high"),
+        }
+    }
+
+    /// The Anthropic `thinking.budget_tokens` value for this level, or `None` when effort is `Off`
+    /// (thinking disabled). Kept under the Anthropic adapter's `MAX_OUTPUT_TOKENS` (16_000) with
+    /// headroom for the actual answer, since the Messages API requires `budget_tokens < max_tokens` (and
+    /// at least 1024). Only meaningful for `ProviderKind::Anthropic`.
+    pub fn anthropic_budget_tokens(self) -> Option<u32> {
+        match self {
+            Effort::Off => None,
+            Effort::Low => Some(1_024),
+            Effort::Medium => Some(4_096),
+            Effort::High => Some(8_192),
+            Effort::Xhigh => Some(12_000),
+            Effort::Max => Some(14_000),
+        }
+    }
+
+    /// The Anthropic `output_config.effort` value for adaptive thinking (`thinking: {type: "adaptive"}`),
+    /// or `None` when effort is `Off`. Reuses the same lowercase labels as [`Self::label`]. Only
+    /// meaningful for a model whose `AnthropicThinkingMode` is `AdaptiveOptIn`/`AdaptiveDefaultOn`.
+    pub fn as_anthropic_output_effort(self) -> Option<&'static str> {
+        (self != Effort::Off).then(|| self.label())
+    }
 }
 
 /// A configured provider — everything non-secret needed to talk to it. The catalog the user selects
@@ -156,6 +280,10 @@ pub struct ProviderProfile {
     #[serde(default)]
     pub models: Vec<String>,
     pub auth: AuthMethod,
+    /// Per-provider thinking override. `None` uses `kind.thinking_default()`; `Some(false)` disables
+    /// it explicitly even for kinds that enable it by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
 }
 
 /// The secret material for a provider, stored in the OS keyring (or a 0600 fallback file) as JSON.
@@ -348,5 +476,99 @@ mod tests {
         assert!(ProviderKind::Anthropic.requires_api_key());
         assert!(!ProviderKind::OpenAiCompatible.requires_api_key());
         assert!(!ProviderKind::Custom.requires_api_key());
+    }
+
+    #[test]
+    fn openai_and_anthropic_capability_ignore_the_model_string() {
+        assert_eq!(
+            ProviderKind::Openai.thinking_capability("gpt-5"),
+            ThinkingCapability::Discrete
+        );
+        assert_eq!(
+            ProviderKind::Anthropic.thinking_capability("claude-opus-4-8"),
+            ThinkingCapability::Budget
+        );
+    }
+
+    #[test]
+    fn compatible_and_custom_kinds_never_offer_thinking() {
+        assert_eq!(
+            ProviderKind::OpenAiCompatible.thinking_capability("anything"),
+            ThinkingCapability::Unsupported
+        );
+        assert_eq!(
+            ProviderKind::Custom.thinking_capability("anything"),
+            ThinkingCapability::Unsupported
+        );
+    }
+
+    #[test]
+    fn nvidia_capability_is_keyed_on_the_model_family() {
+        // Nemotron/Kimi/Qwen/GLM each have an official NVIDIA reference page confirming their
+        // reasoning-toggle convention, so all four now offer a Toggle.
+        for toggle_model in [
+            "nvidia/llama-3.3-nemotron-super-49b-v1",
+            "moonshotai/kimi-k2",
+            "qwen/qwen3-235b-a22b",
+            "zai-org/glm-4.5",
+        ] {
+            assert_eq!(
+                ProviderKind::Nvidia.thinking_capability(toggle_model),
+                ThinkingCapability::Toggle,
+                "expected Toggle for {toggle_model}"
+            );
+        }
+        for unsupported_model in [
+            // DeepSeek: a reported NIM hang (V4, absent chat_template_kwargs) and a vLLM issue (the
+            // toggle not honored on r1-0528) make this "known unreliable", not just "unverified".
+            "deepseek-ai/deepseek-v4",
+            "deepseek-ai/deepseek-r1",
+            "minimaxai/minimax-m1",
+            "google/gemma-3-27b-it",
+            "some/unknown-model",
+        ] {
+            assert_eq!(
+                ProviderKind::Nvidia.thinking_capability(unsupported_model),
+                ThinkingCapability::Unsupported,
+                "expected unsupported for {unsupported_model}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_budget_tokens_is_none_when_off_and_rises_with_effort() {
+        assert_eq!(Effort::Off.anthropic_budget_tokens(), None);
+        let mut previous = 0;
+        for effort in [
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+            Effort::Max,
+        ] {
+            let budget = effort
+                .anthropic_budget_tokens()
+                .expect("every non-Off level has a budget");
+            assert!(budget >= 1_024, "{effort:?} budget below the API minimum");
+            assert!(
+                budget > previous,
+                "{effort:?} budget must exceed the prior level"
+            );
+            previous = budget;
+        }
+    }
+
+    #[test]
+    fn anthropic_output_effort_is_none_when_off_and_matches_label_otherwise() {
+        assert_eq!(Effort::Off.as_anthropic_output_effort(), None);
+        for effort in [
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+            Effort::Max,
+        ] {
+            assert_eq!(effort.as_anthropic_output_effort(), Some(effort.label()));
+        }
     }
 }

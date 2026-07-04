@@ -18,7 +18,9 @@ use crate::modules::tui::domain::selection::{Granularity, ScreenSelection, Selec
 use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
 use crate::modules::tui::domain::wizard::{ADD_PROVIDER_LABEL, ProviderWizard, WizardStep};
 use crate::shared::kernel::approval_mode::ApprovalMode;
-use crate::shared::kernel::provider::{AuthMethod, Effort, Secret};
+use crate::shared::kernel::provider::{
+    AuthMethod, Effort, ProviderProfile, Secret, ThinkingCapability,
+};
 
 /// Transcript scroll amounts, in lines, single-sourced here for the keymap (key scroll) and `update.rs`
 /// (wheel scroll). A key step (arrow) moves `SCROLL_STEP`; Shift pages by `SCROLL_PAGE`; a mouse-wheel

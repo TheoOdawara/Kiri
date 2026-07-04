@@ -28,6 +28,19 @@ fn kiri_global_dir() -> PathBuf {
     expand_home("~/.kiri")
 }
 
+/// Load the optional `~/.kiri/.env` into process env before config resolution, so a user can keep API
+/// keys (and other trusted overrides) in one owner-only file that seeds `credentials.json`. Read ONLY
+/// from the trusted global dir, never the cwd — a hostile project repo must not be able to inject env
+/// and thereby redirect a credential or weaken the sandbox (ADR 0020; the "project layer is untrusted"
+/// invariant). Best-effort: an absent or malformed `.env` just means no vars are set, never a boot
+/// failure, and `dotenvy` never overrides an already-exported var.
+pub fn load_global_env() {
+    let env_path = kiri_global_dir().join(".env");
+    // Deliberately ignored: `.env` is an optional convenience. A missing file, or a malformed line that
+    // fails to parse, must not abort boot — the affected key simply stays unset and onboarding handles it.
+    let _ = dotenvy::from_path(&env_path);
+}
+
 /// The resolved configuration the composition root needs to wire the harness. Provider endpoints and
 /// the active model come from the configured [`ProviderProfile`] catalog; the matching secret is
 /// fetched from the credential store at wire time (never stored here).
@@ -80,6 +93,11 @@ pub struct Settings {
     /// Optional embeddings config for semantic recall: which configured provider to reuse and the model.
     /// `None` keeps recall keyword-only. Trusted (global) layer only.
     pub embeddings: Option<EmbeddingSettings>,
+    /// The merged instructions text to inject into the system prompt (global + project, or a CLI
+    /// override). `None` when no instructions file was found.
+    pub instructions: Option<String>,
+    /// The file paths that contributed to `instructions`, in discovery order, for TUI display.
+    pub instruction_paths: Vec<PathBuf>,
 }
 
 /// Resolved `[embeddings]` config: an existing provider id whose endpoint/credential to reuse, and the
@@ -90,13 +108,57 @@ pub struct EmbeddingSettings {
     pub model: String,
 }
 
+/// Return the first instructions file found in `dir` by the discovery order `KIRI.md` → `AGENTS.md` →
+/// `CLAUDE.md`. Returns `None` if none of the candidates exist.
+pub(super) fn find_instructions(dir: &std::path::Path) -> Option<PathBuf> {
+    ["KIRI.md", "AGENTS.md", "CLAUDE.md"]
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|p| p.is_file())
+}
+
+/// Discover and load instructions, merging global (`~/.kiri/`) and project (workspace root) layers.
+/// A CLI override (`--instructions`) replaces both layers. Returns `(merged_text, contributing_paths)`.
+fn load_instructions(
+    workspace: &std::path::Path,
+    global_dir: &std::path::Path,
+    cli_override: Option<PathBuf>,
+) -> Result<(Option<String>, Vec<PathBuf>)> {
+    if let Some(path) = cli_override {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("--instructions: cannot read {}: {e}", path.display()))?;
+        return Ok((Some(text), vec![path]));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for dir in [global_dir, workspace] {
+        if let Some(p) = find_instructions(dir)
+            && let Ok(text) = std::fs::read_to_string(&p)
+            && !text.trim().is_empty()
+        {
+            parts.push(text);
+            paths.push(p);
+        }
+    }
+    let merged = if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    };
+    Ok((merged, paths))
+}
+
 impl Settings {
     /// Resolve the runtime settings from the already-parsed CLI path/prompt: load the layered TOML
     /// config (`~/.kiri` global ← `<workspace>/.kiri` project) and reduce it to `Settings`. `main` owns
     /// CLI parsing — so it can dispatch the headless `kiri sync` route before reaching the TUI — and
     /// hands the values here. No `.env`: the harness owns its config (TOML) and secrets (keyring); a
     /// first run with no config seeds a default NVIDIA provider and writes a starter `~/.kiri/config.toml`.
-    pub fn resolve(cli_path: Option<PathBuf>, cli_prompt: Option<String>) -> Result<Self> {
+    pub fn resolve(
+        cli_path: Option<PathBuf>,
+        cli_prompt: Option<String>,
+        cli_instructions: Option<PathBuf>,
+    ) -> Result<Self> {
         let path = cli_path.unwrap_or_else(|| PathBuf::from("."));
 
         let global_dir = kiri_global_dir();
@@ -146,6 +208,9 @@ impl Settings {
             .or_else(|| std::env::var_os("KIRI_DOCS_PATH").map(PathBuf::from))
             .unwrap_or_else(|| path.join("docs"));
 
+        let (loaded_instructions, loaded_paths) =
+            load_instructions(&path, &global_dir, cli_instructions)?;
+
         Ok(Self {
             path,
             seed: cli_prompt,
@@ -190,7 +255,22 @@ impl Settings {
                 }
                 _ => None,
             },
+            instructions: loaded_instructions,
+            instruction_paths: loaded_paths,
         })
+    }
+
+    /// The instructions text formatted for TUI display: paths header followed by the merged content.
+    /// Returns `None` when no instructions were loaded.
+    pub fn instructions_display(&self) -> Option<String> {
+        let text = self.instructions.as_deref()?;
+        let header = self
+            .instruction_paths
+            .iter()
+            .map(|p| format!("- {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(format!("Arquivos carregados:\n{header}\n\n{text}"))
     }
 
     /// The active provider profile, resolved against the catalog. Errors if the active id names no

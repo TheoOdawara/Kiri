@@ -1,8 +1,10 @@
 //! Assembles one streamed turn from the Messages API SSE events. Each event's `data` payload carries a
 //! `type` discriminator (mirroring the SSE `event:` line), so dispatch is on the payload alone — the
 //! `eventsource-stream` layer handles line framing upstream. Text deltas stream as content and
-//! accumulate; thinking deltas stream as reasoning (not persisted); tool-use blocks accumulate their
-//! id/name (from `content_block_start`) and JSON input (from `input_json_delta`), keyed by block index.
+//! accumulate; thinking deltas stream as reasoning AND accumulate into the turn's `ThinkingBlock`
+//! (its `signature_delta` alongside it), so it can be replayed on the next turn ahead of any `tool_use`
+//! block; tool-use blocks accumulate their id/name (from `content_block_start`) and JSON input (from
+//! `input_json_delta`), keyed by block index.
 
 use std::collections::BTreeMap;
 
@@ -15,6 +17,7 @@ use crate::modules::provider::infrastructure::streaming::{
 use crate::modules::provider::infrastructure::tool_args;
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::message::ThinkingBlock;
 use crate::shared::kernel::stream_event::StreamEvent;
 use crate::shared::kernel::tool_call::{FunctionCall, TOOL_CALL_FUNCTION_KIND, ToolCall};
 
@@ -42,8 +45,16 @@ pub(crate) fn handle_event(
             index,
             content_block,
         } => {
-            if let ContentBlockStart::ToolUse { id, name } = content_block {
-                accumulator.start_tool_use(index, id, name);
+            match content_block {
+                ContentBlockStart::ToolUse { id, name } => {
+                    accumulator.start_tool_use(index, id, name)
+                }
+                // The encrypted blob arrives whole here (no delta stream); it has "no readable summary"
+                // per the docs, so it must not reach the UI sink the way a visible thinking delta does.
+                ContentBlockStart::RedactedThinking { data } => {
+                    accumulator.set_redacted_thinking(index, data)
+                }
+                ContentBlockStart::Other => {}
             }
             Ok(())
         }
@@ -75,10 +86,19 @@ fn apply_delta(
             sink.on_event(StreamEvent::Content(text))
         }
         BlockDelta::ThinkingDelta { thinking } if !thinking.is_empty() => {
-            // Reasoning is not persisted, but it still flows through the channel/transcript, so it must
-            // count toward the same ceiling — otherwise a provider streaming thinking forever OOMs.
+            // Reasoning streams to the UI AND accumulates into the turn's ThinkingBlock (so it can be
+            // replayed ahead of any tool_use on the next turn); either way it counts toward the same
+            // ceiling — otherwise a provider streaming thinking forever OOMs.
             enforce_stream_budget(&mut accumulator.streamed_bytes, thinking.len())?;
+            accumulator.push_thinking_text(index, &thinking);
             sink.on_event(StreamEvent::Reasoning(thinking))
+        }
+        BlockDelta::SignatureDelta { signature } if !signature.is_empty() => {
+            // The signature must be replayed byte-for-byte alongside its thinking text; it is not shown
+            // to the user, but still counts toward the stream budget like every other delta kind.
+            enforce_stream_budget(&mut accumulator.streamed_bytes, signature.len())?;
+            accumulator.push_thinking_signature(index, &signature);
+            Ok(())
         }
         BlockDelta::InputJsonDelta { partial_json } => {
             enforce_stream_budget(&mut accumulator.streamed_bytes, partial_json.len())?;
@@ -89,13 +109,15 @@ fn apply_delta(
     }
 }
 
-/// Assembles a turn from its streamed blocks. Tool-use blocks are keyed by their content-block `index`
-/// (a `BTreeMap` keeps them in natural order); their `input_json_delta` slices concatenate in arrival
-/// order. Text/thinking blocks need no slot — text accumulates into `content`, thinking only streams.
+/// Assembles a turn from its streamed blocks. Tool-use and thinking blocks are keyed by their
+/// content-block `index` (a `BTreeMap` keeps them in natural order); a tool-use's `input_json_delta`
+/// slices and a thinking block's text/signature deltas each concatenate in arrival order. Text needs no
+/// slot — it accumulates directly into `content`.
 #[derive(Default)]
 pub(crate) struct TurnAccumulator {
     content: String,
     tool_uses: BTreeMap<u32, PartialToolUse>,
+    thinking: BTreeMap<u32, PartialThinking>,
     /// Running total of streamed text + reasoning + tool-input bytes, bounded by the shared
     /// `MAX_STREAM_BYTES` via `enforce_stream_budget`.
     streamed_bytes: usize,
@@ -108,6 +130,22 @@ struct PartialToolUse {
     id: String,
     name: String,
     input: String,
+}
+
+/// A thinking-family block in progress. `Visible` accumulates text/signature deltas incrementally;
+/// `Redacted` arrives whole from `content_block_start` (see `set_redacted_thinking`) and never changes.
+enum PartialThinking {
+    Visible { text: String, signature: String },
+    Redacted { data: String },
+}
+
+impl PartialThinking {
+    fn empty_visible() -> Self {
+        Self::Visible {
+            text: String::new(),
+            signature: String::new(),
+        }
+    }
 }
 
 impl TurnAccumulator {
@@ -140,6 +178,43 @@ impl TurnAccumulator {
         }
     }
 
+    /// Append a thinking-text slice to the block at `index`, starting it if this is the first delta. A
+    /// delta for an index already recorded as `Redacted` is a no-op — the protocol never streams
+    /// text/signature deltas for a redacted block, but this must not panic/overwrite if it ever did.
+    fn push_thinking_text(&mut self, index: u32, text: &str) {
+        match self
+            .thinking
+            .entry(index)
+            .or_insert_with(PartialThinking::empty_visible)
+        {
+            PartialThinking::Visible { text: existing, .. } => existing.push_str(text),
+            PartialThinking::Redacted { .. } => {}
+        }
+    }
+
+    /// Append a signature slice to the block at `index`, starting it if this is the first delta. Same
+    /// defensive no-op as `push_thinking_text` for an index already recorded as `Redacted`.
+    fn push_thinking_signature(&mut self, index: u32, signature: &str) {
+        match self
+            .thinking
+            .entry(index)
+            .or_insert_with(PartialThinking::empty_visible)
+        {
+            PartialThinking::Visible {
+                signature: existing,
+                ..
+            } => existing.push_str(signature),
+            PartialThinking::Redacted { .. } => {}
+        }
+    }
+
+    /// Record a `redacted_thinking` block at `index`. Unlike a visible block, the encrypted `data`
+    /// arrives whole in `content_block_start` — there is no delta to accumulate.
+    fn set_redacted_thinking(&mut self, index: u32, data: String) {
+        self.thinking
+            .insert(index, PartialThinking::Redacted { data });
+    }
+
     pub(crate) fn into_completed(self) -> CompletedTurn {
         let tool_calls = self
             .tool_uses
@@ -155,9 +230,23 @@ impl TurnAccumulator {
                 },
             })
             .collect();
+        // Anthropic sends at most one thinking-family block per (non-interleaved) turn; the lowest
+        // content-block index is the one to carry forward if a future response ever streams more than one.
+        let thinking = self
+            .thinking
+            .into_values()
+            .next()
+            .map(|partial| match partial {
+                PartialThinking::Visible { text, signature } => ThinkingBlock::Visible {
+                    text,
+                    signature: (!signature.is_empty()).then_some(signature),
+                },
+                PartialThinking::Redacted { data } => ThinkingBlock::Redacted { data },
+            });
         CompletedTurn {
             content: self.content,
             tool_calls,
+            thinking,
         }
     }
 }
@@ -199,9 +288,10 @@ mod tests {
     }
 
     #[test]
-    fn thinking_deltas_stream_as_reasoning_but_are_not_persisted() {
+    fn thinking_deltas_stream_as_reasoning_and_are_persisted() {
         let (events, turn) = run(&[
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-1"}}"#,
             r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hi"}}"#,
         ]);
         assert_eq!(
@@ -212,6 +302,65 @@ mod tests {
             ]
         );
         assert_eq!(turn.content, "Hi");
+        match turn.thinking.expect("the thinking block must be persisted") {
+            ThinkingBlock::Visible { text, signature } => {
+                assert_eq!(text, "hmm");
+                assert_eq!(signature.as_deref(), Some("sig-1"));
+            }
+            other => panic!("expected Visible, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thinking_text_and_signature_accumulate_across_multiple_deltas() {
+        let (_events, turn) = run(&[
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"first "}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"second"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"ab"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"cd"}}"#,
+        ]);
+        match turn.thinking.expect("thinking must be present") {
+            ThinkingBlock::Visible { text, signature } => {
+                assert_eq!(text, "first second");
+                assert_eq!(signature.as_deref(), Some("abcd"));
+            }
+            other => panic!("expected Visible, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_thinking_delta_leaves_thinking_absent() {
+        let (_events, turn) = run(&[
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#,
+        ]);
+        assert!(turn.thinking.is_none());
+    }
+
+    #[test]
+    fn redacted_thinking_start_is_captured_without_streaming_to_the_sink() {
+        let (events, turn) = run(&[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"encrypted-blob"}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hi"}}"#,
+        ]);
+        assert_eq!(events, vec![StreamEvent::Content("Hi".to_string())]);
+        match turn.thinking.expect("the redacted block must be persisted") {
+            ThinkingBlock::Redacted { data } => assert_eq!(data, "encrypted-blob"),
+            other => panic!("expected Redacted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redacted_thinking_ignores_a_stray_delta_for_the_same_index() {
+        // The protocol never streams thinking/signature deltas for a redacted block, but a defensive
+        // no-op must not panic or silently corrupt the recorded data if it ever did.
+        let (_events, turn) = run(&[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"encrypted-blob"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"stray"}}"#,
+        ]);
+        match turn.thinking.expect("the redacted block must survive") {
+            ThinkingBlock::Redacted { data } => assert_eq!(data, "encrypted-blob"),
+            other => panic!("expected Redacted, got {other:?}"),
+        }
     }
 
     #[test]
@@ -437,16 +586,20 @@ mod tests {
 
     #[test]
     fn unknown_and_non_json_events_are_ignored() {
+        // `signature_delta` used to be the example of an ignored delta kind; it is now handled (see
+        // `thinking_deltas_stream_as_reasoning_and_are_persisted`), so this uses a genuinely unrecognized
+        // delta kind to keep exercising the `#[serde(other)]` fallback.
         let (events, turn) = run(&[
             "",
             ": keep-alive",
             r#"{"type":"message_start","message":{"id":"m","type":"message","role":"assistant"}}"#,
             r#"{"type":"ping"}"#,
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"x"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":"x"}}"#,
         ]);
         assert!(events.is_empty());
         assert_eq!(turn.content, "");
         assert!(turn.tool_calls.is_empty());
+        assert!(turn.thinking.is_none());
     }
 
     #[tokio::test]
