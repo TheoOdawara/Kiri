@@ -95,8 +95,8 @@ pub async fn run_shell(
     policy: &SandboxPolicy,
 ) -> Result<ExecResult, ExecError> {
     let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.args(["/C", script]);
+        let mut c = Command::new("pwsh");
+        c.args(["-Command", script]);
         c
     } else {
         let mut c = Command::new("sh");
@@ -109,7 +109,24 @@ pub async fn run_shell(
     let cmd = confiner
         .confine(cmd, policy)
         .map_err(|error| ExecError::Spawn(error.to_string()))?;
-    run(cmd, None, timeout).await
+    match run(cmd, None, timeout).await {
+        Ok(res) => Ok(res),
+        Err(ExecError::Spawn(e)) => {
+            if cfg!(windows)
+                && (e.contains("not found")
+                    || e.contains("os error 2")
+                    || e.contains("entity not found"))
+            {
+                Err(ExecError::Spawn(
+                    "PowerShell 7 (pwsh) is required on Windows but was not found on PATH."
+                        .to_string(),
+                ))
+            } else {
+                Err(ExecError::Spawn(e))
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Combine `stdout` then `stderr` (as `run_command` reports them) and truncate at `EXEC_MAX_BYTES`.

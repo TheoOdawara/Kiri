@@ -78,7 +78,8 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), AgentError> {
 
 #[cfg(not(unix))]
 fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), AgentError> {
-    fs::write(path, bytes).map_err(|e| AgentError::Secret(format!("write {}: {e}", path.display())))
+    crate::shared::infra::fs::write_atomic_sync(path, bytes)
+        .map_err(|e| AgentError::Secret(format!("write {}: {e}", path.display())))
 }
 
 #[cfg(test)]

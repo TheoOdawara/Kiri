@@ -91,7 +91,7 @@ pub fn persist_active_provider(config_path: &Path, provider_id: &str) -> Result<
 
 /// Add or replace a provider profile in the global config (from the add wizard). The profile's `id`
 /// keys the table (and is itself `#[serde(skip)]` in the body); the secret material is stored separately
-/// in the keyring, never here.
+/// in the credential store (the `0600` `credentials.json`), never here.
 pub fn upsert_provider(config_path: &Path, profile: &ProviderProfile) -> Result<(), AgentError> {
     update_global_config(config_path, |config| {
         config.providers.insert(profile.id.clone(), profile.clone());

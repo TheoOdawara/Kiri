@@ -11,7 +11,7 @@ Layers on the global contract — only project-specific rules below; when they c
 - `tokio` (full) — async runtime. `reqwest` (json) — HTTP to the provider. `serde` + `serde_json` — payloads.
 - **clap** (derive) — CLI parsing. **async-trait** — dyn-compatible async ports. **thiserror** — the typed
   `AgentError` kernel type. **anyhow** — error glue at the binary edge. **toml** — layered config.
-  **keyring** — OS credential store (Keychain / Cred Manager / Secret Service). **zeroize** — secret memory.
+  **dotenvy** — seed process env from the trusted `~/.kiri/.env` (never the cwd; ADR 0020). **zeroize** — secret memory.
 - Single binary crate. No workspace, no lib target.
 
 ## Commands (verified on Rust 1.96)
@@ -48,8 +48,9 @@ in the transcript rather than `eprintln!` behind the alternate-screen TUI.
   ports `Presenter`/`ApprovalPolicy`/`ToolObserver`, plus the provider's `EventSink`; the conversation
   types it drives live in shared/kernel), `provider` (the `CompletionProvider`
   port + two API-key adapters — `openai` (chat-completions: NVIDIA / compatible / custom / OpenAI) and
-  `anthropic` (Messages API) — plus the `SecretStore` port with `keyring`/`0600`-file adapters and the
-  `factory` that picks the adapter from `(kind, auth)`; see ADRs 0011/0012), `tools` (the `Tool` trait + `ToolRegistry`
+  `anthropic` (Messages API) — plus the `SecretStore` port with the `0600`-file adapter (`FileSecretStore`,
+  the only backend — the OS keyring was removed, ADR 0020) and the
+  `factory` that picks the adapter from `(kind, auth)`; see ADRs 0011/0012/0020), `tools` (the `Tool` trait + `ToolRegistry`
   + the `Sandbox` port — `FsSandbox` the fs adapter — + one fs adapter per tool), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
   adapter + the ratatui runtime — the sole front-end), `memory` (durable knowledge: `MemoryEntry`/`MemoryKind`
   domain — kinds include `preference` — + the capability port `Memory` (impl by `LayeredMemory`, composing
@@ -76,7 +77,7 @@ shells out to `git` to reach the user's profile repo (ADR 0015); filesystem I/O 
 `tools/infrastructure` (the `FsSandbox` adapter — behind the `tools/application::Sandbox` port — is the
 single path chokepoint) — **except** the `memory`, `session`,
 and `sync` contexts, which own their data dirs (`.kiri/memory`, `~/.kiri/memory`, `~/.kiri/sessions.db`,
-`~/.kiri/sync`), plus `provider/infrastructure/secrets` (the keyring/`0600` credentials file) and
+`~/.kiri/sync`), plus `provider/infrastructure/secrets` (the `0600` credentials file) and
 `shared/infra/config` (the `~/.kiri/config.toml` + dir creation) — all do their own file/SQLite I/O for
 harness-owned storage, never for agent-supplied paths (ref ADRs 0010/0013/0015); `domain` has no I/O and
 no UI-framework dependency — the **one** sanctioned exception is the TUI `InputBuffer` owning a
@@ -93,12 +94,16 @@ the `Sandbox` port as `&dyn Sandbox`), registered in `default_fs_tools`; a new p
 `provider/infrastructure/factory`; a new memory/docs tool = one file under `memory/infrastructure/tools/`,
 registered in `default_memory_tools`.
 
-**Providers & config (ADRs 0011/0012):** provider-agnostic, **API key only** — subscription OAuth (Claude
+**Providers & config (ADRs 0011/0012/0020):** provider-agnostic, **API key only** — subscription OAuth (Claude
 Pro/Max, ChatGPT Plus/Pro) is intentionally **unsupported** (it requires impersonating the vendor's client,
 which is ToS-banned and bans the user's account; `AuthMethod::Oauth` is modeled but non-wired). The provider
 catalog, active selection, model lists, and effort live in **layered TOML** (`~/.kiri/config.toml` global ←
-`<workspace>/.kiri/config.toml` project); **secrets** live in the OS keyring (or a `0600` file), keyed by
-provider id, never in TOML. **No `.env`.** The untrusted project layer contributes **only `effort`** —
+`<workspace>/.kiri/config.toml` project); **secrets** live in a `0600` `~/.kiri/credentials.json`, keyed by
+provider id, never in TOML (the OS keyring was removed — ADR 0020). **`.env` only from `~/.kiri/.env`, never
+the cwd** (`config::load_global_env` via `dotenvy::from_path`; ADR 0020): `~/.kiri/` is owner-only and
+user-authored, so its `.env` carries global-layer trust and may seed API keys / env, while a hostile
+project repo can never inject env — the argless cwd-reading `dotenvy::dotenv()` is build-failed by an
+`architecture_guards` test. The untrusted project layer contributes **only `effort`** —
 providers/sandbox/http/paths come from the trusted global layer (a malicious repo must not redirect a
 credential or weaken the sandbox). `/provider` (switch + add wizard), `/models`, `/effort` manage it live.
 A first run seeds NVIDIA and imports an API-key env var (`NVIDIA_API_KEY` / `KIRI_<ID>_API_KEY` …) once.

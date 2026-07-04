@@ -120,11 +120,14 @@ pub(super) fn load_net_allow() -> Result<Arc<[Regex]>> {
 /// when Windows support lands (deferred — do not add untested Windows code now). Note: tilde expansion
 /// for agent-supplied tool paths has its own read in `tools/infrastructure/path.rs::home()`.
 fn home_dir() -> Option<OsString> {
-    std::env::var_os("HOME")
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
 }
 
 /// The separator between entries in a colon-list env var (the extra docs/memory paths). Unix-only today
 /// (`:`); Windows uses `;` — change it here, the single site, when Windows support lands (deferred).
+#[cfg(windows)]
+const PATH_LIST_SEPARATOR: char = ';';
+#[cfg(not(windows))]
 const PATH_LIST_SEPARATOR: char = ':';
 
 /// Expand a leading `~`/`~/…` to the home dir; any other path is taken as given.

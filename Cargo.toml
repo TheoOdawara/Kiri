@@ -38,8 +38,9 @@ base64 = "0.22.1"
 regex = "1.11"
 uuid = { version = "1.12", features = ["v7", "serde"] }
 toml = "0.8"
-keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service"] }
 zeroize = "1"
+dotenvy = "0.15.7"
+
 
 [dev-dependencies]
 tempfile = "3"

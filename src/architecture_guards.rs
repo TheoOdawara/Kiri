@@ -66,6 +66,31 @@ fn only_input_buffer_couples_domain_to_ui_crates() {
     }
 }
 
+/// ADR 0020: the untrusted-project isolation invariant — a `.env` may be loaded ONLY from the trusted
+/// `~/.kiri` dir, never the cwd. The argless `dotenvy::dotenv()` reads a `.env` from the current working
+/// directory (a hostile repo the user `cd`s into), which would let it inject security-relevant env
+/// (`KIRI_SANDBOX*`, `KIRI_PATH`, `*_API_KEY`, …). Fail the build if that cwd variant reappears anywhere
+/// under `src/`; the sanctioned path is `dotenvy::from_path(~/.kiri/.env)` in `config::load_global_env`.
+#[test]
+fn no_cwd_dotenv_load() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rs_files(&src, &mut files);
+    // Build the needle by concatenation so this guard's own literal does not self-match.
+    let needle = concat!("dotenvy::", "dotenv(");
+    for file in &files {
+        if file.ends_with("architecture_guards.rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(file).expect("read src file");
+        assert!(
+            !source.contains(needle),
+            "{} loads a `.env` from the cwd; use dotenvy::from_path(~/.kiri/.env) (ADR 0020)",
+            file.display()
+        );
+    }
+}
+
 /// ADR 0003: `domain` is pure data + rules — no filesystem, network, or database I/O. Walk every
 /// `*.rs` under each `src/modules/*/domain/` and assert none references an I/O facility (`std::fs`,
 /// `tokio::fs`, `std::net`, `reqwest`, `rusqlite`). There is NO exception: unlike the UI-crate coupling

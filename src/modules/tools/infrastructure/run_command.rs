@@ -865,11 +865,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let sb = confined_sandbox(&dir);
         let reg = registry();
-        let probe = format!(
-            "{}/kiri-sbx-must-not-exist-{}",
-            std::env::var("HOME").unwrap(),
-            std::process::id()
-        );
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        let probe = format!("{home}/kiri-sbx-must-not-exist-{}", std::process::id());
         let _ = fs::remove_file(&probe);
         let cmd = format!("echo leaked > '{probe}' 2>&1; echo done");
         let _ = reg

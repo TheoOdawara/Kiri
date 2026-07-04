@@ -28,6 +28,19 @@ fn kiri_global_dir() -> PathBuf {
     expand_home("~/.kiri")
 }
 
+/// Load the optional `~/.kiri/.env` into process env before config resolution, so a user can keep API
+/// keys (and other trusted overrides) in one owner-only file that seeds `credentials.json`. Read ONLY
+/// from the trusted global dir, never the cwd — a hostile project repo must not be able to inject env
+/// and thereby redirect a credential or weaken the sandbox (ADR 0020; the "project layer is untrusted"
+/// invariant). Best-effort: an absent or malformed `.env` just means no vars are set, never a boot
+/// failure, and `dotenvy` never overrides an already-exported var.
+pub fn load_global_env() {
+    let env_path = kiri_global_dir().join(".env");
+    // Deliberately ignored: `.env` is an optional convenience. A missing file, or a malformed line that
+    // fails to parse, must not abort boot — the affected key simply stays unset and onboarding handles it.
+    let _ = dotenvy::from_path(&env_path);
+}
+
 /// The resolved configuration the composition root needs to wire the harness. Provider endpoints and
 /// the active model come from the configured [`ProviderProfile`] catalog; the matching secret is
 /// fetched from the credential store at wire time (never stored here).

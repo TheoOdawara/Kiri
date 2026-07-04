@@ -15,7 +15,9 @@ pub(crate) fn expand_tilde(path: &str, home: Option<&Path>) -> PathBuf {
 }
 
 pub(crate) fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 /// Whether a tool path targets an explicit absolute location (after `~` expansion) — i.e. potentially
