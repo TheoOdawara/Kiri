@@ -283,7 +283,7 @@ fn wizard_blank_key_compatible_emits_none_auth_and_no_credential() {
 fn wizard_edit_keeps_existing_key_for_a_compatible_provider_with_blank_key() {
     // Regression lock: editing a keyless-CAPABLE kind (OpenAiCompatible/Custom) that already HAS a
     // stored key, then leaving the key field blank ("keep existing"), must not collapse `auth` to
-    // `None` — that would make `apply_save_provider` delete the real stored key from the keyring.
+    // `None` — that would make `apply_save_provider` delete the real stored key from the store.
     use crate::shared::kernel::provider::{AuthMethod, ProviderKind, ProviderProfile};
 
     let existing = ProviderProfile {

@@ -19,12 +19,12 @@ use super::RunLoop;
 
 /// Everything the runtime needs to rebuild the provider adapter for a live `/models`/`/effort`/
 /// `/provider` change: the HTTP client, the secret store, the full provider catalog, the active id, the
-/// active provider's cached credential (so a rebuild needs no keyring round-trip), and the thinking/
+/// active provider's cached credential (so a rebuild needs no store round-trip), and the thinking/
 /// effort dials. Effort is captured at adapter construction, so changing effort — or the active
 /// provider — means rebuilding the `Arc`. The cached `credential` has three states: `None` during
 /// first-run onboarding (no usable key yet); `Some(Credential::None)` for an active keyless provider
 /// (auth = "none"); and `Some(Credential::ApiKey { .. })` for a keyed one. It is set the moment a
-/// provider is switched to or saved, so a rebuild needs no keyring round-trip.
+/// provider is switched to or saved, so a rebuild needs no store round-trip.
 pub struct ProviderSwap {
     client: reqwest::Client,
     secrets: Box<dyn SecretStore>,
@@ -192,7 +192,7 @@ impl ProviderSwap {
         credential: Credential,
     ) -> Result<(Arc<dyn CompletionProvider>, String), AgentError> {
         // Build first (validates the profile/credential), then store the secret — so a build failure
-        // never leaves an orphaned credential in the keyring for a provider that was not added.
+        // never leaves an orphaned credential in the store for a provider that was not added.
         let provider = self.build(&profile, &credential, self.effort)?;
         match &credential {
             // A keyless provider stores nothing; clear any stale key from a prior keyed config of this
@@ -322,7 +322,7 @@ impl RunLoop {
     }
 
     /// Apply a wizard `SaveProvider` or edit: derive the credential, build and store the provider, make
-    /// it active, drop the onboarding gate, and persist. `keep_existing_key` skips the keyring write
+    /// it active, drop the onboarding gate, and persist. `keep_existing_key` skips the store write
     /// (edit mode, user left key field blank — the stored secret is reused). Commit only on success.
     pub(super) fn apply_save_provider(
         &mut self,
@@ -333,7 +333,7 @@ impl RunLoop {
             AuthMethod::ApiKey if keep_existing_key => {
                 // Editing with a blank key: reuse the cached credential from the last switch/save.
                 // If no credential is cached (corner case: editing a provider that was never activated),
-                // fall back to resolving from the keyring so the provider stays functional.
+                // fall back to resolving from the store so the provider stays functional.
                 self.model.pending_credential = None;
                 match self.provider_swap.credential.clone() {
                     Some(c) => c,
@@ -398,7 +398,7 @@ impl RunLoop {
         }
     }
 
-    /// Apply a `DeleteProvider` effect: remove from in-memory catalog + keyring, persist to TOML,
+    /// Apply a `DeleteProvider` effect: remove from in-memory catalog + store, persist to TOML,
     /// rebuild the adapter for the new active provider (or revert to the null/unconfigured state), and
     /// update model state.
     pub(super) fn apply_delete_provider(&mut self, id: String) {

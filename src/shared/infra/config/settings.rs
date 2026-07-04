@@ -76,7 +76,7 @@ pub struct Settings {
     pub shared_memory_db: PathBuf,
     /// The persisted-conversations database. Defaults to `~/.kiri/sessions.db`. Gated by `memory_enabled`.
     pub sessions_db: PathBuf,
-    /// The credential-store fallback file when no OS keyring is reachable. `~/.kiri/credentials.json`.
+    /// The credential-store file. `~/.kiri/credentials.json`.
     pub credentials_file: PathBuf,
     /// The harness home (`~/.kiri`). The single source every consumer reads instead of re-deriving it
     /// from `config_path.parent()`; the sync work-tree lives at `<global_dir>/sync`.
@@ -152,7 +152,7 @@ impl Settings {
     /// Resolve the runtime settings from the already-parsed CLI path/prompt: load the layered TOML
     /// config (`~/.kiri` global ← `<workspace>/.kiri` project) and reduce it to `Settings`. `main` owns
     /// CLI parsing — so it can dispatch the headless `kiri sync` route before reaching the TUI — and
-    /// hands the values here. No `.env`: the harness owns its config (TOML) and secrets (keyring); a
+    /// hands the values here. The harness owns its config (TOML) and secrets (the 0600 credentials file); a
     /// first run with no config seeds a default NVIDIA provider and writes a starter `~/.kiri/config.toml`.
     pub fn resolve(
         cli_path: Option<PathBuf>,

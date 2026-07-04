@@ -157,7 +157,7 @@ pub struct Model {
     pub session_ids: Vec<String>,
     /// The open add-provider wizard, or `None`. While set, keys drive its steps.
     pub wizard: Option<ProviderWizard>,
-    /// The API key typed in the wizard, staged for the runtime to store in the keyring. Held as a
+    /// The API key typed in the wizard, staged for the runtime to store in the credential store. Held as a
     /// `Secret` (redacted in `Debug`) and taken on `SaveProvider`, so the key never rides in an effect
     /// or the transcript.
     pub pending_credential: Option<Secret>,

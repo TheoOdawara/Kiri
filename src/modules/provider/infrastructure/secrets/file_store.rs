@@ -1,5 +1,5 @@
-//! [`SecretStore`] backed by a 0600 JSON file under the kiri config dir. The fallback when no OS
-//! keyring is reachable (headless Linux / CI). The whole map is read-modify-written per call — fine for
+//! [`SecretStore`] backed by a 0600 JSON file under the kiri config dir. The only credential-store
+//! backend (ADR 0020). The whole map is read-modify-written per call — fine for
 //! the handful of providers a user configures.
 
 use std::collections::BTreeMap;

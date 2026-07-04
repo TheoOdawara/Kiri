@@ -266,7 +266,7 @@ impl Effort {
 
 /// A configured provider — everything non-secret needed to talk to it. The catalog the user selects
 /// among; persisted in the TOML config. The secret material lives separately in a [`Credential`]
-/// (keyring / 0600 file), keyed by [`ProviderProfile::id`].
+/// (a 0600 file), keyed by [`ProviderProfile::id`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderProfile {
     /// Stable id; the map key in `[providers.<id>]`. Not serialized in the table body.
@@ -286,7 +286,7 @@ pub struct ProviderProfile {
     pub thinking: Option<bool>,
 }
 
-/// The secret material for a provider, stored in the OS keyring (or a 0600 fallback file) as JSON.
+/// The secret material for a provider, stored in the 0600 credentials file as JSON.
 /// Never written to the TOML config and never logged. Refresh tokens persist here; short-lived access
 /// tokens are also persisted so a restarted session can refresh without re-login.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -297,7 +297,7 @@ pub enum Credential {
     },
     /// No credential: a keyless provider (`auth = "none"`). The composition root synthesizes this to
     /// build an adapter that omits the `Authorization` header; it is not normally persisted, since a
-    /// keyless provider stores nothing in the keyring.
+    /// keyless provider stores nothing.
     None,
     Oauth(OauthTokens),
 }
@@ -315,7 +315,7 @@ pub struct OauthTokens {
 }
 
 /// A secret string: zeroized on drop and redacted in `Debug`, so it never lands in a log or transcript.
-/// It serializes its inner value because the only sink is the OS keyring / a 0600 credentials file.
+/// It serializes its inner value because the only sink is the 0600 credentials file.
 #[derive(Clone)]
 pub struct Secret(Zeroizing<String>);
 

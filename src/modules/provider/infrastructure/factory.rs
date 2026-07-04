@@ -128,7 +128,7 @@ pub fn build_embedding_provider(
 
 /// The legacy/CI env var an API-key provider can be primed from, by vendor plus a generic per-id form.
 /// A migration aid (and the live-`/provider`-switch fallback) so a provider whose key lives in an env
-/// var works without first storing it in the keyring. Filters empties per candidate so a set-but-blank
+/// var works without first storing it in the credential store. Filters empties per candidate so a set-but-blank
 /// generic var does not shadow a real vendor var.
 pub fn api_key_from_env(profile: &ProviderProfile) -> Option<Secret> {
     let generic = generic_env_key(profile);
@@ -146,7 +146,7 @@ pub fn api_key_from_env(profile: &ProviderProfile) -> Option<Secret> {
 /// The outcome of resolving a provider's credential. Single-sources the *policy* (keyless short-circuit
 /// → stored → one-time env import → absent) while leaving *reporting* and *absent-handling* to each
 /// caller, so the composition root (`app::wire`) and the live `/provider` swap (`ProviderSwap`) cannot
-/// drift. It lives here, beside `api_key_from_env`/`SecretStore`, because the env/keyring access it
+/// drift. It lives here, beside `api_key_from_env`/`SecretStore`, because the env/store access it
 /// orchestrates is a binary-edge credential-acquisition concern, not domain policy.
 pub enum CredentialResolution {
     /// `auth = "none"` → [`Credential::None`]; the secret store is never consulted.
@@ -180,7 +180,7 @@ pub fn resolve_credential(
 
 /// Whether the user opted out of persisting a first-run env-key import via `KIRI_NO_KEY_IMPORT`
 /// (`1`/`true`, case-insensitive). Lets an env key drive a single session / CI run without writing a
-/// durable copy to the keyring or the `0600` fallback (SEC-07).
+/// durable copy to the `0600` credentials file (SEC-07).
 fn no_key_import_opt_out() -> bool {
     std::env::var("KIRI_NO_KEY_IMPORT")
         .map(|v| {

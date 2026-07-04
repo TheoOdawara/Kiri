@@ -13,7 +13,7 @@ use super::defaults::DEFAULT_PROVIDER_ID;
 // Two layers merge into the resolved config: a global `~/.kiri/config.toml` and a per-project
 // `<workspace>/.kiri/config.toml`. The project layer overrides the global field-by-field; for the
 // `providers` table, project entries override or add by id. Secrets are NOT stored here — they live in
-// the OS keyring (or a 0600 fallback file), keyed by provider id.
+// the 0600 credentials file, keyed by provider id.
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub(super) struct RawConfig {

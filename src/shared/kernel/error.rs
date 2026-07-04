@@ -26,7 +26,7 @@ pub enum AgentError {
     /// persistence is auxiliary, so callers degrade gracefully (an inert store) rather than abort.
     #[error("session error: {0}")]
     Session(String),
-    /// A credential-store failure (OS keyring or the 0600 fallback file): reading, writing, or
+    /// A credential-store failure (the 0600 credentials file): reading, writing, or
     /// (de)serializing a provider's secret material. Never carries the secret itself.
     #[error("credential store error: {0}")]
     Secret(String),

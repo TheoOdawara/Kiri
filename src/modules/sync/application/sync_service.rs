@@ -7,7 +7,7 @@ use crate::modules::sync::domain::config_trust::risky_config_changes;
 use crate::shared::infra::config;
 use crate::shared::kernel::error::{AgentError, AgentResult};
 
-/// The files the sync work-tree holds. Secrets (`credentials.json`, keyring) are NEVER among them — only
+/// The files the sync work-tree holds. Secrets (`credentials.json`) are NEVER among them — only
 /// the non-secret `config.toml` and the memory NDJSON are written into the tree.
 const MEMORY_FILE: &str = "memory.ndjson";
 const CONFIG_FILE: &str = "config.toml";

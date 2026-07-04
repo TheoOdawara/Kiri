@@ -60,7 +60,7 @@ pub enum Effect {
         thinking: Option<bool>,
         keep_existing_key: bool,
     },
-    /// Remove a provider by id: keyring secret, in-memory catalog, and TOML config entry.
+    /// Remove a provider by id: stored secret, in-memory catalog, and TOML config entry.
     DeleteProvider(String),
     /// Place the edit cursor at the composer click (absolute screen cell). The runtime resolves it
     /// against the rendered editor geometry — a no-op when the click is outside the box or the layout

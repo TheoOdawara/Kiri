@@ -117,19 +117,19 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         settings.extra_ro.clone(),
         settings.extra_rw.clone(),
     )?;
-    // Resolve the active provider profile and its credential (OS keyring, or a 0600 fallback file),
+    // Resolve the active provider profile and its credential (the 0600 credentials file),
     // then select the adapter. This is the one place adapters are chosen.
     let profile = settings.active_profile()?.clone();
     let credential = resolve_credential(&profile, secrets.as_ref(), &mut boot_notices)?;
     // A keyless active provider whose id once held a key (migrated api-key -> none by hand-edit) leaves a
-    // stale secret in the keyring; clear it best-effort so no orphaned credential lingers. A missing-key
+    // stale secret in the store; clear it best-effort so no orphaned credential lingers. A missing-key
     // delete is a harmless no-op.
     if profile.auth == AuthMethod::None {
         let _ = secrets.delete(&profile.id);
     }
     // Pick the initial adapter without ever aborting the boot (see `select_initial_provider`). The
     // client/credential are kept so the runtime's `ProviderSwap` can rebuild on a live `/effort` change
-    // without a keyring round-trip.
+    // without a store round-trip.
     let (provider, needs_onboarding) =
         select_initial_provider(&client, &profile, &credential, &settings, &mut boot_notices);
     // The file tools plus the plan-mode control tool. `present_plan` is advertised only in plan mode
@@ -371,7 +371,7 @@ fn build_embedder(
             )));
             return None;
         }
-        // Distinguish a genuine keyring/store fault from "not logged in", so a broken credential store
+        // Distinguish a genuine store fault from "not logged in", so a broken credential store
         // is diagnosable rather than silently reported as a missing credential.
         Err(error) => {
             notices.push(BootNotice::new(format!(
@@ -478,7 +478,7 @@ fn select_initial_provider(
 /// Resolve the active provider's credential: the stored one if present, else a one-time import from a
 /// legacy env var (migration aid / CI escape hatch) for API-key providers, else `None` — the signal that
 /// this is a first run with nothing configured, which the caller routes to onboarding (never a fatal
-/// abort). A genuine store error (a broken keyring, distinct from "not logged in") still propagates.
+/// abort). A genuine store error (a broken credentials file, distinct from "not logged in") still propagates.
 /// Never logs the secret.
 fn resolve_credential(
     profile: &ProviderProfile,
@@ -499,8 +499,8 @@ fn resolve_credential(
         } => {
             match persisted {
                 Ok(()) => notices.push(BootNotice::new(format!(
-                    "imported the API key for provider '{}' from the environment and saved it to the OS \
-                     credential store (keyring, or the ~/.kiri/credentials.json fallback); it now persists \
+                    "imported the API key for provider '{}' from the environment and saved it to the \
+                     credential store (the ~/.kiri/credentials.json file); it now persists \
                      across sessions on this machine. To undo this, remove the stored credential (a \
                      /provider logout flow is planned) — unsetting the env var does NOT delete the saved \
                      copy.",
@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn resolve_credential_yields_none_credential_for_a_keyless_profile() {
         // auth = "none" short-circuits to Credential::None and must ignore any stale stored key — the
-        // early return precedes the keyring lookup, so a leftover key from a prior keyed config is unused.
+        // early return precedes the store lookup, so a leftover key from a prior keyed config is unused.
         let store = FakeStore(Some(api_key()));
         let p = profile(
             "lmstudio",
