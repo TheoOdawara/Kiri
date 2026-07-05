@@ -39,6 +39,11 @@ pub enum AgentError {
     /// not an `io::Error`, and distinct from `Sandbox`/`Secret`.
     #[error("config error: {0}")]
     Config(String),
+    /// An extensions-framework failure (ADR 0021): loading rules/commands/agents/skills, or reading/
+    /// writing the trust store (the gate's TOFU approval record). Extensions are auxiliary, so callers
+    /// degrade gracefully rather than abort.
+    #[error("extensions error: {0}")]
+    Extensions(String),
 }
 
 /// The result of any fallible port/adapter signature: `Result<T, AgentError>` named once so the error
@@ -59,6 +64,13 @@ impl AgentError {
     pub fn session(error: impl std::fmt::Display) -> Self {
         Self::Session(error.to_string())
     }
+
+    /// Build an [`AgentError::Extensions`] from any `Display` source. The single constructor the
+    /// extensions loader and trust store map their non-IO failures through (mirrors
+    /// [`AgentError::memory`]).
+    pub fn extensions(error: impl std::fmt::Display) -> Self {
+        Self::Extensions(error.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -69,6 +81,12 @@ mod tests {
     fn memory_constructor_builds_memory_variant() {
         let error = AgentError::memory("disk full");
         assert!(matches!(&error, AgentError::Memory(message) if message == "disk full"));
+    }
+
+    #[test]
+    fn extensions_constructor_builds_extensions_variant() {
+        let error = AgentError::extensions("bad frontmatter");
+        assert!(matches!(&error, AgentError::Extensions(message) if message == "bad frontmatter"));
     }
 
     #[test]

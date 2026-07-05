@@ -55,6 +55,7 @@ Passive content is injected before `# Security`, so the harness's security polic
 ```
 # Memory & preferences
 # Rules                       <- {RULES}  (always-on rules; absent when none)
+# Skills                      <- {SKILLS} (one-line index; bodies fetched on demand via use_skill)
 # User Instructions           <- {INSTRUCTIONS} (ADR 0019)
 # Security                    <- always last
 ```
@@ -64,6 +65,24 @@ Passive content is injected before `# Security`, so the harness's security polic
 `app::wire` is the only place the extension adapters are chosen and the catalogs assembled, injected as ports.
 A new `extensions` bounded context holds the discovery + loading + the gate state; a `mcp` context and a
 `hooks` context own network/process I/O (the sanctioned sites for those, mirroring `provider`/`sync`).
+
+### Trust gate implementation: TOFU (Trust On First Use)
+
+`domain::gate::resolve(layer, previously_approved)` is the pure decision (global always `Approved`; project
+`Approved` only when `previously_approved`). The "previously approved" bit comes from
+`infrastructure::trust_store::ExtensionsTrustStore`, a `0600` JSON file at `~/.kiri/extensions_trust.json`
+(mirroring `FileSecretStore`'s adapter shape: read-modify-write, crash-atomic, owner-only), keyed by
+`capability id -> approved content hash` (`domain::gate::content_hash`, blake3, 16 hex chars).
+
+TOFU semantics: approve a capability once, and it stays approved as long as its content is unchanged. If a
+hostile repo edits an already-approved hook/MCP config after approval, its hash no longer matches the stored
+one — the gate reports `Pending` again on the next boot, exactly as if it had never been approved. Revoking
+an approval today means deleting its entry from the trust-store file by hand; a `/trust` management command
+is future work.
+
+This lands ahead of any real active-capability type (hooks/MCP, Fase 4/5) as infrastructure only — nothing
+calls `resolve`/`ExtensionsTrustStore` in production yet, since there is nothing to gate. The first hook
+discovered from a project layer is the first real caller.
 
 ## Consequences
 
