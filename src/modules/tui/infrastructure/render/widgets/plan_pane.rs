@@ -4,7 +4,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use crate::modules::tui::domain::modal::PlanFocus;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::infrastructure::markdown;
 use crate::modules::tui::infrastructure::theme;
@@ -37,21 +36,14 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         "".to_string()
     };
 
-    let focused = plan.focus == PlanFocus::Plan;
-    let border_color = if focused {
-        theme::WARNING
-    } else {
-        theme::STEEL_RAMP[4]
-    };
-
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color))
+        .border_style(Style::default().fg(theme::WARNING))
         .title(Span::styled(
             format!(" 📋 PLANO PROPOSTO{} ", title_suffix),
             Style::default()
-                .fg(border_color)
+                .fg(theme::WARNING)
                 .add_modifier(Modifier::BOLD),
         ));
 

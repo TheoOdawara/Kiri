@@ -95,20 +95,6 @@ pub(super) fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
 pub(super) fn on_plan_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     if let Some(plan) = model.pending_plan.as_mut() {
         match key.code {
-            Key::Tab | Key::BackTab => {
-                plan.focus = match plan.focus {
-                    PlanFocus::Options => PlanFocus::Plan,
-                    PlanFocus::Plan => PlanFocus::Options,
-                };
-                return vec![];
-            }
-            Key::Left | Key::Right => {
-                plan.focus = match plan.focus {
-                    PlanFocus::Options => PlanFocus::Plan,
-                    PlanFocus::Plan => PlanFocus::Options,
-                };
-                return vec![];
-            }
             Key::Up if key.shift => {
                 plan.scroll = plan.scroll.saturating_sub(1);
                 return vec![];
@@ -118,21 +104,11 @@ pub(super) fn on_plan_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                 return vec![];
             }
             Key::Up => {
-                match plan.focus {
-                    PlanFocus::Plan => plan.scroll = plan.scroll.saturating_sub(1),
-                    PlanFocus::Options => {
-                        plan.selected = wrapping_step(plan.selected, -1, PlanOption::ALL.len());
-                    }
-                }
+                plan.selected = wrapping_step(plan.selected, -1, PlanOption::ALL.len());
                 return vec![];
             }
             Key::Down => {
-                match plan.focus {
-                    PlanFocus::Plan => plan.scroll = plan.scroll.saturating_add(1),
-                    PlanFocus::Options => {
-                        plan.selected = wrapping_step(plan.selected, 1, PlanOption::ALL.len());
-                    }
-                }
+                plan.selected = wrapping_step(plan.selected, 1, PlanOption::ALL.len());
                 return vec![];
             }
             Key::PageUp => {
@@ -239,13 +215,7 @@ pub(super) fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
 
     let filtered = picker.filtered_options();
     let index = match key.code {
-        Key::Enter => {
-            if picker.selected < filtered.len() {
-                filtered[picker.selected].0
-            } else {
-                return vec![];
-            }
-        }
+        Key::Enter if picker.selected < filtered.len() => filtered[picker.selected].0,
         _ => return vec![],
     };
 

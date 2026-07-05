@@ -148,7 +148,6 @@ fn pending_plan_renders_the_plan_box_below_the_transcript() {
         plan: "meu plano".to_string(),
         selected: 0,
         scroll: 0,
-        focus: Default::default(),
     });
     let out = render(&model, 80, 20);
     assert!(out.contains("plano"), "plan box title missing:\n{out}");

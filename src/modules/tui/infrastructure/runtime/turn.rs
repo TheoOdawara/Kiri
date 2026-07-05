@@ -107,7 +107,6 @@ pub(super) fn on_turn_end(
                 plan,
                 selected: 0,
                 scroll: 0,
-                focus: Default::default(),
             });
         }
         Ok(TurnOutcome::PlanProposed(_)) => {}

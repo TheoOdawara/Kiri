@@ -111,13 +111,6 @@ impl PlanOption {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum PlanFocus {
-    #[default]
-    Options,
-    Plan,
-}
-
 /// A finished plan-mode turn awaiting the user's decision.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PendingPlan {
@@ -127,6 +120,4 @@ pub struct PendingPlan {
     pub selected: usize,
     /// The current scroll offset in lines.
     pub scroll: usize,
-    /// The current focus target.
-    pub focus: PlanFocus,
 }
