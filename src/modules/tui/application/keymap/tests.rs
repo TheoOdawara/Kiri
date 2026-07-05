@@ -55,9 +55,43 @@ fn picker_digit_selects_a_row() {
     let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
     let mut m = Model::default().with_provider_catalog(models, Effort::default());
     submit_line(&mut m, "/models");
-    // Digit 3 picks the third model.
-    let effects = on_key(&mut m, press(Key::Char('3')));
+    // Typing 'c' filters the list to only "c".
+    assert!(on_key(&mut m, press(Key::Char('c'))).is_empty());
+    // Since only "c" matches, selected will be 0 (the only item in filtered list).
+    // Pressing Enter will select the highlighted item "c".
+    let effects = on_key(&mut m, press(Key::Enter));
     assert_eq!(effects, vec![Effect::SetModel("c".to_string())]);
+}
+
+#[test]
+fn picker_search_query_typing_and_backspace() {
+    let models = vec!["apple".to_string(), "banana".to_string(), "cherry".to_string()];
+    let mut m = Model::default().with_provider_catalog(models, Effort::default());
+    submit_line(&mut m, "/models");
+    
+    // Type 'a'
+    on_key(&mut m, press(Key::Char('a')));
+    {
+        let picker = m.picker.as_ref().unwrap();
+        assert_eq!(picker.query, "a");
+        assert_eq!(picker.filtered_options().len(), 2); // apple, banana
+    }
+
+    // Type 'n' -> query is "an"
+    on_key(&mut m, press(Key::Char('n')));
+    {
+        let picker = m.picker.as_ref().unwrap();
+        assert_eq!(picker.query, "an");
+        assert_eq!(picker.filtered_options().len(), 1); // banana
+    }
+
+    // Backspace -> query is "a" again
+    on_key(&mut m, press(Key::Backspace));
+    {
+        let picker = m.picker.as_ref().unwrap();
+        assert_eq!(picker.query, "a");
+        assert_eq!(picker.filtered_options().len(), 2); // apple, banana
+    }
 }
 
 #[test]

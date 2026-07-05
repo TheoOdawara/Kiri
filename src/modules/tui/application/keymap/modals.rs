@@ -152,6 +152,13 @@ fn plan_option_for_digit(c: char) -> Option<PlanOption> {
 /// closes it, Ctrl+C quits. Enter on a `Models` picker emits `SetModel`; on `Effort`, the row index maps
 /// back to `Effort::ALL` for `SetEffort`. The runtime applies the swap and persists it.
 pub(super) fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
+    if key.ctrl && key.code == Key::Char('c') {
+        model.picker = None;
+        model.should_quit = true;
+        return vec![Effect::Quit];
+    }
+
+    let mut query_changed = false;
     if let Some(picker) = model.picker.as_mut() {
         match key.code {
             Key::Up => {
@@ -162,28 +169,39 @@ pub(super) fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                 picker.move_cursor(1);
                 return vec![];
             }
-            _ => {}
+            Key::Esc => {
+                model.picker = None;
+                return vec![];
+            }
+            Key::Backspace => {
+                picker.query.pop();
+                picker.selected = 0;
+                query_changed = true;
+            }
+            Key::Char(c) if !key.ctrl && !key.alt => {
+                picker.query.push(c);
+                picker.selected = 0;
+                query_changed = true;
+            }
+            Key::Enter => {}
+            _ => return vec![],
         }
     }
 
-    if key.ctrl && key.code == Key::Char('c') {
-        model.picker = None;
-        model.should_quit = true;
-        return vec![Effect::Quit];
+    if query_changed {
+        return vec![];
     }
 
-    let selected = model.picker.as_ref().map_or(0, |p| p.selected);
-    let option_count = model.picker.as_ref().map_or(0, |p| p.options.len());
+    let picker = match &model.picker {
+        Some(p) => p,
+        None => return vec![],
+    };
+
+    let filtered = picker.filtered_options();
     let index = match key.code {
-        Key::Enter => selected,
-        Key::Esc => {
-            model.picker = None;
-            return vec![];
-        }
-        Key::Char(c) if c.is_ascii_digit() => {
-            let digit = c.to_digit(10).unwrap_or(0) as usize;
-            if digit >= 1 && digit <= option_count {
-                digit - 1
+        Key::Enter => {
+            if picker.selected < filtered.len() {
+                filtered[picker.selected].0
             } else {
                 return vec![];
             }

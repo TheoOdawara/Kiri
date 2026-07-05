@@ -7,7 +7,7 @@ use crate::modules::tui::domain::model::{ActiveModal, Model};
 use crate::modules::tui::infrastructure::layout::{Regions, frame_layout, h_pad_total};
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
-    approval, command_menu, editor, header, hint_line, meta_rule, selection_overlay,
+    approval, command_menu, editor, header, hint_line, meta_rule, picker, selection_overlay,
     sidebar, search_bar, transcript_pane, wizard,
 };
 
@@ -53,7 +53,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
             approval::render(pending, frame, regions.prompt_box)
         }
         Some(ActiveModal::Picker(picker)) => {
-            approval::render_picker(picker, frame, regions.prompt_box)
+            picker::render(picker, frame, main_area)
         }
         Some(ActiveModal::Wizard(provider_wizard)) => {
             wizard::render(provider_wizard, frame, regions.prompt_box)
@@ -109,9 +109,7 @@ pub fn frame_regions(area: Rect, model: &Model) -> Regions {
         Some(ActiveModal::Approval(pending)) => {
             approval::box_dims(content, pending.action(), ApprovalOption::ALL.len()).1
         }
-        Some(ActiveModal::Picker(picker)) => {
-            approval::box_dims(content, &picker.action, picker.options.len()).1
-        }
+        Some(ActiveModal::Picker(_)) => 0,
         Some(ActiveModal::Wizard(provider_wizard)) => wizard::box_dims(content, provider_wizard).1,
         None => 0,
     };

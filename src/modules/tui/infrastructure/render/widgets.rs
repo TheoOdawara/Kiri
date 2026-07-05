@@ -1,6 +1,7 @@
 pub mod sidebar;
 pub mod search_bar;
 pub mod approval;
+pub mod picker;
 pub mod command_menu;
 pub mod editor;
 pub mod header;

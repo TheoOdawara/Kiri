@@ -23,6 +23,7 @@ pub struct Picker {
     pub action: String,
     pub options: Vec<String>,
     pub selected: usize,
+    pub query: String,
 }
 
 impl Picker {
@@ -41,11 +42,29 @@ impl Picker {
             action: action.into(),
             options,
             selected,
+            query: String::new(),
         }
     }
 
-    /// Move the highlight by `delta` rows, wrapping within the options.
+    /// The subset of options that match the query (case-insensitive substring match).
+    /// Returns a list of `(original_index, option_text)`.
+    pub fn filtered_options(&self) -> Vec<(usize, &str)> {
+        let q = self.query.to_lowercase();
+        self.options
+            .iter()
+            .enumerate()
+            .filter(|(_, opt)| opt.to_lowercase().contains(&q))
+            .map(|(idx, opt)| (idx, opt.as_str()))
+            .collect()
+    }
+
+    /// Move the highlight by `delta` rows, wrapping within the filtered options.
     pub fn move_cursor(&mut self, delta: i32) {
-        self.selected = wrapping_step(self.selected, delta, self.options.len());
+        let count = self.filtered_options().len();
+        if count > 0 {
+            self.selected = wrapping_step(self.selected, delta, count);
+        } else {
+            self.selected = 0;
+        }
     }
 }
