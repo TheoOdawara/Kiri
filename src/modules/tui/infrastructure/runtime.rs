@@ -48,6 +48,7 @@ use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::update::update;
+use crate::modules::tui::domain::command_menu::CustomCommandEntry;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::TranscriptItem;
 use crate::modules::tui::infrastructure::text;
@@ -132,6 +133,14 @@ pub struct TuiParams {
     /// The formatted `/instructions` display text (paths + merged content). `None` when no
     /// instructions file was found.
     pub instructions_display: Option<String>,
+    /// The formatted `/rules` display text (ADR 0021 extension rules). `None` when none were loaded.
+    pub rules_display: Option<String>,
+    /// Extension-provided custom commands, shown in the live slash-command preview.
+    pub custom_commands: Vec<CustomCommandEntry>,
+    /// Every custom-command token (name + aliases) mapped to its expanded prompt body.
+    pub custom_command_bodies: std::collections::HashMap<String, String>,
+    /// The formatted `/commands` display text. `None` when none were loaded.
+    pub commands_display: Option<String>,
 }
 
 /// The long-lived owned run state, aggregated so the per-turn driver and the effect handlers are
@@ -185,6 +194,10 @@ impl Tui {
             project_id,
             boot_notices,
             instructions_display,
+            rules_display,
+            custom_commands,
+            custom_command_bodies,
+            commands_display,
         } = params;
         let workspace = text::display_path(sandbox.root());
         let (model_id, models) = provider_swap
@@ -198,7 +211,9 @@ impl Tui {
                 provider_swap.provider_ids(),
                 provider_swap.profiles().to_vec(),
             )
-            .with_instructions(instructions_display);
+            .with_instructions(instructions_display)
+            .with_rules(rules_display)
+            .with_custom_commands(custom_commands, custom_command_bodies, commands_display);
         // Surface the wire-time degradations first, so the onboarding welcome (the call to action) lands
         // last when both are present.
         surface_boot_notices(&mut model, &boot_notices);

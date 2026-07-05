@@ -1009,7 +1009,7 @@ fn typing_slash_opens_the_command_menu() {
     assert!(m.command_menu.is_some(), "menu should open on bare slash");
     // Empty query shows the whole catalog.
     assert_eq!(
-        m.command_menu.as_ref().unwrap().filtered().len(),
+        m.command_menu.as_ref().unwrap().len(),
         crate::modules::tui::domain::command_menu::COMMANDS.len()
     );
 }
@@ -1019,9 +1019,9 @@ fn typing_after_slash_filters_the_menu() {
     let mut m = Model::default();
     type_str(&mut m, "/ne");
     let menu = m.command_menu.as_ref().expect("menu should stay open");
-    assert_eq!(menu.filtered().len(), 1);
+    assert_eq!(menu.len(), 1);
     assert_eq!(
-        menu.spec().unwrap().name,
+        menu.entry().unwrap().name(),
         "/new",
         "filtered row should highlight /new"
     );

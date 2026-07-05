@@ -30,8 +30,13 @@ pub enum Command {
     Sync,
     /// `/instructions`: show the active instructions files and their merged content.
     Instructions,
-    /// A `/`-prefixed token that is not a known command.
-    Unknown,
+    /// `/rules`: show the loaded extension rules (id, layer, always-on).
+    Rules,
+    /// `/commands`: show the loaded extension custom commands (name, aliases, layer, source path).
+    Commands,
+    /// A `/`-prefixed token that matches no built-in — carries the raw head token so the runtime can
+    /// still resolve it against the extension-provided custom commands before reporting it unknown.
+    Unknown(String),
 }
 
 /// Parse a submitted line. `None` means it is a model prompt (or blank); the caller decides. A line that
@@ -61,7 +66,9 @@ pub fn parse(line: &str) -> Option<Command> {
         "/sessions" | "/sessoes" => Command::Sessions,
         "/sync" => Command::Sync,
         "/instructions" | "/instrucoes" => Command::Instructions,
-        _ => Command::Unknown,
+        "/rules" | "/regras" => Command::Rules,
+        "/commands" | "/comandos" => Command::Commands,
+        _ => Command::Unknown(head.to_string()),
     };
     Some(command)
 }
@@ -111,8 +118,11 @@ mod tests {
 
     #[test]
     fn unknown_slash_tokens_are_commands_not_prompts() {
-        assert_eq!(parse("/exitnow"), Some(Command::Unknown));
-        assert_eq!(parse("/foo"), Some(Command::Unknown));
+        assert_eq!(
+            parse("/exitnow"),
+            Some(Command::Unknown("/exitnow".to_string()))
+        );
+        assert_eq!(parse("/foo"), Some(Command::Unknown("/foo".to_string())));
     }
 
     #[test]
@@ -143,8 +153,14 @@ mod tests {
 
     #[test]
     fn paste_is_now_unknown() {
-        assert_eq!(parse("/paste"), Some(Command::Unknown));
-        assert_eq!(parse("/colar"), Some(Command::Unknown));
+        assert_eq!(
+            parse("/paste"),
+            Some(Command::Unknown("/paste".to_string()))
+        );
+        assert_eq!(
+            parse("/colar"),
+            Some(Command::Unknown("/colar".to_string()))
+        );
     }
 
     #[test]
@@ -188,7 +204,7 @@ mod tests {
         // same command as its name, so the menu never advertises a token the parser would reject.
         for spec in COMMANDS {
             let canonical = parse(spec.name).expect("catalog name parses");
-            assert!(!matches!(canonical, Command::Unknown));
+            assert!(!matches!(canonical, Command::Unknown(_)));
             for alias in spec.aliases {
                 assert_eq!(
                     parse(alias),
@@ -232,6 +248,10 @@ mod tests {
             "/sync",
             "/instructions",
             "/instrucoes",
+            "/rules",
+            "/regras",
+            "/commands",
+            "/comandos",
         ]
         .into_iter()
         .collect();

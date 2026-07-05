@@ -26,6 +26,22 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
             model.notify_info(text);
             vec![]
         }
+        Some(Command::Rules) => {
+            let text = model
+                .rules_display
+                .clone()
+                .unwrap_or_else(|| "Nenhuma regra carregada.".to_string());
+            model.notify_info(text);
+            vec![]
+        }
+        Some(Command::Commands) => {
+            let text = model
+                .commands_display
+                .clone()
+                .unwrap_or_else(|| "Nenhum comando custom carregado.".to_string());
+            model.notify_info(text);
+            vec![]
+        }
         Some(Command::Help) => {
             model.notify_info(command::help_text());
             vec![]
@@ -42,10 +58,13 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
         Some(Command::Models) => open_models_picker(model),
         Some(Command::Effort) => open_effort_picker(model),
         Some(Command::Provider) => open_provider_picker(model),
-        Some(Command::Unknown) => {
-            model.notify_error(format!("comando desconhecido: {} (use /help)", line.trim()));
-            vec![]
-        }
+        Some(Command::Unknown(token)) => match model.custom_command_bodies.get(&token).cloned() {
+            Some(body) => submit_custom_command(model, &line, body),
+            None => {
+                model.notify_error(format!("comando desconhecido: {} (use /help)", line.trim()));
+                vec![]
+            }
+        },
         None if line.trim().is_empty() && model.attachments.is_empty() => vec![],
         None if model.unconfigured => {
             // No usable provider yet: never send to the null provider silently. Drop the staged images,
@@ -72,6 +91,28 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
             vec![Effect::SubmitPrompt { text: line, images }]
         }
     }
+}
+
+/// Expand and submit an extension-provided custom command (ADR 0021): the transcript shows what the user
+/// typed, but the prompt sent to the model is the command's body with any trailing argument text appended.
+fn submit_custom_command(model: &mut Model, line: &str, body: String) -> Vec<Effect> {
+    let arg = line
+        .split_once(char::is_whitespace)
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or("");
+    let text = if arg.is_empty() {
+        body
+    } else {
+        format!("{body}\n\n{arg}")
+    };
+    model
+        .transcript
+        .push(TranscriptItem::User(line.to_string()));
+    model.busy = true;
+    vec![Effect::SubmitPrompt {
+        text,
+        images: vec![],
+    }]
 }
 
 /// Open the `/models` picker for the active provider's catalog, preselecting the current model. An empty

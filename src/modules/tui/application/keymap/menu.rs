@@ -16,9 +16,10 @@ pub fn sync_menu(model: &mut Model) {
         model.command_menu = None;
         return;
     }
-    match &mut model.command_menu {
-        Some(menu) => menu.refresh(&text),
-        slot @ None => *slot = Some(CommandMenu::open(&text)),
+    if let Some(menu) = model.command_menu.as_mut() {
+        menu.refresh(&text);
+    } else {
+        model.command_menu = Some(CommandMenu::open(&text, &model.custom_commands));
     }
 }
 
@@ -43,10 +44,13 @@ pub(super) fn on_menu_key(model: &mut Model, key: &KeyPress) -> Option<Vec<Effec
             Some(vec![])
         }
         Key::Tab => {
-            if let Some(menu) = model.command_menu.as_ref()
-                && let Some(spec) = menu.spec()
-            {
-                complete_command(model, spec.name);
+            let name = model
+                .command_menu
+                .as_ref()
+                .and_then(|menu| menu.entry())
+                .map(|entry| entry.name().to_string());
+            if let Some(name) = name {
+                complete_command(model, &name);
             }
             Some(vec![])
         }
@@ -60,7 +64,7 @@ pub(super) fn on_menu_key(model: &mut Model, key: &KeyPress) -> Option<Vec<Effec
 
 /// Replace the slash-command token in the buffer with `name` followed by a single space (Tab moves to
 /// argument mode), then close the menu. Uses `set` to keep `InputBuffer`'s cursor on a char boundary.
-fn complete_command(model: &mut Model, name: &'static str) {
+fn complete_command(model: &mut Model, name: &str) {
     let mut new_text = String::with_capacity(name.len() + 1);
     new_text.push_str(name);
     new_text.push(' ');

@@ -43,6 +43,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         blurb: "exibe as instruções ativas e os arquivos carregados",
     },
     CommandSpec {
+        name: "/rules",
+        aliases: &["/regras"],
+        blurb: "exibe as regras carregadas (rules globais/projeto)",
+    },
+    CommandSpec {
+        name: "/commands",
+        aliases: &["/comandos"],
+        blurb: "exibe os comandos custom carregados (globais/projeto)",
+    },
+    CommandSpec {
         name: "/plan",
         aliases: &[],
         blurb: "modo plan (só leitura; planeja e executa após aprovação)",
@@ -111,21 +121,92 @@ pub fn filter(prefix: &str) -> Vec<usize> {
         .collect()
 }
 
+/// One extension-provided custom slash command (ADR 0021) surfaced in the live preview alongside the
+/// built-ins. Aliases still resolve at submit time via the extensions catalog; the preview matches on the
+/// canonical name only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomCommandEntry {
+    pub name: String,
+    pub blurb: String,
+}
+
+fn filter_custom(prefix: &str, custom: &[CustomCommandEntry]) -> Vec<usize> {
+    let query = prefix.trim_start_matches('/').to_ascii_lowercase();
+    custom
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry
+                .name
+                .trim_start_matches('/')
+                .to_ascii_lowercase()
+                .starts_with(&query)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// A resolved preview row: a built-in command or an extension-provided one. Both display the same way;
+/// only the source array differs.
+#[derive(Debug, Clone, Copy)]
+pub enum MenuEntry<'a> {
+    Static(&'static CommandSpec),
+    Custom(&'a CustomCommandEntry),
+}
+
+impl MenuEntry<'_> {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Static(spec) => spec.name,
+            Self::Custom(entry) => &entry.name,
+        }
+    }
+
+    pub fn blurb(&self) -> &str {
+        match self {
+            Self::Static(spec) => spec.blurb,
+            Self::Custom(entry) => &entry.blurb,
+        }
+    }
+}
+
+/// Which catalog a filtered row's index resolves against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Static(usize),
+    Custom(usize),
+}
+
+fn recompute(prefix: &str, custom: &[CustomCommandEntry]) -> Vec<Source> {
+    let mut sources: Vec<Source> = filter(prefix).into_iter().map(Source::Static).collect();
+    sources.extend(
+        filter_custom(prefix, custom)
+            .into_iter()
+            .map(Source::Custom),
+    );
+    sources
+}
+
 /// The live preview shown while the buffer is a slash command in progress. Open it from `sync_menu`
 /// whenever the input starts with `/` and has no whitespace yet (a space ends the command name and
-/// starts the arguments, so the menu closes). `filtered` indexes into `COMMANDS`; `selected` is the
-/// highlighted row, wrapped on `move_cursor` to stay in range.
+/// starts the arguments, so the menu closes). `filtered` resolves against the built-in catalog or the
+/// snapshot of extension-provided commands taken at `open`; `selected` is the highlighted row, wrapped on
+/// `move_cursor` to stay in range.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandMenu {
-    filtered: Vec<usize>,
+    custom: Vec<CustomCommandEntry>,
+    filtered: Vec<Source>,
     selected: usize,
 }
 
 impl CommandMenu {
-    /// Open with the filtered set for `prefix` and the first row highlighted.
-    pub fn open(prefix: &str) -> Self {
-        let filtered = filter(prefix);
+    /// Open with the filtered set for `prefix` and the first row highlighted. `custom` is snapshotted
+    /// once here (extension commands are loaded once at boot, never change mid-session).
+    pub fn open(prefix: &str, custom: &[CustomCommandEntry]) -> Self {
+        let custom = custom.to_vec();
+        let filtered = recompute(prefix, &custom);
         Self {
+            custom,
             filtered,
             selected: 0,
         }
@@ -133,7 +214,7 @@ impl CommandMenu {
 
     /// Recompute the filter for a new `prefix`, keeping the selection in range.
     pub fn refresh(&mut self, prefix: &str) {
-        self.filtered = filter(prefix);
+        self.filtered = recompute(prefix, &self.custom);
         if !self.filtered.is_empty() && self.selected >= self.filtered.len() {
             self.selected = self.filtered.len() - 1;
         } else if self.filtered.is_empty() {
@@ -146,13 +227,25 @@ impl CommandMenu {
         self.selected = wrapping_step(self.selected, delta, self.filtered.len());
     }
 
-    /// The spec of the highlighted row, if any.
-    pub fn spec(&self) -> Option<&'static CommandSpec> {
-        self.filtered.get(self.selected).map(|&i| &COMMANDS[i])
+    fn resolve(&self, source: Source) -> MenuEntry<'_> {
+        match source {
+            Source::Static(i) => MenuEntry::Static(&COMMANDS[i]),
+            Source::Custom(i) => MenuEntry::Custom(&self.custom[i]),
+        }
     }
 
-    pub fn filtered(&self) -> &[usize] {
-        &self.filtered
+    /// The entry of the highlighted row, if any.
+    pub fn entry(&self) -> Option<MenuEntry<'_>> {
+        self.filtered.get(self.selected).map(|&s| self.resolve(s))
+    }
+
+    /// The entry at a given display row, for rendering the whole filtered list.
+    pub fn row(&self, row: usize) -> Option<MenuEntry<'_>> {
+        self.filtered.get(row).map(|&s| self.resolve(s))
+    }
+
+    pub fn len(&self) -> usize {
+        self.filtered.len()
     }
 
     pub fn selected(&self) -> usize {
@@ -202,19 +295,19 @@ mod tests {
 
     #[test]
     fn menu_refresh_keeps_selection_in_range() {
-        let mut m = CommandMenu::open("/");
+        let mut m = CommandMenu::open("/", &[]);
         assert_eq!(m.selected(), 0);
         m.move_cursor(3);
         assert_eq!(m.selected(), 3);
         m.refresh("/new");
-        assert_eq!(m.filtered().len(), 1);
+        assert_eq!(m.len(), 1);
         assert_eq!(m.selected(), 0);
     }
 
     #[test]
     fn move_cursor_wraps_in_both_directions() {
-        let mut m = CommandMenu::open("/");
-        let len = m.filtered().len();
+        let mut m = CommandMenu::open("/", &[]);
+        let len = m.len();
         m.move_cursor(-(1));
         assert_eq!(m.selected(), len - 1);
         m.move_cursor(1);
@@ -222,10 +315,25 @@ mod tests {
     }
 
     #[test]
-    fn spec_returns_the_highlighted_command() {
-        let mut m = CommandMenu::open("/");
+    fn entry_returns_the_highlighted_command() {
+        let mut m = CommandMenu::open("/", &[]);
         m.move_cursor(1);
-        assert_eq!(m.spec().unwrap().name, COMMANDS[1].name);
+        assert_eq!(m.entry().unwrap().name(), COMMANDS[1].name);
+    }
+
+    #[test]
+    fn custom_commands_are_filtered_and_shown_alongside_built_ins() {
+        let custom = [CustomCommandEntry {
+            name: "/test".to_string(),
+            blurb: "run the suite".to_string(),
+        }];
+        let m = CommandMenu::open("/", &custom);
+        assert_eq!(m.len(), COMMANDS.len() + 1);
+
+        let m = CommandMenu::open("/te", &custom);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.entry().unwrap().name(), "/test");
+        assert_eq!(m.entry().unwrap().blurb(), "run the suite");
     }
 
     /// Locks the invariant called out at the top of the file: every entry in `COMMANDS` must resolve
@@ -238,7 +346,7 @@ mod tests {
         for spec in COMMANDS {
             let parsed = parse(spec.name).expect("catalog name must parse");
             assert!(
-                !matches!(parsed, Command::Unknown),
+                !matches!(parsed, Command::Unknown(_)),
                 "{spec:?} is in the catalog but parse() returned Unknown"
             );
         }

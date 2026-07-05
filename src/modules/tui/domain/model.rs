@@ -3,7 +3,7 @@ use std::time::Instant;
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::provider::{Effort, ProviderProfile, Secret};
 
-use super::command_menu::CommandMenu;
+use super::command_menu::{CommandMenu, CustomCommandEntry};
 use super::history::History;
 use super::input_buffer::{ImageAttachment, InputBuffer};
 use super::modal::{PendingApproval, PendingPlan};
@@ -163,6 +163,17 @@ pub struct Model {
     pub pending_credential: Option<Secret>,
     /// The live slash-command preview, open while the input starts with `/` and has no whitespace yet.
     pub command_menu: Option<CommandMenu>,
+    /// Extension-provided custom commands (ADR 0021), shown in the live preview alongside the built-ins.
+    pub custom_commands: Vec<CustomCommandEntry>,
+    /// Every extension command token (canonical name + aliases) mapped straight to its expanded prompt
+    /// body, so submit-time lookup is a single hit regardless of which alias was typed.
+    pub custom_command_bodies: std::collections::HashMap<String, String>,
+    /// The formatted `/rules` display text (id, layer, always-on) for the loaded extension rules. `None`
+    /// when none were found.
+    pub rules_display: Option<String>,
+    /// The formatted `/commands` display text (name, aliases, layer, source path) for the loaded custom
+    /// commands. `None` when none were found.
+    pub commands_display: Option<String>,
     /// Images pasted from the clipboard, staged for the next prompt and drained on submit.
     pub attachments: Vec<ImageAttachment>,
     /// When set, tool outputs and edit diffs render in full instead of a bounded preview. Toggled
@@ -275,6 +286,26 @@ impl Model {
     /// Seed the instructions display text for the `/instructions` command.
     pub fn with_instructions(mut self, display: Option<String>) -> Self {
         self.instructions_display = display;
+        self
+    }
+
+    /// Seed the extension-provided custom commands: the preview entries, the token→body lookup used at
+    /// submit time, and the `/commands` display text.
+    pub fn with_custom_commands(
+        mut self,
+        entries: Vec<CustomCommandEntry>,
+        bodies: std::collections::HashMap<String, String>,
+        display: Option<String>,
+    ) -> Self {
+        self.custom_commands = entries;
+        self.custom_command_bodies = bodies;
+        self.commands_display = display;
+        self
+    }
+
+    /// Seed the rules display text for the `/rules` command.
+    pub fn with_rules(mut self, display: Option<String>) -> Self {
+        self.rules_display = display;
         self
     }
 

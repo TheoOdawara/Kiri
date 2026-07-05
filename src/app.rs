@@ -14,6 +14,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 
 use crate::modules::agent::application::agent_loop::AgentLoop;
+use crate::modules::extensions::application::{ExtensionCatalog, ExtensionsLoader};
+use crate::modules::extensions::infrastructure::file_loader::FileExtensionsLoader;
 use crate::modules::memory::application::digest::{
     DIGEST_PROJECT_CAP, DIGEST_SHARED_CAP, render_digest,
 };
@@ -49,6 +51,7 @@ use crate::modules::tools::infrastructure::exec::EXEC_MAX_BYTES;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tools::infrastructure::sensitive::load_sensitive_matcher;
+use crate::modules::tui::domain::command_menu::CustomCommandEntry;
 use crate::modules::tui::infrastructure::runtime::{
     BootNotice, ProviderSwap, SharedMemoryFactory, SyncContext, Tui, TuiParams,
 };
@@ -93,6 +96,10 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         build_memory(&settings, embedder, project_id.clone(), &mut boot_notices).await?;
     // Session persistence shares the same degrade-never-abort contract as memory.
     let session_store = build_session(&settings, &mut boot_notices).await?;
+    // Extensions (ADR 0021): rules + commands from the global and project layers. Auxiliary like memory
+    // and session — a load failure degrades to an empty catalog rather than aborting the boot.
+    let extensions = build_extensions(&settings, &mut boot_notices).await;
+    let rules_text = extensions.render_rules();
     let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
     // The composition root owns cross-module wiring: build the sensitive matcher here and inject it into
     // the sandbox, so `Settings`/`config` no longer reaches into the `tools` adapter for it.
@@ -107,6 +114,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         RUN_COMMAND_DEFAULT_TIMEOUT_MS,
         EXEC_MAX_BYTES,
         settings.checkpoint_budget,
+        (!rules_text.is_empty()).then_some(rules_text.as_str()),
         settings.instructions.as_deref(),
     );
     let sandbox = FsSandbox::with_confinement(
@@ -176,6 +184,18 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         settings.thinking,
         settings.effort,
     );
+    let rules_display = extensions.rules_display();
+    let commands_display = extensions.commands_display();
+    let custom_command_bodies = extensions.command_bodies();
+    let mut custom_commands: Vec<CustomCommandEntry> = extensions
+        .commands
+        .values()
+        .map(|command| CustomCommandEntry {
+            name: command.name.clone(),
+            blurb: command.description.clone(),
+        })
+        .collect();
+    custom_commands.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Tui::new(TuiParams {
         agent_loop,
         sandbox,
@@ -190,7 +210,27 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         project_id,
         boot_notices,
         instructions_display,
+        rules_display,
+        custom_commands,
+        custom_command_bodies,
+        commands_display,
     }))
+}
+
+/// Wire the extensions framework (ADR 0021): rules + commands, discovered from `~/.kiri/{rules,commands}`
+/// (global, trusted) and `<workspace>/.kiri/{rules,commands}` (project). Auxiliary like memory/session — a
+/// load failure degrades to an empty catalog (surfaced as a boot notice) rather than aborting the boot.
+async fn build_extensions(settings: &Settings, notices: &mut Vec<BootNotice>) -> ExtensionCatalog {
+    let loader = FileExtensionsLoader::new(settings.global_dir.clone(), &settings.path);
+    match loader.load().await {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            notices.push(BootNotice::new(format!(
+                "extensions unavailable ({error}); continuing without rules/commands"
+            )));
+            ExtensionCatalog::default()
+        }
+    }
 }
 
 /// The headless `kiri sync …` route, wired through the single composition root: harden the harness home,

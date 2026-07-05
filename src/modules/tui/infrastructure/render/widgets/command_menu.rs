@@ -14,7 +14,7 @@ pub fn render(menu: &CommandMenu, frame: &mut Frame, anchor: Rect) {
     if menu.is_empty() {
         return;
     }
-    let region = box_rect(anchor, menu.filtered().len());
+    let region = box_rect(anchor, menu.len());
     frame.render_widget(Clear, region);
 
     let block = Block::default()
@@ -28,17 +28,20 @@ pub fn render(menu: &CommandMenu, frame: &mut Frame, anchor: Rect) {
 
     let inner_w = inner_area.width as usize;
     let mut lines: Vec<Line> = Vec::new();
-    for (row, &cmd_index) in menu.filtered().iter().enumerate() {
-        let spec = &crate::modules::tui::domain::command_menu::COMMANDS[cmd_index];
+    for row in 0..menu.len() {
+        let Some(entry) = menu.row(row) else {
+            continue;
+        };
         let (marker, style) = super::option_marker(row == menu.selected());
         // Truncate the blurb so the row never overflows the list width.
-        let name_cols = display_width(spec.name);
+        let name = entry.name();
+        let name_cols = display_width(name);
         let prefix_cols = 2 + name_cols + 2; // marker + name + gap
         let blurb_budget = inner_w.saturating_sub(prefix_cols);
-        let blurb = truncate_blurb(spec.blurb, blurb_budget);
+        let blurb = truncate_blurb(entry.blurb(), blurb_budget);
         lines.push(Line::from(vec![
             Span::styled(marker, style),
-            Span::styled(spec.name, style),
+            Span::styled(name.to_string(), style),
             Span::styled("  ", style),
             Span::styled(blurb, style),
         ]));
@@ -116,7 +119,7 @@ mod tests {
 
     #[test]
     fn menu_renders_title_and_highlighted_row() {
-        let menu = CommandMenu::open("/");
+        let menu = CommandMenu::open("/", &[]);
         let out = paint(&menu, 64, 16);
         assert!(out.contains("comandos"), "title missing:\n{out}");
         assert!(out.contains("/new"), "canonical names missing:\n{out}");
@@ -125,7 +128,7 @@ mod tests {
 
     #[test]
     fn empty_menu_renders_nothing() {
-        let menu = CommandMenu::open("/zzz");
+        let menu = CommandMenu::open("/zzz", &[]);
         let out = paint(&menu, 64, 16);
         assert!(
             !out.contains("comandos"),
