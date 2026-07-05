@@ -10,7 +10,7 @@ use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::msg::{Key, KeyPress, MouseKind};
 use crate::modules::tui::domain::command_menu::CommandMenu;
-use crate::modules::tui::domain::modal::{ApprovalOption, PlanOption};
+use crate::modules::tui::domain::modal::{ApprovalOption, PlanFocus, PlanOption};
 use crate::modules::tui::domain::model::{Model, PaneFocus};
 use crate::modules::tui::domain::nav::wrapping_step;
 use crate::modules::tui::domain::picker::{Picker, PickerKind};

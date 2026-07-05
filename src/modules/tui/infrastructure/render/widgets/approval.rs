@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use crate::modules::tui::domain::modal::{
-    ApprovalOption, PendingApproval, PendingPlan, PlanOption,
+    ApprovalOption, PendingApproval, PendingPlan, PlanFocus, PlanOption,
 };
 use crate::modules::tui::infrastructure::markdown;
 use crate::modules::tui::infrastructure::theme;
@@ -17,6 +17,7 @@ pub fn render(pending: &PendingApproval, frame: &mut Frame, area: Rect) {
         pending.action(),
         &options,
         pending.selected,
+        true,
         frame,
         area,
     );
@@ -32,6 +33,7 @@ fn render_stanza(
     action: &str,
     options: &[&str],
     selected: usize,
+    focused: bool,
     frame: &mut Frame,
     area: Rect,
 ) {
@@ -47,7 +49,11 @@ fn render_stanza(
     lines.append(&mut markdown::render(action, theme::strong(), inner_w));
     lines.push(Line::default());
     for (i, option) in options.iter().enumerate() {
-        let (marker, style) = super::option_marker(i == selected);
+        let (marker, style) = if focused {
+            super::option_marker(i == selected)
+        } else {
+            ("  ", theme::dim())
+        };
         lines.push(Line::from(vec![
             Span::styled(marker, style),
             Span::styled(format!("{}. {option}", i + 1), style),
@@ -90,7 +96,16 @@ pub fn box_dims(area: Rect, action: &str, option_count: usize) -> (u16, u16) {
 /// plan text stays visible above it.
 pub fn render_plan_into(plan: &PendingPlan, frame: &mut Frame, area: Rect) {
     let options: Vec<&str> = PlanOption::ALL.iter().map(|o| o.label()).collect();
-    render_stanza("plano", PLAN_ACTION, &options, plan.selected, frame, area);
+    let focused = plan.focus == PlanFocus::Options;
+    render_stanza(
+        "plano",
+        PLAN_ACTION,
+        &options,
+        plan.selected,
+        focused,
+        frame,
+        area,
+    );
 }
 
 #[cfg(test)]
