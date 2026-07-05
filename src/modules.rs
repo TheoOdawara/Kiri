@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod extensions;
 pub mod memory;
 pub mod provider;
 pub mod session;
