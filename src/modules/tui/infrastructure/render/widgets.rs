@@ -1,3 +1,5 @@
+pub mod sidebar;
+pub mod search_bar;
 pub mod approval;
 pub mod command_menu;
 pub mod editor;

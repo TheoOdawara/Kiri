@@ -24,11 +24,14 @@ fn render(model: &Model, width: u16, height: u16) -> String {
 fn empty_shell_shows_brand_splash_and_hints() {
     let model = Model::new("model-x".to_string(), "/work".to_string());
     let out = render(&model, 80, 12);
-    assert!(out.contains("kiri"), "brand seal missing:\n{out}");
     assert!(out.contains("KIRI"), "splash mark missing:\n{out}");
     assert!(out.contains("model-x"), "model missing:\n{out}");
     assert!(out.contains("›▏"), "prompt glyph missing:\n{out}");
     assert!(out.contains("Enter envia"), "hints missing:\n{out}");
+
+    // Sidebar should contain the brand "kiri" when wide
+    let out_wide = render(&model, 140, 15);
+    assert!(out_wide.contains("kiri"), "sidebar brand seal missing:\n{out_wide}");
 }
 
 #[test]
@@ -271,8 +274,7 @@ fn typed_input_renders_in_the_editor() {
 fn narrow_terminal_keeps_prompt_and_short_hint_without_overflow() {
     let model = Model::new("m".to_string(), "/w".to_string());
     let out = render(&model, 20, 8);
-    // The prompt glyph and the seal survive; the long hint collapses to the short form.
-    assert!(out.contains("kiri"), "brand seal missing:\n{out}");
+    // The prompt glyph survives; the long hint collapses to the short form.
     assert!(out.contains("›▏"), "prompt glyph missing:\n{out}");
     assert!(out.contains("/help"), "short hint missing:\n{out}");
 }

@@ -185,7 +185,28 @@ pub struct Model {
     /// onboarding saves a provider. Gates prompt submission and re-opens onboarding instead of stranding
     /// the user against the null provider.
     pub unconfigured: bool,
+    /// Which pane currently has keyboard focus.
+    pub focused_pane: PaneFocus,
+    /// The index of the selected transcript item when in transcript focus mode.
+    pub selected_item: Option<usize>,
+    /// Individual tool indices that are manually expanded.
+    pub expanded_tools_indices: std::collections::HashSet<usize>,
+    /// Active search query in the transcript history.
+    pub search_query: Option<String>,
+    /// Transcript item indices that match the active search query.
+    pub search_results: Vec<usize>,
+    /// The current highlighted search result index in `search_results`.
+    pub active_search_match: usize,
 }
+
+/// Which pane has keyboard input focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaneFocus {
+    #[default]
+    Input,
+    Transcript,
+}
+
 
 /// The single modal currently awaiting the user, in precedence order, borrowed from the model. Resolved
 /// once by [`Model::active_modal`] so the view's render dispatch and its region sizing never re-derive the

@@ -66,4 +66,7 @@ pub enum Effect {
     /// against the rendered editor geometry — a no-op when the click is outside the box or the layout
     /// is ambiguous (wrapped/scrolled), since the reducer has no render geometry to map it itself.
     PlaceCursor { col: u16, row: u16 },
+    /// Open the specified file path in the user's $EDITOR.
+    OpenFile(String),
 }
+

@@ -421,6 +421,24 @@ impl RunLoop {
                 self.apply_save_provider(profile, keep_existing_key);
             }
             Effect::DeleteProvider(id) => self.apply_delete_provider(id),
+            Effect::OpenFile(path) => {
+                let mut stdout = std::io::stdout();
+                let _ = crossterm::execute!(stdout, crossterm::terminal::LeaveAlternateScreen);
+                let _ = crossterm::terminal::disable_raw_mode();
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
+                let full_path = self.sandbox.root().join(&path);
+                let status = std::process::Command::new(&editor)
+                    .arg(full_path)
+                    .status();
+                if let Err(e) = status {
+                    println!("Failed to run editor {}: {}. Press Enter to continue...", editor, e);
+                    let mut input = String::new();
+                    let _ = std::io::stdin().read_line(&mut input);
+                }
+                let _ = crossterm::terminal::enable_raw_mode();
+                let _ = crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen);
+                let _ = ui.terminal.clear();
+            }
             Effect::AnswerApproval(_) | Effect::CancelTurn => {}
         }
         Ok(())

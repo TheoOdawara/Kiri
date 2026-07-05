@@ -48,7 +48,7 @@ pub(super) enum Block {
     /// A paragraph or heading text: a list of soft-break-separated lines, each a list of styled runs.
     Text { lines: Vec<Vec<Span<'static>>> },
     /// A fenced code block: raw lines, no inline parsing.
-    Code { lines: Vec<String> },
+    Code { lang: Option<String>, lines: Vec<String> },
     /// A blockquote: inner blocks, rendered with a `│ ` prefix.
     Quote { inner: Vec<Block> },
     /// An unordered list item: inner blocks, prefixed with `- `.
@@ -130,6 +130,8 @@ struct ParseCtx {
     current_text: Vec<Vec<Span<'static>>>,
     /// Current code block lines.
     current_code: Vec<String>,
+    /// Language string if the current code block is fenced.
+    current_code_lang: Option<String>,
     /// Quote/item nesting: stack of block builders.
     block_stack: Vec<BlockBuilder>,
     /// Whether we are inside a code block.
@@ -159,6 +161,7 @@ impl ParseCtx {
             fmt_stack: Vec::new(),
             current_text: Vec::new(),
             current_code: Vec::new(),
+            current_code_lang: None,
             block_stack: Vec::new(),
             in_code: false,
             list_counters: Vec::new(),
@@ -189,9 +192,13 @@ impl ParseCtx {
                 self.fmt_stack.push(FmtTag::Strikethrough);
                 self.sync_fmt();
             }
-            Tag::CodeBlock(_) => {
+            Tag::CodeBlock(kind) => {
                 self.in_code = true;
                 self.current_code.clear();
+                self.current_code_lang = match kind {
+                    pulldown_cmark::CodeBlockKind::Fenced(s) => Some(s.to_string()),
+                    _ => None,
+                };
             }
             Tag::BlockQuote(_) => self.block_stack.push(BlockBuilder::Quote(Vec::new())),
             Tag::List(start) => {
@@ -248,8 +255,9 @@ impl ParseCtx {
             }
             TagEnd::CodeBlock => {
                 let lines = std::mem::take(&mut self.current_code);
+                let lang = self.current_code_lang.take();
                 self.in_code = false;
-                self.push_block(Block::Code { lines }, blocks);
+                self.push_block(Block::Code { lang, lines }, blocks);
             }
             TagEnd::BlockQuote(_) => {
                 self.flush_text_block(blocks);
