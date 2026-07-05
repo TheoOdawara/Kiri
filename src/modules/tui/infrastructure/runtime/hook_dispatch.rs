@@ -40,8 +40,14 @@ pub(super) async fn dispatch_hooks(
         let approved = match hook.layer {
             Layer::Global => true,
             Layer::Project => {
-                let hash = gate::content_hash(&hook.command);
-                let previously_approved = hooks.trust.is_approved(&hook.id, &hash).unwrap_or(false);
+                let hash = gate::content_hash(&hook.hash_key());
+                // Fail closed on a trust-store read error: treat as not-yet-approved rather than
+                // propagating — a corrupt/unreadable store must never silently let a project hook run. A
+                // retried `/approve-hook` surfaces the same read error directly (it reads-then-writes).
+                let previously_approved = hooks
+                    .trust
+                    .is_approved("hook", &hook.id, &hash)
+                    .unwrap_or(false);
                 gate::resolve(hook.layer, previously_approved) == gate::GateState::Approved
             }
         };

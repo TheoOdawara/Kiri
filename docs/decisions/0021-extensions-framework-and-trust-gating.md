@@ -128,6 +128,48 @@ start). A server that fails to spawn, fails its handshake, or fails tool discove
 notice — auxiliary, like every other extension type, never fatal. `/mcp` lists what loaded and its gate
 state.
 
+### Security hardening from review (post-implementation)
+
+A code review and security audit of the initial implementation surfaced five gaps against this ADR's own
+guarantees, all fixed before merge:
+
+- **MCP servers no longer inherit the harness process env.** `tokio::process::Command` inherits the
+  *entire* parent environment by default, which included provider API keys imported via `load_global_env`
+  (ADR 0020) — directly contradicting "the project layer... never receives a harness secret."
+  `RmcpConnection::connect` now calls `env_clear()` and re-adds only a small non-secret allowlist
+  (`PATH`, `HOME`, and the Windows equivalents) needed to resolve/run typical server binaries.
+- **`rmcp` calls are now timeout-bounded.** `connect`/`list_tools`/`call_tool` had no bound, so a hung or
+  malicious approved server could stall `app::wire` (or a live turn) indefinitely — a self-service-
+  unrecoverable local DoS once a server was approved. Both now run under `tokio::time::timeout`,
+  degrading to the existing boot-notice/error path on expiry, per this project's "all I/O has a timeout"
+  rule.
+- **The trust store is scoped by capability kind and workspace, not bare id.** `ExtensionsTrustStore` keys
+  approvals by `(workspace_id, kind, id)`, not just `id` — the single trust-store file backs every
+  workspace, so a bare-id key let a hook and an MCP server that render to the same content string (or the
+  same id+content reused across two different projects) share one approval, letting a lower-risk
+  capability's consent silently cover a higher-risk one.
+- **MCP's TOFU hash is now argv-structured, not a space-joined display string.** `McpServer::hash_key`
+  NUL-joins `command` and each arg; the old `content_hash(&command_line())` collided
+  `(command: "foo", args: ["bar", "baz"])` with `(command: "foo", args: ["bar baz"])`, letting an approved
+  server's argv shape change silently post-approval.
+- **A hook's TOFU hash now folds in `event`/`matcher`, not just `command`.** `Hook::hash_key` hashes all
+  three, so editing an approved hook's firing point (e.g. `SessionEnd` → `TurnEnd`, changing a one-shot
+  teardown hook into one that fires every turn) invalidates the approval exactly like an edited command
+  body does.
+
+Also added: a per-server cap (`MAX_MCP_TOOLS_PER_SERVER`) on how many tools an MCP server can register, so
+a compromised approved server can't leak unbounded `Box::leak`'d memory or bloat the schema payload; and
+an explicit disclosure in the `/approve-mcp` flow that an MCP server is an unrestricted, network-capable
+subprocess, unlike a sandboxed, network-denied hook.
+
+Deferred as `security-debt` (tracked as GitHub issues, not silently dropped): `tools::infrastructure::
+exec::run_shell` (used by both `run_command` and `ShellHookRunner`) has the same env-inheritance property
+as the pre-fix MCP path, but is pre-existing, wider-blast-radius code that needs its own review rather than
+a fix folded into this ADR's follow-up; the `hooks_process_io_confined_to_infrastructure`/`mcp_process_io_
+confined_to_infrastructure` guards are string-literal greps, defeatable by aliasing (defense-in-depth, not
+the primary control); sequential `SessionStart` hook dispatch can delay the TUI's first frame with no
+visible progress indicator.
+
 ## Consequences
 
 - A team commits `.kiri/rules/` and `.kiri/commands/` to share behavioural guidance and slash commands;

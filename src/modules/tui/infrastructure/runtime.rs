@@ -524,8 +524,8 @@ impl RunLoop {
                 .notify_info(format!("hook '{id}' é global — já aprovado por padrão"));
             return;
         }
-        let hash = crate::modules::extensions::domain::gate::content_hash(&hook.command);
-        match self.hooks.trust.approve(id, &hash) {
+        let hash = crate::modules::extensions::domain::gate::content_hash(&hook.hash_key());
+        match self.hooks.trust.approve("hook", id, &hash) {
             Ok(()) => self
                 .model
                 .notify_info(format!("hook '{id}' aprovado — passa a disparar")),
@@ -551,10 +551,11 @@ impl RunLoop {
             ));
             return;
         }
-        let hash = crate::modules::extensions::domain::gate::content_hash(&server.command_line());
-        match self.hooks.trust.approve(id, &hash) {
+        let hash = crate::modules::extensions::domain::gate::content_hash(&server.hash_key());
+        match self.hooks.trust.approve("mcp", id, &hash) {
             Ok(()) => self.model.notify_info(format!(
-                "servidor MCP '{id}' aprovado — conecta na próxima sessão"
+                "servidor MCP '{id}' aprovado — conecta na próxima sessão como subprocesso irrestrito, \
+                 com acesso à rede, diferente de um hook sandboxed"
             )),
             Err(error) => self
                 .model
@@ -590,9 +591,10 @@ mod tests {
         HookContext {
             catalog: std::sync::Arc::new(ExtensionCatalog::default()),
             runner: std::sync::Arc::new(ShellHookRunner),
-            trust: std::sync::Arc::new(ExtensionsTrustStore::new(std::path::PathBuf::from(
-                "/dev/null/kiri-test-trust.json",
-            ))),
+            trust: std::sync::Arc::new(ExtensionsTrustStore::new(
+                std::path::PathBuf::from("/dev/null/kiri-test-trust.json"),
+                "test-workspace".to_string(),
+            )),
         }
     }
 

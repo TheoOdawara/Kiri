@@ -306,6 +306,19 @@ impl Hook {
             path: res.path.clone(),
         })
     }
+
+    /// The TOFU content-hash input (`domain::gate::content_hash`): `event`, `matcher`, and `command`
+    /// NUL-separated. Folding in `event`/`matcher` (not just `command`) means changing what a hook fires
+    /// on — e.g. `SessionEnd` (once, at teardown) to `TurnEnd` (every turn) — invalidates its approval
+    /// exactly like editing the command body does; hashing only `command` would let that slip through.
+    pub fn hash_key(&self) -> String {
+        format!(
+            "{:?}\0{}\0{}",
+            self.event,
+            self.matcher.as_deref().unwrap_or(""),
+            self.command
+        )
+    }
 }
 
 /// An **MCP server** (ADR 0021): a subprocess speaking the Model Context Protocol over stdio, whose
@@ -346,15 +359,27 @@ impl McpServer {
         })
     }
 
-    /// The effective command line (`command` plus any `args`, space-joined) — the single source for
-    /// display (`ExtensionCatalog::mcp_display`) and for the TOFU content hash (`domain::gate::
-    /// content_hash`), so both always agree on what "this server's content" means.
+    /// The effective command line (`command` plus any `args`, space-joined) for **display** only
+    /// (`ExtensionCatalog::mcp_display`) — human-readable, but ambiguous as a hash input (`args: ["bar",
+    /// "baz"]` and `args: ["bar baz"]` both render `"bar baz"`). Use `hash_key` for the TOFU content hash.
     pub fn command_line(&self) -> String {
         if self.args.is_empty() {
             self.command.clone()
         } else {
             format!("{} {}", self.command, self.args.join(" "))
         }
+    }
+
+    /// The TOFU content-hash input (`domain::gate::content_hash`): `command` and each arg NUL-separated,
+    /// preserving argv boundaries so two different `(command, args)` shapes can never collide the way the
+    /// space-joined `command_line()` display string can.
+    pub fn hash_key(&self) -> String {
+        let mut key = self.command.clone();
+        for arg in &self.args {
+            key.push('\0');
+            key.push_str(arg);
+        }
+        key
     }
 }
 
@@ -549,6 +574,46 @@ mod tests {
     }
 
     #[test]
+    fn hook_hash_key_changes_when_event_changes() {
+        // An approved hook edited to fire on a different (e.g. more frequent) event must invalidate its
+        // TOFU approval, not just an edit to the command body.
+        let start = resource(
+            "notify",
+            "---\nevent: SessionStart\n---\n",
+            "echo hi",
+            Layer::Project,
+        );
+        let turn_end = resource(
+            "notify",
+            "---\nevent: TurnEnd\n---\n",
+            "echo hi",
+            Layer::Project,
+        );
+        let a = Hook::from_resource(&start).unwrap();
+        let b = Hook::from_resource(&turn_end).unwrap();
+        assert_ne!(a.hash_key(), b.hash_key());
+    }
+
+    #[test]
+    fn hook_hash_key_changes_when_matcher_changes() {
+        let write = resource(
+            "audit",
+            "---\nevent: PreToolUse\nmatcher: write_file\n---\n",
+            "echo hi",
+            Layer::Project,
+        );
+        let exec = resource(
+            "audit",
+            "---\nevent: PreToolUse\nmatcher: run_command\n---\n",
+            "echo hi",
+            Layer::Project,
+        );
+        let a = Hook::from_resource(&write).unwrap();
+        let b = Hook::from_resource(&exec).unwrap();
+        assert_ne!(a.hash_key(), b.hash_key());
+    }
+
+    #[test]
     fn mcp_server_reads_command_and_args() {
         let res = resource(
             "filesystem",
@@ -568,6 +633,29 @@ mod tests {
     fn mcp_server_missing_command_is_none() {
         let res = resource("x", "---\n---\n", "", Layer::Project);
         assert!(McpServer::from_resource(&res).is_none());
+    }
+
+    #[test]
+    fn mcp_server_hash_key_does_not_collide_across_argv_splits() {
+        // `command_line()` (display) space-joins command+args, so `(foo, ["bar", "baz"])` and
+        // `(foo, ["bar baz"])` would render identically and hash identically if hashed directly —
+        // `hash_key` must disambiguate the argv boundary that `command_line` collapses.
+        let two_args = McpServer {
+            id: "x".to_string(),
+            command: "foo".to_string(),
+            args: vec!["bar".to_string(), "baz".to_string()],
+            layer: Layer::Project,
+            path: "/fake/x.md".to_string(),
+        };
+        let one_arg = McpServer {
+            id: "x".to_string(),
+            command: "foo".to_string(),
+            args: vec!["bar baz".to_string()],
+            layer: Layer::Project,
+            path: "/fake/x.md".to_string(),
+        };
+        assert_eq!(two_args.command_line(), one_arg.command_line());
+        assert_ne!(two_args.hash_key(), one_arg.hash_key());
     }
 
     #[test]

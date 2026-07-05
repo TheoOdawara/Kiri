@@ -109,10 +109,13 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // and session — a load failure degrades to an empty catalog rather than aborting the boot.
     let extensions = build_extensions(&settings, &mut boot_notices).await;
     // Shared by hook dispatch and MCP-server connection: the TOFU trust store gating both active
-    // capability types (ADR 0021). One store, one file — a capability id namespace collision between a
-    // hook and an MCP server is not a real-world concern (ids are author-chosen per resource file).
+    // capability types (ADR 0021). One file backs every workspace/kind, so approvals are scoped by
+    // `project_id` (reusing the same per-workspace key `build_memory`/sessions use) and by capability
+    // kind (`is_approved`/`approve`'s `kind` argument) — otherwise a hook and an MCP server rendering the
+    // same content string, or the same id+content reused across two projects, would share one approval.
     let trust_store = Arc::new(ExtensionsTrustStore::new(
         settings.global_dir.join("extensions_trust.json"),
+        project_id.clone(),
     ));
     let rules_text = extensions.render_rules();
     let skills_text = extensions.skills_index().unwrap_or_default();
@@ -254,10 +257,16 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     }))
 }
 
+/// Bound on the number of tools registered from a single MCP server. `McpToolProxy` leaks each qualified
+/// name (`Box::leak`, once per tool, never freed) — an approved-but-compromised server returning an
+/// unbounded tool list must not leak unbounded memory or bloat the schema payload sent to the provider.
+const MAX_MCP_TOOLS_PER_SERVER: usize = 200;
+
 /// Connect to every gate-approved MCP server (ADR 0021) and register its discovered tools. Global
-/// servers always connect; a project server needs the trust gate to currently approve its exact command
-/// line (`/approve-mcp <id>`). A pending server, a spawn/handshake failure, or a discovery failure all
-/// surface as a boot notice and are skipped — auxiliary, like every other extension type, never fatal.
+/// servers always connect; a project server needs the trust gate to currently approve its exact
+/// `(command, args)` (`/approve-mcp <id>`). A pending server, a spawn/handshake failure, or a discovery
+/// failure all surface as a boot notice and are skipped — auxiliary, like every other extension type,
+/// never fatal.
 async fn build_mcp_tools(
     extensions: &ExtensionCatalog,
     trust: &ExtensionsTrustStore,
@@ -267,18 +276,23 @@ async fn build_mcp_tools(
     let mut servers: Vec<&McpServer> = extensions.mcp_servers.values().collect();
     servers.sort_by(|a, b| a.id.cmp(&b.id));
     for server in servers {
-        let command_line = server.command_line();
         let approved = match server.layer {
             Layer::Global => true,
             Layer::Project => {
-                let hash = content_hash(&command_line);
-                let previously_approved = trust.is_approved(&server.id, &hash).unwrap_or(false);
+                let hash = content_hash(&server.hash_key());
+                // Fail closed on a trust-store read error (corrupt/unreadable file): treat as
+                // not-yet-approved rather than propagating — a storage hiccup must never silently grant
+                // a network-capable active capability. A retried `/approve-mcp` surfaces the same read
+                // error directly (it calls `approve`, which reads-then-writes), so the failure isn't silent.
+                let previously_approved =
+                    trust.is_approved("mcp", &server.id, &hash).unwrap_or(false);
                 gate::resolve(server.layer, previously_approved) == GateState::Approved
             }
         };
         if !approved {
             notices.push(BootNotice::new(format!(
-                "MCP server '{}' is pending approval (project layer) — run /approve-mcp {} to enable it",
+                "MCP server '{}' is pending approval (project layer) — it will run as an unrestricted, \
+                 network-capable subprocess once approved; run /approve-mcp {} to enable it",
                 server.id, server.id
             )));
             continue;
@@ -295,11 +309,19 @@ async fn build_mcp_tools(
         };
         match connection.list_tools().await {
             Ok(specs) => {
-                for spec in specs {
+                let discovered = specs.len();
+                for spec in specs.into_iter().take(MAX_MCP_TOOLS_PER_SERVER) {
                     tools.push(Box::new(McpToolProxy::new(
                         &server.id,
                         spec,
                         connection.clone(),
+                    )));
+                }
+                if discovered > MAX_MCP_TOOLS_PER_SERVER {
+                    notices.push(BootNotice::new(format!(
+                        "MCP server '{}' advertised {discovered} tools; only the first \
+                         {MAX_MCP_TOOLS_PER_SERVER} were registered",
+                        server.id
                     )));
                 }
             }
