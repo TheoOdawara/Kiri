@@ -80,16 +80,39 @@ one — the gate reports `Pending` again on the next boot, exactly as if it had 
 an approval today means deleting its entry from the trust-store file by hand; a `/trust` management command
 is future work.
 
-This lands ahead of any real active-capability type (hooks/MCP, Fase 4/5) as infrastructure only — nothing
-calls `resolve`/`ExtensionsTrustStore` in production yet, since there is nothing to gate. The first hook
-discovered from a project layer is the first real caller.
+This landed ahead of any real active-capability type as infrastructure only; hooks (below) is the first
+real caller.
+
+### Hooks: the first active capability
+
+`extensions::domain::resource::Hook`/`HookEvent` are discovered exactly like rules/commands/agents/skills
+(a `hooks/` subdirectory, frontmatter `event:` + optional `matcher:`, the Markdown body is the shell
+command). Execution lives in the new `hooks` bounded context (`hooks::application::hook_runner::HookRunner`
+port, `hooks::infrastructure::shell::ShellHookRunner` adapter) — the sanctioned site for this context's
+process I/O, confined by an architecture guard mirroring the domain-purity one. A hook's command runs
+through the same confined-exec surface as `run_command` (`tools::infrastructure::exec::run_shell`), network
+denied by default.
+
+Hooks are fire-and-forget: a run's outcome (success, failure, or timeout) surfaces as an info notice on the
+transcript, never fails or blocks the session/turn it fired from. `SessionStart`/`SessionEnd`/`TurnEnd`
+dispatch from existing async funnels (`Tui::run`'s boot/teardown, `on_turn_end`) via
+`tui::infrastructure::runtime::hook_dispatch::dispatch_hooks`, gated per firing:
+`domain::gate::resolve(layer, trust_store.is_approved(id, content_hash(command)))`. Global hooks always run;
+a project hook needs `/approve-hook <id>` first (TOFU) — `/hooks` lists what's loaded and its gate state.
+
+`PreToolUse`/`PostToolUse` are discovered and gated identically but have **no dispatcher yet**:
+`agent::application::tool_observer::ToolObserver`'s callbacks (`tool_started`/`tool_finished`) are
+synchronous, so firing an async hook there needs new spawn+channel plumbing into `Bridge` — deferred as a
+follow-up rather than folded into this pass.
 
 ## Consequences
 
 - A team commits `.kiri/rules/` and `.kiri/commands/` to share behavioural guidance and slash commands;
   both take effect on the next session start (the prompt is rendered once at boot).
-- Active capabilities (hooks/MCP) committed to a repo never auto-execute on `cd`; the user approves them once.
-- An architecture guard (to be added with the `mcp`/`hooks` contexts) will keep network/process I/O confined to
-  those contexts' `infrastructure/` layer, mirroring the domain-purity guard.
+- Active capabilities (hooks/MCP) committed to a repo never auto-execute on `cd`; the user approves them once
+  (`/approve-hook <id>`).
+- The `hooks_process_io_confined_to_infrastructure` architecture guard (`src/architecture_guards.rs`) keeps
+  process I/O confined to `hooks/infrastructure/`, mirroring the domain-purity guard; the same guard will be
+  added for `mcp` when that context lands (Fase 5).
 - The `extensions` context's `domain/` layer stays pure (frontmatter parsing, resource types); filesystem
   discovery lives in `infrastructure/`, like the `memory` and `sync` contexts' own data dirs.

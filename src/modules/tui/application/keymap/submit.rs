@@ -58,6 +58,22 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
             model.notify_info(text);
             vec![]
         }
+        Some(Command::Hooks) => {
+            let text = model
+                .hooks_display
+                .clone()
+                .unwrap_or_else(|| "Nenhum hook carregado.".to_string());
+            model.notify_info(text);
+            vec![]
+        }
+        Some(Command::ApproveHook(id)) => {
+            if id.is_empty() {
+                model.notify_error("uso: /approve-hook <id> (veja /hooks)");
+                vec![]
+            } else {
+                vec![Effect::ApproveHook(id)]
+            }
+        }
         Some(Command::Help) => {
             model.notify_info(command::help_text());
             vec![]

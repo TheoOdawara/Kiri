@@ -7,9 +7,6 @@
 use crate::modules::extensions::domain::scope::Layer;
 
 /// The resolved state of one active-capability gate.
-// ponytail: no caller yet — the first active-capability type (hooks) lands in Fase 4 and resolves each
-// discovered hook through this before letting it execute.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateState {
     Approved,
@@ -19,7 +16,6 @@ pub enum GateState {
 /// Resolve the gate state for a capability discovered at `layer`. Global is always `Approved`; project is
 /// `Approved` only when `previously_approved` (a trust-store hit for the capability's current content
 /// hash) is `true`, else `Pending` — the runtime surfaces a `BootNotice` and asks the user.
-#[allow(dead_code)]
 pub fn resolve(layer: Layer, previously_approved: bool) -> GateState {
     match layer {
         Layer::Global => GateState::Approved,
@@ -30,7 +26,6 @@ pub fn resolve(layer: Layer, previously_approved: bool) -> GateState {
 
 /// A short, stable content hash (blake3, first 16 hex chars) for TOFU comparison: the trust store keys an
 /// approval to this hash, so editing a project capability's content after approval reverts it to pending.
-#[allow(dead_code)]
 pub fn content_hash(content: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(content.as_bytes());

@@ -17,6 +17,8 @@ use crate::modules::agent::application::agent_loop::AgentLoop;
 use crate::modules::extensions::application::{ExtensionCatalog, ExtensionsLoader};
 use crate::modules::extensions::infrastructure::file_loader::FileExtensionsLoader;
 use crate::modules::extensions::infrastructure::tools::default_extension_tools;
+use crate::modules::extensions::infrastructure::trust_store::ExtensionsTrustStore;
+use crate::modules::hooks::infrastructure::shell::ShellHookRunner;
 use crate::modules::memory::application::digest::{
     DIGEST_PROJECT_CAP, DIGEST_SHARED_CAP, render_digest,
 };
@@ -54,7 +56,7 @@ use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tools::infrastructure::sensitive::load_sensitive_matcher;
 use crate::modules::tui::domain::command_menu::CustomCommandEntry;
 use crate::modules::tui::infrastructure::runtime::{
-    BootNotice, ProviderSwap, SharedMemoryFactory, SyncContext, Tui, TuiParams,
+    BootNotice, HookContext, ProviderSwap, SharedMemoryFactory, SyncContext, Tui, TuiParams,
 };
 use crate::shared::infra::config::{
     Settings, SyncAction, ensure_private_dir, render_system_prompt,
@@ -102,6 +104,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     let extensions = build_extensions(&settings, &mut boot_notices).await;
     let rules_text = extensions.render_rules();
     let skills_text = extensions.skills_index().unwrap_or_default();
+    let hooks_display = extensions.hooks_display();
     let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
     // The composition root owns cross-module wiring: build the sensitive matcher here and inject it into
     // the sandbox, so `Settings`/`config` no longer reaches into the `tools` adapter for it.
@@ -202,6 +205,17 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         })
         .collect();
     custom_commands.sort_by(|a, b| a.name.cmp(&b.name));
+    // ADR 0021 hook dispatch: the catalog, the sanctioned shell-exec adapter, and the TOFU trust store.
+    // Built here (the composition root) and threaded through TuiParams to the SessionStart/SessionEnd/
+    // TurnEnd firing points in `tui::infrastructure::runtime`. The catalog Arc is built last — every
+    // other read of `extensions` above happens first.
+    let hook_context = HookContext {
+        catalog: Arc::new(extensions),
+        runner: Arc::new(ShellHookRunner),
+        trust: Arc::new(ExtensionsTrustStore::new(
+            settings.global_dir.join("extensions_trust.json"),
+        )),
+    };
     Ok(Tui::new(TuiParams {
         agent_loop,
         sandbox,
@@ -222,6 +236,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         commands_display,
         agents_display,
         skills_display,
+        hooks_display,
+        hooks: hook_context,
     }))
 }
 

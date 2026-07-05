@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::modules::extensions::domain::resource::{
-    AgentProfile, CommandSpec as ExtCommandSpec, Resource, Rule, Skill,
+    AgentProfile, CommandSpec as ExtCommandSpec, Hook, HookEvent, Resource, Rule, Skill,
 };
 use crate::shared::kernel::error::AgentResult;
 
@@ -26,6 +26,8 @@ pub struct ExtensionCatalog {
     /// Skills, keyed by id. Their descriptions render into the system prompt's skill index; bodies are
     /// fetched on demand by the `use_skill` tool.
     pub skills: HashMap<String, Skill>,
+    /// Hooks, keyed by id. Global hooks auto-approve; project ones need the trust gate.
+    pub hooks: HashMap<String, Hook>,
 }
 
 impl ExtensionCatalog {
@@ -182,6 +184,36 @@ impl ExtensionCatalog {
         let lines: Vec<String> = skills
             .iter()
             .map(|skill| format!("- {} — {}", skill.id, skill.description))
+            .collect();
+        Some(lines.join("\n"))
+    }
+
+    /// The hooks bound to `event`, sorted by id for a stable, deterministic firing order.
+    pub fn hooks_for_event(&self, event: HookEvent) -> Vec<&Hook> {
+        let mut hooks: Vec<&Hook> = self.hooks.values().filter(|h| h.event == event).collect();
+        hooks.sort_by(|a, b| a.id.cmp(&b.id));
+        hooks
+    }
+
+    /// The `/hooks` display text: one line per loaded hook (id, event, layer, source path), sorted by id.
+    /// `None` when no hooks were loaded.
+    pub fn hooks_display(&self) -> Option<String> {
+        if self.hooks.is_empty() {
+            return None;
+        }
+        let mut hooks: Vec<&Hook> = self.hooks.values().collect();
+        hooks.sort_by(|a, b| a.id.cmp(&b.id));
+        let lines: Vec<String> = hooks
+            .iter()
+            .map(|hook| {
+                format!(
+                    "- {} [{:?}, {}] {}",
+                    hook.id,
+                    hook.event,
+                    hook.layer.label(),
+                    hook.path
+                )
+            })
             .collect();
         Some(lines.join("\n"))
     }
@@ -475,5 +507,68 @@ mod tests {
         };
         let index = catalog.skills_index().unwrap();
         assert_eq!(index, "- pdf-extract — Extract text from PDFs");
+    }
+
+    fn hook(id: &str, event: HookEvent, layer: Layer) -> Hook {
+        Hook {
+            id: id.to_string(),
+            event,
+            matcher: None,
+            command: format!("echo {id}"),
+            layer,
+            path: format!("/fake/{id}.md"),
+        }
+    }
+
+    #[test]
+    fn empty_catalog_yields_no_hooks_display_and_no_hooks_for_any_event() {
+        let catalog = ExtensionCatalog::default();
+        assert!(catalog.hooks_display().is_none());
+        assert!(catalog.hooks_for_event(HookEvent::SessionStart).is_empty());
+    }
+
+    #[test]
+    fn hooks_for_event_filters_and_sorts_by_id() {
+        let mut hooks = HashMap::new();
+        hooks.insert(
+            "b-notify".to_string(),
+            hook("b-notify", HookEvent::SessionStart, Layer::Global),
+        );
+        hooks.insert(
+            "a-notify".to_string(),
+            hook("a-notify", HookEvent::SessionStart, Layer::Global),
+        );
+        hooks.insert(
+            "end-notify".to_string(),
+            hook("end-notify", HookEvent::SessionEnd, Layer::Global),
+        );
+        let catalog = ExtensionCatalog {
+            hooks,
+            ..ExtensionCatalog::default()
+        };
+        let start_hooks = catalog.hooks_for_event(HookEvent::SessionStart);
+        assert_eq!(
+            start_hooks
+                .iter()
+                .map(|h| h.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a-notify", "b-notify"]
+        );
+        assert_eq!(catalog.hooks_for_event(HookEvent::TurnEnd).len(), 0);
+    }
+
+    #[test]
+    fn hooks_display_lists_id_event_layer_and_path() {
+        let mut hooks = HashMap::new();
+        hooks.insert(
+            "notify".to_string(),
+            hook("notify", HookEvent::SessionStart, Layer::Project),
+        );
+        let catalog = ExtensionCatalog {
+            hooks,
+            ..ExtensionCatalog::default()
+        };
+        let display = catalog.hooks_display().unwrap();
+        assert!(display.contains("- notify [SessionStart, project] /fake/notify.md"));
     }
 }

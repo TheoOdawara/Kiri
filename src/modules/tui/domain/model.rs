@@ -178,6 +178,8 @@ pub struct Model {
     pub agents_display: Option<String>,
     /// The formatted `/skills` display text (id, tags, layer, source path). `None` when none were found.
     pub skills_display: Option<String>,
+    /// The formatted `/hooks` display text (id, event, layer, source path). `None` when none were found.
+    pub hooks_display: Option<String>,
     /// Images pasted from the clipboard, staged for the next prompt and drained on submit.
     pub attachments: Vec<ImageAttachment>,
     /// When set, tool outputs and edit diffs render in full instead of a bounded preview. Toggled
@@ -322,6 +324,12 @@ impl Model {
     /// Seed the skills display text for the `/skills` command.
     pub fn with_skills(mut self, display: Option<String>) -> Self {
         self.skills_display = display;
+        self
+    }
+
+    /// Seed the hooks display text for the `/hooks` command.
+    pub fn with_hooks(mut self, display: Option<String>) -> Self {
+        self.hooks_display = display;
         self
     }
 

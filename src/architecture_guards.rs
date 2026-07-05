@@ -91,6 +91,38 @@ fn no_cwd_dotenv_load() {
     }
 }
 
+/// ADR 0021: the `hooks` context's process I/O is confined to `hooks/infrastructure/` — a hook's shell
+/// command must run only through the sanctioned adapter (`ShellHookRunner`, over the sandbox's existing
+/// confined-exec surface), never a raw process spawn from `hooks/application/`. Mirrors
+/// `domain_is_free_of_io`'s shape but for a different boundary within the same context.
+#[test]
+fn hooks_process_io_confined_to_infrastructure() {
+    let hooks_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("modules")
+        .join("hooks");
+    assert!(
+        hooks_root.is_dir(),
+        "expected the hooks bounded context at src/modules/hooks"
+    );
+    let mut files = Vec::new();
+    rs_files(&hooks_root, &mut files);
+    for file in &files {
+        if file.components().any(|c| c.as_os_str() == "infrastructure") {
+            continue;
+        }
+        let source = std::fs::read_to_string(file).expect("read hooks file");
+        for needle in ["tokio::process", "std::process", "Command::new"] {
+            assert!(
+                !source.contains(needle),
+                "hooks file {} spawns a process ({needle:?}); process I/O must stay in \
+                 hooks/infrastructure/ (ADR 0021)",
+                file.display()
+            );
+        }
+    }
+}
+
 /// ADR 0003: `domain` is pure data + rules — no filesystem, network, or database I/O. Walk every
 /// `*.rs` under each `src/modules/*/domain/` and assert none references an I/O facility (`std::fs`,
 /// `tokio::fs`, `std::net`, `reqwest`, `rusqlite`). There is NO exception: unlike the UI-crate coupling

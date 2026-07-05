@@ -1,7 +1,8 @@
 //! Loads extension resources from the filesystem: Markdown files with optional YAML frontmatter.
-//! Scans the four resource-type subdirectories (`rules/`, `commands/`, `agents/`, `skills/`) under both
-//! `~/.kiri/` (global) and `<workspace>/.kiri/` (project) — merging by id (global first, project extends).
-//! Follows the same convention as `DocsLibrary`: depth-first walk, capped, symlink-skipping.
+//! Scans the five resource-type subdirectories (`rules/`, `commands/`, `agents/`, `skills/`, `hooks/`)
+//! under both `~/.kiri/` (global) and `<workspace>/.kiri/` (project) — merging by id (global first,
+//! project extends). Follows the same convention as `DocsLibrary`: depth-first walk, capped,
+//! symlink-skipping.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,14 +10,14 @@ use std::path::{Path, PathBuf};
 use crate::modules::extensions::application::catalog::{ExtensionCatalog, ExtensionsLoader};
 use crate::modules::extensions::domain::frontmatter::Frontmatter;
 use crate::modules::extensions::domain::resource::{
-    AgentProfile, CommandSpec as ExtCommandSpec, Resource, Rule, Skill,
+    AgentProfile, CommandSpec as ExtCommandSpec, Hook, Resource, Rule, Skill,
 };
 use crate::modules::extensions::domain::scope::Layer;
 use crate::shared::kernel::error::AgentResult;
 
-/// The four extension resource types this loader scans, in discovery order. Each is a subdirectory name
+/// The five extension resource types this loader scans, in discovery order. Each is a subdirectory name
 /// under both the global and project `.kiri/` roots.
-const RESOURCE_TYPES: [&str; 4] = ["rules", "commands", "agents", "skills"];
+const RESOURCE_TYPES: [&str; 5] = ["rules", "commands", "agents", "skills", "hooks"];
 
 /// Cap on total files visited during discovery across all extension types, so a huge tree does not hold
 /// boot indefinitely.
@@ -99,7 +100,7 @@ async fn load_layer(
     Ok(())
 }
 
-/// The filesystem adapter: scans `~/.kiri/{rules,commands,agents,skills}/` and their
+/// The filesystem adapter: scans `~/.kiri/{rules,commands,agents,skills,hooks}/` and their
 /// `<workspace>/.kiri/` project-layer equivalents, loading Markdown files with frontmatter. Reads the
 /// home directory from `shared/infra::home` — the single cross-platform source also read by
 /// `config::expand_home`.
@@ -152,6 +153,13 @@ impl FileExtensionsLoader {
                 "skills" => {
                     let skill = Skill::from_resource(res);
                     catalog.skills.insert(skill.id.clone(), skill);
+                }
+                "hooks" => {
+                    // A malformed hook (missing/unrecognized event, or a blank command) is dropped
+                    // rather than aborting the whole catalog load.
+                    if let Some(hook) = Hook::from_resource(res) {
+                        catalog.hooks.insert(hook.id.clone(), hook);
+                    }
                 }
                 _ => {}
             }
@@ -317,5 +325,43 @@ mod tests {
         let catalog = loader.load().await.unwrap();
         assert!(catalog.agents.is_empty());
         assert!(catalog.skills.is_empty());
+    }
+
+    #[tokio::test]
+    async fn loads_hooks() {
+        let global = TempDir::new().unwrap();
+        write(
+            global.path(),
+            "hooks/notify.md",
+            "---\nevent: SessionStart\n---\n\necho welcome back\n",
+        )
+        .await;
+
+        let workspace = TempDir::new().unwrap();
+        let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
+        let catalog = loader.load().await.unwrap();
+
+        let hook = catalog.hooks.get("notify").unwrap();
+        assert_eq!(
+            hook.event,
+            crate::modules::extensions::domain::resource::HookEvent::SessionStart
+        );
+        assert_eq!(hook.command, "echo welcome back");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_hook_is_dropped_not_fatal() {
+        let global = TempDir::new().unwrap();
+        write(
+            global.path(),
+            "hooks/broken.md",
+            "---\nevent: NotARealEvent\n---\n\necho hi\n",
+        )
+        .await;
+
+        let workspace = TempDir::new().unwrap();
+        let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
+        let catalog = loader.load().await.unwrap();
+        assert!(catalog.hooks.is_empty());
     }
 }

@@ -38,6 +38,10 @@ pub enum Command {
     Agents,
     /// `/skills`: show the loaded skills (id, tags, layer, source path).
     Skills,
+    /// `/hooks`: show the loaded hooks (id, event, layer, source path).
+    Hooks,
+    /// `/approve-hook <id>`: approve a pending project-layer hook (ADR 0021 TOFU gate).
+    ApproveHook(String),
     /// A `/`-prefixed token that matches no built-in — carries the raw head token so the runtime can
     /// still resolve it against the extension-provided custom commands before reporting it unknown.
     Unknown(String),
@@ -74,6 +78,8 @@ pub fn parse(line: &str) -> Option<Command> {
         "/commands" | "/comandos" => Command::Commands,
         "/agents" | "/agentes" => Command::Agents,
         "/skills" => Command::Skills,
+        "/hooks" => Command::Hooks,
+        "/approve-hook" => Command::ApproveHook(arg.to_string()),
         _ => Command::Unknown(head.to_string()),
     };
     Some(command)
@@ -261,6 +267,8 @@ mod tests {
             "/agents",
             "/agentes",
             "/skills",
+            "/hooks",
+            "/approve-hook",
         ]
         .into_iter()
         .collect();

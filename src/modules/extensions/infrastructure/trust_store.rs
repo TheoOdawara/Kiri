@@ -19,14 +19,10 @@ struct TrustFile {
 }
 
 /// The on-disk trust store: one approved content-hash per project-layer capability id.
-// ponytail: no caller yet — the first active-capability type (hooks) lands in Fase 4 and records/consults
-// approvals here before letting a project hook execute.
-#[allow(dead_code)]
 pub struct ExtensionsTrustStore {
     path: PathBuf,
 }
 
-#[allow(dead_code)]
 impl ExtensionsTrustStore {
     pub fn new(path: PathBuf) -> Self {
         Self { path }

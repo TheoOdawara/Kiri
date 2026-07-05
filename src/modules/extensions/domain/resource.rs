@@ -240,6 +240,74 @@ impl Skill {
     }
 }
 
+/// The lifecycle point a hook fires on. `SessionStart`/`SessionEnd`/`TurnEnd` dispatch from existing
+/// async funnels (`app::wire`/`Tui::run` boot and teardown, `on_turn_end`).
+// ponytail: PreToolUse/PostToolUse parse and gate correctly but have no dispatcher yet — ToolObserver's
+// callbacks (`tool_started`/`tool_finished`) are synchronous, so firing a hook there needs new
+// spawn+channel plumbing into Bridge, a follow-up rather than folded into this pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEvent {
+    SessionStart,
+    SessionEnd,
+    TurnEnd,
+    #[allow(dead_code)]
+    PreToolUse,
+    #[allow(dead_code)]
+    PostToolUse,
+}
+
+impl HookEvent {
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim() {
+            "SessionStart" => Some(Self::SessionStart),
+            "SessionEnd" => Some(Self::SessionEnd),
+            "TurnEnd" => Some(Self::TurnEnd),
+            "PreToolUse" => Some(Self::PreToolUse),
+            "PostToolUse" => Some(Self::PostToolUse),
+            _ => None,
+        }
+    }
+}
+
+/// A **hook** (ADR 0021): a shell command run at a lifecycle event — an active capability, gated by
+/// `domain::gate` for project-layer hooks (global ones auto-approve). Built from a `Resource`; the
+/// command is the resource body (like `AgentProfile::system_prompt`/`Skill::body`), the event and
+/// optional tool-name matcher (`PreToolUse`/`PostToolUse` only) come from frontmatter.
+#[derive(Debug, Clone)]
+pub struct Hook {
+    pub id: String,
+    pub event: HookEvent,
+    #[allow(dead_code)] // consumed once PreToolUse/PostToolUse dispatch lands
+    pub matcher: Option<String>,
+    pub command: String,
+    pub layer: Layer,
+    pub path: String,
+}
+
+impl Hook {
+    /// Build a hook from a frontmatter-parsed resource. `None` when `event:` is missing/unrecognized or
+    /// the body (the command to run) is blank — a malformed hook file is dropped, never aborts boot.
+    pub fn from_resource(res: &Resource) -> Option<Self> {
+        let event = res.frontmatter.get("event").and_then(HookEvent::from_str)?;
+        if res.body.is_empty() {
+            return None;
+        }
+        let matcher = res
+            .frontmatter
+            .get("matcher")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        Some(Self {
+            id: res.id.clone(),
+            event,
+            matcher,
+            command: res.body.clone(),
+            layer: res.layer,
+            path: res.path.clone(),
+        })
+    }
+}
+
 /// Truthy-string check shared with the frontmatter `always:` reader.
 fn is_truthy(value: &str) -> bool {
     matches!(
@@ -378,5 +446,55 @@ mod tests {
         let res = resource("doc", "---\n---\n", "Write docs.", Layer::Project);
         let skill = Skill::from_resource(&res);
         assert!(skill.script.is_none());
+    }
+
+    #[test]
+    fn hook_reads_event_matcher_and_command_body() {
+        let res = resource(
+            "notify",
+            "---\nevent: SessionStart\n---\n",
+            "echo hello",
+            Layer::Global,
+        );
+        let hook = Hook::from_resource(&res).unwrap();
+        assert_eq!(hook.event, HookEvent::SessionStart);
+        assert_eq!(hook.command, "echo hello");
+        assert!(hook.matcher.is_none());
+    }
+
+    #[test]
+    fn hook_reads_the_tool_matcher() {
+        let res = resource(
+            "audit-writes",
+            "---\nevent: PreToolUse\nmatcher: write_file\n---\n",
+            "echo about to write",
+            Layer::Project,
+        );
+        let hook = Hook::from_resource(&res).unwrap();
+        assert_eq!(hook.event, HookEvent::PreToolUse);
+        assert_eq!(hook.matcher.as_deref(), Some("write_file"));
+    }
+
+    #[test]
+    fn hook_missing_event_is_none() {
+        let res = resource("x", "---\n---\n", "echo hi", Layer::Global);
+        assert!(Hook::from_resource(&res).is_none());
+    }
+
+    #[test]
+    fn hook_unrecognized_event_is_none() {
+        let res = resource(
+            "x",
+            "---\nevent: SomethingElse\n---\n",
+            "echo hi",
+            Layer::Global,
+        );
+        assert!(Hook::from_resource(&res).is_none());
+    }
+
+    #[test]
+    fn hook_blank_command_is_none() {
+        let res = resource("x", "---\nevent: SessionStart\n---\n", "", Layer::Global);
+        assert!(Hook::from_resource(&res).is_none());
     }
 }

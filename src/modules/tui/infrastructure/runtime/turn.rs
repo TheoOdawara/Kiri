@@ -10,9 +10,12 @@ use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 
 use super::bridge::EngineMsg;
+use super::hook_dispatch::{HookContext, dispatch_hooks};
 use super::input;
 use crate::modules::agent::application::agent_loop::TurnOutcome;
 use crate::modules::agent::application::approval_policy::Approval;
+use crate::modules::extensions::domain::resource::HookEvent;
+use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::msg::{Msg, StreamKind};
 use crate::modules::tui::application::update::update;
@@ -78,13 +81,15 @@ fn engine_msg(engine: EngineMsg, pending_reply: &mut Option<oneshot::Sender<Appr
     }
 }
 
-/// Apply the turn's outcome: surface errors, roll back the conversation, and reset per-turn UI state.
-/// A user cancel (^C) is reported as such, not as an error.
-pub(super) fn on_turn_end(
+/// Apply the turn's outcome: surface errors, roll back the conversation, reset per-turn UI state, and
+/// fire every ADR 0021 TurnEnd hook. A user cancel (^C) is reported as such, not as an error.
+pub(super) async fn on_turn_end(
     result: Result<TurnOutcome, AgentError>,
     cancelled: bool,
     model: &mut Model,
     conversation: &mut Conversation,
+    sandbox: &dyn Sandbox,
+    hooks: &HookContext,
 ) {
     match result {
         Ok(TurnOutcome::Completed) => {
@@ -135,6 +140,7 @@ pub(super) fn on_turn_end(
     // `TurnEnded` only resets per-turn model state (no effects); the returned Vec is intentionally
     // discarded.
     let _ = update(model, Msg::TurnEnded);
+    dispatch_hooks(HookEvent::TurnEnd, hooks, sandbox, model).await;
 }
 
 /// True when the turn ended with an empty assistant reply and no tool activity — the provider returned
@@ -294,7 +300,8 @@ impl RunLoop {
                                 | Effect::SetProvider(_)
                                 | Effect::SaveProvider { .. }
                                 | Effect::DeleteProvider(_)
-                                | Effect::OpenFile(_) => {}
+                                | Effect::OpenFile(_)
+                                | Effect::ApproveHook(_) => {}
                             }
                         }
                         // Coalesce a burst: drain every engine message already queued before drawing, so
@@ -340,7 +347,15 @@ impl RunLoop {
         }
 
         let cancelled = engine.cancel.is_cancelled();
-        on_turn_end(result, cancelled, &mut self.model, &mut self.conversation);
+        on_turn_end(
+            result,
+            cancelled,
+            &mut self.model,
+            &mut self.conversation,
+            &self.sandbox,
+            &self.hooks,
+        )
+        .await;
         engine.cancel.reset();
         *engine.pending_reply = None;
         Ok(())

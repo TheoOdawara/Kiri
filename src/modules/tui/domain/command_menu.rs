@@ -63,6 +63,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         blurb: "exibe as skills carregadas (use_skill busca o conteúdo)",
     },
     CommandSpec {
+        name: "/hooks",
+        aliases: &[],
+        blurb: "exibe os hooks carregados e seu estado de aprovação",
+    },
+    CommandSpec {
+        name: "/approve-hook",
+        aliases: &[],
+        blurb: "aprova um hook de projeto pendente: /approve-hook <id>",
+    },
+    CommandSpec {
         name: "/plan",
         aliases: &[],
         blurb: "modo plan (só leitura; planeja e executa após aprovação)",
