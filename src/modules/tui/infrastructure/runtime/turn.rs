@@ -100,8 +100,14 @@ pub(super) fn on_turn_end(
         // questions in plan mode without prematurely triggering approval, and the plan shown is always
         // the complete tool argument, never a half-streamed transcript.
         Ok(TurnOutcome::PlanProposed(plan)) if !cancelled => {
-            model.transcript.push(TranscriptItem::Assistant(plan));
-            model.pending_plan = Some(PendingPlan::default());
+            model
+                .transcript
+                .push(TranscriptItem::PlanProposed(plan.clone()));
+            model.pending_plan = Some(PendingPlan {
+                plan,
+                selected: 0,
+                scroll: 0,
+            });
         }
         Ok(TurnOutcome::PlanProposed(_)) => {}
         // A ^C while busy cancels just this turn: `drive_turn` sets the cancel token and synthesizes

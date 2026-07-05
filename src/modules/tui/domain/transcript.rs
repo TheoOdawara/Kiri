@@ -9,6 +9,7 @@ pub enum TranscriptItem {
     User(String),
     Reasoning(String),
     Assistant(String),
+    PlanProposed(String),
     /// A tool call the agent made — its command, an optional edit diff, and (once it finishes) the
     /// outcome. Surfaced in every approval mode so the user sees each action even under auto.
     Tool(ToolActivity),

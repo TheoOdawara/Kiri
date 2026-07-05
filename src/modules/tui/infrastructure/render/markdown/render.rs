@@ -43,7 +43,10 @@ fn render_block(block: &Block, width: usize, out: &mut Vec<Line<'static>>) {
         Block::Code { lang, lines } => {
             for line in lines {
                 let mut line_spans = highlight_code_line(&format!(" {line}"), lang.as_deref());
-                let line_len: usize = line_spans.iter().map(|s| display_width(s.content.as_ref())).sum();
+                let line_len: usize = line_spans
+                    .iter()
+                    .map(|s| display_width(s.content.as_ref()))
+                    .sum();
                 if line_len < width {
                     let padding = " ".repeat(width - line_len);
                     line_spans.push(Span::styled(padding, Style::default().bg(theme::CODE_BG)));
@@ -153,67 +156,93 @@ fn prepend_prefix(prefix: &str, line: Line<'static>) -> Line<'static> {
 
 fn highlight_code_line(line: &str, lang: Option<&str>) -> Vec<Span<'static>> {
     let base_style = Style::default().fg(theme::CODE_FG).bg(theme::CODE_BG);
-    
+
     let Some(l) = lang else {
         return vec![Span::styled(line.to_string(), base_style)];
     };
-    
+
     let l_lower = l.to_lowercase();
-    if !matches!(l_lower.as_str(), "rust" | "rs" | "python" | "py" | "go" | "javascript" | "js" | "typescript" | "ts" | "json" | "toml") {
+    if !matches!(
+        l_lower.as_str(),
+        "rust"
+            | "rs"
+            | "python"
+            | "py"
+            | "go"
+            | "javascript"
+            | "js"
+            | "typescript"
+            | "ts"
+            | "json"
+            | "toml"
+    ) {
         return vec![Span::styled(line.to_string(), base_style)];
     }
-    
+
     let keywords = [
-        "fn", "let", "mut", "match", "struct", "enum", "impl", "use", "pub", "return", "if", "else", "for", "in", "loop", "while",
-        "const", "var", "function", "import", "export", "from", "class", "def", "import", "as", "package", "func", "type",
+        "fn", "let", "mut", "match", "struct", "enum", "impl", "use", "pub", "return", "if",
+        "else", "for", "in", "loop", "while", "const", "var", "function", "import", "export",
+        "from", "class", "def", "import", "as", "package", "func", "type",
     ];
-    
+
     let trimmed = line.trim_start();
     if trimmed.starts_with("//") || trimmed.starts_with("#") {
-        return vec![Span::styled(line.to_string(), Style::default().fg(theme::BRAND).bg(theme::CODE_BG))];
+        return vec![Span::styled(
+            line.to_string(),
+            Style::default().fg(theme::BRAND).bg(theme::CODE_BG),
+        )];
     }
-    
+
     let mut spans = Vec::new();
     let mut current_word = String::new();
     let mut in_string = false;
     let mut string_char = '"';
-    
+
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        
+
         if in_string {
             current_word.push(c);
             if c == string_char && chars.get(i.saturating_sub(1)) != Some(&'\\') {
                 in_string = false;
-                spans.push(Span::styled(current_word.clone(), Style::default().fg(theme::SUCCESS).bg(theme::CODE_BG)));
+                spans.push(Span::styled(
+                    current_word.clone(),
+                    Style::default().fg(theme::SUCCESS).bg(theme::CODE_BG),
+                ));
                 current_word.clear();
             }
             i += 1;
             continue;
         }
-        
+
         if c == '/' && chars.get(i + 1) == Some(&'/') && !in_string {
             if !current_word.is_empty() {
                 spans.push(Span::styled(current_word.clone(), base_style));
                 current_word.clear();
             }
             let comment: String = chars[i..].iter().collect();
-            spans.push(Span::styled(comment, Style::default().fg(theme::BRAND).bg(theme::CODE_BG)));
+            spans.push(Span::styled(
+                comment,
+                Style::default().fg(theme::BRAND).bg(theme::CODE_BG),
+            ));
             break;
         }
-        
+
         if c == '#' && !in_string && (l_lower == "python" || l_lower == "py" || l_lower == "toml") {
             if !current_word.is_empty() {
                 spans.push(Span::styled(current_word.clone(), base_style));
                 current_word.clear();
             }
             let comment: String = chars[i..].iter().collect();
-            spans.push(Span::styled(comment, Style::default().fg(theme::BRAND).bg(theme::CODE_BG)));
+            spans.push(Span::styled(
+                comment,
+                Style::default().fg(theme::BRAND).bg(theme::CODE_BG),
+            ));
             break;
         }
-        
+
         if (c == '"' || c == '\'') && !in_string {
             if !current_word.is_empty() {
                 spans.push(Span::styled(current_word.clone(), base_style));
@@ -225,15 +254,21 @@ fn highlight_code_line(line: &str, lang: Option<&str>) -> Vec<Span<'static>> {
             i += 1;
             continue;
         }
-        
+
         if c.is_alphanumeric() || c == '_' {
             current_word.push(c);
         } else {
             if !current_word.is_empty() {
                 if keywords.contains(&current_word.as_str()) {
-                    spans.push(Span::styled(current_word.clone(), Style::default().fg(theme::HEADING).bg(theme::CODE_BG)));
+                    spans.push(Span::styled(
+                        current_word.clone(),
+                        Style::default().fg(theme::HEADING).bg(theme::CODE_BG),
+                    ));
                 } else if current_word.chars().next().unwrap().is_numeric() {
-                    spans.push(Span::styled(current_word.clone(), Style::default().fg(theme::HIGHLIGHT).bg(theme::CODE_BG)));
+                    spans.push(Span::styled(
+                        current_word.clone(),
+                        Style::default().fg(theme::HIGHLIGHT).bg(theme::CODE_BG),
+                    ));
                 } else {
                     spans.push(Span::styled(current_word.clone(), base_style));
                 }
@@ -243,14 +278,17 @@ fn highlight_code_line(line: &str, lang: Option<&str>) -> Vec<Span<'static>> {
         }
         i += 1;
     }
-    
+
     if !current_word.is_empty() {
         if keywords.contains(&current_word.as_str()) {
-            spans.push(Span::styled(current_word, Style::default().fg(theme::HEADING).bg(theme::CODE_BG)));
+            spans.push(Span::styled(
+                current_word,
+                Style::default().fg(theme::HEADING).bg(theme::CODE_BG),
+            ));
         } else {
             spans.push(Span::styled(current_word, base_style));
         }
     }
-    
+
     spans
 }

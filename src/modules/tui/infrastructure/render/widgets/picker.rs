@@ -48,7 +48,10 @@ pub fn render(picker: &Picker, frame: &mut Frame, area: Rect) {
     let sep_width = chunks[1].width as usize;
     let separator = "─".repeat(sep_width);
     frame.render_widget(
-        Paragraph::new(Line::styled(separator, Style::default().fg(theme::STEEL_RAMP[4]))),
+        Paragraph::new(Line::styled(
+            separator,
+            Style::default().fg(theme::STEEL_RAMP[4]),
+        )),
         chunks[1],
     );
 
@@ -56,9 +59,12 @@ pub fn render(picker: &Picker, frame: &mut Frame, area: Rect) {
     let filtered = picker.filtered_options();
     let mut lines = Vec::new();
     let list_height = chunks[2].height as usize;
-    
+
     if filtered.is_empty() {
-        lines.push(Line::styled("  (nenhum resultado encontrado)", theme::dim()));
+        lines.push(Line::styled(
+            "  (nenhum resultado encontrado)",
+            theme::dim(),
+        ));
     } else {
         // We have `picker.selected` as the index in the `filtered` list.
         // Scroll the viewport window if necessary.
@@ -68,7 +74,7 @@ pub fn render(picker: &Picker, frame: &mut Frame, area: Rect) {
             0
         };
         let end_index = (start_index + list_height).min(filtered.len());
-        
+
         for idx in start_index..end_index {
             let (_, option_text) = &filtered[idx];
             let is_selected = idx == picker.selected;

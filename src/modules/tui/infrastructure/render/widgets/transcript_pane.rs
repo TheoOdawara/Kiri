@@ -54,7 +54,9 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
         return;
     }
 
-    let width = (area.width as usize).saturating_sub(2).clamp(1, BODY_MAX_WIDTH);
+    let width = (area.width as usize)
+        .saturating_sub(2)
+        .clamp(1, BODY_MAX_WIDTH);
     let reveal = Reveal {
         motion,
         now: model.timeline.render_at,
@@ -82,14 +84,14 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
             width: area.width.saturating_sub(1),
             ..area
         };
-        
+
         frame.render_widget(
             Paragraph::new(lines)
                 .scroll((offset, 0))
                 .style(theme::base()),
             text_area,
         );
-        
+
         let h = area.height as f32;
         let t = total as f32;
         let thumb_h = ((h / t) * h).round().clamp(1.0, h) as u16;
@@ -99,13 +101,17 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
         } else {
             0
         };
-        
+
         let scroll_x = area.x + area.width.saturating_sub(1);
         for row_y in 0..area.height {
             let is_thumb = row_y >= thumb_offset && row_y < thumb_offset + thumb_h;
             let symbol = if is_thumb { "┃" } else { "│" };
-            let color = if is_thumb { theme::STEEL_RAMP[2] } else { theme::STEEL_RAMP[4] };
-            
+            let color = if is_thumb {
+                theme::STEEL_RAMP[2]
+            } else {
+                theme::STEEL_RAMP[4]
+            };
+
             if let Some(cell) = frame.buffer_mut().cell_mut((scroll_x, area.y + row_y)) {
                 cell.set_symbol(symbol);
                 cell.set_fg(color);
@@ -155,7 +161,8 @@ fn build_transcript_lines(
         render_item(item, width, expanded, active, reveal, &mut lines);
         let end_len = lines.len();
 
-        let is_selected = focused_pane == crate::modules::tui::domain::model::PaneFocus::Transcript && Some(idx) == selected_item;
+        let is_selected = focused_pane == crate::modules::tui::domain::model::PaneFocus::Transcript
+            && Some(idx) == selected_item;
         for line_idx in start_len..end_len {
             let line = &mut lines[line_idx];
             let indicator = if is_selected {
@@ -208,6 +215,15 @@ fn render_item(
             } else {
                 render_body(text, Style::default().fg(theme::STEEL), width, false, out);
             }
+        }
+        TranscriptItem::PlanProposed(text) => {
+            out.push(Line::styled(
+                "◆ plano proposto",
+                Style::default()
+                    .fg(theme::WARNING)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            render_body(text, Style::default().fg(theme::WARNING), width, false, out);
         }
         TranscriptItem::Tool(activity) => render_tool(activity, width, expanded, out),
         TranscriptItem::Notice(level, text) => {
@@ -325,40 +341,38 @@ fn render_result(
 fn render_diff(diff_data: &ToolDiff, width: usize, expanded: bool, out: &mut Vec<Line<'static>>) {
     let diff = similar::TextDiff::from_lines(&diff_data.old, &diff_data.new);
     let hunks = diff.grouped_ops(3);
-    
+
     if hunks.is_empty() {
         out.push(Line::styled("  (sem alterações textuais)", theme::dim()));
         return;
     }
-    
+
     let mut total_lines = 0;
-    let limit = if expanded { usize::MAX } else { DIFF_LINES_PER_SIDE * 2 };
-    
+    let limit = if expanded {
+        usize::MAX
+    } else {
+        DIFF_LINES_PER_SIDE * 2
+    };
+
     for (hunk_idx, hunk) in hunks.iter().enumerate() {
         if hunk_idx > 0 {
             out.push(Line::styled("  @@ ... @@", theme::dim()));
         }
-        
+
         for op in hunk {
             for change in diff.iter_changes(op) {
                 let line_content = change.value().trim_end_matches('\n');
-                
+
                 if total_lines >= limit {
                     continue;
                 }
-                
+
                 let (prefix, style) = match change.tag() {
-                    similar::ChangeTag::Delete => {
-                        ("- ", Style::default().fg(theme::ERROR))
-                    }
-                    similar::ChangeTag::Insert => {
-                        ("+ ", Style::default().fg(theme::SUCCESS))
-                    }
-                    similar::ChangeTag::Equal => {
-                        ("  ", theme::dim())
-                    }
+                    similar::ChangeTag::Delete => ("- ", Style::default().fg(theme::ERROR)),
+                    similar::ChangeTag::Insert => ("+ ", Style::default().fg(theme::SUCCESS)),
+                    similar::ChangeTag::Equal => ("  ", theme::dim()),
                 };
-                
+
                 for row in hard_wrap(&format!("  {prefix}{line_content}"), width) {
                     if total_lines < limit {
                         out.push(Line::styled(row, style));
@@ -368,11 +382,17 @@ fn render_diff(diff_data: &ToolDiff, width: usize, expanded: bool, out: &mut Vec
             }
         }
     }
-    
-    let total_actual_changes = diff.iter_all_changes().filter(|c| c.tag() != similar::ChangeTag::Equal).count();
+
+    let total_actual_changes = diff
+        .iter_all_changes()
+        .filter(|c| c.tag() != similar::ChangeTag::Equal)
+        .count();
     if !expanded && total_actual_changes > limit {
         out.push(Line::styled(
-            format!("  … (+{} linhas alteradas) · ^O para expandir", total_actual_changes.saturating_sub(limit)),
+            format!(
+                "  … (+{} linhas alteradas) · ^O para expandir",
+                total_actual_changes.saturating_sub(limit)
+            ),
             theme::dim(),
         ));
     }
@@ -611,7 +631,8 @@ mod tests {
                 crate::modules::tui::domain::model::PaneFocus::Input,
                 None,
                 &empty_set,
-            ).len(),
+            )
+            .len(),
             per_frame,
         );
     }

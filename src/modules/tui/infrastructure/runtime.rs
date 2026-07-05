@@ -427,11 +427,12 @@ impl RunLoop {
                 let _ = crossterm::terminal::disable_raw_mode();
                 let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
                 let full_path = self.sandbox.root().join(&path);
-                let status = std::process::Command::new(&editor)
-                    .arg(full_path)
-                    .status();
+                let status = std::process::Command::new(&editor).arg(full_path).status();
                 if let Err(e) = status {
-                    println!("Failed to run editor {}: {}. Press Enter to continue...", editor, e);
+                    println!(
+                        "Failed to run editor {}: {}. Press Enter to continue...",
+                        editor, e
+                    );
                     let mut input = String::new();
                     let _ = std::io::stdin().read_line(&mut input);
                 }
@@ -875,7 +876,7 @@ mod tests {
         assert!(
             model.transcript.items().iter().any(|item| matches!(
                 item,
-                TranscriptItem::Assistant(text) if text.contains("Plano")
+                TranscriptItem::PlanProposed(text) if text.contains("Plano")
             )),
             "the proposed plan text must be rendered in the transcript"
         );

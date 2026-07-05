@@ -31,7 +31,11 @@ pub struct Regions {
 /// terminal edges. Generous when the terminal is roomy, zero on small ones so nothing is squeezed.
 /// Public so the view sizes the input wrap width against the same content width.
 pub fn h_pad_total(area: Rect) -> u16 {
-    if roomy(area) { LEFT_GUTTER + RIGHT_GUTTER } else { 0 }
+    if roomy(area) {
+        LEFT_GUTTER + RIGHT_GUTTER
+    } else {
+        0
+    }
 }
 
 /// Whether the terminal has room to spare for decorative padding (side gutters, top margin, the gap
@@ -53,7 +57,7 @@ pub fn frame_layout(area: Rect, input_lines: u16, box_h: u16) -> Regions {
     let has_box = box_h > 0;
     let vertical_pad = if roomy && !has_box { 1 } else { 0 };
     let gap_h = if roomy && !has_box { 2 } else { 0 };
-    
+
     let left_pad = if roomy { LEFT_GUTTER } else { 0 };
     let right_pad = if roomy { RIGHT_GUTTER } else { 0 };
 
@@ -66,7 +70,11 @@ pub fn frame_layout(area: Rect, input_lines: u16, box_h: u16) -> Regions {
 
     let input_height = input_lines.clamp(MIN_INPUT_HEIGHT, MAX_INPUT_HEIGHT); // borderless: no frame rows
     let header_h = 0; // Header is moved to the sidebar!
-    let hint_h = if area.height < SHORT_TERMINAL_HEIGHT { 0 } else { 1 };
+    let hint_h = if area.height < SHORT_TERMINAL_HEIGHT {
+        0
+    } else {
+        1
+    };
     // The confirmation box must render in full (the user reads its options to answer), so it takes
     // priority over the transcript: cap it to the rows left by the fixed chrome (header, gap, meta,
     // input, hint) and let the transcript yield to zero while a box is up. With no box, the transcript

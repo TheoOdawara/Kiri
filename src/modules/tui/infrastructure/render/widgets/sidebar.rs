@@ -1,8 +1,8 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::text::{Line, Span};
 use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::TranscriptItem;
@@ -14,7 +14,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(theme::STEEL_RAMP[4]))
         .style(theme::base());
-    
+
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
@@ -22,8 +22,14 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
 
     // --- Section: BRAND HEADER ---
     lines.push(Line::styled(" ⬢ kiri", theme::strong()));
-    lines.push(Line::styled("  Engineering-Grade Code Harness", theme::dim()));
-    lines.push(Line::styled(" ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄", theme::dim()));
+    lines.push(Line::styled(
+        "  Engineering-Grade Code Harness",
+        theme::dim(),
+    ));
+    lines.push(Line::styled(
+        " ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
+        theme::dim(),
+    ));
     lines.push(Line::default());
 
     // --- Section: SYSTEM STATUS ---
@@ -38,7 +44,10 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     ]));
     lines.push(Line::from(vec![
         Span::styled("  Modo:   ", theme::dim()),
-        Span::styled(format!("{:?}", model.approval_mode).to_uppercase(), Style::default().fg(theme::WARNING)),
+        Span::styled(
+            format!("{:?}", model.approval_mode).to_uppercase(),
+            Style::default().fg(theme::WARNING),
+        ),
     ]));
     lines.push(Line::default());
 
@@ -46,18 +55,27 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     lines.push(Line::styled(" ◆ CONTEXTO", theme::strong()));
     lines.push(Line::from(vec![
         Span::styled("  Provider: ", theme::dim()),
-        Span::styled(&model.status.provider, Style::default().fg(theme::STEEL_RAMP[1])),
+        Span::styled(
+            &model.status.provider,
+            Style::default().fg(theme::STEEL_RAMP[1]),
+        ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  Modelo:   ", theme::dim()),
         Span::styled(
-            fit_text(&model.status.model, inner_area.width.saturating_sub(13) as usize),
-            Style::default().fg(theme::STEEL_RAMP[1])
+            fit_text(
+                &model.status.model,
+                inner_area.width.saturating_sub(13) as usize,
+            ),
+            Style::default().fg(theme::STEEL_RAMP[1]),
         ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  Esforço:  ", theme::dim()),
-        Span::styled(format!("{:?}", model.status.effort).to_uppercase(), Style::default().fg(theme::STEEL_RAMP[1])),
+        Span::styled(
+            format!("{:?}", model.status.effort).to_uppercase(),
+            Style::default().fg(theme::STEEL_RAMP[1]),
+        ),
     ]));
     lines.push(Line::default());
 
@@ -66,8 +84,11 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     lines.push(Line::from(vec![
         Span::styled("  Diretório: ", theme::dim()),
         Span::styled(
-            fit_text(&model.status.workspace, inner_area.width.saturating_sub(14) as usize),
-            Style::default().fg(theme::STEEL_RAMP[2])
+            fit_text(
+                &model.status.workspace,
+                inner_area.width.saturating_sub(14) as usize,
+            ),
+            Style::default().fg(theme::STEEL_RAMP[2]),
         ),
     ]));
     lines.push(Line::default());
@@ -81,18 +102,21 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         for file in modified_files.iter().take(8) {
             lines.push(Line::from(vec![
                 Span::styled("  • ", Style::default().fg(theme::SUCCESS)),
-                Span::styled(fit_text(file, inner_area.width.saturating_sub(6) as usize), Style::default().fg(theme::STEEL)),
+                Span::styled(
+                    fit_text(file, inner_area.width.saturating_sub(6) as usize),
+                    Style::default().fg(theme::STEEL),
+                ),
             ]));
         }
         if modified_files.len() > 8 {
-            lines.push(Line::styled(format!("  ... e mais {}", modified_files.len() - 8), theme::dim()));
+            lines.push(Line::styled(
+                format!("  ... e mais {}", modified_files.len() - 8),
+                theme::dim(),
+            ));
         }
     }
 
-    frame.render_widget(
-        Paragraph::new(lines).style(theme::base()),
-        inner_area,
-    );
+    frame.render_widget(Paragraph::new(lines).style(theme::base()), inner_area);
 }
 
 fn fit_text(text: &str, limit: usize) -> String {
@@ -115,7 +139,11 @@ fn collect_modified_files(model: &Model) -> Vec<String> {
             let parts: Vec<&str> = cmd.split_whitespace().collect();
             if parts.len() >= 2 {
                 let tool = parts[0];
-                if tool == "edit_file" || tool == "write_file" || tool == "create_dir" || tool == "delete_file" {
+                if tool == "edit_file"
+                    || tool == "write_file"
+                    || tool == "create_dir"
+                    || tool == "delete_file"
+                {
                     let path = parts[1].trim_matches('"').trim_matches('\'');
                     files.insert(path.to_string());
                 }

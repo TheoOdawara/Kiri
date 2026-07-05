@@ -117,7 +117,8 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                 model.focused_pane = match model.focused_pane {
                     PaneFocus::Input => {
                         if model.selected_item.is_none() && !model.transcript.is_empty() {
-                            model.selected_item = Some(model.transcript.items().len().saturating_sub(1));
+                            model.selected_item =
+                                Some(model.transcript.items().len().saturating_sub(1));
                         }
                         PaneFocus::Transcript
                     }
@@ -343,7 +344,9 @@ fn on_transcript_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                 let text = match item {
                     TranscriptItem::User(t) => t.clone(),
                     TranscriptItem::Reasoning(t) => t.clone(),
-                    TranscriptItem::Assistant(t) => extract_code_blocks(t),
+                    TranscriptItem::Assistant(t) | TranscriptItem::PlanProposed(t) => {
+                        extract_code_blocks(t)
+                    }
                     TranscriptItem::Tool(act) => {
                         if let Some((_, out, _)) = &act.result {
                             out.clone()
@@ -406,7 +409,7 @@ fn extract_code_blocks(text: &str) -> String {
 
 fn on_search_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     let mut query = model.search_query.clone().unwrap_or_default();
-    
+
     match key.code {
         Key::Esc | Key::Enter => {
             if key.code == Key::Esc {
@@ -458,17 +461,17 @@ fn update_search_results(model: &mut Model, query: &str) {
     model.search_query = Some(query.to_string());
     model.search_results.clear();
     model.active_search_match = 0;
-    
+
     if query.is_empty() {
         return;
     }
-    
+
     let query_lower = query.to_lowercase();
     for (idx, item) in model.transcript.items().iter().enumerate() {
         let text = match item {
             TranscriptItem::User(t) => t,
             TranscriptItem::Reasoning(t) => t,
-            TranscriptItem::Assistant(t) => t,
+            TranscriptItem::Assistant(t) | TranscriptItem::PlanProposed(t) => t,
             TranscriptItem::Tool(act) => &act.command,
             TranscriptItem::Notice(_, t) => t,
         };
@@ -476,10 +479,8 @@ fn update_search_results(model: &mut Model, query: &str) {
             model.search_results.push(idx);
         }
     }
-    
+
     if !model.search_results.is_empty() {
         model.selected_item = Some(model.search_results[0]);
     }
 }
-
-

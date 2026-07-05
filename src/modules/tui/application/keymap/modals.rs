@@ -95,12 +95,28 @@ pub(super) fn on_approval_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
 pub(super) fn on_plan_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     if let Some(plan) = model.pending_plan.as_mut() {
         match key.code {
+            Key::Up if key.shift => {
+                plan.scroll = plan.scroll.saturating_sub(1);
+                return vec![];
+            }
+            Key::Down if key.shift => {
+                plan.scroll = plan.scroll.saturating_add(1);
+                return vec![];
+            }
             Key::Up => {
                 plan.selected = wrapping_step(plan.selected, -1, PlanOption::ALL.len());
                 return vec![];
             }
             Key::Down => {
                 plan.selected = wrapping_step(plan.selected, 1, PlanOption::ALL.len());
+                return vec![];
+            }
+            Key::PageUp => {
+                plan.scroll = plan.scroll.saturating_sub(10);
+                return vec![];
+            }
+            Key::PageDown => {
+                plan.scroll = plan.scroll.saturating_add(10);
                 return vec![];
             }
             _ => {}

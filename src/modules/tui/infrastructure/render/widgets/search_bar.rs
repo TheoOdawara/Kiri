@@ -1,7 +1,7 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::widgets::{Clear, Paragraph};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Clear, Paragraph};
 
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::infrastructure::theme;
@@ -52,5 +52,8 @@ pub fn render(model: &Model, frame: &mut Frame, anchor: Rect) {
         spans.push(Span::raw(padding));
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(theme::base()), region);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(theme::base()),
+        region,
+    );
 }

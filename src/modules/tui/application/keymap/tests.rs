@@ -65,10 +65,14 @@ fn picker_digit_selects_a_row() {
 
 #[test]
 fn picker_search_query_typing_and_backspace() {
-    let models = vec!["apple".to_string(), "banana".to_string(), "cherry".to_string()];
+    let models = vec![
+        "apple".to_string(),
+        "banana".to_string(),
+        "cherry".to_string(),
+    ];
     let mut m = Model::default().with_provider_catalog(models, Effort::default());
     submit_line(&mut m, "/models");
-    
+
     // Type 'a'
     on_key(&mut m, press(Key::Char('a')));
     {

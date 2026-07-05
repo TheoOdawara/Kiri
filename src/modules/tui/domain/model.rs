@@ -207,7 +207,6 @@ pub enum PaneFocus {
     Transcript,
 }
 
-
 /// The single modal currently awaiting the user, in precedence order, borrowed from the model. Resolved
 /// once by [`Model::active_modal`] so the view's render dispatch and its region sizing never re-derive the
 /// `plan ▸ approval ▸ picker ▸ wizard` order independently.

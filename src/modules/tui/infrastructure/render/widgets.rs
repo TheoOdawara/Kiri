@@ -1,13 +1,14 @@
-pub mod sidebar;
-pub mod search_bar;
 pub mod approval;
-pub mod picker;
 pub mod command_menu;
 pub mod editor;
 pub mod header;
 pub mod hint_line;
 pub mod meta_rule;
+pub mod picker;
+pub mod plan_pane;
+pub mod search_bar;
 pub mod selection_overlay;
+pub mod sidebar;
 pub mod splash;
 pub mod transcript_pane;
 pub mod wizard;

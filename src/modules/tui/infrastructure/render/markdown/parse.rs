@@ -48,7 +48,10 @@ pub(super) enum Block {
     /// A paragraph or heading text: a list of soft-break-separated lines, each a list of styled runs.
     Text { lines: Vec<Vec<Span<'static>>> },
     /// A fenced code block: raw lines, no inline parsing.
-    Code { lang: Option<String>, lines: Vec<String> },
+    Code {
+        lang: Option<String>,
+        lines: Vec<String>,
+    },
     /// A blockquote: inner blocks, rendered with a `│ ` prefix.
     Quote { inner: Vec<Block> },
     /// An unordered list item: inner blocks, prefixed with `- `.

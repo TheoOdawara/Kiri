@@ -7,8 +7,8 @@ use crate::modules::tui::domain::model::{ActiveModal, Model};
 use crate::modules::tui::infrastructure::layout::{Regions, frame_layout, h_pad_total};
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::{
-    approval, command_menu, editor, header, hint_line, meta_rule, picker, selection_overlay,
-    sidebar, search_bar, transcript_pane, wizard,
+    approval, command_menu, editor, header, hint_line, meta_rule, picker, plan_pane, search_bar,
+    selection_overlay, sidebar, transcript_pane, wizard,
 };
 
 /// The sole ratatui render entry point: project the model onto the frame's regions. Pure with respect
@@ -44,7 +44,28 @@ pub fn view(model: &Model, frame: &mut Frame) {
         .and_reduce_if(main_area.height < 8 || main_area.width < 60);
     let regions = frame_regions(main_area, model);
     header::render(model, frame, regions.header);
-    transcript_pane::render(model, frame, regions.transcript, motion);
+
+    if model.pending_plan.is_some() {
+        let transcript_area = regions.transcript;
+        if transcript_area.width >= 100 {
+            // Split horizontally: 40% transcript, 60% plan
+            let split = ratatui::layout::Layout::horizontal([
+                ratatui::layout::Constraint::Percentage(40),
+                ratatui::layout::Constraint::Min(2), // 2 columns spacer
+                ratatui::layout::Constraint::Percentage(60),
+            ])
+            .split(transcript_area);
+
+            transcript_pane::render(model, frame, split[0], motion);
+            plan_pane::render(model, frame, split[2]);
+        } else {
+            // Replace transcript completely
+            plan_pane::render(model, frame, transcript_area);
+        }
+    } else {
+        transcript_pane::render(model, frame, regions.transcript, motion);
+    }
+
     match model.active_modal() {
         Some(ActiveModal::Plan(plan)) => {
             approval::render_plan_into(plan, frame, regions.prompt_box)
@@ -52,9 +73,7 @@ pub fn view(model: &Model, frame: &mut Frame) {
         Some(ActiveModal::Approval(pending)) => {
             approval::render(pending, frame, regions.prompt_box)
         }
-        Some(ActiveModal::Picker(picker)) => {
-            picker::render(picker, frame, main_area)
-        }
+        Some(ActiveModal::Picker(picker)) => picker::render(picker, frame, main_area),
         Some(ActiveModal::Wizard(provider_wizard)) => {
             wizard::render(provider_wizard, frame, regions.prompt_box)
         }

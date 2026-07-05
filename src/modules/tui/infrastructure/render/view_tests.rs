@@ -31,7 +31,10 @@ fn empty_shell_shows_brand_splash_and_hints() {
 
     // Sidebar should contain the brand "kiri" when wide
     let out_wide = render(&model, 140, 15);
-    assert!(out_wide.contains("kiri"), "sidebar brand seal missing:\n{out_wide}");
+    assert!(
+        out_wide.contains("kiri"),
+        "sidebar brand seal missing:\n{out_wide}"
+    );
 }
 
 #[test]
@@ -140,8 +143,12 @@ fn pending_plan_renders_the_plan_box_below_the_transcript() {
     let mut model = Model::new("m".to_string(), "/w".to_string());
     model
         .transcript
-        .push(TranscriptItem::Assistant("meu plano".to_string()));
-    model.pending_plan = Some(PendingPlan::default());
+        .push(TranscriptItem::PlanProposed("meu plano".to_string()));
+    model.pending_plan = Some(PendingPlan {
+        plan: "meu plano".to_string(),
+        selected: 0,
+        scroll: 0,
+    });
     let out = render(&model, 80, 20);
     assert!(out.contains("plano"), "plan box title missing:\n{out}");
     assert!(out.contains("Executar"), "plan option missing:\n{out}");

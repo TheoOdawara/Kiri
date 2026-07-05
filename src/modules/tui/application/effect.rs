@@ -69,4 +69,3 @@ pub enum Effect {
     /// Open the specified file path in the user's $EDITOR.
     OpenFile(String),
 }
-

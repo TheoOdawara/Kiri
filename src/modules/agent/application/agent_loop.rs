@@ -135,11 +135,23 @@ impl AgentLoop {
         let mut calls_since_checkpoint: usize = 0;
         loop {
             io.begin_round();
+            let turn_messages = if mode == ApprovalMode::Plan {
+                let mut msgs = conversation.messages().to_vec();
+                msgs.push(Message::system(
+                    "CRITICAL: The active approval mode is PLAN. You are restricted to read-only tools and run_command. \
+                     Do NOT write file edits or code changes in your text response. Instead, investigate using read-only \
+                     tools, design the plan, and submit it using the `present_plan` tool. Calling `present_plan` is the \
+                     only way to propose your plan."
+                ));
+                msgs
+            } else {
+                conversation.messages().to_vec()
+            };
             let result = self
                 .provider
                 .complete(
                     TurnRequest {
-                        messages: conversation.messages(),
+                        messages: &turn_messages,
                         model: &self.model,
                         tools: &schemas,
                     },

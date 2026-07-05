@@ -111,10 +111,13 @@ impl PlanOption {
     }
 }
 
-/// A finished plan-mode turn awaiting the user's decision. The plan itself is the assistant's last
-/// transcript item; this only tracks which action is highlighted.
+/// A finished plan-mode turn awaiting the user's decision.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PendingPlan {
+    /// The proposed plan text.
+    pub plan: String,
     /// The highlighted option index into [`PlanOption::ALL`].
     pub selected: usize,
+    /// The current scroll offset in lines.
+    pub scroll: usize,
 }
