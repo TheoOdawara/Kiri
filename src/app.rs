@@ -15,10 +15,16 @@ use anyhow::{Context, Result, bail};
 
 use crate::modules::agent::application::agent_loop::AgentLoop;
 use crate::modules::extensions::application::{ExtensionCatalog, ExtensionsLoader};
+use crate::modules::extensions::domain::gate::{self, GateState, content_hash};
+use crate::modules::extensions::domain::resource::McpServer;
+use crate::modules::extensions::domain::scope::Layer;
 use crate::modules::extensions::infrastructure::file_loader::FileExtensionsLoader;
 use crate::modules::extensions::infrastructure::tools::default_extension_tools;
 use crate::modules::extensions::infrastructure::trust_store::ExtensionsTrustStore;
 use crate::modules::hooks::infrastructure::shell::ShellHookRunner;
+use crate::modules::mcp::application::mcp_connection::McpConnection;
+use crate::modules::mcp::infrastructure::rmcp_client::RmcpConnection;
+use crate::modules::mcp::infrastructure::tool_proxy::McpToolProxy;
 use crate::modules::memory::application::digest::{
     DIGEST_PROJECT_CAP, DIGEST_SHARED_CAP, render_digest,
 };
@@ -102,9 +108,16 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // Extensions (ADR 0021): rules + commands from the global and project layers. Auxiliary like memory
     // and session — a load failure degrades to an empty catalog rather than aborting the boot.
     let extensions = build_extensions(&settings, &mut boot_notices).await;
+    // Shared by hook dispatch and MCP-server connection: the TOFU trust store gating both active
+    // capability types (ADR 0021). One store, one file — a capability id namespace collision between a
+    // hook and an MCP server is not a real-world concern (ids are author-chosen per resource file).
+    let trust_store = Arc::new(ExtensionsTrustStore::new(
+        settings.global_dir.join("extensions_trust.json"),
+    ));
     let rules_text = extensions.render_rules();
     let skills_text = extensions.skills_index().unwrap_or_default();
     let hooks_display = extensions.hooks_display();
+    let mcp_display = extensions.mcp_display();
     let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
     // The composition root owns cross-module wiring: build the sensitive matcher here and inject it into
     // the sandbox, so `Settings`/`config` no longer reaches into the `tools` adapter for it.
@@ -156,6 +169,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     tools.push(Box::new(PresentPlan));
     tools.extend(memory_tools);
     tools.extend(default_extension_tools(Arc::new(extensions.skills.clone())));
+    tools.extend(build_mcp_tools(&extensions, &trust_store, &mut boot_notices).await);
     let registry = ToolRegistry::new(tools);
     let agent_loop = AgentLoop::new(
         provider,
@@ -212,9 +226,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     let hook_context = HookContext {
         catalog: Arc::new(extensions),
         runner: Arc::new(ShellHookRunner),
-        trust: Arc::new(ExtensionsTrustStore::new(
-            settings.global_dir.join("extensions_trust.json"),
-        )),
+        trust: trust_store,
     };
     Ok(Tui::new(TuiParams {
         agent_loop,
@@ -237,8 +249,68 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         agents_display,
         skills_display,
         hooks_display,
+        mcp_display,
         hooks: hook_context,
     }))
+}
+
+/// Connect to every gate-approved MCP server (ADR 0021) and register its discovered tools. Global
+/// servers always connect; a project server needs the trust gate to currently approve its exact command
+/// line (`/approve-mcp <id>`). A pending server, a spawn/handshake failure, or a discovery failure all
+/// surface as a boot notice and are skipped — auxiliary, like every other extension type, never fatal.
+async fn build_mcp_tools(
+    extensions: &ExtensionCatalog,
+    trust: &ExtensionsTrustStore,
+    notices: &mut Vec<BootNotice>,
+) -> Vec<Box<dyn Tool>> {
+    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+    let mut servers: Vec<&McpServer> = extensions.mcp_servers.values().collect();
+    servers.sort_by(|a, b| a.id.cmp(&b.id));
+    for server in servers {
+        let command_line = server.command_line();
+        let approved = match server.layer {
+            Layer::Global => true,
+            Layer::Project => {
+                let hash = content_hash(&command_line);
+                let previously_approved = trust.is_approved(&server.id, &hash).unwrap_or(false);
+                gate::resolve(server.layer, previously_approved) == GateState::Approved
+            }
+        };
+        if !approved {
+            notices.push(BootNotice::new(format!(
+                "MCP server '{}' is pending approval (project layer) — run /approve-mcp {} to enable it",
+                server.id, server.id
+            )));
+            continue;
+        }
+        let connection = match RmcpConnection::connect(&server.command, &server.args).await {
+            Ok(connection) => Arc::new(connection) as Arc<dyn McpConnection>,
+            Err(error) => {
+                notices.push(BootNotice::new(format!(
+                    "MCP server '{}' unavailable ({error}); continuing without its tools",
+                    server.id
+                )));
+                continue;
+            }
+        };
+        match connection.list_tools().await {
+            Ok(specs) => {
+                for spec in specs {
+                    tools.push(Box::new(McpToolProxy::new(
+                        &server.id,
+                        spec,
+                        connection.clone(),
+                    )));
+                }
+            }
+            Err(error) => notices.push(BootNotice::new(format!(
+                "MCP server '{}' connected but tool discovery failed ({error}); continuing without its \
+                 tools",
+                server.id
+            ))),
+        }
+    }
+    tools
 }
 
 /// Wire the extensions framework (ADR 0021): rules + commands, discovered from `~/.kiri/{rules,commands}`

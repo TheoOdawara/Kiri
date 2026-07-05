@@ -67,18 +67,23 @@ in the transcript rather than `eprintln!` behind the alternate-screen TUI.
   domain + `SessionStore` port + `SqliteSessionStore`, driving `/resume` and `/sessions`; ADR 0013),
   `sync` (portable-profile sync to a private git repo: the `Git` port + `GitCli` + NDJSON export/merge +
   `SyncService`, behind `kiri sync …` and `/sync`; ADR 0015), `extensions` (ADR 0021 workflow surface:
-  rules/commands/agents/skills/hooks, each with a global `~/.kiri/` and project `<workspace>/.kiri/` layer —
-  the `Frontmatter` parser, the `Resource`/`Rule`/`CommandSpec`/`AgentProfile`/`Skill`/`Hook` domain types,
-  the `ExtensionsLoader` port + `FileExtensionsLoader` adapter assembling an `ExtensionCatalog`, the pure
-  trust-gate decision `domain::gate::resolve`/`content_hash` (blake3) + the `0600`-file
-  `ExtensionsTrustStore` recording TOFU approvals — `/rules`/`/commands`/`/agents`/`/skills`/`/hooks`/
-  `/approve-hook` manage it live), `hooks` (the sanctioned site for the `hooks` extension type's process
-  I/O: the `HookRunner` port + `ShellHookRunner` adapter running a hook's command over the same confined
-  shell-exec surface `run_command` uses; fire-and-forget — a run's outcome is a transcript notice, never a
-  failure — dispatched at `SessionStart`/`SessionEnd`/`TurnEnd` via
+  rules/commands/agents/skills/hooks/mcp, each with a global `~/.kiri/` and project `<workspace>/.kiri/`
+  layer — the `Frontmatter` parser, the `Resource`/`Rule`/`CommandSpec`/`AgentProfile`/`Skill`/`Hook`/
+  `McpServer` domain types, the `ExtensionsLoader` port + `FileExtensionsLoader` adapter assembling an
+  `ExtensionCatalog`, the pure trust-gate decision `domain::gate::resolve`/`content_hash` (blake3) + the
+  `0600`-file `ExtensionsTrustStore` recording TOFU approvals — `/rules`/`/commands`/`/agents`/`/skills`/
+  `/hooks`/`/approve-hook`/`/mcp`/`/approve-mcp` manage it live), `hooks` (the sanctioned site for the
+  `hooks` extension type's process I/O: the `HookRunner` port + `ShellHookRunner` adapter running a hook's
+  command over the same confined shell-exec surface `run_command` uses; fire-and-forget — a run's outcome
+  is a transcript notice, never a failure — dispatched at `SessionStart`/`SessionEnd`/`TurnEnd` via
   `tui::infrastructure::runtime::hook_dispatch`; `PreToolUse`/`PostToolUse` are discovered/gated but not yet
-  dispatched, `ToolObserver`'s synchronous callbacks need new plumbing first). Planned: a memory-management
-  GUI, an `mcp` context (Fase 5, likely via the `rmcp` SDK).
+  dispatched, `ToolObserver`'s synchronous callbacks need new plumbing first), `mcp` (the sanctioned site
+  for the `mcp` extension type's process/network I/O: the `McpConnection` port + `RmcpConnection` adapter —
+  over the official `rmcp` SDK, the one third-party dependency this framework needed — spawning a server
+  over stdio and completing the MCP handshake; `app::wire` connects every gate-approved server once at
+  boot and wraps each discovered tool as an `McpToolProxy`, a real `Tool` registered into the same
+  `ToolRegistry` as the built-in file tools, namespaced `mcp__<server_id>__<tool_name>`; stdio transport
+  only, HTTP/SSE unstarted). Planned: a memory-management GUI.
 - **shared/kernel:** cross-cutting primitives — `ToolCall`/`FunctionCall`, `AgentError` (thiserror),
   `ApprovalMode`, the conversation types (`Message`/`Role`/`StreamEvent`/`CompletedTurn`/`Conversation`,
   the shared data between `agent` and `provider` — their home here is what breaks the agent↔provider cycle),
@@ -93,14 +98,14 @@ shells out to `git` to reach the user's profile repo (ADR 0015); filesystem I/O 
 `tools/infrastructure` (the `FsSandbox` adapter — behind the `tools/application::Sandbox` port — is the
 single path chokepoint) — **except** the `memory`, `session`,
 `sync`, and `extensions` contexts, which own their data dirs (`.kiri/memory`, `~/.kiri/memory`,
-`~/.kiri/sessions.db`, `~/.kiri/sync`, `.kiri/{rules,commands,agents,skills,hooks}`,
+`~/.kiri/sessions.db`, `~/.kiri/sync`, `.kiri/{rules,commands,agents,skills,hooks,mcp}`,
 `~/.kiri/extensions_trust.json`), plus `provider/infrastructure/secrets` (the `0600` credentials file) and
 `shared/infra/config` (the `~/.kiri/config.toml` + dir creation) — all do their own file/SQLite I/O for
 harness-owned storage, never for agent-supplied paths (ref ADRs 0010/0013/0015/0021); process I/O for the
-`hooks` extension type stays inside `hooks/infrastructure/` (`ShellHookRunner`, guarded by
-`hooks_process_io_confined_to_infrastructure` in `architecture_guards.rs`, mirroring the domain-purity
-guard), itself routed through the existing `tools/infrastructure::exec::run_shell` chokepoint, never a raw
-spawn; `domain` has no I/O and
+`hooks`/`mcp` extension types stays inside their own `infrastructure/` (`ShellHookRunner` routed through the
+existing `tools/infrastructure::exec::run_shell` chokepoint; `RmcpConnection` over the `rmcp` SDK), each
+guarded by its own architecture-guard test (`hooks_process_io_confined_to_infrastructure`,
+`mcp_process_io_confined_to_infrastructure`) mirroring the domain-purity guard; `domain` has no I/O and
 no UI-framework dependency — the **one** sanctioned exception is the TUI `InputBuffer` owning a
 `tui_textarea::TextArea` (ADR 0017, guarded by a recursive domain-purity test); the engine never touches
 stdin/stdout directly (all UI via the engine ports). Ports return `AgentError`; `anyhow` only at the binary edge.

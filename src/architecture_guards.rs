@@ -123,6 +123,39 @@ fn hooks_process_io_confined_to_infrastructure() {
     }
 }
 
+/// ADR 0021: the `mcp` context's process/network I/O is confined to `mcp/infrastructure/` — spawning an
+/// MCP server or speaking the protocol over its stdio must run only through the sanctioned adapter
+/// (`RmcpConnection`, over the official `rmcp` SDK), never a raw process spawn or an `rmcp` reference from
+/// `mcp/application/`. Mirrors `hooks_process_io_confined_to_infrastructure` for the sibling active
+/// capability.
+#[test]
+fn mcp_process_io_confined_to_infrastructure() {
+    let mcp_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("modules")
+        .join("mcp");
+    assert!(
+        mcp_root.is_dir(),
+        "expected the mcp bounded context at src/modules/mcp"
+    );
+    let mut files = Vec::new();
+    rs_files(&mcp_root, &mut files);
+    for file in &files {
+        if file.components().any(|c| c.as_os_str() == "infrastructure") {
+            continue;
+        }
+        let source = std::fs::read_to_string(file).expect("read mcp file");
+        for needle in ["tokio::process", "std::process", "Command::new", "rmcp::"] {
+            assert!(
+                !source.contains(needle),
+                "mcp file {} references process I/O or the rmcp SDK directly ({needle:?}); that must \
+                 stay in mcp/infrastructure/ (ADR 0021)",
+                file.display()
+            );
+        }
+    }
+}
+
 /// ADR 0003: `domain` is pure data + rules — no filesystem, network, or database I/O. Walk every
 /// `*.rs` under each `src/modules/*/domain/` and assert none references an I/O facility (`std::fs`,
 /// `tokio::fs`, `std::net`, `reqwest`, `rusqlite`). There is NO exception: unlike the UI-crate coupling

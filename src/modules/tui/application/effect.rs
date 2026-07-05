@@ -71,4 +71,7 @@ pub enum Effect {
     /// Approve a pending project-layer hook by id (`/approve-hook`, ADR 0021 TOFU gate). The runtime
     /// looks it up in the loaded catalog and records its current content hash in the trust store.
     ApproveHook(String),
+    /// Approve a pending project-layer MCP server by id (`/approve-mcp`, ADR 0021 TOFU gate). Takes
+    /// effect on the next session start — the server connects (or not) once, at boot.
+    ApproveMcp(String),
 }

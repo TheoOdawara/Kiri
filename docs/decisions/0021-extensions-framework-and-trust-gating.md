@@ -105,14 +105,37 @@ a project hook needs `/approve-hook <id>` first (TOFU) — `/hooks` lists what's
 synchronous, so firing an async hook there needs new spawn+channel plumbing into `Bridge` — deferred as a
 follow-up rather than folded into this pass.
 
+### MCP: the second active capability
+
+`extensions::domain::resource::McpServer` is discovered exactly like every other resource type (an `mcp/`
+subdirectory, frontmatter `command:` + optional `args:` list; **stdio transport only** — the ADR's
+`Http(url)` variant is unstarted, a `// ponytail:` upgrade path on the type itself). Connection and protocol
+speech live in the new `mcp` bounded context, over the official `rmcp` SDK (crates.io `rmcp`, the
+`modelcontextprotocol` org's Rust SDK) — the one new third-party dependency this whole framework needed.
+`mcp::application::mcp_connection::McpConnection` is the port (`list_tools`/`call_tool`, no `rmcp` type in
+its signature); `mcp::infrastructure::rmcp_client::RmcpConnection` is the sanctioned adapter, spawning the
+server as a child process (`rmcp::transport::TokioChildProcess`) and completing the handshake
+(`().serve(transport)`). An architecture guard confines both process spawning and any `rmcp::` reference to
+`mcp/infrastructure/`, mirroring the hooks guard.
+
+Unlike a hook (fires and exits every time), an MCP server is a **persistent connection**: `app::wire`
+connects to every gate-approved server once, at boot, lists its tools, and wraps each as a
+`mcp::infrastructure::tool_proxy::McpToolProxy` — a real `tools::application::tool::Tool` registered into
+the same `ToolRegistry` as the built-in file tools, namespaced `mcp__<server_id>__<tool_name>` so two
+servers can never collide. The gate check therefore happens once per boot, not per call (there is no
+"re-checked every firing" the way hooks work — `/approve-mcp <id>` takes effect on the *next* session
+start). A server that fails to spawn, fails its handshake, or fails tool discovery degrades to a boot
+notice — auxiliary, like every other extension type, never fatal. `/mcp` lists what loaded and its gate
+state.
+
 ## Consequences
 
 - A team commits `.kiri/rules/` and `.kiri/commands/` to share behavioural guidance and slash commands;
   both take effect on the next session start (the prompt is rendered once at boot).
 - Active capabilities (hooks/MCP) committed to a repo never auto-execute on `cd`; the user approves them once
-  (`/approve-hook <id>`).
-- The `hooks_process_io_confined_to_infrastructure` architecture guard (`src/architecture_guards.rs`) keeps
-  process I/O confined to `hooks/infrastructure/`, mirroring the domain-purity guard; the same guard will be
-  added for `mcp` when that context lands (Fase 5).
+  (`/approve-hook <id>` / `/approve-mcp <id>`).
+- The `hooks_process_io_confined_to_infrastructure` and `mcp_process_io_confined_to_infrastructure`
+  architecture guards (`src/architecture_guards.rs`) keep process/network I/O confined to each context's
+  `infrastructure/`, mirroring the domain-purity guard.
 - The `extensions` context's `domain/` layer stays pure (frontmatter parsing, resource types); filesystem
   discovery lives in `infrastructure/`, like the `memory` and `sync` contexts' own data dirs.

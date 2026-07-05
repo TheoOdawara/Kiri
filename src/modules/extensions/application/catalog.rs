@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::modules::extensions::domain::resource::{
-    AgentProfile, CommandSpec as ExtCommandSpec, Hook, HookEvent, Resource, Rule, Skill,
+    AgentProfile, CommandSpec as ExtCommandSpec, Hook, HookEvent, McpServer, Resource, Rule, Skill,
 };
 use crate::shared::kernel::error::AgentResult;
 
@@ -28,6 +28,8 @@ pub struct ExtensionCatalog {
     pub skills: HashMap<String, Skill>,
     /// Hooks, keyed by id. Global hooks auto-approve; project ones need the trust gate.
     pub hooks: HashMap<String, Hook>,
+    /// MCP servers, keyed by id. Global auto-approve; project ones need the trust gate.
+    pub mcp_servers: HashMap<String, McpServer>,
 }
 
 impl ExtensionCatalog {
@@ -217,11 +219,35 @@ impl ExtensionCatalog {
             .collect();
         Some(lines.join("\n"))
     }
+
+    /// The `/mcp` display text: one line per loaded MCP server (id, command + args, layer, source path),
+    /// sorted by id. `None` when no servers were loaded.
+    pub fn mcp_display(&self) -> Option<String> {
+        if self.mcp_servers.is_empty() {
+            return None;
+        }
+        let mut servers: Vec<&McpServer> = self.mcp_servers.values().collect();
+        servers.sort_by(|a, b| a.id.cmp(&b.id));
+        let lines: Vec<String> = servers
+            .iter()
+            .map(|server| {
+                format!(
+                    "- {} `{}` [{}] {}",
+                    server.id,
+                    server.command_line(),
+                    server.layer.label(),
+                    server.path
+                )
+            })
+            .collect();
+        Some(lines.join("\n"))
+    }
 }
 
-/// The capability port: discover and load extension resources from global and project layers.
-/// Async so a future MCP-discovery handshake (Fase 5) is supported; the current filesystem loader
-/// blocks once during boot and is async-compatible.
+/// The capability port: discover and load extension resources (including MCP server *specs* — command +
+/// args, not a live connection) from global and project layers. Async so the filesystem walk never blocks
+/// the runtime; the actual MCP handshake is a separate step (`mcp::infrastructure::rmcp_client`, run by
+/// `app::wire` only for gate-approved servers).
 #[async_trait::async_trait]
 pub trait ExtensionsLoader: Send + Sync {
     /// Discover and load all extension resources, returning an assembled catalog. The loader scans
@@ -570,5 +596,35 @@ mod tests {
         };
         let display = catalog.hooks_display().unwrap();
         assert!(display.contains("- notify [SessionStart, project] /fake/notify.md"));
+    }
+
+    fn mcp_server(id: &str, command: &str, args: &[&str], layer: Layer) -> McpServer {
+        McpServer {
+            id: id.to_string(),
+            command: command.to_string(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            layer,
+            path: format!("/fake/{id}.md"),
+        }
+    }
+
+    #[test]
+    fn empty_catalog_yields_no_mcp_display() {
+        assert!(ExtensionCatalog::default().mcp_display().is_none());
+    }
+
+    #[test]
+    fn mcp_display_lists_id_command_layer_and_path() {
+        let mut mcp_servers = HashMap::new();
+        mcp_servers.insert(
+            "filesystem".to_string(),
+            mcp_server("filesystem", "npx", &["-y", "server-fs"], Layer::Global),
+        );
+        let catalog = ExtensionCatalog {
+            mcp_servers,
+            ..ExtensionCatalog::default()
+        };
+        let display = catalog.mcp_display().unwrap();
+        assert!(display.contains("- filesystem `npx -y server-fs` [global] /fake/filesystem.md"));
     }
 }

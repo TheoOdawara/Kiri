@@ -180,6 +180,8 @@ pub struct Model {
     pub skills_display: Option<String>,
     /// The formatted `/hooks` display text (id, event, layer, source path). `None` when none were found.
     pub hooks_display: Option<String>,
+    /// The formatted `/mcp` display text (id, command, layer, source path). `None` when none were found.
+    pub mcp_display: Option<String>,
     /// Images pasted from the clipboard, staged for the next prompt and drained on submit.
     pub attachments: Vec<ImageAttachment>,
     /// When set, tool outputs and edit diffs render in full instead of a bounded preview. Toggled
@@ -330,6 +332,12 @@ impl Model {
     /// Seed the hooks display text for the `/hooks` command.
     pub fn with_hooks(mut self, display: Option<String>) -> Self {
         self.hooks_display = display;
+        self
+    }
+
+    /// Seed the MCP servers display text for the `/mcp` command.
+    pub fn with_mcp(mut self, display: Option<String>) -> Self {
+        self.mcp_display = display;
         self
     }
 

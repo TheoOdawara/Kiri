@@ -74,6 +74,22 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
                 vec![Effect::ApproveHook(id)]
             }
         }
+        Some(Command::Mcp) => {
+            let text = model
+                .mcp_display
+                .clone()
+                .unwrap_or_else(|| "Nenhum servidor MCP carregado.".to_string());
+            model.notify_info(text);
+            vec![]
+        }
+        Some(Command::ApproveMcp(id)) => {
+            if id.is_empty() {
+                model.notify_error("uso: /approve-mcp <id> (veja /mcp)");
+                vec![]
+            } else {
+                vec![Effect::ApproveMcp(id)]
+            }
+        }
         Some(Command::Help) => {
             model.notify_info(command::help_text());
             vec![]

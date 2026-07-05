@@ -301,7 +301,8 @@ impl RunLoop {
                                 | Effect::SaveProvider { .. }
                                 | Effect::DeleteProvider(_)
                                 | Effect::OpenFile(_)
-                                | Effect::ApproveHook(_) => {}
+                                | Effect::ApproveHook(_)
+                                | Effect::ApproveMcp(_) => {}
                             }
                         }
                         // Coalesce a burst: drain every engine message already queued before drawing, so

@@ -308,6 +308,56 @@ impl Hook {
     }
 }
 
+/// An **MCP server** (ADR 0021): a subprocess speaking the Model Context Protocol over stdio, whose
+/// tools extend the model's toolset — an active capability, gated like hooks. Built from a `Resource`;
+/// `command`/`args` come from frontmatter (no shell involved — spawned as `command` with `args` directly,
+/// like `hooks` shells its command, but MCP servers are long-lived processes, not one-shot scripts).
+// ponytail: stdio transport only — HTTP/SSE MCP servers are unstarted (ADR 0021's `Http(url)` variant).
+// Upgrade path: a second `McpTransport` variant + the matching rmcp streamable-http client feature.
+#[derive(Debug, Clone)]
+pub struct McpServer {
+    pub id: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub layer: Layer,
+    pub path: String,
+}
+
+impl McpServer {
+    /// Build an MCP server spec from a frontmatter-parsed resource. `None` when `command:` is missing or
+    /// blank — a malformed server file is dropped rather than aborting boot.
+    pub fn from_resource(res: &Resource) -> Option<Self> {
+        let command = res
+            .frontmatter
+            .get("command")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())?;
+        let args = res
+            .frontmatter
+            .list("args")
+            .map(|items| items.to_vec())
+            .unwrap_or_default();
+        Some(Self {
+            id: res.id.clone(),
+            command,
+            args,
+            layer: res.layer,
+            path: res.path.clone(),
+        })
+    }
+
+    /// The effective command line (`command` plus any `args`, space-joined) — the single source for
+    /// display (`ExtensionCatalog::mcp_display`) and for the TOFU content hash (`domain::gate::
+    /// content_hash`), so both always agree on what "this server's content" means.
+    pub fn command_line(&self) -> String {
+        if self.args.is_empty() {
+            self.command.clone()
+        } else {
+            format!("{} {}", self.command, self.args.join(" "))
+        }
+    }
+}
+
 /// Truthy-string check shared with the frontmatter `always:` reader.
 fn is_truthy(value: &str) -> bool {
     matches!(
@@ -496,5 +546,33 @@ mod tests {
     fn hook_blank_command_is_none() {
         let res = resource("x", "---\nevent: SessionStart\n---\n", "", Layer::Global);
         assert!(Hook::from_resource(&res).is_none());
+    }
+
+    #[test]
+    fn mcp_server_reads_command_and_args() {
+        let res = resource(
+            "filesystem",
+            "---\ncommand: npx\nargs:\n  - -y\n  - \"@modelcontextprotocol/server-filesystem\"\n---\n",
+            "",
+            Layer::Global,
+        );
+        let server = McpServer::from_resource(&res).unwrap();
+        assert_eq!(server.command, "npx");
+        assert_eq!(
+            server.args,
+            ["-y", "@modelcontextprotocol/server-filesystem"]
+        );
+    }
+
+    #[test]
+    fn mcp_server_missing_command_is_none() {
+        let res = resource("x", "---\n---\n", "", Layer::Project);
+        assert!(McpServer::from_resource(&res).is_none());
+    }
+
+    #[test]
+    fn mcp_server_blank_command_is_none() {
+        let res = resource("x", "---\ncommand: \"\"\n---\n", "", Layer::Project);
+        assert!(McpServer::from_resource(&res).is_none());
     }
 }

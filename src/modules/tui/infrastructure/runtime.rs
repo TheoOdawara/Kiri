@@ -153,6 +153,8 @@ pub struct TuiParams {
     pub skills_display: Option<String>,
     /// The formatted `/hooks` display text. `None` when none were loaded.
     pub hooks_display: Option<String>,
+    /// The formatted `/mcp` display text. `None` when none were loaded.
+    pub mcp_display: Option<String>,
     /// The ADR 0021 hook-dispatch dependencies, threaded through to `RunLoop` for the
     /// SessionStart/SessionEnd/TurnEnd firing points.
     pub hooks: HookContext,
@@ -217,6 +219,7 @@ impl Tui {
             agents_display,
             skills_display,
             hooks_display,
+            mcp_display,
             hooks,
         } = params;
         let workspace = text::display_path(sandbox.root());
@@ -236,6 +239,7 @@ impl Tui {
             .with_agents(agents_display)
             .with_skills(skills_display)
             .with_hooks(hooks_display)
+            .with_mcp(mcp_display)
             .with_custom_commands(custom_commands, custom_command_bodies, commands_display);
         // Surface the wire-time degradations first, so the onboarding welcome (the call to action) lands
         // last when both are present.
@@ -500,6 +504,7 @@ impl RunLoop {
                 let _ = ui.terminal.clear();
             }
             Effect::ApproveHook(id) => self.apply_approve_hook(&id),
+            Effect::ApproveMcp(id) => self.apply_approve_mcp(&id),
             Effect::AnswerApproval(_) | Effect::CancelTurn => {}
         }
         Ok(())
@@ -527,6 +532,33 @@ impl RunLoop {
             Err(error) => self
                 .model
                 .notify_error(format!("falha ao aprovar hook '{id}': {error}")),
+        }
+    }
+
+    /// `/approve-mcp <id>`: record the server's current command-line hash as approved in the trust
+    /// store (ADR 0021 TOFU). A server only connects once, at boot, so this takes effect on the next
+    /// session start — never mid-session. Unknown id, a global server (already auto-approved), or a
+    /// trust-store write failure all surface as a notice.
+    fn apply_approve_mcp(&mut self, id: &str) {
+        let Some(server) = self.hooks.catalog.mcp_servers.get(id) else {
+            self.model
+                .notify_error(format!("servidor MCP desconhecido: {id} (veja /mcp)"));
+            return;
+        };
+        if server.layer == crate::modules::extensions::domain::scope::Layer::Global {
+            self.model.notify_info(format!(
+                "servidor MCP '{id}' é global — já aprovado por padrão"
+            ));
+            return;
+        }
+        let hash = crate::modules::extensions::domain::gate::content_hash(&server.command_line());
+        match self.hooks.trust.approve(id, &hash) {
+            Ok(()) => self.model.notify_info(format!(
+                "servidor MCP '{id}' aprovado — conecta na próxima sessão"
+            )),
+            Err(error) => self
+                .model
+                .notify_error(format!("falha ao aprovar servidor MCP '{id}': {error}")),
         }
     }
 }

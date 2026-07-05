@@ -73,6 +73,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         blurb: "aprova um hook de projeto pendente: /approve-hook <id>",
     },
     CommandSpec {
+        name: "/mcp",
+        aliases: &[],
+        blurb: "exibe os servidores MCP carregados e seu estado de aprovação",
+    },
+    CommandSpec {
+        name: "/approve-mcp",
+        aliases: &[],
+        blurb: "aprova um servidor MCP de projeto pendente: /approve-mcp <id>",
+    },
+    CommandSpec {
         name: "/plan",
         aliases: &[],
         blurb: "modo plan (só leitura; planeja e executa após aprovação)",

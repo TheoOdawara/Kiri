@@ -42,6 +42,10 @@ pub enum Command {
     Hooks,
     /// `/approve-hook <id>`: approve a pending project-layer hook (ADR 0021 TOFU gate).
     ApproveHook(String),
+    /// `/mcp`: show the loaded MCP servers (id, command, layer, source path).
+    Mcp,
+    /// `/approve-mcp <id>`: approve a pending project-layer MCP server (ADR 0021 TOFU gate).
+    ApproveMcp(String),
     /// A `/`-prefixed token that matches no built-in — carries the raw head token so the runtime can
     /// still resolve it against the extension-provided custom commands before reporting it unknown.
     Unknown(String),
@@ -80,6 +84,8 @@ pub fn parse(line: &str) -> Option<Command> {
         "/skills" => Command::Skills,
         "/hooks" => Command::Hooks,
         "/approve-hook" => Command::ApproveHook(arg.to_string()),
+        "/mcp" => Command::Mcp,
+        "/approve-mcp" => Command::ApproveMcp(arg.to_string()),
         _ => Command::Unknown(head.to_string()),
     };
     Some(command)
@@ -269,6 +275,8 @@ mod tests {
             "/skills",
             "/hooks",
             "/approve-hook",
+            "/mcp",
+            "/approve-mcp",
         ]
         .into_iter()
         .collect();

@@ -41,6 +41,7 @@ uuid = { version = "1.12", features = ["v7", "serde"] }
 toml = "0.8"
 zeroize = "1"
 dotenvy = "0.15.7"
+rmcp = { version = "2.1.0", default-features = false, features = ["client", "transport-child-process"] }
 
 
 [dev-dependencies]
