@@ -75,8 +75,12 @@ pub fn render(picker: &Picker, frame: &mut Frame, area: Rect) {
         };
         let end_index = (start_index + list_height).min(filtered.len());
 
-        for idx in start_index..end_index {
-            let (_, option_text) = &filtered[idx];
+        for (idx, (_, option_text)) in filtered
+            .iter()
+            .enumerate()
+            .take(end_index)
+            .skip(start_index)
+        {
             let is_selected = idx == picker.selected;
             let (marker, style) = super::option_marker(is_selected);
             lines.push(Line::from(vec![

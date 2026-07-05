@@ -362,10 +362,10 @@ fn on_transcript_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
             }
         }
         Key::Char('o') => {
-            if let Some(TranscriptItem::Tool(act)) = model.transcript.items().get(current) {
-                if let Some(path) = extract_filepath(&act.command) {
-                    return vec![Effect::OpenFile(path)];
-                }
+            if let Some(TranscriptItem::Tool(act)) = model.transcript.items().get(current)
+                && let Some(path) = extract_filepath(&act.command)
+            {
+                return vec![Effect::OpenFile(path)];
             }
         }
         _ => {}

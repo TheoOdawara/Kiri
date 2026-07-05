@@ -65,13 +65,15 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
     let lines = build_transcript_lines(
         model.transcript.items(),
         width,
-        model.expand_tools,
-        model.status.streaming,
-        model.has_modal(),
-        reveal,
-        model.focused_pane,
-        model.selected_item,
-        &model.expanded_tools_indices,
+        TranscriptState {
+            global_expanded: model.expand_tools,
+            streaming: model.status.streaming,
+            has_modal: model.has_modal(),
+            reveal,
+            focused_pane: model.focused_pane,
+            selected_item: model.selected_item,
+            expanded_tools_indices: &model.expanded_tools_indices,
+        },
     );
 
     let total = lines.len() as u16;
@@ -127,6 +129,19 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
     }
 }
 
+/// The per-frame model state `build_transcript_lines` reads, bundled so the function stays under
+/// clippy's argument-count lint without losing any of the inputs it needs.
+#[derive(Clone, Copy)]
+struct TranscriptState<'a> {
+    global_expanded: bool,
+    streaming: bool,
+    has_modal: bool,
+    reveal: Reveal<'a>,
+    focused_pane: crate::modules::tui::domain::model::PaneFocus,
+    selected_item: Option<usize>,
+    expanded_tools_indices: &'a std::collections::HashSet<usize>,
+}
+
 /// Build the wrapped, styled transcript lines for the pane — the per-frame work, factored out of `render`
 /// so it can be timed without a ratatui `Frame` (see the `render_cost` measurement). Pure in its inputs;
 /// the markdown body of a finalized item is memoized by `markdown::render`, so a settled transcript pays
@@ -134,13 +149,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
 fn build_transcript_lines(
     items: &[TranscriptItem],
     width: usize,
-    global_expanded: bool,
-    streaming: bool,
-    has_modal: bool,
-    reveal: Reveal,
-    focused_pane: crate::modules::tui::domain::model::PaneFocus,
-    selected_item: Option<usize>,
-    expanded_tools_indices: &std::collections::HashSet<usize>,
+    state: TranscriptState,
 ) -> Vec<Line<'static>> {
     let last = items.len().saturating_sub(1);
     let mut lines: Vec<Line> = Vec::new();
@@ -155,16 +164,16 @@ fn build_transcript_lines(
         // The still-streaming item (the trailing assistant/reasoning while a turn streams) renders as
         // plain text — skipping the per-frame markdown parse keeps the ~30 fps stream cheap; once the
         // turn finishes it re-renders formatted (and is then memoized).
-        let active = streaming && idx == last;
-        let expanded = global_expanded || expanded_tools_indices.contains(&idx);
+        let active = state.streaming && idx == last;
+        let expanded = state.global_expanded || state.expanded_tools_indices.contains(&idx);
         let start_len = lines.len();
-        render_item(item, width, expanded, active, reveal, &mut lines);
+        render_item(item, width, expanded, active, state.reveal, &mut lines);
         let end_len = lines.len();
 
-        let is_selected = focused_pane == crate::modules::tui::domain::model::PaneFocus::Transcript
-            && Some(idx) == selected_item;
-        for line_idx in start_len..end_len {
-            let line = &mut lines[line_idx];
+        let is_selected = state.focused_pane
+            == crate::modules::tui::domain::model::PaneFocus::Transcript
+            && Some(idx) == state.selected_item;
+        for line in lines.iter_mut().take(end_len).skip(start_len) {
             let indicator = if is_selected {
                 Span::styled("▍ ", Style::default().fg(theme::HIGHLIGHT))
             } else {
@@ -177,7 +186,7 @@ fn build_transcript_lines(
     // Rack focus: while a confirmation is up, the whole transcript recedes one ramp step so the
     // borderless stanza pulls focus by depth, not by a drawn box. One static restyle — never animated,
     // so it stays a single diff and does not fight the markdown memoization.
-    if has_modal {
+    if state.has_modal {
         for line in &mut lines {
             recede(line);
         }
@@ -587,52 +596,30 @@ mod tests {
             landings: &[],
         };
         let empty_set = std::collections::HashSet::new();
-        // Warm the markdown memoization cache (the expensive parse happens once per unique body).
-        let _ = build_transcript_lines(
-            &items,
-            88,
-            false,
-            false,
-            false,
+        let state = TranscriptState {
+            global_expanded: false,
+            streaming: false,
+            has_modal: false,
             reveal,
-            crate::modules::tui::domain::model::PaneFocus::Input,
-            None,
-            &empty_set,
-        );
+            focused_pane: crate::modules::tui::domain::model::PaneFocus::Input,
+            selected_item: None,
+            expanded_tools_indices: &empty_set,
+        };
+        // Warm the markdown memoization cache (the expensive parse happens once per unique body).
+        let _ = build_transcript_lines(&items, 88, state);
 
         let iterations = 2000;
         let start = Instant::now();
         let mut sink = 0usize;
         for _ in 0..iterations {
-            let lines = build_transcript_lines(
-                &items,
-                88,
-                false,
-                false,
-                false,
-                reveal,
-                crate::modules::tui::domain::model::PaneFocus::Input,
-                None,
-                &empty_set,
-            );
+            let lines = build_transcript_lines(&items, 88, state);
             sink = sink.wrapping_add(lines.len());
         }
         let per_frame = start.elapsed() / iterations;
         println!(
             "render_cost: {} items -> {} lines, {:?}/frame (markdown memoized), sink={sink}",
             items.len(),
-            build_transcript_lines(
-                &items,
-                88,
-                false,
-                false,
-                false,
-                reveal,
-                crate::modules::tui::domain::model::PaneFocus::Input,
-                None,
-                &empty_set,
-            )
-            .len(),
+            build_transcript_lines(&items, 88, state).len(),
             per_frame,
         );
     }
