@@ -97,6 +97,7 @@ const SYSTEM_PROMPT_TEMPLATE: &str = concat!(
     "details. When this session ends the harness also distills what was learned, so you need not ",
     "summarize at the end — just capture preferences as they surface.\n\n",
     "{RULES}",
+    "{SKILLS}",
     "{INSTRUCTIONS}",
     "# Security\n",
     "Never read, write, edit, delete, or move files matching a sensitive pattern — the harness ",
@@ -112,20 +113,26 @@ const SYSTEM_PROMPT_TEMPLATE: &str = concat!(
     "what you saw.",
 );
 
-/// Render the system prompt, filling the four runtime placeholders plus the optional extension-rules
-/// and user-instructions blocks (both injected before `# Security` — rules first, ADR 0021 — so the
-/// Security section always takes precedence over any extension- or user-supplied text). The values
-/// arrive as parameters so this leaf module gains no dependency on the `tools` layer (SEC-06).
+/// Render the system prompt, filling the four runtime placeholders plus the optional extension-rules,
+/// skill-index, and user-instructions blocks (all injected before `# Security` — rules, then skills,
+/// then instructions, ADR 0021 — so the Security section always takes precedence over any extension- or
+/// user-supplied text). The values arrive as parameters so this leaf module gains no dependency on the
+/// `tools` layer (SEC-06).
 pub fn render_system_prompt(
     sensitive_globs: &[&str],
     default_timeout_ms: u64,
     output_cap_bytes: usize,
     checkpoint: Duration,
     rules: Option<&str>,
+    skills: Option<&str>,
     instructions: Option<&str>,
 ) -> String {
     let rules_block = match rules {
         Some(text) if !text.trim().is_empty() => format!("# Rules\n{}\n\n", text.trim()),
+        _ => String::new(),
+    };
+    let skills_block = match skills {
+        Some(text) if !text.trim().is_empty() => format!("# Skills\n{}\n\n", text.trim()),
         _ => String::new(),
     };
     let instructions_block = match instructions {
@@ -136,6 +143,7 @@ pub fn render_system_prompt(
     };
     SYSTEM_PROMPT_TEMPLATE
         .replace("{RULES}", &rules_block)
+        .replace("{SKILLS}", &skills_block)
         .replace("{INSTRUCTIONS}", &instructions_block)
         .replace("{SENSITIVE_LIST}", &sensitive_globs.join(", "))
         .replace(
@@ -161,6 +169,7 @@ mod tests {
             Duration::from_secs(30 * 60),
             None,
             None,
+            None,
         )
     }
 
@@ -180,6 +189,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
+            None,
             None,
             None,
         );
@@ -208,6 +218,7 @@ mod tests {
             Duration::from_secs(30 * 60),
             None,
             None,
+            None,
         );
         assert!(
             prompt.contains(&format!("{}s timeout enforced", timeout_ms / 1000)),
@@ -226,6 +237,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(45 * 60),
+            None,
             None,
             None,
         );
@@ -267,6 +279,7 @@ mod tests {
             64 * 1024,
             Duration::from_secs(30 * 60),
             None,
+            None,
             Some("Always use Rust."),
         );
         assert!(prompt.contains("# User Instructions\nAlways use Rust."));
@@ -285,6 +298,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
+            None,
             None,
             Some("   \n  "),
         );
@@ -305,6 +319,7 @@ mod tests {
             64 * 1024,
             Duration::from_secs(30 * 60),
             Some("Always use Rust fmt."),
+            None,
             Some("Always use Rust."),
         );
         assert!(prompt.contains("# Rules\nAlways use Rust fmt."));
@@ -326,7 +341,50 @@ mod tests {
             Duration::from_secs(30 * 60),
             Some("   \n  "),
             None,
+            None,
         );
         assert!(!prompt.contains("# Rules"));
+    }
+
+    #[test]
+    fn no_skills_leaves_no_skills_section() {
+        let prompt = render();
+        assert!(!prompt.contains("# Skills"));
+    }
+
+    #[test]
+    fn skills_block_is_injected_between_rules_and_instructions() {
+        let prompt = render_system_prompt(
+            &[".env"],
+            30_000,
+            64 * 1024,
+            Duration::from_secs(30 * 60),
+            Some("Always use Rust fmt."),
+            Some("- pdf-extract — Extract text from PDFs"),
+            Some("Always use Rust."),
+        );
+        assert!(prompt.contains("# Skills\n- pdf-extract — Extract text from PDFs"));
+        let rules_pos = prompt.find("# Rules").unwrap();
+        let skills_pos = prompt.find("# Skills").unwrap();
+        let instr_pos = prompt.find("# User Instructions").unwrap();
+        let sec_pos = prompt.find("# Security").unwrap();
+        assert!(
+            rules_pos < skills_pos && skills_pos < instr_pos && instr_pos < sec_pos,
+            "rules, then skills, then instructions, all before Security"
+        );
+    }
+
+    #[test]
+    fn blank_skills_are_treated_as_none() {
+        let prompt = render_system_prompt(
+            &[".env"],
+            30_000,
+            64 * 1024,
+            Duration::from_secs(30 * 60),
+            None,
+            Some("   \n  "),
+            None,
+        );
+        assert!(!prompt.contains("# Skills"));
     }
 }

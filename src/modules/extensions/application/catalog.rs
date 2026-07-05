@@ -1,13 +1,17 @@
 use std::collections::HashMap;
 
-use crate::modules::extensions::domain::resource::{CommandSpec as ExtCommandSpec, Resource, Rule};
+use crate::modules::extensions::domain::resource::{
+    AgentProfile, CommandSpec as ExtCommandSpec, Resource, Rule, Skill,
+};
 use crate::shared::kernel::error::AgentResult;
 
 /// The assembled extension catalogs, agnostic of the filesystem source. The loader builds it; the
 /// composition root (`app::wire`) owns the loader adapter, calls `load`, and injects the result.
 #[derive(Debug, Clone, Default)]
 pub struct ExtensionCatalog {
-    /// The raw resources (for display / debugging), keyed by id.
+    // ponytail: kept for future `/extensions` debug display (raw resources, both types, one place);
+    // nothing reads it yet — `/rules`/`/commands`/`/agents`/`/skills` each already display their own kind.
+    #[allow(dead_code)]
     pub resources: HashMap<String, Resource>,
     /// Rules, keyed by id. Always-on rules (`Rule::always == true`) are injected into the system prompt;
     /// on-demand rules are addressable by skills/commands (future).
@@ -17,6 +21,11 @@ pub struct ExtensionCatalog {
     pub commands: HashMap<String, ExtCommandSpec>,
     /// One alias → owning command name map, built alongside `commands`.
     pub command_aliases: HashMap<String, String>,
+    /// Agent profiles, keyed by id. A command's `agent:` field binds it to one.
+    pub agents: HashMap<String, AgentProfile>,
+    /// Skills, keyed by id. Their descriptions render into the system prompt's skill index; bodies are
+    /// fetched on demand by the `use_skill` tool.
+    pub skills: HashMap<String, Skill>,
 }
 
 impl ExtensionCatalog {
@@ -92,19 +101,89 @@ impl ExtensionCatalog {
         Some(lines.join("\n"))
     }
 
-    /// Every command token (canonical name + aliases) mapped straight to its expanded prompt body, so
-    /// submit-time lookup is a single hit regardless of which alias the user typed.
+    /// Every command token (canonical name + aliases) mapped straight to its expanded prompt body — the
+    /// command's own body, with its bound agent's system-prompt prepended when it has one (`agent:`
+    /// names an unknown id is treated as unbound). Submit-time lookup is a single hit regardless of which
+    /// alias the user typed.
     pub fn command_bodies(&self) -> HashMap<String, String> {
         let mut bodies = HashMap::with_capacity(self.commands.len());
         for command in self.commands.values() {
-            bodies.insert(command.name.clone(), command.body.clone());
+            bodies.insert(command.name.clone(), self.expand_command_body(command));
         }
         for (alias, owner) in &self.command_aliases {
             if let Some(command) = self.commands.get(owner) {
-                bodies.insert(alias.clone(), command.body.clone());
+                bodies.insert(alias.clone(), self.expand_command_body(command));
             }
         }
         bodies
+    }
+
+    fn expand_command_body(&self, command: &ExtCommandSpec) -> String {
+        match command.agent.as_ref().and_then(|id| self.agents.get(id)) {
+            Some(agent) => format!("{}\n\n{}", agent.system_prompt, command.body),
+            None => command.body.clone(),
+        }
+    }
+
+    /// The `/agents` display text: one line per loaded agent profile (id, layer, source path), sorted by
+    /// id. `None` when no agents were loaded.
+    pub fn agents_display(&self) -> Option<String> {
+        if self.agents.is_empty() {
+            return None;
+        }
+        let mut agents: Vec<&AgentProfile> = self.agents.values().collect();
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
+        let lines: Vec<String> = agents
+            .iter()
+            .map(|agent| format!("- {} [{}] {}", agent.id, agent.layer.label(), agent.path))
+            .collect();
+        Some(lines.join("\n"))
+    }
+
+    /// The `/skills` display text: one line per loaded skill (id, layer, tags, source path), sorted by
+    /// id. `None` when no skills were loaded.
+    pub fn skills_display(&self) -> Option<String> {
+        if self.skills.is_empty() {
+            return None;
+        }
+        let mut skills: Vec<&Skill> = self.skills.values().collect();
+        skills.sort_by(|a, b| a.id.cmp(&b.id));
+        let lines: Vec<String> = skills
+            .iter()
+            .map(|skill| {
+                let tags = if skill.tags.is_empty() {
+                    String::new()
+                } else {
+                    let mut sorted: Vec<&str> = skill.tags.iter().map(String::as_str).collect();
+                    sorted.sort_unstable();
+                    format!(" (tags: {})", sorted.join(", "))
+                };
+                format!(
+                    "- {}{} [{}] {}",
+                    skill.id,
+                    tags,
+                    skill.layer.label(),
+                    skill.path
+                )
+            })
+            .collect();
+        Some(lines.join("\n"))
+    }
+
+    /// The always-on skill index for the system prompt: one `name — description` line per skill, sorted
+    /// by id, so the model knows what `use_skill` can fetch without carrying every body up front. `None`
+    /// when no skills were loaded.
+    pub fn skills_index(&self) -> Option<String> {
+        if self.skills.is_empty() {
+            return None;
+        }
+        let mut skills: Vec<&Skill> = self.skills.values().collect();
+        skills.sort_by(|a, b| a.id.cmp(&b.id));
+        let lines: Vec<String> = skills
+            .iter()
+            .map(|skill| format!("- {} — {}", skill.id, skill.description))
+            .collect();
+        Some(lines.join("\n"))
     }
 }
 
@@ -263,5 +342,138 @@ mod tests {
         };
         let display = catalog.commands_display().unwrap();
         assert!(display.contains("/test (aliases: /t) [project] /fake/test.md"));
+    }
+
+    fn agent(id: &str, system_prompt: &str) -> AgentProfile {
+        AgentProfile {
+            id: id.to_string(),
+            system_prompt: system_prompt.to_string(),
+            layer: Layer::Global,
+            path: format!("/fake/{id}.md"),
+            model: None,
+            allowed_tools: Vec::new(),
+        }
+    }
+
+    fn command(name: &str, body: &str, agent: Option<&str>) -> ExtCommandSpec {
+        ExtCommandSpec {
+            name: name.to_string(),
+            aliases: Vec::new(),
+            description: String::new(),
+            body: body.to_string(),
+            layer: Layer::Project,
+            path: format!("/fake{name}.md"),
+            agent: agent.map(str::to_string),
+            model: None,
+            allowed_tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn command_bodies_prepends_the_bound_agent_system_prompt() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "researcher".to_string(),
+            agent("researcher", "You are a deep-research agent."),
+        );
+        let mut commands = HashMap::new();
+        commands.insert(
+            "/deep".to_string(),
+            command("/deep", "Investigate thoroughly.", Some("researcher")),
+        );
+        let catalog = ExtensionCatalog {
+            agents,
+            commands,
+            ..ExtensionCatalog::default()
+        };
+        let bodies = catalog.command_bodies();
+        assert_eq!(
+            bodies.get("/deep").map(String::as_str),
+            Some("You are a deep-research agent.\n\nInvestigate thoroughly.")
+        );
+    }
+
+    #[test]
+    fn command_bodies_ignores_an_unknown_agent_id() {
+        let mut commands = HashMap::new();
+        commands.insert(
+            "/deep".to_string(),
+            command("/deep", "Investigate thoroughly.", Some("ghost")),
+        );
+        let catalog = ExtensionCatalog {
+            commands,
+            ..ExtensionCatalog::default()
+        };
+        let bodies = catalog.command_bodies();
+        assert_eq!(
+            bodies.get("/deep").map(String::as_str),
+            Some("Investigate thoroughly.")
+        );
+    }
+
+    #[test]
+    fn empty_catalog_yields_no_agents_display() {
+        assert!(ExtensionCatalog::default().agents_display().is_none());
+    }
+
+    #[test]
+    fn agents_display_lists_id_layer_and_path() {
+        let mut agents = HashMap::new();
+        agents.insert("researcher".to_string(), agent("researcher", "..."));
+        let catalog = ExtensionCatalog {
+            agents,
+            ..ExtensionCatalog::default()
+        };
+        let display = catalog.agents_display().unwrap();
+        assert!(display.contains("- researcher [global] /fake/researcher.md"));
+    }
+
+    fn skill(id: &str, description: &str, tags: &[&str]) -> Skill {
+        Skill {
+            id: id.to_string(),
+            description: description.to_string(),
+            body: format!("{id} body"),
+            layer: Layer::Project,
+            path: format!("/fake/{id}.md"),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            script: None,
+        }
+    }
+
+    #[test]
+    fn empty_catalog_yields_no_skills_display_or_index() {
+        let catalog = ExtensionCatalog::default();
+        assert!(catalog.skills_display().is_none());
+        assert!(catalog.skills_index().is_none());
+    }
+
+    #[test]
+    fn skills_display_lists_id_tags_layer_and_path() {
+        let mut skills = HashMap::new();
+        skills.insert(
+            "pdf-extract".to_string(),
+            skill("pdf-extract", "Extract text from PDFs", &["pdf", "docs"]),
+        );
+        let catalog = ExtensionCatalog {
+            skills,
+            ..ExtensionCatalog::default()
+        };
+        let display = catalog.skills_display().unwrap();
+        assert!(display.contains("- pdf-extract (tags: docs, pdf) [project] /fake/pdf-extract.md"));
+    }
+
+    #[test]
+    fn skills_index_lists_id_and_description() {
+        let mut skills = HashMap::new();
+        skills.insert(
+            "pdf-extract".to_string(),
+            skill("pdf-extract", "Extract text from PDFs", &[]),
+        );
+        let catalog = ExtensionCatalog {
+            skills,
+            ..ExtensionCatalog::default()
+        };
+        let index = catalog.skills_index().unwrap();
+        assert_eq!(index, "- pdf-extract — Extract text from PDFs");
     }
 }

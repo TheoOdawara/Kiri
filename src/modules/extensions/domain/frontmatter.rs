@@ -39,11 +39,15 @@ impl Frontmatter {
     }
 
     /// Whether `key` is present as a scalar or a list.
+    // ponytail: generic accessors with no production caller yet — kept for the next frontmatter
+    // consumer (e.g. a `has("script")` check) rather than deleted pre-emptively; both are unit-tested.
+    #[allow(dead_code)]
     pub fn has(&self, key: &str) -> bool {
         self.get(key).is_some() || self.lists.iter().any(|(k, _)| k == key)
     }
 
     /// The parsed scalar keys as a tag set, for callers that index by tag/metadata.
+    #[allow(dead_code)]
     pub fn scalar_keys(&self) -> HashSet<&str> {
         self.scalars.iter().map(|(k, _)| k.as_str()).collect()
     }

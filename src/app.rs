@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use crate::modules::agent::application::agent_loop::AgentLoop;
 use crate::modules::extensions::application::{ExtensionCatalog, ExtensionsLoader};
 use crate::modules::extensions::infrastructure::file_loader::FileExtensionsLoader;
+use crate::modules::extensions::infrastructure::tools::default_extension_tools;
 use crate::modules::memory::application::digest::{
     DIGEST_PROJECT_CAP, DIGEST_SHARED_CAP, render_digest,
 };
@@ -100,6 +101,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // and session — a load failure degrades to an empty catalog rather than aborting the boot.
     let extensions = build_extensions(&settings, &mut boot_notices).await;
     let rules_text = extensions.render_rules();
+    let skills_text = extensions.skills_index().unwrap_or_default();
     let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
     // The composition root owns cross-module wiring: build the sensitive matcher here and inject it into
     // the sandbox, so `Settings`/`config` no longer reaches into the `tools` adapter for it.
@@ -115,6 +117,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         EXEC_MAX_BYTES,
         settings.checkpoint_budget,
         (!rules_text.is_empty()).then_some(rules_text.as_str()),
+        (!skills_text.is_empty()).then_some(skills_text.as_str()),
         settings.instructions.as_deref(),
     );
     let sandbox = FsSandbox::with_confinement(
@@ -149,6 +152,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     );
     tools.push(Box::new(PresentPlan));
     tools.extend(memory_tools);
+    tools.extend(default_extension_tools(Arc::new(extensions.skills.clone())));
     let registry = ToolRegistry::new(tools);
     let agent_loop = AgentLoop::new(
         provider,
@@ -186,6 +190,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     );
     let rules_display = extensions.rules_display();
     let commands_display = extensions.commands_display();
+    let agents_display = extensions.agents_display();
+    let skills_display = extensions.skills_display();
     let custom_command_bodies = extensions.command_bodies();
     let mut custom_commands: Vec<CustomCommandEntry> = extensions
         .commands
@@ -214,6 +220,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         custom_commands,
         custom_command_bodies,
         commands_display,
+        agents_display,
+        skills_display,
     }))
 }
 

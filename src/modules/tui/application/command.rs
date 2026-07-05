@@ -34,6 +34,10 @@ pub enum Command {
     Rules,
     /// `/commands`: show the loaded extension custom commands (name, aliases, layer, source path).
     Commands,
+    /// `/agents`: show the loaded agent profiles (id, layer, source path).
+    Agents,
+    /// `/skills`: show the loaded skills (id, tags, layer, source path).
+    Skills,
     /// A `/`-prefixed token that matches no built-in — carries the raw head token so the runtime can
     /// still resolve it against the extension-provided custom commands before reporting it unknown.
     Unknown(String),
@@ -68,6 +72,8 @@ pub fn parse(line: &str) -> Option<Command> {
         "/instructions" | "/instrucoes" => Command::Instructions,
         "/rules" | "/regras" => Command::Rules,
         "/commands" | "/comandos" => Command::Commands,
+        "/agents" | "/agentes" => Command::Agents,
+        "/skills" => Command::Skills,
         _ => Command::Unknown(head.to_string()),
     };
     Some(command)
@@ -252,6 +258,9 @@ mod tests {
             "/regras",
             "/commands",
             "/comandos",
+            "/agents",
+            "/agentes",
+            "/skills",
         ]
         .into_iter()
         .collect();

@@ -53,6 +53,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         blurb: "exibe os comandos custom carregados (globais/projeto)",
     },
     CommandSpec {
+        name: "/agents",
+        aliases: &["/agentes"],
+        blurb: "exibe os perfis de agente carregados",
+    },
+    CommandSpec {
+        name: "/skills",
+        aliases: &[],
+        blurb: "exibe as skills carregadas (use_skill busca o conteúdo)",
+    },
+    CommandSpec {
         name: "/plan",
         aliases: &[],
         blurb: "modo plan (só leitura; planeja e executa após aprovação)",

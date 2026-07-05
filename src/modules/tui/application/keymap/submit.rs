@@ -42,6 +42,22 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
             model.notify_info(text);
             vec![]
         }
+        Some(Command::Agents) => {
+            let text = model
+                .agents_display
+                .clone()
+                .unwrap_or_else(|| "Nenhum agente carregado.".to_string());
+            model.notify_info(text);
+            vec![]
+        }
+        Some(Command::Skills) => {
+            let text = model
+                .skills_display
+                .clone()
+                .unwrap_or_else(|| "Nenhuma skill carregada.".to_string());
+            model.notify_info(text);
+            vec![]
+        }
         Some(Command::Help) => {
             model.notify_info(command::help_text());
             vec![]

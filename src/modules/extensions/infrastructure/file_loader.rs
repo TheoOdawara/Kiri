@@ -1,6 +1,6 @@
 //! Loads extension resources from the filesystem: Markdown files with optional YAML frontmatter.
-//! Scans two well-known directory trees — `~/.kiri/rules/`/`commands/` (global) and
-//! `<workspace>/.kiri/rules/`/`commands/` (project) — merging by id (global first, project extends).
+//! Scans the four resource-type subdirectories (`rules/`, `commands/`, `agents/`, `skills/`) under both
+//! `~/.kiri/` (global) and `<workspace>/.kiri/` (project) — merging by id (global first, project extends).
 //! Follows the same convention as `DocsLibrary`: depth-first walk, capped, symlink-skipping.
 
 use std::collections::HashMap;
@@ -8,9 +8,15 @@ use std::path::{Path, PathBuf};
 
 use crate::modules::extensions::application::catalog::{ExtensionCatalog, ExtensionsLoader};
 use crate::modules::extensions::domain::frontmatter::Frontmatter;
-use crate::modules::extensions::domain::resource::{CommandSpec as ExtCommandSpec, Resource, Rule};
+use crate::modules::extensions::domain::resource::{
+    AgentProfile, CommandSpec as ExtCommandSpec, Resource, Rule, Skill,
+};
 use crate::modules::extensions::domain::scope::Layer;
 use crate::shared::kernel::error::AgentResult;
+
+/// The four extension resource types this loader scans, in discovery order. Each is a subdirectory name
+/// under both the global and project `.kiri/` roots.
+const RESOURCE_TYPES: [&str; 4] = ["rules", "commands", "agents", "skills"];
 
 /// Cap on total files visited during discovery across all extension types, so a huge tree does not hold
 /// boot indefinitely.
@@ -93,9 +99,10 @@ async fn load_layer(
     Ok(())
 }
 
-/// The filesystem adapter: scans `~/.kiri/rules/` and `<workspace>/.kiri/rules/` (plus `commands/`
-/// equivalents for Phase 2), loading Markdown files with frontmatter. Reads the home directory from
-/// `shared/infra::home` — the single cross-platform source also read by `config::expand_home`.
+/// The filesystem adapter: scans `~/.kiri/{rules,commands,agents,skills}/` and their
+/// `<workspace>/.kiri/` project-layer equivalents, loading Markdown files with frontmatter. Reads the
+/// home directory from `shared/infra::home` — the single cross-platform source also read by
+/// `config::expand_home`.
 pub struct FileExtensionsLoader {
     global_dir: PathBuf,
     project_dir: PathBuf,
@@ -110,38 +117,46 @@ impl FileExtensionsLoader {
         }
     }
 
-    async fn load_type(
-        &self,
-        type_name: &str,
-        resources: &mut HashMap<String, Resource>,
-        rules: &mut Vec<Rule>,
-        commands: &mut HashMap<String, ExtCommandSpec>,
-        command_aliases: &mut HashMap<String, String>,
-    ) -> AgentResult<()> {
+    /// Discover and fold one resource type into `catalog`: scans the global then project `type_name/`
+    /// subdirectory (a fresh resources map per type, so ids never collide across types), then builds the
+    /// typed entries into the matching catalog field. Takes `&mut ExtensionCatalog` rather than one
+    /// mutable ref per field — the catalog already groups every accumulator this needs, so this stays
+    /// under the argument-count lint as new resource types are added.
+    async fn load_type(&self, type_name: &str, catalog: &mut ExtensionCatalog) -> AgentResult<()> {
+        let mut resources: HashMap<String, Resource> = HashMap::new();
         let global_root = self.global_dir.join(type_name);
         if global_root.is_dir() {
-            load_layer(&global_root, Layer::Global, resources).await?;
+            load_layer(&global_root, Layer::Global, &mut resources).await?;
         }
         let project_root = self.project_dir.join(type_name);
         if project_root.is_dir() {
-            load_layer(&project_root, Layer::Project, resources).await?;
+            load_layer(&project_root, Layer::Project, &mut resources).await?;
         }
 
-        for (_, res) in resources.iter() {
+        for res in resources.values() {
             match type_name {
-                "rules" => {
-                    rules.push(Rule::from_resource(res));
-                }
+                "rules" => catalog.rules.push(Rule::from_resource(res)),
                 "commands" => {
                     let cmd = ExtCommandSpec::from_resource(res);
                     for alias in &cmd.aliases {
-                        command_aliases.insert(alias.clone(), cmd.name.clone());
+                        catalog
+                            .command_aliases
+                            .insert(alias.clone(), cmd.name.clone());
                     }
-                    commands.insert(cmd.name.clone(), cmd);
+                    catalog.commands.insert(cmd.name.clone(), cmd);
+                }
+                "agents" => {
+                    let agent = AgentProfile::from_resource(res);
+                    catalog.agents.insert(agent.id.clone(), agent);
+                }
+                "skills" => {
+                    let skill = Skill::from_resource(res);
+                    catalog.skills.insert(skill.id.clone(), skill);
                 }
                 _ => {}
             }
         }
+        catalog.resources.extend(resources);
         Ok(())
     }
 }
@@ -149,39 +164,11 @@ impl FileExtensionsLoader {
 #[async_trait::async_trait]
 impl ExtensionsLoader for FileExtensionsLoader {
     async fn load(&self) -> AgentResult<ExtensionCatalog> {
-        let mut resources: HashMap<String, Resource> = HashMap::new();
-        let mut rules: Vec<Rule> = Vec::new();
-        let mut commands: HashMap<String, ExtCommandSpec> = HashMap::new();
-        let mut command_aliases: HashMap<String, String> = HashMap::new();
-
-        // Rules first (global, then project), then commands — same order each type.
-        self.load_type(
-            "rules",
-            &mut resources,
-            &mut rules,
-            &mut commands,
-            &mut command_aliases,
-        )
-        .await?;
-        // Commands use a fresh resources map so they don't share the rules' id namespace.
-        let mut cmd_resources: HashMap<String, Resource> = HashMap::new();
-        self.load_type(
-            "commands",
-            &mut cmd_resources,
-            &mut rules,
-            &mut commands,
-            &mut command_aliases,
-        )
-        .await?;
-        // Merge the two resource maps (rules + commands).
-        resources.extend(cmd_resources);
-
-        Ok(ExtensionCatalog {
-            resources,
-            rules,
-            commands,
-            command_aliases,
-        })
+        let mut catalog = ExtensionCatalog::default();
+        for type_name in RESOURCE_TYPES {
+            self.load_type(type_name, &mut catalog).await?;
+        }
+        Ok(catalog)
     }
 }
 
@@ -290,5 +277,45 @@ mod tests {
         assert_eq!(cmd.layer, Layer::Global);
         // Both resources are in the catalog for display.
         assert_eq!(catalog.resources.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn loads_agents_and_skills() {
+        let global = TempDir::new().unwrap();
+        write(
+            global.path(),
+            "agents/researcher.md",
+            "---\nmodel: gpt-pro\n---\n\nYou are a deep-research agent.\n",
+        )
+        .await;
+        write(
+            global.path(),
+            "skills/pdf-extract.md",
+            "---\ndescription: Extract text from PDFs\ntags:\n  - pdf\n---\n\nUse pdftotext.\n",
+        )
+        .await;
+
+        let workspace = TempDir::new().unwrap();
+        let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
+        let catalog = loader.load().await.unwrap();
+
+        let agent = catalog.agents.get("researcher").unwrap();
+        assert_eq!(agent.system_prompt, "You are a deep-research agent.");
+        assert_eq!(agent.model.as_deref(), Some("gpt-pro"));
+
+        let skill = catalog.skills.get("pdf-extract").unwrap();
+        assert_eq!(skill.description, "Extract text from PDFs");
+        assert!(skill.tags.contains("pdf"));
+        assert_eq!(skill.body, "Use pdftotext.");
+    }
+
+    #[tokio::test]
+    async fn empty_dirs_yield_no_agents_or_skills() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
+        let catalog = loader.load().await.unwrap();
+        assert!(catalog.agents.is_empty());
+        assert!(catalog.skills.is_empty());
     }
 }

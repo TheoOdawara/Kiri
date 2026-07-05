@@ -47,6 +47,10 @@ pub struct Rule {
     pub body: String,
     pub layer: Layer,
     pub path: String,
+    // ponytail: on-demand rule addressing by tag (skills/commands looking up a rule by topic) has no
+    // caller yet — the only routing built so far is the always-on injection. Upgrade path: a
+    // `rules_by_tag` lookup once a skill/command needs one.
+    #[allow(dead_code)]
     pub tags: HashSet<String>,
 }
 
@@ -87,10 +91,14 @@ pub struct CommandSpec {
     pub body: String,
     pub layer: Layer,
     pub path: String,
-    /// Reserved for Fase 3/5 binding: an agent profile id or MCP server to run the command under.
+    /// An agent profile id to run the command under: its system-prompt is prepended to the expanded body
+    /// (`ExtensionCatalog::command_bodies`).
     pub agent: Option<String>,
+    // ponytail: model/tool-scoping per turn has no engine mechanism yet (AgentLoop/ToolRegistry are
+    // session-wide, not per-turn) — upgrade path: thread an optional override through AgentLoop::run.
+    #[allow(dead_code)]
     pub model: Option<String>,
-    /// Reserved for Fase 3: a tool allow-list the invocation restricts the turn to.
+    #[allow(dead_code)]
     pub allowed_tools: Vec<String>,
 }
 
@@ -139,6 +147,95 @@ impl CommandSpec {
             agent,
             model,
             allowed_tools,
+        }
+    }
+}
+
+/// An **agent** profile (ADR 0021): a named system-prompt a custom command binds to via its `agent:`
+/// field. Built from a `Resource`. Not an isolated sub-agent — the harness runs a single turn loop, so
+/// binding a command to an agent means "prepend this system-prompt to the turn", not "spawn a concurrent
+/// agent" (see `ExtensionCatalog::command_bodies`).
+#[derive(Debug, Clone)]
+pub struct AgentProfile {
+    pub id: String,
+    /// The agent's system-prompt text (the resource body), prepended to a bound command's expanded body.
+    pub system_prompt: String,
+    pub layer: Layer,
+    pub path: String,
+    // ponytail: same ceiling as `CommandSpec::model`/`allowed_tools` — no per-turn override mechanism yet.
+    #[allow(dead_code)]
+    pub model: Option<String>,
+    #[allow(dead_code)]
+    pub allowed_tools: Vec<String>,
+}
+
+impl AgentProfile {
+    /// Build an agent profile from a frontmatter-parsed resource.
+    pub fn from_resource(res: &Resource) -> Self {
+        let model = res
+            .frontmatter
+            .get("model")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let allowed_tools = res
+            .frontmatter
+            .list("allowed-tools")
+            .map(|items| items.to_vec())
+            .unwrap_or_default();
+        Self {
+            id: res.id.clone(),
+            system_prompt: res.body.clone(),
+            layer: res.layer,
+            path: res.path.clone(),
+            model,
+            allowed_tools,
+        }
+    }
+}
+
+/// A **skill**: on-demand instructions the model pulls via the `use_skill(name)` tool rather than always
+/// carrying the full body in the system prompt. `description` is the one-line entry shown in the always-on
+/// skill index; `body` is returned only when invoked. Built from a `Resource`.
+#[derive(Debug, Clone)]
+pub struct Skill {
+    pub id: String,
+    pub description: String,
+    pub body: String,
+    pub layer: Layer,
+    pub path: String,
+    pub tags: HashSet<String>,
+    // ponytail: a skill script is an active capability (shell execution) — no hooks/gate machinery exists
+    // yet to run it safely. Upgrade path: the hooks context (Fase 4) executes it behind the trust gate.
+    #[allow(dead_code)]
+    pub script: Option<String>,
+}
+
+impl Skill {
+    /// Build a skill from a frontmatter-parsed resource.
+    pub fn from_resource(res: &Resource) -> Self {
+        let description = res
+            .frontmatter
+            .get("description")
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let tags = res
+            .frontmatter
+            .list("tags")
+            .map(|items| items.iter().cloned().collect())
+            .unwrap_or_default();
+        let script = res
+            .frontmatter
+            .get("script")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        Self {
+            id: res.id.clone(),
+            description,
+            body: res.body.clone(),
+            layer: res.layer,
+            path: res.path.clone(),
+            tags,
+            script,
         }
     }
 }
@@ -244,5 +341,42 @@ mod tests {
         assert!(cmd.agent.is_none());
         assert!(cmd.model.is_none());
         assert!(cmd.allowed_tools.is_empty());
+    }
+
+    #[test]
+    fn agent_profile_reads_system_prompt_and_bindings() {
+        let res = resource(
+            "researcher",
+            "---\nmodel: gpt-pro\nallowed-tools:\n  - search\n---\n",
+            "You are a deep-research agent.",
+            Layer::Global,
+        );
+        let agent = AgentProfile::from_resource(&res);
+        assert_eq!(agent.id, "researcher");
+        assert_eq!(agent.system_prompt, "You are a deep-research agent.");
+        assert_eq!(agent.model.as_deref(), Some("gpt-pro"));
+        assert_eq!(agent.allowed_tools, ["search"]);
+    }
+
+    #[test]
+    fn skill_reads_description_tags_and_script() {
+        let res = resource(
+            "pdf-extract",
+            "---\ndescription: Extract text from PDFs\ntags:\n  - pdf\n  - docs\nscript: extract.py\n---\n",
+            "Use pdftotext for extraction.",
+            Layer::Project,
+        );
+        let skill = Skill::from_resource(&res);
+        assert_eq!(skill.description, "Extract text from PDFs");
+        assert!(skill.tags.contains("pdf"));
+        assert!(skill.tags.contains("docs"));
+        assert_eq!(skill.script.as_deref(), Some("extract.py"));
+    }
+
+    #[test]
+    fn skill_absent_script_is_none() {
+        let res = resource("doc", "---\n---\n", "Write docs.", Layer::Project);
+        let skill = Skill::from_resource(&res);
+        assert!(skill.script.is_none());
     }
 }

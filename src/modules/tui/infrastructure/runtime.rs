@@ -141,6 +141,10 @@ pub struct TuiParams {
     pub custom_command_bodies: std::collections::HashMap<String, String>,
     /// The formatted `/commands` display text. `None` when none were loaded.
     pub commands_display: Option<String>,
+    /// The formatted `/agents` display text. `None` when none were loaded.
+    pub agents_display: Option<String>,
+    /// The formatted `/skills` display text. `None` when none were loaded.
+    pub skills_display: Option<String>,
 }
 
 /// The long-lived owned run state, aggregated so the per-turn driver and the effect handlers are
@@ -198,6 +202,8 @@ impl Tui {
             custom_commands,
             custom_command_bodies,
             commands_display,
+            agents_display,
+            skills_display,
         } = params;
         let workspace = text::display_path(sandbox.root());
         let (model_id, models) = provider_swap
@@ -213,6 +219,8 @@ impl Tui {
             )
             .with_instructions(instructions_display)
             .with_rules(rules_display)
+            .with_agents(agents_display)
+            .with_skills(skills_display)
             .with_custom_commands(custom_commands, custom_command_bodies, commands_display);
         // Surface the wire-time degradations first, so the onboarding welcome (the call to action) lands
         // last when both are present.

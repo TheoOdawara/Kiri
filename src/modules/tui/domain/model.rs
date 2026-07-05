@@ -174,6 +174,10 @@ pub struct Model {
     /// The formatted `/commands` display text (name, aliases, layer, source path) for the loaded custom
     /// commands. `None` when none were found.
     pub commands_display: Option<String>,
+    /// The formatted `/agents` display text (id, layer, source path). `None` when none were found.
+    pub agents_display: Option<String>,
+    /// The formatted `/skills` display text (id, tags, layer, source path). `None` when none were found.
+    pub skills_display: Option<String>,
     /// Images pasted from the clipboard, staged for the next prompt and drained on submit.
     pub attachments: Vec<ImageAttachment>,
     /// When set, tool outputs and edit diffs render in full instead of a bounded preview. Toggled
@@ -306,6 +310,18 @@ impl Model {
     /// Seed the rules display text for the `/rules` command.
     pub fn with_rules(mut self, display: Option<String>) -> Self {
         self.rules_display = display;
+        self
+    }
+
+    /// Seed the agents display text for the `/agents` command.
+    pub fn with_agents(mut self, display: Option<String>) -> Self {
+        self.agents_display = display;
+        self
+    }
+
+    /// Seed the skills display text for the `/skills` command.
+    pub fn with_skills(mut self, display: Option<String>) -> Self {
+        self.skills_display = display;
         self
     }
 
