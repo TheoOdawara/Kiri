@@ -141,6 +141,26 @@ impl ProviderSwap {
         }
     }
 
+    /// Resolve the credential to reuse when editing `profile` with a blank key ("keep existing key").
+    /// Reuses the cached credential ONLY when `profile.id` is the currently ACTIVE provider — `credential`
+    /// is cached per-active-provider, not per-`profile.id` (see the struct doc comment). Issue #27a: using
+    /// it unconditionally let editing a DIFFERENT, non-active provider with a blank key silently adopt the
+    /// active provider's credential and re-store it under the edited profile's id, corrupting that
+    /// provider's stored secret with the wrong key. For any other provider (or no cache yet), resolves
+    /// fresh from the secret store, keyed by `profile.id` itself.
+    pub(super) fn resolve_credential_for_edit(
+        &self,
+        profile: &ProviderProfile,
+    ) -> Result<Credential, AgentError> {
+        if self.active == profile.id
+            && let Some(credential) = self.credential.clone()
+        {
+            return Ok(credential);
+        }
+        let (credential, _) = self.resolve_credential(profile)?;
+        Ok(credential)
+    }
+
     /// Rebuild the active provider with a new `effort`, committing the effort only on success. Without a
     /// live credential (first-run onboarding) there is nothing to rebuild, so it surfaces a clear error
     /// and leaves the effort dial untouched rather than panicking or silently diverging.
@@ -285,30 +305,43 @@ impl RunLoop {
         }
     }
 
+    /// Install a successful `ProviderSwitch`: swap the live adapter, adopt its model, refresh the status
+    /// line AND the `/models` picker's catalog (`self.model.models`), and surface any one-time env-import
+    /// persist warning. The one place both `apply_set_provider` and `apply_delete_provider`'s
+    /// fallback-to-next-provider path install a switch, so the model-catalog refresh can never silently
+    /// drift between the two again — it did (issue #27/G2-2): the delete path's own copy of this block had
+    /// dropped the `self.model.models` line, leaving the `/models` picker offering the deleted provider's
+    /// models until the next `/provider` switch.
+    fn install_switch(&mut self, id: &str, switch: ProviderSwitch) {
+        let ProviderSwitch {
+            provider,
+            model: target_model,
+            persist_warning,
+        } = switch;
+        self.agent_loop.set_provider(provider);
+        self.agent_loop.set_model(target_model.clone());
+        self.model.status.model = target_model;
+        self.model.status.provider = id.to_string();
+        self.model.models = self
+            .provider_swap
+            .active_profile()
+            .map(|p| p.models.clone())
+            .unwrap_or_default();
+        // Surface a one-time env-import persist failure (closes the former swallowed `let _ =`):
+        // the switch still succeeded for this session, but the key was not saved for the next one.
+        notice_env_import_failure(persist_warning, &mut self.model);
+    }
+
     /// Apply a `/provider` switch: rebuild the chosen provider's adapter with its stored credential and
     /// swap it in, also adopting its model. Commit + persist only on success; a missing credential or
     /// unknown id is surfaced, never a silent no-op.
     pub(super) fn apply_set_provider(&mut self, id: String) {
         match self.provider_swap.switch_to(&id) {
-            Ok(ProviderSwitch {
-                provider,
-                model: target_model,
-                persist_warning,
-            }) => {
-                self.agent_loop.set_provider(provider);
-                self.agent_loop.set_model(target_model.clone());
-                self.model.status.model = target_model.clone();
-                self.model.status.provider = id.clone();
-                self.model.models = self
-                    .provider_swap
-                    .active_profile()
-                    .map(|p| p.models.clone())
-                    .unwrap_or_default();
+            Ok(switch) => {
+                let target_model = switch.model.clone();
+                self.install_switch(&id, switch);
                 self.model
                     .notify_info(format!("provider: {id} ({target_model})"));
-                // Surface a one-time env-import persist failure (closes the former swallowed `let _ =`):
-                // the switch still succeeded for this session, but the key was not saved for the next one.
-                notice_env_import_failure(persist_warning, &mut self.model);
                 persist_or_notice(
                     config::persist_active_provider(&self.config_path, &id),
                     &mut self.model,
@@ -331,21 +364,17 @@ impl RunLoop {
     ) {
         let credential = match &profile.auth {
             AuthMethod::ApiKey if keep_existing_key => {
-                // Editing with a blank key: reuse the cached credential from the last switch/save.
-                // If no credential is cached (corner case: editing a provider that was never activated),
-                // fall back to resolving from the store so the provider stays functional.
+                // Editing with a blank key: see `ProviderSwap::resolve_credential_for_edit` (issue #27a)
+                // for why this can't just reuse the cached credential unconditionally.
                 self.model.pending_credential = None;
-                match self.provider_swap.credential.clone() {
-                    Some(c) => c,
-                    None => match self.provider_swap.resolve_credential(&profile) {
-                        Ok((c, _)) => c,
-                        Err(error) => {
-                            self.model.notify_error(format!(
-                                "não foi possível recuperar a chave existente: {error:#}"
-                            ));
-                            return;
-                        }
-                    },
+                match self.provider_swap.resolve_credential_for_edit(&profile) {
+                    Ok(c) => c,
+                    Err(error) => {
+                        self.model.notify_error(format!(
+                            "não foi possível recuperar a chave existente: {error:#}"
+                        ));
+                        return;
+                    }
                 }
             }
             AuthMethod::ApiKey => {
@@ -426,17 +455,7 @@ impl RunLoop {
         }
         // Rebuild the adapter for the new active provider.
         match self.provider_swap.switch_to(&new_active) {
-            Ok(ProviderSwitch {
-                provider,
-                model: target_model,
-                persist_warning,
-            }) => {
-                self.agent_loop.set_provider(provider);
-                self.agent_loop.set_model(target_model.clone());
-                self.model.status.model = target_model;
-                self.model.status.provider = new_active;
-                notice_env_import_failure(persist_warning, &mut self.model);
-            }
+            Ok(switch) => self.install_switch(&new_active, switch),
             Err(error) => self.model.notify_error(format!(
                 "não foi possível ativar o próximo provider: {error:#}"
             )),

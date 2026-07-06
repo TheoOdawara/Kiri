@@ -661,6 +661,35 @@ mod tests {
         );
     }
 
+    // Issue #27/G2-2: `apply_delete_provider`'s fallback-to-next-provider path used to duplicate
+    // `apply_set_provider`'s "install a switch" block inline, and the copy had already drifted (missing
+    // the `self.model.models` refresh, leaving `/models` offering the deleted provider's catalog). Both
+    // now route through the single `install_switch` helper (`runtime/provider_swap.rs`), so this can never
+    // silently drift apart again — proving the field gets set correctly needs a full `RunLoop` fixture
+    // (agent_loop/sandbox/session_store/memory/sync_context), deliberately out of scope for this fix and
+    // covered by issue #10's own "unit tests for domain-level provider CRUD logic" acceptance criterion;
+    // this source-scan guard only locks the *structural* failure (a second inline copy of the block) — it
+    // does not assert the block's body still contains the `self.model.models` refresh, so it is a
+    // de-duplication lock, not a substitute for that behavioral fixture.
+    #[test]
+    fn provider_switch_install_has_exactly_one_implementation() {
+        let source = include_str!("runtime/provider_swap.rs");
+        assert_eq!(
+            source.matches("fn install_switch").count(),
+            1,
+            "there must be exactly one install_switch definition — a second copy is exactly how G2-2 \
+             happened"
+        );
+        // Both call sites route through it: apply_set_provider's Ok arm and apply_delete_provider's
+        // fallback Ok arm.
+        assert_eq!(
+            source.matches("self.install_switch(").count(),
+            2,
+            "both apply_set_provider and apply_delete_provider's fallback path must call install_switch, \
+             not duplicate its body inline"
+        );
+    }
+
     fn has_error_notice(model: &Model) -> bool {
         model
             .transcript
@@ -748,6 +777,19 @@ mod tests {
         fn api_key() -> Credential {
             Credential::ApiKey {
                 key: Secret::new("k"),
+            }
+        }
+
+        fn api_key_with(value: &str) -> Credential {
+            Credential::ApiKey {
+                key: Secret::new(value),
+            }
+        }
+
+        fn expose(credential: &Credential) -> &str {
+            match credential {
+                Credential::ApiKey { key } => key.expose(),
+                other => panic!("expected an api key credential, got {other:?}"),
             }
         }
 
@@ -861,6 +903,82 @@ mod tests {
             );
             assert!(s.rebuild_with_effort(Effort::Max).is_err());
             assert_eq!(s.effort, Effort::High, "the effort dial must not change");
+        }
+
+        #[test]
+        fn resolve_credential_for_edit_reuses_the_cache_for_the_active_provider() {
+            let s = swap(
+                vec![profile("nvidia", ProviderKind::Nvidia, "m1")],
+                "nvidia",
+                &[("nvidia", api_key_with("active-cached-key"))],
+            );
+            let credential = s
+                .resolve_credential_for_edit(&profile("nvidia", ProviderKind::Nvidia, "m1"))
+                .unwrap();
+            assert_eq!(expose(&credential), "active-cached-key");
+        }
+
+        #[test]
+        fn resolve_credential_for_edit_never_leaks_the_active_credential_to_another_provider() {
+            // Issue #27a: editing a DIFFERENT, non-active provider with a blank key must resolve THAT
+            // provider's own stored credential, never the active provider's cached one — the cache is
+            // keyed by "the active provider," not by the profile being edited. Two distinct stored keys
+            // prove which one comes back.
+            let s = swap(
+                vec![
+                    profile("nvidia", ProviderKind::Nvidia, "m1"),
+                    profile("claude", ProviderKind::Anthropic, "claude-opus-4-8"),
+                ],
+                "nvidia",
+                &[
+                    ("nvidia", api_key_with("active-nvidia-key")),
+                    ("claude", api_key_with("claudes-own-key")),
+                ],
+            );
+            let credential = s
+                .resolve_credential_for_edit(&profile(
+                    "claude",
+                    ProviderKind::Anthropic,
+                    "claude-opus-4-8",
+                ))
+                .unwrap();
+            assert_eq!(
+                expose(&credential),
+                "claudes-own-key",
+                "must resolve claude's own stored key, never nvidia's active-cached one"
+            );
+        }
+
+        #[test]
+        fn resolve_credential_for_edit_falls_back_to_the_store_when_nothing_is_cached() {
+            // Editing a provider that was never activated this session (no cached credential at all):
+            // resolves fresh from the store rather than erroring.
+            let s = ProviderSwap::new(
+                reqwest::Client::new(),
+                Box::new(FakeStore {
+                    creds: HashMap::from([(
+                        "claude".to_string(),
+                        api_key_with("claudes-store-key"),
+                    )]),
+                }),
+                vec![profile(
+                    "claude",
+                    ProviderKind::Anthropic,
+                    "claude-opus-4-8",
+                )],
+                "claude".into(),
+                None,
+                true,
+                Effort::High,
+            );
+            let credential = s
+                .resolve_credential_for_edit(&profile(
+                    "claude",
+                    ProviderKind::Anthropic,
+                    "claude-opus-4-8",
+                ))
+                .unwrap();
+            assert_eq!(expose(&credential), "claudes-store-key");
         }
 
         #[test]
