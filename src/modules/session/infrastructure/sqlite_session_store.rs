@@ -316,6 +316,41 @@ impl SessionStore for SqliteSessionStore {
         .await
     }
 
+    async fn recent_user_prompts(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<String>> {
+        let conn = self.conn.clone();
+        let project_id = project_id.to_string();
+        run_blocking(
+            move || -> AgentResult<Vec<String>> {
+                let conn = lock(&conn, AgentError::session)?;
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT m.content FROM messages m
+                     JOIN sessions s ON m.session_id = s.id
+                     WHERE s.project_id = ?1 AND m.role = 'user' AND m.content IS NOT NULL
+                     ORDER BY s.updated_at DESC, m.ordinal DESC
+                     LIMIT ?2",
+                    )
+                    .map_err(AgentError::session)?;
+                let rows = stmt
+                    .query_map(params![project_id, limit as i64], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .map_err(AgentError::session)?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(AgentError::session)?);
+                }
+                Ok(out)
+            },
+            AgentError::session,
+        )
+        .await
+    }
+
     async fn load(&self, session_id: &str) -> AgentResult<Option<Session>> {
         let conn = self.conn.clone();
         let session_id = session_id.to_string();
@@ -790,5 +825,40 @@ mod tests {
             is_duplicate_column_error(&error),
             "expected a duplicate-column error, got {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn recent_user_prompts_filters_projects_and_roles_ordered_newest_first_with_limit() {
+        let dir = TempDir::new().unwrap();
+        let store = store(&dir).await;
+
+        let s1 = store.create("proj-a").await.unwrap();
+        store
+            .append_messages(
+                &s1.id,
+                &[Message::user("first"), Message::assistant_text("reply")],
+            )
+            .await
+            .unwrap();
+        let s2 = store.create("proj-a").await.unwrap();
+        store
+            .append_messages(&s2.id, &[Message::user("second"), Message::user("third")])
+            .await
+            .unwrap();
+        let other = store.create("proj-b").await.unwrap();
+        store
+            .append_messages(&other.id, &[Message::user("other project")])
+            .await
+            .unwrap();
+
+        let prompts = store.recent_user_prompts("proj-a", 10).await.unwrap();
+        assert_eq!(
+            prompts,
+            vec!["third", "second", "first"],
+            "newest first across sessions, assistant rows and other projects excluded"
+        );
+
+        let limited = store.recent_user_prompts("proj-a", 2).await.unwrap();
+        assert_eq!(limited, vec!["third", "second"], "limit is respected");
     }
 }

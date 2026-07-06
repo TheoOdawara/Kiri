@@ -362,6 +362,25 @@ impl Tui {
         )
         .await;
 
+        // Seed cross-session up/down recall with the last RECENT_PROMPT_SEED prompts the user submitted
+        // in this project, oldest first (matches History::record's newest-last/dedup semantics). Skipped
+        // entirely when the session store is degraded (KIRI_MEMORY=off or a failed open) — recall then
+        // stays in-memory-only for the current run, same as before this seed existed.
+        const RECENT_PROMPT_SEED: usize = 10;
+        if run_loop.session_store.is_available() {
+            // A query failure here (locked/corrupt DB) only costs the recall seed, not the boot itself —
+            // the TUI still starts with an empty (in-memory) history rather than failing to launch over a
+            // non-essential convenience read.
+            let prompts = run_loop
+                .session_store
+                .recent_user_prompts(&run_loop.project_id, RECENT_PROMPT_SEED)
+                .await
+                .unwrap_or_default();
+            for prompt in prompts.into_iter().rev() {
+                run_loop.model.history.record(&prompt);
+            }
+        }
+
         // An initial prompt from the CLI runs as the first turn.
         if let Some(line) = seed.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
             match command::parse(&line) {
@@ -1183,6 +1202,13 @@ mod tests {
                 unreachable!("provider CRUD tests must never touch the session store")
             }
             async fn load(&self, _session_id: &str) -> AgentResult<Option<Session>> {
+                unreachable!("provider CRUD tests must never touch the session store")
+            }
+            async fn recent_user_prompts(
+                &self,
+                _project_id: &str,
+                _limit: usize,
+            ) -> AgentResult<Vec<String>> {
                 unreachable!("provider CRUD tests must never touch the session store")
             }
             fn is_available(&self) -> bool {

@@ -32,6 +32,11 @@ pub trait SessionStore: Send + Sync {
     /// Load a full session (all messages, in order) by id.
     async fn load(&self, session_id: &str) -> AgentResult<Option<Session>>;
 
+    /// The most recent user-submitted prompts across every session for a project, newest first —
+    /// backs cross-session up/down recall in the TUI's prompt `History`.
+    async fn recent_user_prompts(&self, project_id: &str, limit: usize)
+    -> AgentResult<Vec<String>>;
+
     /// Whether the store initialized successfully; a degraded (inert) store reports `false`.
     fn is_available(&self) -> bool;
 }
