@@ -288,7 +288,7 @@ async fn build_mcp_tools(
     servers.sort_by(|a, b| a.id.cmp(&b.id));
     for server in servers {
         let approved = match server.layer {
-            Layer::Global => true,
+            Layer::Global | Layer::Bundled => true,
             Layer::Project => {
                 let hash = content_hash(&server.hash_key());
                 // Fail closed on a trust-store read error (corrupt/unreadable file): treat as
@@ -346,9 +346,12 @@ async fn build_mcp_tools(
     tools
 }
 
-/// Wire the extensions framework (ADR 0021): rules + commands, discovered from `~/.kiri/{rules,commands}`
-/// (global, trusted) and `<workspace>/.kiri/{rules,commands}` (project). Auxiliary like memory/session — a
-/// load failure degrades to an empty catalog (surfaced as a boot notice) rather than aborting the boot.
+/// Wire the extensions framework (ADR 0021): rules, commands, agents, skills, hooks, and MCP servers,
+/// discovered from `~/.kiri/{...}` (global, trusted) and `<workspace>/.kiri/{...}` (project), with the
+/// binary-shipped defaults (ADR 0028) folded in as a third, lowest-precedence layer per resource type —
+/// so a fresh install is never empty, and any user file overrides a default of the same id. Auxiliary
+/// like memory/session — a load failure degrades to an empty catalog (surfaced as a boot notice) rather
+/// than aborting the boot.
 async fn build_extensions(settings: &Settings, notices: &mut Vec<BootNotice>) -> ExtensionCatalog {
     let loader = FileExtensionsLoader::new(settings.global_dir.clone(), &settings.path);
     match loader.load().await {

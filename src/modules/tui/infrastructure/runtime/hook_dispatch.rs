@@ -38,7 +38,7 @@ pub(super) async fn dispatch_hooks(
 ) {
     for hook in hooks.catalog.hooks_for_event(event) {
         let approved = match hook.layer {
-            Layer::Global => true,
+            Layer::Global | Layer::Bundled => true,
             Layer::Project => {
                 let hash = gate::content_hash(&hook.hash_key());
                 // Fail closed on a trust-store read error: treat as not-yet-approved rather than
