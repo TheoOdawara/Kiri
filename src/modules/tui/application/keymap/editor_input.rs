@@ -23,6 +23,12 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
     if model.wizard.is_some() {
         return on_wizard_key(model, key);
     }
+    if model.search_query.is_some() {
+        return on_search_key(model, key);
+    }
+    if model.focused_pane == PaneFocus::Transcript {
+        return on_transcript_key(model, key);
+    }
 
     // A live screen selection takes Ctrl+C first: request a copy (the runtime scrapes the buffer) and
     // clear afterward, so a second Ctrl+C resumes cancel/quit. This precedes both the composer's own
@@ -107,6 +113,30 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                 model.should_quit = true;
                 return vec![Effect::Quit];
             }
+            Key::Char('p') => {
+                model.focused_pane = match model.focused_pane {
+                    PaneFocus::Input => {
+                        if model.selected_item.is_none() && !model.transcript.is_empty() {
+                            model.selected_item =
+                                Some(model.transcript.items().len().saturating_sub(1));
+                        }
+                        PaneFocus::Transcript
+                    }
+                    PaneFocus::Transcript => PaneFocus::Input,
+                };
+                return vec![];
+            }
+            Key::Char('f') => {
+                if model.search_query.is_some() {
+                    model.search_query = None;
+                    model.search_results.clear();
+                } else {
+                    model.search_query = Some(String::new());
+                    model.search_results.clear();
+                    model.active_search_match = 0;
+                }
+                return vec![];
+            }
             _ => {}
         }
     }
@@ -123,6 +153,16 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
             model.timeline.last_esc = Some(now);
             if double_tap {
                 return vec![Effect::CancelTurn];
+            }
+            vec![]
+        }
+        // Esc when input is empty swaps to transcript focus.
+        Key::Esc if model.input.is_empty() => {
+            if !model.transcript.is_empty() {
+                model.focused_pane = PaneFocus::Transcript;
+                if model.selected_item.is_none() {
+                    model.selected_item = Some(model.transcript.items().len().saturating_sub(1));
+                }
             }
             vec![]
         }
@@ -255,5 +295,192 @@ fn click_granularity(model: &mut Model, col: u16, row: u16) -> Granularity {
         1 => Granularity::Char,
         2 => Granularity::Word,
         _ => Granularity::Line,
+    }
+}
+
+fn on_transcript_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
+    if (key.ctrl && key.code == Key::Char('p')) || key.code == Key::Esc {
+        model.focused_pane = PaneFocus::Input;
+        return vec![];
+    }
+
+    let items_len = model.transcript.items().len();
+    if items_len == 0 {
+        return vec![];
+    }
+
+    let mut current = model.selected_item.unwrap_or(items_len - 1);
+
+    match key.code {
+        Key::Up | Key::Char('k') => {
+            if current > 0 {
+                current -= 1;
+            } else {
+                current = items_len - 1;
+            }
+            model.selected_item = Some(current);
+            model.scroll.up(2);
+        }
+        Key::Down | Key::Char('j') => {
+            if current < items_len - 1 {
+                current += 1;
+            } else {
+                current = 0;
+            }
+            model.selected_item = Some(current);
+            model.scroll.down(2);
+        }
+        Key::Enter | Key::Char(' ') => {
+            if let Some(TranscriptItem::Tool(_)) = model.transcript.items().get(current) {
+                if model.expanded_tools_indices.contains(&current) {
+                    model.expanded_tools_indices.remove(&current);
+                } else {
+                    model.expanded_tools_indices.insert(current);
+                }
+            }
+        }
+        Key::Char('c') => {
+            if let Some(item) = model.transcript.items().get(current) {
+                let text = match item {
+                    TranscriptItem::User(t) => t.clone(),
+                    TranscriptItem::Reasoning(t) => t.clone(),
+                    TranscriptItem::Assistant(t) | TranscriptItem::PlanProposed(t) => {
+                        extract_code_blocks(t)
+                    }
+                    TranscriptItem::Tool(act) => {
+                        if let Some((_, out, _)) = &act.result {
+                            out.clone()
+                        } else {
+                            act.command.clone()
+                        }
+                    }
+                    TranscriptItem::Notice(_, t) => t.clone(),
+                };
+                if !text.is_empty() {
+                    return vec![Effect::CopyToClipboard(text)];
+                }
+            }
+        }
+        Key::Char('o') => {
+            if let Some(TranscriptItem::Tool(act)) = model.transcript.items().get(current)
+                && let Some(path) = extract_filepath(&act.command)
+            {
+                return vec![Effect::OpenFile(path)];
+            }
+        }
+        _ => {}
+    }
+    vec![]
+}
+
+fn extract_filepath(command: &str) -> Option<String> {
+    let parts: Vec<&str> = command.split_whitespace().collect();
+    if parts.len() >= 2 {
+        let path = parts[1].trim_matches('"').trim_matches('\'');
+        Some(path.to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_code_blocks(text: &str) -> String {
+    let mut blocks = Vec::new();
+    let mut in_block = false;
+    let mut current_block = Vec::new();
+    for line in text.lines() {
+        if line.starts_with("```") {
+            if in_block {
+                blocks.push(current_block.join("\n"));
+                current_block.clear();
+                in_block = false;
+            } else {
+                in_block = true;
+            }
+        } else if in_block {
+            current_block.push(line);
+        }
+    }
+    if blocks.is_empty() {
+        text.to_string()
+    } else {
+        blocks.join("\n\n")
+    }
+}
+
+fn on_search_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
+    let mut query = model.search_query.clone().unwrap_or_default();
+
+    match key.code {
+        Key::Esc | Key::Enter => {
+            if key.code == Key::Esc {
+                model.search_query = None;
+                model.search_results.clear();
+            } else {
+                model.focused_pane = PaneFocus::Input;
+            }
+            return vec![];
+        }
+        Key::Up | Key::Char('p') if key.ctrl => {
+            if !model.search_results.is_empty() {
+                if model.active_search_match > 0 {
+                    model.active_search_match -= 1;
+                } else {
+                    model.active_search_match = model.search_results.len() - 1;
+                }
+                let idx = model.search_results[model.active_search_match];
+                model.selected_item = Some(idx);
+                model.scroll.up(2);
+            }
+        }
+        Key::Down | Key::Char('n') if key.ctrl => {
+            if !model.search_results.is_empty() {
+                if model.active_search_match < model.search_results.len() - 1 {
+                    model.active_search_match += 1;
+                } else {
+                    model.active_search_match = 0;
+                }
+                let idx = model.search_results[model.active_search_match];
+                model.selected_item = Some(idx);
+                model.scroll.down(2);
+            }
+        }
+        Key::Backspace => {
+            query.pop();
+            update_search_results(model, &query);
+        }
+        Key::Char(c) if !key.ctrl && !key.alt => {
+            query.push(c);
+            update_search_results(model, &query);
+        }
+        _ => {}
+    }
+    vec![]
+}
+
+fn update_search_results(model: &mut Model, query: &str) {
+    model.search_query = Some(query.to_string());
+    model.search_results.clear();
+    model.active_search_match = 0;
+
+    if query.is_empty() {
+        return;
+    }
+
+    let query_lower = query.to_lowercase();
+    for (idx, item) in model.transcript.items().iter().enumerate() {
+        let text = match item {
+            TranscriptItem::User(t) => t,
+            TranscriptItem::Reasoning(t) => t,
+            TranscriptItem::Assistant(t) | TranscriptItem::PlanProposed(t) => t,
+            TranscriptItem::Tool(act) => &act.command,
+            TranscriptItem::Notice(_, t) => t,
+        };
+        if text.to_lowercase().contains(&query_lower) {
+            model.search_results.push(idx);
+        }
+    }
+
+    if !model.search_results.is_empty() {
+        model.selected_item = Some(model.search_results[0]);
     }
 }

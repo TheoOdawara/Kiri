@@ -14,6 +14,17 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 
 use crate::modules::agent::application::agent_loop::AgentLoop;
+use crate::modules::extensions::application::{ExtensionCatalog, ExtensionsLoader};
+use crate::modules::extensions::domain::gate::{self, GateState, content_hash};
+use crate::modules::extensions::domain::resource::McpServer;
+use crate::modules::extensions::domain::scope::Layer;
+use crate::modules::extensions::infrastructure::file_loader::FileExtensionsLoader;
+use crate::modules::extensions::infrastructure::tools::default_extension_tools;
+use crate::modules::extensions::infrastructure::trust_store::ExtensionsTrustStore;
+use crate::modules::hooks::infrastructure::shell::ShellHookRunner;
+use crate::modules::mcp::application::mcp_connection::McpConnection;
+use crate::modules::mcp::infrastructure::rmcp_client::RmcpConnection;
+use crate::modules::mcp::infrastructure::tool_proxy::McpToolProxy;
 use crate::modules::memory::application::digest::{
     DIGEST_PROJECT_CAP, DIGEST_SHARED_CAP, render_digest,
 };
@@ -49,8 +60,9 @@ use crate::modules::tools::infrastructure::exec::EXEC_MAX_BYTES;
 use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tools::infrastructure::sensitive::load_sensitive_matcher;
+use crate::modules::tui::domain::command_menu::CustomCommandEntry;
 use crate::modules::tui::infrastructure::runtime::{
-    BootNotice, ProviderSwap, SharedMemoryFactory, SyncContext, Tui, TuiParams,
+    BootNotice, HookContext, ProviderSwap, SharedMemoryFactory, SyncContext, Tui, TuiParams,
 };
 use crate::shared::infra::config::{
     Settings, SyncAction, ensure_private_dir, render_system_prompt,
@@ -93,6 +105,22 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         build_memory(&settings, embedder, project_id.clone(), &mut boot_notices).await?;
     // Session persistence shares the same degrade-never-abort contract as memory.
     let session_store = build_session(&settings, &mut boot_notices).await?;
+    // Extensions (ADR 0021): rules + commands from the global and project layers. Auxiliary like memory
+    // and session — a load failure degrades to an empty catalog rather than aborting the boot.
+    let extensions = build_extensions(&settings, &mut boot_notices).await;
+    // Shared by hook dispatch and MCP-server connection: the TOFU trust store gating both active
+    // capability types (ADR 0021). One file backs every workspace/kind, so approvals are scoped by
+    // `project_id` (reusing the same per-workspace key `build_memory`/sessions use) and by capability
+    // kind (`is_approved`/`approve`'s `kind` argument) — otherwise a hook and an MCP server rendering the
+    // same content string, or the same id+content reused across two projects, would share one approval.
+    let trust_store = Arc::new(ExtensionsTrustStore::new(
+        settings.global_dir.join("extensions_trust.json"),
+        project_id.clone(),
+    ));
+    let rules_text = extensions.render_rules();
+    let skills_text = extensions.skills_index().unwrap_or_default();
+    let hooks_display = extensions.hooks_display();
+    let mcp_display = extensions.mcp_display();
     let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
     // The composition root owns cross-module wiring: build the sensitive matcher here and inject it into
     // the sandbox, so `Settings`/`config` no longer reaches into the `tools` adapter for it.
@@ -107,6 +135,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         RUN_COMMAND_DEFAULT_TIMEOUT_MS,
         EXEC_MAX_BYTES,
         settings.checkpoint_budget,
+        (!rules_text.is_empty()).then_some(rules_text.as_str()),
+        (!skills_text.is_empty()).then_some(skills_text.as_str()),
         settings.instructions.as_deref(),
     );
     let sandbox = FsSandbox::with_confinement(
@@ -141,6 +171,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     );
     tools.push(Box::new(PresentPlan));
     tools.extend(memory_tools);
+    tools.extend(default_extension_tools(Arc::new(extensions.skills.clone())));
+    tools.extend(build_mcp_tools(&extensions, &trust_store, &mut boot_notices).await);
     let registry = ToolRegistry::new(tools);
     let agent_loop = AgentLoop::new(
         provider,
@@ -176,6 +208,29 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         settings.thinking,
         settings.effort,
     );
+    let rules_display = extensions.rules_display();
+    let commands_display = extensions.commands_display();
+    let agents_display = extensions.agents_display();
+    let skills_display = extensions.skills_display();
+    let custom_command_bodies = extensions.command_bodies();
+    let mut custom_commands: Vec<CustomCommandEntry> = extensions
+        .commands
+        .values()
+        .map(|command| CustomCommandEntry {
+            name: command.name.clone(),
+            blurb: command.description.clone(),
+        })
+        .collect();
+    custom_commands.sort_by(|a, b| a.name.cmp(&b.name));
+    // ADR 0021 hook dispatch: the catalog, the sanctioned shell-exec adapter, and the TOFU trust store.
+    // Built here (the composition root) and threaded through TuiParams to the SessionStart/SessionEnd/
+    // TurnEnd firing points in `tui::infrastructure::runtime`. The catalog Arc is built last — every
+    // other read of `extensions` above happens first.
+    let hook_context = HookContext {
+        catalog: Arc::new(extensions),
+        runner: Arc::new(ShellHookRunner),
+        trust: trust_store,
+    };
     Ok(Tui::new(TuiParams {
         agent_loop,
         sandbox,
@@ -190,7 +245,110 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         project_id,
         boot_notices,
         instructions_display,
+        rules_display,
+        custom_commands,
+        custom_command_bodies,
+        commands_display,
+        agents_display,
+        skills_display,
+        hooks_display,
+        mcp_display,
+        hooks: hook_context,
     }))
+}
+
+/// Bound on the number of tools registered from a single MCP server. `McpToolProxy` leaks each qualified
+/// name (`Box::leak`, once per tool, never freed) — an approved-but-compromised server returning an
+/// unbounded tool list must not leak unbounded memory or bloat the schema payload sent to the provider.
+const MAX_MCP_TOOLS_PER_SERVER: usize = 200;
+
+/// Connect to every gate-approved MCP server (ADR 0021) and register its discovered tools. Global
+/// servers always connect; a project server needs the trust gate to currently approve its exact
+/// `(command, args)` (`/approve-mcp <id>`). A pending server, a spawn/handshake failure, or a discovery
+/// failure all surface as a boot notice and are skipped — auxiliary, like every other extension type,
+/// never fatal.
+async fn build_mcp_tools(
+    extensions: &ExtensionCatalog,
+    trust: &ExtensionsTrustStore,
+    notices: &mut Vec<BootNotice>,
+) -> Vec<Box<dyn Tool>> {
+    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+    let mut servers: Vec<&McpServer> = extensions.mcp_servers.values().collect();
+    servers.sort_by(|a, b| a.id.cmp(&b.id));
+    for server in servers {
+        let approved = match server.layer {
+            Layer::Global => true,
+            Layer::Project => {
+                let hash = content_hash(&server.hash_key());
+                // Fail closed on a trust-store read error (corrupt/unreadable file): treat as
+                // not-yet-approved rather than propagating — a storage hiccup must never silently grant
+                // a network-capable active capability. A retried `/approve-mcp` surfaces the same read
+                // error directly (it calls `approve`, which reads-then-writes), so the failure isn't silent.
+                let previously_approved =
+                    trust.is_approved("mcp", &server.id, &hash).unwrap_or(false);
+                gate::resolve(server.layer, previously_approved) == GateState::Approved
+            }
+        };
+        if !approved {
+            notices.push(BootNotice::new(format!(
+                "MCP server '{}' is pending approval (project layer) — it will run as an unrestricted, \
+                 network-capable subprocess once approved; run /approve-mcp {} to enable it",
+                server.id, server.id
+            )));
+            continue;
+        }
+        let connection = match RmcpConnection::connect(&server.command, &server.args).await {
+            Ok(connection) => Arc::new(connection) as Arc<dyn McpConnection>,
+            Err(error) => {
+                notices.push(BootNotice::new(format!(
+                    "MCP server '{}' unavailable ({error}); continuing without its tools",
+                    server.id
+                )));
+                continue;
+            }
+        };
+        match connection.list_tools().await {
+            Ok(specs) => {
+                let discovered = specs.len();
+                for spec in specs.into_iter().take(MAX_MCP_TOOLS_PER_SERVER) {
+                    tools.push(Box::new(McpToolProxy::new(
+                        &server.id,
+                        spec,
+                        connection.clone(),
+                    )));
+                }
+                if discovered > MAX_MCP_TOOLS_PER_SERVER {
+                    notices.push(BootNotice::new(format!(
+                        "MCP server '{}' advertised {discovered} tools; only the first \
+                         {MAX_MCP_TOOLS_PER_SERVER} were registered",
+                        server.id
+                    )));
+                }
+            }
+            Err(error) => notices.push(BootNotice::new(format!(
+                "MCP server '{}' connected but tool discovery failed ({error}); continuing without its \
+                 tools",
+                server.id
+            ))),
+        }
+    }
+    tools
+}
+
+/// Wire the extensions framework (ADR 0021): rules + commands, discovered from `~/.kiri/{rules,commands}`
+/// (global, trusted) and `<workspace>/.kiri/{rules,commands}` (project). Auxiliary like memory/session — a
+/// load failure degrades to an empty catalog (surfaced as a boot notice) rather than aborting the boot.
+async fn build_extensions(settings: &Settings, notices: &mut Vec<BootNotice>) -> ExtensionCatalog {
+    let loader = FileExtensionsLoader::new(settings.global_dir.clone(), &settings.path);
+    match loader.load().await {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            notices.push(BootNotice::new(format!(
+                "extensions unavailable ({error}); continuing without rules/commands"
+            )));
+            ExtensionCatalog::default()
+        }
+    }
 }
 
 /// The headless `kiri sync …` route, wired through the single composition root: harden the harness home,

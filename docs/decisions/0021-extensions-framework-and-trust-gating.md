@@ -1,0 +1,183 @@
+# ADR 0021 — Extensions Framework and Trust Gating
+
+**Status:** Accepted
+**Date:** 2026-06-29
+**Relates to:** ADR 0007 (system prompt), ADR 0012 (config layering), ADR 0019 (instructions layering)
+
+## Context
+
+Kiri supports a full AI-workflow surface: **rules**, **commands**, **agents**, **skills**, **hooks**, and
+**MCP** servers, each with a **global** (`~/.kiri/`) and a **local/project** (`<workspace>/.kiri/`) layer,
+mirroring the two-layer model already used for instructions (ADR 0019) and config (ADR 0012).
+
+The central tension: the project layer lives inside an **untrusted** workspace (a repo a user `cd`s into),
+and ADR 0012 locks it to contributing only `effort` — it must not redirect a credential, weaken the sandbox,
+or inject env. Yet the *value* of a workflow framework is precisely that teams commit these files to a repo
+to share them. So most extension types need to be loadable from the project layer.
+
+## Decision
+
+### Extension types, partitioned by capability
+
+Each extension is classified by the kind of effect it has, and the **project layer's rights** depend on it:
+
+| Class | Examples | Project layer |
+|---|---|---|
+| **Passive content** (text injected into a prompt or expanded into a prompt) | rules, command prompts, skill instructions, agent system-prompts | Loaded by default and merged into the session system prompt **before `# Security`** — the same posture as `KIRI.md` (ADR 0019). Injecting text does not execute anything; the Security section always takes precedence. |
+| **Active capability** (executes a shell/process, opens a network connection, or restricts/extends the toolset) | hooks (shell), MCP (spawn process / open a connection), sub-agents (tool subset + isolation), skill scripts | **Discovered** from the project, but **gated**: activated only after explicit user approval at boot, surfaced as a `BootNotice`. A hostile repo never silently enables execution or network, and never receives a harness secret. |
+| **Secrets** | MCP server API keys / tokens | **Global trusted layer only** (`~/.kiri/credentials.json`, `0600`). The project layer never supplies a secret. |
+
+This extends ADR 0012's "project contributes only `effort`" rule: the project *may* define passive content and
+the *metadata* of an active capability, but active capabilities from the project start **disabled** and require
+an explicit gate. The gate reuses the existing onboarding/approval machinery (a first-run prompt carried as a
+`BootNotice`).
+
+### Storage locations
+
+Two layers, both under `.kiri/` (consistent with project memory, which already lives in `<workspace>/.kiri/memory/`):
+
+```
+~/.kiri/{rules,commands,skills,agents,hooks,mcp}/      # global (trusted)
+<workspace>/.kiri/{rules,commands,commands,...}/       # project (untrusted — load passive, gate active)
+```
+
+Each resource is a Markdown file with optional YAML frontmatter. Global loads first, project after; a project
+entry with the same `id`/`name` extends or overrides the global one (never silently replaces a global one for
+routing-relevant fields).
+
+Discoverability from foreign ecosystems (`.claude/`, `.cursor/`) is deliberate future work — recorded here so
+the loader has one discovery layer per resource type.
+
+### Ordering in the system prompt
+
+Passive content is injected before `# Security`, so the harness's security policy is always final:
+
+```
+# Memory & preferences
+# Rules                       <- {RULES}  (always-on rules; absent when none)
+# Skills                      <- {SKILLS} (one-line index; bodies fetched on demand via use_skill)
+# User Instructions           <- {INSTRUCTIONS} (ADR 0019)
+# Security                    <- always last
+```
+
+### Composition root
+
+`app::wire` is the only place the extension adapters are chosen and the catalogs assembled, injected as ports.
+A new `extensions` bounded context holds the discovery + loading + the gate state; a `mcp` context and a
+`hooks` context own network/process I/O (the sanctioned sites for those, mirroring `provider`/`sync`).
+
+### Trust gate implementation: TOFU (Trust On First Use)
+
+`domain::gate::resolve(layer, previously_approved)` is the pure decision (global always `Approved`; project
+`Approved` only when `previously_approved`). The "previously approved" bit comes from
+`infrastructure::trust_store::ExtensionsTrustStore`, a `0600` JSON file at `~/.kiri/extensions_trust.json`
+(mirroring `FileSecretStore`'s adapter shape: read-modify-write, crash-atomic, owner-only), keyed by
+`capability id -> approved content hash` (`domain::gate::content_hash`, blake3, 16 hex chars).
+
+TOFU semantics: approve a capability once, and it stays approved as long as its content is unchanged. If a
+hostile repo edits an already-approved hook/MCP config after approval, its hash no longer matches the stored
+one — the gate reports `Pending` again on the next boot, exactly as if it had never been approved. Revoking
+an approval today means deleting its entry from the trust-store file by hand; a `/trust` management command
+is future work.
+
+This landed ahead of any real active-capability type as infrastructure only; hooks (below) is the first
+real caller.
+
+### Hooks: the first active capability
+
+`extensions::domain::resource::Hook`/`HookEvent` are discovered exactly like rules/commands/agents/skills
+(a `hooks/` subdirectory, frontmatter `event:` + optional `matcher:`, the Markdown body is the shell
+command). Execution lives in the new `hooks` bounded context (`hooks::application::hook_runner::HookRunner`
+port, `hooks::infrastructure::shell::ShellHookRunner` adapter) — the sanctioned site for this context's
+process I/O, confined by an architecture guard mirroring the domain-purity one. A hook's command runs
+through the same confined-exec surface as `run_command` (`tools::infrastructure::exec::run_shell`), network
+denied by default.
+
+Hooks are fire-and-forget: a run's outcome (success, failure, or timeout) surfaces as an info notice on the
+transcript, never fails or blocks the session/turn it fired from. `SessionStart`/`SessionEnd`/`TurnEnd`
+dispatch from existing async funnels (`Tui::run`'s boot/teardown, `on_turn_end`) via
+`tui::infrastructure::runtime::hook_dispatch::dispatch_hooks`, gated per firing:
+`domain::gate::resolve(layer, trust_store.is_approved(id, content_hash(command)))`. Global hooks always run;
+a project hook needs `/approve-hook <id>` first (TOFU) — `/hooks` lists what's loaded and its gate state.
+
+`PreToolUse`/`PostToolUse` are discovered and gated identically but have **no dispatcher yet**:
+`agent::application::tool_observer::ToolObserver`'s callbacks (`tool_started`/`tool_finished`) are
+synchronous, so firing an async hook there needs new spawn+channel plumbing into `Bridge` — deferred as a
+follow-up rather than folded into this pass.
+
+### MCP: the second active capability
+
+`extensions::domain::resource::McpServer` is discovered exactly like every other resource type (an `mcp/`
+subdirectory, frontmatter `command:` + optional `args:` list; **stdio transport only** — the ADR's
+`Http(url)` variant is unstarted, a `// ponytail:` upgrade path on the type itself). Connection and protocol
+speech live in the new `mcp` bounded context, over the official `rmcp` SDK (crates.io `rmcp`, the
+`modelcontextprotocol` org's Rust SDK) — the one new third-party dependency this whole framework needed.
+`mcp::application::mcp_connection::McpConnection` is the port (`list_tools`/`call_tool`, no `rmcp` type in
+its signature); `mcp::infrastructure::rmcp_client::RmcpConnection` is the sanctioned adapter, spawning the
+server as a child process (`rmcp::transport::TokioChildProcess`) and completing the handshake
+(`().serve(transport)`). An architecture guard confines both process spawning and any `rmcp::` reference to
+`mcp/infrastructure/`, mirroring the hooks guard.
+
+Unlike a hook (fires and exits every time), an MCP server is a **persistent connection**: `app::wire`
+connects to every gate-approved server once, at boot, lists its tools, and wraps each as a
+`mcp::infrastructure::tool_proxy::McpToolProxy` — a real `tools::application::tool::Tool` registered into
+the same `ToolRegistry` as the built-in file tools, namespaced `mcp__<server_id>__<tool_name>` so two
+servers can never collide. The gate check therefore happens once per boot, not per call (there is no
+"re-checked every firing" the way hooks work — `/approve-mcp <id>` takes effect on the *next* session
+start). A server that fails to spawn, fails its handshake, or fails tool discovery degrades to a boot
+notice — auxiliary, like every other extension type, never fatal. `/mcp` lists what loaded and its gate
+state.
+
+### Security hardening from review (post-implementation)
+
+A code review and security audit of the initial implementation surfaced five gaps against this ADR's own
+guarantees, all fixed before merge:
+
+- **MCP servers no longer inherit the harness process env.** `tokio::process::Command` inherits the
+  *entire* parent environment by default, which included provider API keys imported via `load_global_env`
+  (ADR 0020) — directly contradicting "the project layer... never receives a harness secret."
+  `RmcpConnection::connect` now calls `env_clear()` and re-adds only a small non-secret allowlist
+  (`PATH`, `HOME`, and the Windows equivalents) needed to resolve/run typical server binaries.
+- **`rmcp` calls are now timeout-bounded.** `connect`/`list_tools`/`call_tool` had no bound, so a hung or
+  malicious approved server could stall `app::wire` (or a live turn) indefinitely — a self-service-
+  unrecoverable local DoS once a server was approved. Both now run under `tokio::time::timeout`,
+  degrading to the existing boot-notice/error path on expiry, per this project's "all I/O has a timeout"
+  rule.
+- **The trust store is scoped by capability kind and workspace, not bare id.** `ExtensionsTrustStore` keys
+  approvals by `(workspace_id, kind, id)`, not just `id` — the single trust-store file backs every
+  workspace, so a bare-id key let a hook and an MCP server that render to the same content string (or the
+  same id+content reused across two different projects) share one approval, letting a lower-risk
+  capability's consent silently cover a higher-risk one.
+- **MCP's TOFU hash is now argv-structured, not a space-joined display string.** `McpServer::hash_key`
+  NUL-joins `command` and each arg; the old `content_hash(&command_line())` collided
+  `(command: "foo", args: ["bar", "baz"])` with `(command: "foo", args: ["bar baz"])`, letting an approved
+  server's argv shape change silently post-approval.
+- **A hook's TOFU hash now folds in `event`/`matcher`, not just `command`.** `Hook::hash_key` hashes all
+  three, so editing an approved hook's firing point (e.g. `SessionEnd` → `TurnEnd`, changing a one-shot
+  teardown hook into one that fires every turn) invalidates the approval exactly like an edited command
+  body does.
+
+Also added: a per-server cap (`MAX_MCP_TOOLS_PER_SERVER`) on how many tools an MCP server can register, so
+a compromised approved server can't leak unbounded `Box::leak`'d memory or bloat the schema payload; and
+an explicit disclosure in the `/approve-mcp` flow that an MCP server is an unrestricted, network-capable
+subprocess, unlike a sandboxed, network-denied hook.
+
+Deferred as `security-debt` (tracked as GitHub issues, not silently dropped): `tools::infrastructure::
+exec::run_shell` (used by both `run_command` and `ShellHookRunner`) has the same env-inheritance property
+as the pre-fix MCP path, but is pre-existing, wider-blast-radius code that needs its own review rather than
+a fix folded into this ADR's follow-up; the `hooks_process_io_confined_to_infrastructure`/`mcp_process_io_
+confined_to_infrastructure` guards are string-literal greps, defeatable by aliasing (defense-in-depth, not
+the primary control); sequential `SessionStart` hook dispatch can delay the TUI's first frame with no
+visible progress indicator.
+
+## Consequences
+
+- A team commits `.kiri/rules/` and `.kiri/commands/` to share behavioural guidance and slash commands;
+  both take effect on the next session start (the prompt is rendered once at boot).
+- Active capabilities (hooks/MCP) committed to a repo never auto-execute on `cd`; the user approves them once
+  (`/approve-hook <id>` / `/approve-mcp <id>`).
+- The `hooks_process_io_confined_to_infrastructure` and `mcp_process_io_confined_to_infrastructure`
+  architecture guards (`src/architecture_guards.rs`) keep process/network I/O confined to each context's
+  `infrastructure/`, mirroring the domain-purity guard.
+- The `extensions` context's `domain/` layer stays pure (frontmatter parsing, resource types); filesystem
+  discovery lives in `infrastructure/`, like the `memory` and `sync` contexts' own data dirs.

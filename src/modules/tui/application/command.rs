@@ -30,8 +30,25 @@ pub enum Command {
     Sync,
     /// `/instructions`: show the active instructions files and their merged content.
     Instructions,
-    /// A `/`-prefixed token that is not a known command.
-    Unknown,
+    /// `/rules`: show the loaded extension rules (id, layer, always-on).
+    Rules,
+    /// `/commands`: show the loaded extension custom commands (name, aliases, layer, source path).
+    Commands,
+    /// `/agents`: show the loaded agent profiles (id, layer, source path).
+    Agents,
+    /// `/skills`: show the loaded skills (id, tags, layer, source path).
+    Skills,
+    /// `/hooks`: show the loaded hooks (id, event, layer, source path).
+    Hooks,
+    /// `/approve-hook <id>`: approve a pending project-layer hook (ADR 0021 TOFU gate).
+    ApproveHook(String),
+    /// `/mcp`: show the loaded MCP servers (id, command, layer, source path).
+    Mcp,
+    /// `/approve-mcp <id>`: approve a pending project-layer MCP server (ADR 0021 TOFU gate).
+    ApproveMcp(String),
+    /// A `/`-prefixed token that matches no built-in — carries the raw head token so the runtime can
+    /// still resolve it against the extension-provided custom commands before reporting it unknown.
+    Unknown(String),
 }
 
 /// Parse a submitted line. `None` means it is a model prompt (or blank); the caller decides. A line that
@@ -61,7 +78,15 @@ pub fn parse(line: &str) -> Option<Command> {
         "/sessions" | "/sessoes" => Command::Sessions,
         "/sync" => Command::Sync,
         "/instructions" | "/instrucoes" => Command::Instructions,
-        _ => Command::Unknown,
+        "/rules" | "/regras" => Command::Rules,
+        "/commands" | "/comandos" => Command::Commands,
+        "/agents" | "/agentes" => Command::Agents,
+        "/skills" => Command::Skills,
+        "/hooks" => Command::Hooks,
+        "/approve-hook" => Command::ApproveHook(arg.to_string()),
+        "/mcp" => Command::Mcp,
+        "/approve-mcp" => Command::ApproveMcp(arg.to_string()),
+        _ => Command::Unknown(head.to_string()),
     };
     Some(command)
 }
@@ -111,8 +136,11 @@ mod tests {
 
     #[test]
     fn unknown_slash_tokens_are_commands_not_prompts() {
-        assert_eq!(parse("/exitnow"), Some(Command::Unknown));
-        assert_eq!(parse("/foo"), Some(Command::Unknown));
+        assert_eq!(
+            parse("/exitnow"),
+            Some(Command::Unknown("/exitnow".to_string()))
+        );
+        assert_eq!(parse("/foo"), Some(Command::Unknown("/foo".to_string())));
     }
 
     #[test]
@@ -143,8 +171,14 @@ mod tests {
 
     #[test]
     fn paste_is_now_unknown() {
-        assert_eq!(parse("/paste"), Some(Command::Unknown));
-        assert_eq!(parse("/colar"), Some(Command::Unknown));
+        assert_eq!(
+            parse("/paste"),
+            Some(Command::Unknown("/paste".to_string()))
+        );
+        assert_eq!(
+            parse("/colar"),
+            Some(Command::Unknown("/colar".to_string()))
+        );
     }
 
     #[test]
@@ -188,7 +222,7 @@ mod tests {
         // same command as its name, so the menu never advertises a token the parser would reject.
         for spec in COMMANDS {
             let canonical = parse(spec.name).expect("catalog name parses");
-            assert!(!matches!(canonical, Command::Unknown));
+            assert!(!matches!(canonical, Command::Unknown(_)));
             for alias in spec.aliases {
                 assert_eq!(
                     parse(alias),
@@ -232,6 +266,17 @@ mod tests {
             "/sync",
             "/instructions",
             "/instrucoes",
+            "/rules",
+            "/regras",
+            "/commands",
+            "/comandos",
+            "/agents",
+            "/agentes",
+            "/skills",
+            "/hooks",
+            "/approve-hook",
+            "/mcp",
+            "/approve-mcp",
         ]
         .into_iter()
         .collect();

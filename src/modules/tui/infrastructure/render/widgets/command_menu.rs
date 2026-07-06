@@ -1,50 +1,61 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::modules::tui::domain::command_menu::CommandMenu;
 use crate::modules::tui::infrastructure::text::{chunk_by_width, display_width};
 use crate::modules::tui::infrastructure::theme;
 
-/// Render the live slash-command preview as a borderless floating list just above the input editor: a
-/// dim `comandos` label, then one row per command pairing its canonical name with a short blurb. The
-/// selected row carries the single accent through its `❯` caret in the gutter; the rest stay dim.
+/// Render the live slash-command preview as a subtle bordered dropdown box just above the input editor.
+/// The selected row carries the single accent through its `❯` caret in the gutter; the rest stay dim.
 pub fn render(menu: &CommandMenu, frame: &mut Frame, anchor: Rect) {
     if menu.is_empty() {
         return;
     }
-    let region = box_rect(anchor, menu.filtered().len());
+    let region = box_rect(anchor, menu.len());
     frame.render_widget(Clear, region);
 
-    let inner_w = region.width as usize;
-    let mut lines: Vec<Line> = vec![Line::styled(" comandos", theme::dim())];
-    for (row, &cmd_index) in menu.filtered().iter().enumerate() {
-        let spec = &crate::modules::tui::domain::command_menu::COMMANDS[cmd_index];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::STEEL_RAMP[4])) // Subtle dark steel border
+        .title(Span::styled(" comandos ", theme::dim()))
+        .style(theme::base());
+
+    let inner_area = block.inner(region);
+    frame.render_widget(block, region);
+
+    let inner_w = inner_area.width as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for row in 0..menu.len() {
+        let Some(entry) = menu.row(row) else {
+            continue;
+        };
         let (marker, style) = super::option_marker(row == menu.selected());
         // Truncate the blurb so the row never overflows the list width.
-        let name_cols = display_width(spec.name);
+        let name = entry.name();
+        let name_cols = display_width(name);
         let prefix_cols = 2 + name_cols + 2; // marker + name + gap
         let blurb_budget = inner_w.saturating_sub(prefix_cols);
-        let blurb = truncate_blurb(spec.blurb, blurb_budget);
+        let blurb = truncate_blurb(entry.blurb(), blurb_budget);
         lines.push(Line::from(vec![
             Span::styled(marker, style),
-            Span::styled(spec.name, style),
+            Span::styled(name.to_string(), style),
             Span::styled("  ", style),
             Span::styled(blurb, style),
         ]));
     }
 
-    frame.render_widget(Paragraph::new(lines).style(theme::base()), region);
+    frame.render_widget(Paragraph::new(lines).style(theme::base()), inner_area);
 }
 
 /// Anchor the list to the top edge of `anchor` (the input region), so it floats just above the editor.
-/// The available height is the vertical space *above* the editor (`anchor.y`); height is the smaller of
-/// the desired rows (one label + one per command) and that space. Width is the smaller of `anchor.width`
-/// and 64, left-aligned with the editor column.
+/// Height is the smaller of desired rows (command rows + 2 for borders) and the vertical space.
+/// Width is the smaller of `anchor.width` and 64, left-aligned with the editor column.
 fn box_rect(anchor: Rect, row_count: usize) -> Rect {
-    let desired = row_count as u16 + 1; // one label row above the commands
-    let height = desired.min(anchor.y.max(1));
+    let desired = row_count as u16 + 2; // top and bottom border rows
+    let height = desired.min(anchor.y.max(2));
     let width = anchor.width.min(64);
     let y = anchor.y.saturating_sub(height);
     Rect {
@@ -108,7 +119,7 @@ mod tests {
 
     #[test]
     fn menu_renders_title_and_highlighted_row() {
-        let menu = CommandMenu::open("/");
+        let menu = CommandMenu::open("/", &[]);
         let out = paint(&menu, 64, 16);
         assert!(out.contains("comandos"), "title missing:\n{out}");
         assert!(out.contains("/new"), "canonical names missing:\n{out}");
@@ -117,7 +128,7 @@ mod tests {
 
     #[test]
     fn empty_menu_renders_nothing() {
-        let menu = CommandMenu::open("/zzz");
+        let menu = CommandMenu::open("/zzz", &[]);
         let out = paint(&menu, 64, 16);
         assert!(
             !out.contains("comandos"),

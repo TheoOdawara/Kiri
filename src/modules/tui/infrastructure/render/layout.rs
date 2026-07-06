@@ -1,8 +1,9 @@
-use ratatui::layout::{Constraint, Layout, Margin, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 
-/// Columns of side gutter (per edge) reserved on a roomy terminal so content never touches the edges.
-/// Generous (asymmetric-feeling) so the column floats off the wall — part of killing the boxed look.
-const SIDE_GUTTER: u16 = 6;
+/// Columns of left and right side gutters reserved on a roomy terminal.
+/// Small left gutter and minimal right gutter so the transcript/composer cover the full horizontal width.
+const LEFT_GUTTER: u16 = 2;
+const RIGHT_GUTTER: u16 = 1;
 /// Minimum width/height for the terminal to be considered "roomy" enough for decorative padding.
 const MIN_ROOMY_WIDTH: u16 = 60;
 const MIN_ROOMY_HEIGHT: u16 = 12;
@@ -26,11 +27,15 @@ pub struct Regions {
     pub hint: Rect,
 }
 
-/// Horizontal gutter (columns per side) reserved around the whole UI so content never touches the
+/// Horizontal padding (total columns) reserved around the whole UI so content never touches the
 /// terminal edges. Generous when the terminal is roomy, zero on small ones so nothing is squeezed.
 /// Public so the view sizes the input wrap width against the same content width.
-pub fn h_pad(area: Rect) -> u16 {
-    if roomy(area) { SIDE_GUTTER } else { 0 }
+pub fn h_pad_total(area: Rect) -> u16 {
+    if roomy(area) {
+        LEFT_GUTTER + RIGHT_GUTTER
+    } else {
+        0
+    }
 }
 
 /// Whether the terminal has room to spare for decorative padding (side gutters, top margin, the gap
@@ -39,9 +44,9 @@ fn roomy(area: Rect) -> bool {
     area.width >= MIN_ROOMY_WIDTH && area.height >= MIN_ROOMY_HEIGHT
 }
 
-/// Split the frame into the brand seal, the transcript, the forged meta rule, the optional confirmation
+/// Split the frame into the brand seal (height 0 now), the transcript, the forged meta rule, the optional confirmation
 /// box, the borderless input editor (height grows with the buffer, capped), and the hint line. The
-/// header and hint collapse to zero height on very short terminals so the transcript always keeps at
+/// hint collapse to zero height on very short terminals so the transcript always keeps at
 /// least one row; `box_h` is the height the caller computed for a pending plan/approval box (0 when none).
 /// On a roomy terminal the whole stack is inset by a gutter (sides + top/bottom) and a gap separates the
 /// scrolling transcript from the input cluster; both collapse to zero on small terminals.
@@ -52,17 +57,24 @@ pub fn frame_layout(area: Rect, input_lines: u16, box_h: u16) -> Regions {
     let has_box = box_h > 0;
     let vertical_pad = if roomy && !has_box { 1 } else { 0 };
     let gap_h = if roomy && !has_box { 2 } else { 0 };
-    // Inset the stack so content breathes away from the edges. The base block already paints the full
-    // frame, so the margin shows as background padding rather than a gap artifact.
-    let area = area.inner(Margin {
-        horizontal: if roomy { SIDE_GUTTER } else { 0 },
-        vertical: vertical_pad,
-    });
+
+    let left_pad = if roomy { LEFT_GUTTER } else { 0 };
+    let right_pad = if roomy { RIGHT_GUTTER } else { 0 };
+
+    let area = Rect {
+        x: area.x + left_pad,
+        y: area.y + vertical_pad,
+        width: area.width.saturating_sub(left_pad + right_pad),
+        height: area.height.saturating_sub(2 * vertical_pad),
+    };
 
     let input_height = input_lines.clamp(MIN_INPUT_HEIGHT, MAX_INPUT_HEIGHT); // borderless: no frame rows
-    let short = area.height < SHORT_TERMINAL_HEIGHT;
-    let header_h = if short { 0 } else { 1 };
-    let hint_h = if short { 0 } else { 1 };
+    let header_h = 0; // Header is moved to the sidebar!
+    let hint_h = if area.height < SHORT_TERMINAL_HEIGHT {
+        0
+    } else {
+        1
+    };
     // The confirmation box must render in full (the user reads its options to answer), so it takes
     // priority over the transcript: cap it to the rows left by the fixed chrome (header, gap, meta,
     // input, hint) and let the transcript yield to zero while a box is up. With no box, the transcript
@@ -97,8 +109,8 @@ mod tests {
     #[test]
     fn roomy_terminal_gets_gutters_top_margin_and_a_gap() {
         let r = frame_layout(Rect::new(0, 0, 100, 30), 1, 0);
-        assert_eq!(r.header.x, 6, "left gutter expected");
-        assert_eq!(r.header.width, 88, "side gutters of 6 each expected");
+        assert_eq!(r.header.x, 2, "left gutter expected");
+        assert_eq!(r.header.width, 97, "side gutters left 2 right 1 expected");
         assert_eq!(r.header.y, 1, "top margin expected");
         // A two-row gap separates the transcript from the meta rule (the input cluster).
         let transcript_end = r.transcript.y + r.transcript.height;
@@ -121,9 +133,9 @@ mod tests {
     }
 
     #[test]
-    fn h_pad_is_zero_when_not_roomy() {
-        assert_eq!(h_pad(Rect::new(0, 0, 50, 20)), 0);
-        assert_eq!(h_pad(Rect::new(0, 0, 100, 10)), 0);
-        assert_eq!(h_pad(Rect::new(0, 0, 100, 30)), 6);
+    fn h_pad_total_is_zero_when_not_roomy() {
+        assert_eq!(h_pad_total(Rect::new(0, 0, 50, 20)), 0);
+        assert_eq!(h_pad_total(Rect::new(0, 0, 100, 10)), 0);
+        assert_eq!(h_pad_total(Rect::new(0, 0, 100, 30)), 3);
     }
 }

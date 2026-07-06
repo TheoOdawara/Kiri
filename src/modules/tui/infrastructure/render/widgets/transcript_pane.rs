@@ -15,9 +15,7 @@ use crate::modules::tui::infrastructure::text::greedy_wrap;
 use crate::modules::tui::infrastructure::theme;
 use crate::modules::tui::infrastructure::widgets::splash;
 
-/// Max display width of the conversation column. Beyond this the body floats left against the void
-/// (rather than stretching edge-to-edge on an ultrawide terminal), keeping comfortable line lengths.
-const BODY_MAX_WIDTH: usize = 88;
+const BODY_MAX_WIDTH: usize = 9999;
 /// How long a freshly-landed answer line takes to cool from forge-warm to polished steel.
 const COOLING_MS: f32 = 150.0;
 
@@ -56,7 +54,9 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
         return;
     }
 
-    let width = (area.width as usize).clamp(1, BODY_MAX_WIDTH);
+    let width = (area.width as usize)
+        .saturating_sub(2)
+        .clamp(1, BODY_MAX_WIDTH);
     let reveal = Reveal {
         motion,
         now: model.timeline.render_at,
@@ -65,10 +65,15 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
     let lines = build_transcript_lines(
         model.transcript.items(),
         width,
-        model.expand_tools,
-        model.status.streaming,
-        model.has_modal(),
-        reveal,
+        TranscriptState {
+            global_expanded: model.expand_tools,
+            streaming: model.status.streaming,
+            has_modal: model.has_modal(),
+            reveal,
+            focused_pane: model.focused_pane,
+            selected_item: model.selected_item,
+            expanded_tools_indices: &model.expanded_tools_indices,
+        },
     );
 
     let total = lines.len() as u16;
@@ -76,12 +81,65 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
     let scrollback = model.scroll.scrollback.min(max_offset);
     let offset = max_offset - scrollback;
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .scroll((offset, 0))
-            .style(theme::base()),
-        area,
-    );
+    if total > area.height {
+        let text_area = Rect {
+            width: area.width.saturating_sub(1),
+            ..area
+        };
+
+        frame.render_widget(
+            Paragraph::new(lines)
+                .scroll((offset, 0))
+                .style(theme::base()),
+            text_area,
+        );
+
+        let h = area.height as f32;
+        let t = total as f32;
+        let thumb_h = ((h / t) * h).round().clamp(1.0, h) as u16;
+        let max_thumb_offset = area.height.saturating_sub(thumb_h);
+        let thumb_offset = if max_offset > 0 {
+            ((offset as f32 / max_offset as f32) * max_thumb_offset as f32).round() as u16
+        } else {
+            0
+        };
+
+        let scroll_x = area.x + area.width.saturating_sub(1);
+        for row_y in 0..area.height {
+            let is_thumb = row_y >= thumb_offset && row_y < thumb_offset + thumb_h;
+            let symbol = if is_thumb { "┃" } else { "│" };
+            let color = if is_thumb {
+                theme::STEEL_RAMP[2]
+            } else {
+                theme::STEEL_RAMP[4]
+            };
+
+            if let Some(cell) = frame.buffer_mut().cell_mut((scroll_x, area.y + row_y)) {
+                cell.set_symbol(symbol);
+                cell.set_fg(color);
+            }
+        }
+    } else {
+        frame.render_widget(
+            Paragraph::new(lines)
+                .scroll((offset, 0))
+                .style(theme::base()),
+            area,
+        );
+    }
+}
+
+/// The per-frame model state `build_transcript_lines` reads, bundled so the function stays under
+/// clippy's argument-count lint without losing any of the inputs it needs.
+#[derive(Clone, Copy)]
+struct TranscriptState<'a> {
+    global_expanded: bool,
+    streaming: bool,
+    has_modal: bool,
+    reveal: Reveal<'a>,
+    focused_pane: crate::modules::tui::domain::model::PaneFocus,
+    selected_item: Option<usize>,
+    expanded_tools_indices: &'a std::collections::HashSet<usize>,
 }
 
 /// Build the wrapped, styled transcript lines for the pane — the per-frame work, factored out of `render`
@@ -91,32 +149,44 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
 fn build_transcript_lines(
     items: &[TranscriptItem],
     width: usize,
-    expanded: bool,
-    streaming: bool,
-    has_modal: bool,
-    reveal: Reveal,
+    state: TranscriptState,
 ) -> Vec<Line<'static>> {
     let last = items.len().saturating_sub(1);
     let mut lines: Vec<Line> = Vec::new();
     for (idx, item) in items.iter().enumerate() {
         if !lines.is_empty() {
             // Two blank rows open a new turn (a user prompt); one separates items within a turn.
-            lines.push(Line::default());
+            lines.push(Line::from(vec![Span::raw("  ")]));
             if matches!(item, TranscriptItem::User(_)) {
-                lines.push(Line::default());
+                lines.push(Line::from(vec![Span::raw("  ")]));
             }
         }
         // The still-streaming item (the trailing assistant/reasoning while a turn streams) renders as
         // plain text — skipping the per-frame markdown parse keeps the ~30 fps stream cheap; once the
         // turn finishes it re-renders formatted (and is then memoized).
-        let active = streaming && idx == last;
-        render_item(item, width, expanded, active, reveal, &mut lines);
+        let active = state.streaming && idx == last;
+        let expanded = state.global_expanded || state.expanded_tools_indices.contains(&idx);
+        let start_len = lines.len();
+        render_item(item, width, expanded, active, state.reveal, &mut lines);
+        let end_len = lines.len();
+
+        let is_selected = state.focused_pane
+            == crate::modules::tui::domain::model::PaneFocus::Transcript
+            && Some(idx) == state.selected_item;
+        for line in lines.iter_mut().take(end_len).skip(start_len) {
+            let indicator = if is_selected {
+                Span::styled("▍ ", Style::default().fg(theme::HIGHLIGHT))
+            } else {
+                Span::raw("  ")
+            };
+            line.spans.insert(0, indicator);
+        }
     }
 
     // Rack focus: while a confirmation is up, the whole transcript recedes one ramp step so the
     // borderless stanza pulls focus by depth, not by a drawn box. One static restyle — never animated,
     // so it stays a single diff and does not fight the markdown memoization.
-    if has_modal {
+    if state.has_modal {
         for line in &mut lines {
             recede(line);
         }
@@ -154,6 +224,15 @@ fn render_item(
             } else {
                 render_body(text, Style::default().fg(theme::STEEL), width, false, out);
             }
+        }
+        TranscriptItem::PlanProposed(text) => {
+            out.push(Line::styled(
+                "◆ plano proposto",
+                Style::default()
+                    .fg(theme::WARNING)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            render_body(text, Style::default().fg(theme::WARNING), width, false, out);
         }
         TranscriptItem::Tool(activity) => render_tool(activity, width, expanded, out),
         TranscriptItem::Notice(level, text) => {
@@ -268,36 +347,61 @@ fn render_result(
     }
 }
 
-/// Render an `edit_file` change as red `-` / green `+` lines, wrapped, bounded per side unless
-/// expanded. This is a literal old→new replacement block, not a line-level diff algorithm.
-fn render_diff(diff: &ToolDiff, width: usize, expanded: bool, out: &mut Vec<Line<'static>>) {
-    emit_diff_block(&diff.old, '-', theme::ERROR, width, expanded, out);
-    emit_diff_block(&diff.new, '+', theme::SUCCESS, width, expanded, out);
-}
+fn render_diff(diff_data: &ToolDiff, width: usize, expanded: bool, out: &mut Vec<Line<'static>>) {
+    let diff = similar::TextDiff::from_lines(&diff_data.old, &diff_data.new);
+    let hunks = diff.grouped_ops(3);
 
-fn emit_diff_block(
-    text: &str,
-    sign: char,
-    color: Color,
-    width: usize,
-    expanded: bool,
-    out: &mut Vec<Line<'static>>,
-) {
-    let lines: Vec<&str> = text.split('\n').collect();
-    let shown = if expanded {
-        lines.len()
+    if hunks.is_empty() {
+        out.push(Line::styled("  (sem alterações textuais)", theme::dim()));
+        return;
+    }
+
+    let mut total_lines = 0;
+    let limit = if expanded {
+        usize::MAX
     } else {
-        lines.len().min(DIFF_LINES_PER_SIDE)
+        DIFF_LINES_PER_SIDE * 2
     };
-    let style = Style::default().fg(color);
-    for line in &lines[..shown] {
-        for row in hard_wrap(&format!("  {sign} {line}"), width) {
-            out.push(Line::styled(row, style));
+
+    for (hunk_idx, hunk) in hunks.iter().enumerate() {
+        if hunk_idx > 0 {
+            out.push(Line::styled("  @@ ... @@", theme::dim()));
+        }
+
+        for op in hunk {
+            for change in diff.iter_changes(op) {
+                let line_content = change.value().trim_end_matches('\n');
+
+                if total_lines >= limit {
+                    continue;
+                }
+
+                let (prefix, style) = match change.tag() {
+                    similar::ChangeTag::Delete => ("- ", Style::default().fg(theme::ERROR)),
+                    similar::ChangeTag::Insert => ("+ ", Style::default().fg(theme::SUCCESS)),
+                    similar::ChangeTag::Equal => ("  ", theme::dim()),
+                };
+
+                for row in hard_wrap(&format!("  {prefix}{line_content}"), width) {
+                    if total_lines < limit {
+                        out.push(Line::styled(row, style));
+                        total_lines += 1;
+                    }
+                }
+            }
         }
     }
-    if lines.len() > shown {
+
+    let total_actual_changes = diff
+        .iter_all_changes()
+        .filter(|c| c.tag() != similar::ChangeTag::Equal)
+        .count();
+    if !expanded && total_actual_changes > limit {
         out.push(Line::styled(
-            format!("  … (+{})", lines.len() - shown),
+            format!(
+                "  … (+{} linhas alteradas) · ^O para expandir",
+                total_actual_changes.saturating_sub(limit)
+            ),
             theme::dim(),
         ));
     }
@@ -491,21 +595,31 @@ mod tests {
             now: None,
             landings: &[],
         };
+        let empty_set = std::collections::HashSet::new();
+        let state = TranscriptState {
+            global_expanded: false,
+            streaming: false,
+            has_modal: false,
+            reveal,
+            focused_pane: crate::modules::tui::domain::model::PaneFocus::Input,
+            selected_item: None,
+            expanded_tools_indices: &empty_set,
+        };
         // Warm the markdown memoization cache (the expensive parse happens once per unique body).
-        let _ = build_transcript_lines(&items, 88, false, false, false, reveal);
+        let _ = build_transcript_lines(&items, 88, state);
 
         let iterations = 2000;
         let start = Instant::now();
         let mut sink = 0usize;
         for _ in 0..iterations {
-            let lines = build_transcript_lines(&items, 88, false, false, false, reveal);
+            let lines = build_transcript_lines(&items, 88, state);
             sink = sink.wrapping_add(lines.len());
         }
         let per_frame = start.elapsed() / iterations;
         println!(
             "render_cost: {} items -> {} lines, {:?}/frame (markdown memoized), sink={sink}",
             items.len(),
-            build_transcript_lines(&items, 88, false, false, false, reveal).len(),
+            build_transcript_lines(&items, 88, state).len(),
             per_frame,
         );
     }

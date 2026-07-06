@@ -14,12 +14,14 @@ pub mod input;
 pub mod terminal_guard;
 
 mod distill;
+mod hook_dispatch;
 mod provider_swap;
 mod render;
 mod session_ops;
 mod sync;
 mod turn;
 
+pub use hook_dispatch::HookContext;
 pub use provider_swap::ProviderSwap;
 pub use sync::{SharedMemoryFactory, SyncContext};
 
@@ -38,9 +40,11 @@ use tokio::time::{self, Interval};
 use tokio_stream::StreamExt;
 
 use self::bridge::{Bridge, CancelToken, EngineMsg};
+use self::hook_dispatch::dispatch_hooks;
 use self::terminal_guard::TerminalGuard;
 use crate::modules::agent::application::agent_loop::AgentLoop;
 use crate::modules::agent::application::approval_policy::Approval;
+use crate::modules::extensions::domain::resource::HookEvent;
 use crate::modules::memory::application::memory_port::Memory;
 use crate::modules::session::application::session_store::SessionStore;
 use crate::modules::tools::application::sandbox::Sandbox;
@@ -48,6 +52,7 @@ use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tui::application::command::{self, Command};
 use crate::modules::tui::application::effect::Effect;
 use crate::modules::tui::application::update::update;
+use crate::modules::tui::domain::command_menu::CustomCommandEntry;
 use crate::modules::tui::domain::model::Model;
 use crate::modules::tui::domain::transcript::TranscriptItem;
 use crate::modules::tui::infrastructure::text;
@@ -88,6 +93,8 @@ pub struct Tui {
     memory: Arc<dyn Memory>,
     /// The workspace id sessions are keyed by; recomputed on `/cd`.
     project_id: String,
+    /// The ADR 0021 hook-dispatch dependencies (catalog, runner, trust store).
+    hooks: HookContext,
 }
 
 /// A non-fatal degradation observed while wiring the harness (memory/session/embeddings/provider
@@ -132,6 +139,25 @@ pub struct TuiParams {
     /// The formatted `/instructions` display text (paths + merged content). `None` when no
     /// instructions file was found.
     pub instructions_display: Option<String>,
+    /// The formatted `/rules` display text (ADR 0021 extension rules). `None` when none were loaded.
+    pub rules_display: Option<String>,
+    /// Extension-provided custom commands, shown in the live slash-command preview.
+    pub custom_commands: Vec<CustomCommandEntry>,
+    /// Every custom-command token (name + aliases) mapped to its expanded prompt body.
+    pub custom_command_bodies: std::collections::HashMap<String, String>,
+    /// The formatted `/commands` display text. `None` when none were loaded.
+    pub commands_display: Option<String>,
+    /// The formatted `/agents` display text. `None` when none were loaded.
+    pub agents_display: Option<String>,
+    /// The formatted `/skills` display text. `None` when none were loaded.
+    pub skills_display: Option<String>,
+    /// The formatted `/hooks` display text. `None` when none were loaded.
+    pub hooks_display: Option<String>,
+    /// The formatted `/mcp` display text. `None` when none were loaded.
+    pub mcp_display: Option<String>,
+    /// The ADR 0021 hook-dispatch dependencies, threaded through to `RunLoop` for the
+    /// SessionStart/SessionEnd/TurnEnd firing points.
+    pub hooks: HookContext,
 }
 
 /// The long-lived owned run state, aggregated so the per-turn driver and the effect handlers are
@@ -150,6 +176,7 @@ pub(super) struct RunLoop {
     memory: Arc<dyn Memory>,
     project_id: String,
     cursor: SessionCursor,
+    hooks: HookContext,
 }
 
 /// The live loop handles threaded into the per-turn driver and distillation: the terminal to draw on, the
@@ -185,6 +212,15 @@ impl Tui {
             project_id,
             boot_notices,
             instructions_display,
+            rules_display,
+            custom_commands,
+            custom_command_bodies,
+            commands_display,
+            agents_display,
+            skills_display,
+            hooks_display,
+            mcp_display,
+            hooks,
         } = params;
         let workspace = text::display_path(sandbox.root());
         let (model_id, models) = provider_swap
@@ -198,7 +234,13 @@ impl Tui {
                 provider_swap.provider_ids(),
                 provider_swap.profiles().to_vec(),
             )
-            .with_instructions(instructions_display);
+            .with_instructions(instructions_display)
+            .with_rules(rules_display)
+            .with_agents(agents_display)
+            .with_skills(skills_display)
+            .with_hooks(hooks_display)
+            .with_mcp(mcp_display)
+            .with_custom_commands(custom_commands, custom_command_bodies, commands_display);
         // Surface the wire-time degradations first, so the onboarding welcome (the call to action) lands
         // last when both are present.
         surface_boot_notices(&mut model, &boot_notices);
@@ -220,6 +262,7 @@ impl Tui {
             session_store,
             memory,
             project_id,
+            hooks,
         }
     }
 
@@ -237,6 +280,7 @@ impl Tui {
             session_store,
             memory,
             project_id,
+            hooks,
         } = self;
 
         let mut terminal = ratatui::init();
@@ -287,6 +331,7 @@ impl Tui {
                 session_id: None,
                 persisted_len: 0,
             },
+            hooks,
         };
         let mut ui = UiDriver {
             terminal: &mut terminal,
@@ -299,6 +344,15 @@ impl Tui {
             cancel: &cancel,
             pending_reply: &mut pending_reply,
         };
+
+        // ADR 0021: fire every SessionStart hook before the first prompt (CLI seed or interactive) runs.
+        dispatch_hooks(
+            HookEvent::SessionStart,
+            &run_loop.hooks,
+            &run_loop.sandbox,
+            &mut run_loop.model,
+        )
+        .await;
 
         // An initial prompt from the CLI runs as the first turn.
         if let Some(line) = seed.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
@@ -362,6 +416,15 @@ impl Tui {
         // memory. Best-effort, bounded, and Ctrl+C-skippable — quit is never held hostage.
         run_loop.drive_distillation(&mut ui).await;
 
+        // ADR 0021: fire every SessionEnd hook as the session tears down.
+        dispatch_hooks(
+            HookEvent::SessionEnd,
+            &run_loop.hooks,
+            &run_loop.sandbox,
+            &mut run_loop.model,
+        )
+        .await;
+
         Ok(())
     }
 }
@@ -421,22 +484,119 @@ impl RunLoop {
                 self.apply_save_provider(profile, keep_existing_key);
             }
             Effect::DeleteProvider(id) => self.apply_delete_provider(id),
+            Effect::OpenFile(path) => {
+                let mut stdout = std::io::stdout();
+                let _ = crossterm::execute!(stdout, crossterm::terminal::LeaveAlternateScreen);
+                let _ = crossterm::terminal::disable_raw_mode();
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
+                let full_path = self.sandbox.root().join(&path);
+                let status = std::process::Command::new(&editor).arg(full_path).status();
+                if let Err(e) = status {
+                    println!(
+                        "Failed to run editor {}: {}. Press Enter to continue...",
+                        editor, e
+                    );
+                    let mut input = String::new();
+                    let _ = std::io::stdin().read_line(&mut input);
+                }
+                let _ = crossterm::terminal::enable_raw_mode();
+                let _ = crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen);
+                let _ = ui.terminal.clear();
+            }
+            Effect::ApproveHook(id) => self.apply_approve_hook(&id),
+            Effect::ApproveMcp(id) => self.apply_approve_mcp(&id),
             Effect::AnswerApproval(_) | Effect::CancelTurn => {}
         }
         Ok(())
+    }
+
+    /// `/approve-hook <id>`: record the hook's current content hash as approved in the trust store
+    /// (ADR 0021 TOFU). Unknown id, or a global hook (already auto-approved, nothing to record), or a
+    /// trust-store write failure all surface as a notice — never panics, never silently no-ops.
+    fn apply_approve_hook(&mut self, id: &str) {
+        let Some(hook) = self.hooks.catalog.hooks.get(id) else {
+            self.model
+                .notify_error(format!("hook desconhecido: {id} (veja /hooks)"));
+            return;
+        };
+        if hook.layer == crate::modules::extensions::domain::scope::Layer::Global {
+            self.model
+                .notify_info(format!("hook '{id}' é global — já aprovado por padrão"));
+            return;
+        }
+        let hash = crate::modules::extensions::domain::gate::content_hash(&hook.hash_key());
+        match self.hooks.trust.approve("hook", id, &hash) {
+            Ok(()) => self
+                .model
+                .notify_info(format!("hook '{id}' aprovado — passa a disparar")),
+            Err(error) => self
+                .model
+                .notify_error(format!("falha ao aprovar hook '{id}': {error}")),
+        }
+    }
+
+    /// `/approve-mcp <id>`: record the server's current command-line hash as approved in the trust
+    /// store (ADR 0021 TOFU). A server only connects once, at boot, so this takes effect on the next
+    /// session start — never mid-session. Unknown id, a global server (already auto-approved), or a
+    /// trust-store write failure all surface as a notice.
+    fn apply_approve_mcp(&mut self, id: &str) {
+        let Some(server) = self.hooks.catalog.mcp_servers.get(id) else {
+            self.model
+                .notify_error(format!("servidor MCP desconhecido: {id} (veja /mcp)"));
+            return;
+        };
+        if server.layer == crate::modules::extensions::domain::scope::Layer::Global {
+            self.model.notify_info(format!(
+                "servidor MCP '{id}' é global — já aprovado por padrão"
+            ));
+            return;
+        }
+        let hash = crate::modules::extensions::domain::gate::content_hash(&server.hash_key());
+        match self.hooks.trust.approve("mcp", id, &hash) {
+            Ok(()) => self.model.notify_info(format!(
+                "servidor MCP '{id}' aprovado — conecta na próxima sessão como subprocesso irrestrito, \
+                 com acesso à rede, diferente de um hook sandboxed"
+            )),
+            Err(error) => self
+                .model
+                .notify_error(format!("falha ao aprovar servidor MCP '{id}': {error}")),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::turn::{on_turn_end, turn_produced_nothing};
-    use super::{BootNotice, surface_boot_notices};
+    use super::{BootNotice, HookContext, surface_boot_notices};
     use crate::modules::agent::application::agent_loop::TurnOutcome;
+    use crate::modules::extensions::application::catalog::ExtensionCatalog;
+    use crate::modules::extensions::infrastructure::trust_store::ExtensionsTrustStore;
+    use crate::modules::hooks::infrastructure::shell::ShellHookRunner;
+    use crate::modules::tools::infrastructure::sandbox::FsSandbox;
+    use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use crate::modules::tui::domain::model::Model;
     use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
     use crate::shared::kernel::approval_mode::ApprovalMode;
     use crate::shared::kernel::conversation::Conversation;
     use crate::shared::kernel::message::Message;
+
+    /// A sandbox rooted at the current directory — these `on_turn_end` tests never touch it (an empty
+    /// hook catalog means `dispatch_hooks` never reaches an actual execution).
+    fn test_sandbox() -> FsSandbox {
+        FsSandbox::new(std::path::PathBuf::from("."), SensitiveMatcher::empty()).unwrap()
+    }
+
+    /// An empty hook context: no hooks loaded, so `on_turn_end`'s TurnEnd dispatch is a no-op.
+    fn empty_hooks() -> HookContext {
+        HookContext {
+            catalog: std::sync::Arc::new(ExtensionCatalog::default()),
+            runner: std::sync::Arc::new(ShellHookRunner),
+            trust: std::sync::Arc::new(ExtensionsTrustStore::new(
+                std::path::PathBuf::from("/dev/null/kiri-test-trust.json"),
+                "test-workspace".to_string(),
+            )),
+        }
+    }
 
     // The front-end must not be a composition root: the sync adapter *choice* and the shared-DB path now
     // live only in `app::wire`. Guard that runtime.rs constructs no sync adapter and recomputes no path.
@@ -768,8 +928,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_completion_surfaces_a_notice_and_no_plan_box() {
+    #[tokio::test]
+    async fn empty_completion_surfaces_a_notice_and_no_plan_box() {
         // The exact regression: a plan-mode turn whose provider returned nothing must NOT show a plan
         // box, and must surface a visible error instead of failing silently.
         let mut model = Model::new("m".to_string(), "/w".to_string());
@@ -784,7 +944,10 @@ mod tests {
             false,
             &mut model,
             &mut conversation,
-        );
+            &test_sandbox(),
+            &empty_hooks(),
+        )
+        .await;
 
         assert!(
             model.pending_plan.is_none(),
@@ -796,8 +959,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_cancel_aborts_the_turn_without_quitting() {
+    #[tokio::test]
+    async fn a_cancel_aborts_the_turn_without_quitting() {
         // A single ^C while busy cancels just the turn: drive_turn synthesizes Aborted with the cancel
         // token set (cancelled == true). The app must NOT quit — only a genuine input-stream end does.
         let mut model = Model::new("m".to_string(), "/w".to_string());
@@ -810,7 +973,10 @@ mod tests {
             true,
             &mut model,
             &mut conversation,
-        );
+            &test_sandbox(),
+            &empty_hooks(),
+        )
+        .await;
 
         assert!(
             !model.should_quit,
@@ -818,8 +984,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_genuine_abort_quits() {
+    #[tokio::test]
+    async fn a_genuine_abort_quits() {
         // The approval channel closed (cancelled == false): this is a real session end and must quit.
         let mut model = Model::new("m".to_string(), "/w".to_string());
         let mut conversation = Conversation::new("system");
@@ -828,12 +994,15 @@ mod tests {
             false,
             &mut model,
             &mut conversation,
-        );
+            &test_sandbox(),
+            &empty_hooks(),
+        )
+        .await;
         assert!(model.should_quit, "a genuine abort must quit");
     }
 
-    #[test]
-    fn present_plan_outcome_renders_the_plan_and_offers_the_box() {
+    #[tokio::test]
+    async fn present_plan_outcome_renders_the_plan_and_offers_the_box() {
         // A plan is surfaced ONLY via the explicit `present_plan` tool (TurnOutcome::PlanProposed):
         // the plan text is rendered and the approval box opens.
         let mut model = Model::new("m".to_string(), "/w".to_string());
@@ -848,7 +1017,10 @@ mod tests {
             false,
             &mut model,
             &mut conversation,
-        );
+            &test_sandbox(),
+            &empty_hooks(),
+        )
+        .await;
 
         assert!(
             model.pending_plan.is_some(),
@@ -857,15 +1029,15 @@ mod tests {
         assert!(
             model.transcript.items().iter().any(|item| matches!(
                 item,
-                TranscriptItem::Assistant(text) if text.contains("Plano")
+                TranscriptItem::PlanProposed(text) if text.contains("Plano")
             )),
             "the proposed plan text must be rendered in the transcript"
         );
         assert!(!has_error_notice(&model), "a proposed plan is not an error");
     }
 
-    #[test]
-    fn plain_plan_mode_completion_does_not_pop_the_box() {
+    #[tokio::test]
+    async fn plain_plan_mode_completion_does_not_pop_the_box() {
         // A plain text turn in plan mode (the model thought aloud or asked a question, but did NOT
         // call present_plan) must NOT open the approval box — the old eager heuristic was the bug.
         let mut model = Model::new("m".to_string(), "/w".to_string());
@@ -881,7 +1053,10 @@ mod tests {
             false,
             &mut model,
             &mut conversation,
-        );
+            &test_sandbox(),
+            &empty_hooks(),
+        )
+        .await;
 
         assert!(
             model.pending_plan.is_none(),

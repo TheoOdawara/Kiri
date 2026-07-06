@@ -66,4 +66,12 @@ pub enum Effect {
     /// against the rendered editor geometry — a no-op when the click is outside the box or the layout
     /// is ambiguous (wrapped/scrolled), since the reducer has no render geometry to map it itself.
     PlaceCursor { col: u16, row: u16 },
+    /// Open the specified file path in the user's $EDITOR.
+    OpenFile(String),
+    /// Approve a pending project-layer hook by id (`/approve-hook`, ADR 0021 TOFU gate). The runtime
+    /// looks it up in the loaded catalog and records its current content hash in the trust store.
+    ApproveHook(String),
+    /// Approve a pending project-layer MCP server by id (`/approve-mcp`, ADR 0021 TOFU gate). Takes
+    /// effect on the next session start — the server connects (or not) once, at boot.
+    ApproveMcp(String),
 }

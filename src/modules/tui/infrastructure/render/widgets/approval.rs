@@ -6,7 +6,6 @@ use ratatui::widgets::{Clear, Paragraph};
 use crate::modules::tui::domain::modal::{
     ApprovalOption, PendingApproval, PendingPlan, PlanOption,
 };
-use crate::modules::tui::domain::picker::Picker;
 use crate::modules::tui::infrastructure::markdown;
 use crate::modules::tui::infrastructure::theme;
 
@@ -92,19 +91,6 @@ pub fn box_dims(area: Rect, action: &str, option_count: usize) -> (u16, u16) {
 pub fn render_plan_into(plan: &PendingPlan, frame: &mut Frame, area: Rect) {
     let options: Vec<&str> = PlanOption::ALL.iter().map(|o| o.label()).collect();
     render_stanza("plano", PLAN_ACTION, &options, plan.selected, frame, area);
-}
-
-/// Render a generic `/models` / `/effort` picker with the same stanza as the approval/plan boxes.
-pub fn render_picker(picker: &Picker, frame: &mut Frame, area: Rect) {
-    let options: Vec<&str> = picker.options.iter().map(String::as_str).collect();
-    render_stanza(
-        &picker.label,
-        &picker.action,
-        &options,
-        picker.selected,
-        frame,
-        area,
-    );
 }
 
 #[cfg(test)]

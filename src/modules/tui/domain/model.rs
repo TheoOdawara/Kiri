@@ -3,7 +3,7 @@ use std::time::Instant;
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::provider::{Effort, ProviderProfile, Secret};
 
-use super::command_menu::CommandMenu;
+use super::command_menu::{CommandMenu, CustomCommandEntry};
 use super::history::History;
 use super::input_buffer::{ImageAttachment, InputBuffer};
 use super::modal::{PendingApproval, PendingPlan};
@@ -163,6 +163,25 @@ pub struct Model {
     pub pending_credential: Option<Secret>,
     /// The live slash-command preview, open while the input starts with `/` and has no whitespace yet.
     pub command_menu: Option<CommandMenu>,
+    /// Extension-provided custom commands (ADR 0021), shown in the live preview alongside the built-ins.
+    pub custom_commands: Vec<CustomCommandEntry>,
+    /// Every extension command token (canonical name + aliases) mapped straight to its expanded prompt
+    /// body, so submit-time lookup is a single hit regardless of which alias was typed.
+    pub custom_command_bodies: std::collections::HashMap<String, String>,
+    /// The formatted `/rules` display text (id, layer, always-on) for the loaded extension rules. `None`
+    /// when none were found.
+    pub rules_display: Option<String>,
+    /// The formatted `/commands` display text (name, aliases, layer, source path) for the loaded custom
+    /// commands. `None` when none were found.
+    pub commands_display: Option<String>,
+    /// The formatted `/agents` display text (id, layer, source path). `None` when none were found.
+    pub agents_display: Option<String>,
+    /// The formatted `/skills` display text (id, tags, layer, source path). `None` when none were found.
+    pub skills_display: Option<String>,
+    /// The formatted `/hooks` display text (id, event, layer, source path). `None` when none were found.
+    pub hooks_display: Option<String>,
+    /// The formatted `/mcp` display text (id, command, layer, source path). `None` when none were found.
+    pub mcp_display: Option<String>,
     /// Images pasted from the clipboard, staged for the next prompt and drained on submit.
     pub attachments: Vec<ImageAttachment>,
     /// When set, tool outputs and edit diffs render in full instead of a bounded preview. Toggled
@@ -185,6 +204,26 @@ pub struct Model {
     /// onboarding saves a provider. Gates prompt submission and re-opens onboarding instead of stranding
     /// the user against the null provider.
     pub unconfigured: bool,
+    /// Which pane currently has keyboard focus.
+    pub focused_pane: PaneFocus,
+    /// The index of the selected transcript item when in transcript focus mode.
+    pub selected_item: Option<usize>,
+    /// Individual tool indices that are manually expanded.
+    pub expanded_tools_indices: std::collections::HashSet<usize>,
+    /// Active search query in the transcript history.
+    pub search_query: Option<String>,
+    /// Transcript item indices that match the active search query.
+    pub search_results: Vec<usize>,
+    /// The current highlighted search result index in `search_results`.
+    pub active_search_match: usize,
+}
+
+/// Which pane has keyboard input focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaneFocus {
+    #[default]
+    Input,
+    Transcript,
 }
 
 /// The single modal currently awaiting the user, in precedence order, borrowed from the model. Resolved
@@ -255,6 +294,50 @@ impl Model {
     /// Seed the instructions display text for the `/instructions` command.
     pub fn with_instructions(mut self, display: Option<String>) -> Self {
         self.instructions_display = display;
+        self
+    }
+
+    /// Seed the extension-provided custom commands: the preview entries, the token→body lookup used at
+    /// submit time, and the `/commands` display text.
+    pub fn with_custom_commands(
+        mut self,
+        entries: Vec<CustomCommandEntry>,
+        bodies: std::collections::HashMap<String, String>,
+        display: Option<String>,
+    ) -> Self {
+        self.custom_commands = entries;
+        self.custom_command_bodies = bodies;
+        self.commands_display = display;
+        self
+    }
+
+    /// Seed the rules display text for the `/rules` command.
+    pub fn with_rules(mut self, display: Option<String>) -> Self {
+        self.rules_display = display;
+        self
+    }
+
+    /// Seed the agents display text for the `/agents` command.
+    pub fn with_agents(mut self, display: Option<String>) -> Self {
+        self.agents_display = display;
+        self
+    }
+
+    /// Seed the skills display text for the `/skills` command.
+    pub fn with_skills(mut self, display: Option<String>) -> Self {
+        self.skills_display = display;
+        self
+    }
+
+    /// Seed the hooks display text for the `/hooks` command.
+    pub fn with_hooks(mut self, display: Option<String>) -> Self {
+        self.hooks_display = display;
+        self
+    }
+
+    /// Seed the MCP servers display text for the `/mcp` command.
+    pub fn with_mcp(mut self, display: Option<String>) -> Self {
+        self.mcp_display = display;
         self
     }
 
