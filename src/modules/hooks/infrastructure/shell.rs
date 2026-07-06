@@ -120,4 +120,25 @@ mod tests {
         assert!(outcome.ok);
         assert_eq!(outcome.summary, "exit 0");
     }
+
+    /// Issue #8a: `run_command`'s TUI rendering gained a `STDERR_MARKER` convention on a SEPARATE
+    /// function (`exec::capped_combined_marking_stderr`), so `ShellHookRunner` — which still calls the
+    /// plain `exec::capped_combined` — must keep reporting a stderr-only command's own text, never the
+    /// literal marker line.
+    #[tokio::test]
+    async fn a_command_with_only_stderr_output_reports_the_real_error_not_a_marker() {
+        let dir = TempDir::new().unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        let script = script(
+            "echo boom 1>&2; exit 1",
+            "[Console]::Error.WriteLine('boom'); exit 1",
+        );
+        let outcome = ShellHookRunner.run(&sandbox, &hook(script)).await;
+        assert!(!outcome.ok);
+        assert_eq!(outcome.summary, "boom");
+    }
+
+    fn script(unix: &'static str, windows: &'static str) -> &'static str {
+        if cfg!(windows) { windows } else { unix }
+    }
 }

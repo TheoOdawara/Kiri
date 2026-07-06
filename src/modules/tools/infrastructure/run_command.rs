@@ -245,7 +245,7 @@ impl Tool for RunCommand {
             }
         };
 
-        let content = exec::capped_combined(&result);
+        let content = exec::capped_combined_marking_stderr(&result);
         let status_str = match result.exit_code {
             Some(code) => format!("exit code {code}"),
             None => "terminated (no exit code)".to_string(),

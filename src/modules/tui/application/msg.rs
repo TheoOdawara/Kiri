@@ -35,10 +35,12 @@ pub enum Msg {
     TurnBegan,
     StreamDelta(StreamKind, String),
     TurnFinished,
-    /// A tool call started running (engine → TUI), with its display command and an optional edit diff.
+    /// A tool call started running (engine → TUI), with its display command, an optional edit diff, and
+    /// whether it was `run_command` (the only tool whose output may carry the stderr-split marker).
     ToolStarted {
         command: String,
         diff: Option<ToolDiff>,
+        is_run_command: bool,
     },
     /// A tool call finished (engine → TUI): its outcome status, full (capped) output, and duration.
     ToolFinished {

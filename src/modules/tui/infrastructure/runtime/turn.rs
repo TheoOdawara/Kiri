@@ -63,7 +63,15 @@ fn engine_msg(engine: EngineMsg, pending_reply: &mut Option<oneshot::Sender<Appr
         EngineMsg::Began => Msg::TurnBegan,
         EngineMsg::Reasoning(text) => Msg::StreamDelta(StreamKind::Reasoning, text),
         EngineMsg::Content(text) => Msg::StreamDelta(StreamKind::Content, text),
-        EngineMsg::ToolStarted { command, diff } => Msg::ToolStarted { command, diff },
+        EngineMsg::ToolStarted {
+            command,
+            diff,
+            is_run_command,
+        } => Msg::ToolStarted {
+            command,
+            diff,
+            is_run_command,
+        },
         EngineMsg::ToolFinished {
             status,
             output,

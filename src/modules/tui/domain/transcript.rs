@@ -48,6 +48,11 @@ pub struct ToolActivity {
     /// `(status, output, elapsed)` once finished; `None` while running. `output` is the full (capped)
     /// tool output the renderer previews or expands.
     pub result: Option<(ToolStatus, String, Duration)>,
+    /// Whether this call was `run_command` — the only tool whose output may carry `exec::STDERR_MARKER`.
+    /// The renderer gates its stdout/stderr split on this (rather than sniffing the marker text in ANY
+    /// tool's output), so a `read_file`/`search` result that happens to contain the literal line
+    /// `"--- stderr ---"` can never be mis-split and mislabeled as an error.
+    pub is_run_command: bool,
 }
 
 /// The ordered list of transcript items rendered in the main pane.
@@ -98,11 +103,17 @@ impl Transcript {
 
     /// Push a running tool item (command + optional edit diff, no result yet). The engine runs one
     /// call at a time, so the running tool is always the trailing item — no correlation id is needed.
-    pub fn push_tool_start(&mut self, command: String, diff: Option<ToolDiff>) {
+    pub fn push_tool_start(
+        &mut self,
+        command: String,
+        diff: Option<ToolDiff>,
+        is_run_command: bool,
+    ) {
         self.items.push(TranscriptItem::Tool(ToolActivity {
             command,
             diff,
             result: None,
+            is_run_command,
         }));
     }
 
@@ -154,7 +165,7 @@ mod tests {
     #[test]
     fn tool_start_then_finish_coalesce_into_one_item() {
         let mut t = Transcript::default();
-        t.push_tool_start("edit a.txt".to_string(), None);
+        t.push_tool_start("edit a.txt".to_string(), None, false);
         assert_eq!(t.items().len(), 1);
         t.finish_last_tool(
             ToolStatus::Ok,
@@ -171,6 +182,7 @@ mod tests {
                     "edited a.txt".to_string(),
                     Duration::from_millis(5)
                 )),
+                is_run_command: false,
             })]
         );
     }
@@ -185,7 +197,7 @@ mod tests {
     #[test]
     fn a_delta_after_a_tool_starts_a_fresh_assistant_item() {
         let mut t = Transcript::default();
-        t.push_tool_start("cat a.txt".to_string(), None);
+        t.push_tool_start("cat a.txt".to_string(), None, false);
         t.push_content_delta("hi");
         assert_eq!(t.items().len(), 2);
         assert!(matches!(t.items()[1], TranscriptItem::Assistant(_)));
