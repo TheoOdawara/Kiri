@@ -35,7 +35,7 @@ pub struct FsSandbox {
     /// OS-level confinement applied to every child process the tools spawn. `NoConfinement` on
     /// platforms without a facility (and `KIRI_SANDBOX=off`), the platform adapter otherwise.
     confiner: Arc<dyn CommandSandbox>,
-    /// The base network stance for `run_command` (a dev-command allow-list may widen it per call).
+    /// The sandbox's network stance — no per-command widening (ADR 0022).
     network: NetworkPolicy,
     /// Extra paths a confined command may read / write beyond the workspace (toolchain dirs, config).
     extra_ro: Arc<[PathBuf]>,
@@ -118,7 +118,8 @@ impl Sandbox for FsSandbox {
         self.confiner.as_ref()
     }
 
-    /// The base network stance (the default for `run_command` before its dev-command allow-list).
+    /// The sandbox's network stance — the sole source of truth for `run_command`, with no per-command
+    /// widening (ADR 0022).
     fn network(&self) -> NetworkPolicy {
         self.network
     }

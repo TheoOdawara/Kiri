@@ -73,34 +73,6 @@ pub(super) const DEFAULT_PLAN_ALLOW: &[&str] = &[
     r"\bgo\b",
 ];
 
-/// Shell commands allowed to reach the network under OS confinement: dev / package-manager tools, so
-/// builds and dependency installs stay fluid while arbitrary outbound calls are denied by default. The
-/// grant is disclosed in the `run_command` confirmation (informed per-call consent, not silent).
-/// Residual: an allow-listed tool's build script still runs with network and could exfiltrate — the real
-/// fix is per-host egress filtering, deferred to the cross-OS sandbox work (see `RunCommand::network_for`).
-/// Override via `KIRI_SANDBOX_NET_ALLOW_CMDS` (newline-separated regexes, replaces this default).
-pub(super) const DEFAULT_NET_ALLOW: &[&str] = &[
-    r"\bcargo\b",
-    r"\brustup\b",
-    r"\bnpm\b",
-    r"\bnpx\b",
-    r"\bpnpm\b",
-    r"\byarn\b",
-    r"\bbun\b",
-    r"\bpip3?\b",
-    r"\bpoetry\b",
-    r"\buv\b",
-    r"\bgo\b",
-    r"\bgit\b",
-    r"\bmake\b",
-    r"\bmvn\b",
-    r"\bgradle\b",
-    r"\bbundle\b",
-    r"\bgem\b",
-    r"\bcomposer\b",
-    r"\bdeno\b",
-];
-
 /// Toolchain cache/config directories a build legitimately writes to, allowed for writing under
 /// confinement by default so the first `cargo build` / `npm install` works with no extra setup.
 pub(super) const DEFAULT_RW_DIRS: &[&str] = &[

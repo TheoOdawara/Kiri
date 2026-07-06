@@ -164,11 +164,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         select_initial_provider(&client, &profile, &credential, &settings, &mut boot_notices);
     // The file tools plus the plan-mode control tool. `present_plan` is advertised only in plan mode
     // (it carries `plan_only`); the registry's `schemas()` withholds it everywhere else.
-    let mut tools = default_fs_tools(
-        settings.plan_allow.clone(),
-        settings.net_allow.clone(),
-        settings.require_confinement,
-    );
+    let mut tools = default_fs_tools(settings.plan_allow.clone(), settings.require_confinement);
     tools.push(Box::new(PresentPlan));
     tools.extend(memory_tools);
     tools.extend(default_extension_tools(Arc::new(extensions.skills.clone())));
@@ -809,7 +805,6 @@ mod tests {
             sandbox_enabled: false,
             require_confinement: false,
             sandbox_network: NetworkPolicy::Deny,
-            net_allow: Arc::from(Vec::new()),
             extra_ro: Arc::from(Vec::new()),
             extra_rw: Arc::from(Vec::new()),
             connect_timeout: Duration::from_secs(1),

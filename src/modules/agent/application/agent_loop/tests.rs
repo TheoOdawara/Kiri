@@ -134,7 +134,6 @@ fn registry_for_tests() -> ToolRegistry {
     // non-plannable, independent of this list.
     ToolRegistry::new(default_fs_tools(
         Arc::from(vec![Regex::new(r"\becho\b").unwrap()]),
-        Arc::from(Vec::<Regex>::new()),
         false,
     ))
 }

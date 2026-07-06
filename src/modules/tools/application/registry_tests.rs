@@ -11,11 +11,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 fn registry() -> ToolRegistry {
-    ToolRegistry::new(default_fs_tools(
-        Arc::from(Vec::<Regex>::new()),
-        Arc::from(Vec::<Regex>::new()),
-        false,
-    ))
+    ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new()), false))
 }
 
 fn sandbox(dir: &TempDir) -> FsSandbox {
@@ -75,11 +71,7 @@ async fn plan_mode_schemas_expose_only_plannable_tools() {
 #[tokio::test]
 async fn present_plan_is_plan_only() {
     use crate::modules::tools::infrastructure::control::present_plan::PresentPlan;
-    let mut tools = default_fs_tools(
-        Arc::from(Vec::<Regex>::new()),
-        Arc::from(Vec::<Regex>::new()),
-        false,
-    );
+    let mut tools = default_fs_tools(Arc::from(Vec::<Regex>::new()), false);
     tools.push(Box::new(PresentPlan));
     let registry = ToolRegistry::new(tools);
 

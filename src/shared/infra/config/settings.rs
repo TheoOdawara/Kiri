@@ -16,8 +16,8 @@ use super::raw::{
     read_config_file, read_project_config_lenient, resolve_layers, resolve_providers,
 };
 use super::resolve::{
-    compile_patterns, expand_home, load_extra_paths, load_net_allow, resolve_bool,
-    resolve_sandbox_mode, resolve_sandbox_network, resolve_timeout,
+    compile_patterns, expand_home, load_extra_paths, resolve_bool, resolve_sandbox_mode,
+    resolve_sandbox_network, resolve_timeout,
 };
 use super::writers::{default_provider, ensure_private_dir, write_starter_config};
 
@@ -54,10 +54,9 @@ pub struct Settings {
     pub sandbox_enabled: bool,
     /// `KIRI_SANDBOX=require`: refuse `run_command` when no OS sandbox is available.
     pub require_confinement: bool,
-    /// Base network stance for `run_command` (the dev-command allow-list may widen it per call).
+    /// Base network stance for `run_command` — deny by default, `KIRI_SANDBOX_NETWORK=allow` widens it
+    /// session-wide; no per-command widening (ADR 0022).
     pub sandbox_network: NetworkPolicy,
-    /// Commands allowed to reach the network under confinement (dev / package-manager tools).
-    pub net_allow: Arc<[Regex]>,
     /// Extra paths a confined command may read / write beyond the workspace (toolchain dirs, config).
     pub extra_ro: Arc<[PathBuf]>,
     pub extra_rw: Arc<[PathBuf]>,
@@ -220,7 +219,6 @@ impl Settings {
             sandbox_enabled,
             require_confinement,
             sandbox_network: resolve_sandbox_network(config.sandbox.network.as_deref()),
-            net_allow: load_net_allow()?,
             extra_ro: load_extra_paths("KIRI_SANDBOX_RO_PATHS", &[]),
             extra_rw: load_extra_paths("KIRI_SANDBOX_RW_PATHS", DEFAULT_RW_DIRS),
             connect_timeout: resolve_timeout(
