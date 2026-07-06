@@ -392,3 +392,107 @@ fn domain_is_free_of_io() {
         }
     }
 }
+
+/// Whether `cfg_token` (e.g. `"cfg(unix)"`) appears in `source` with `function_name` naming the item it
+/// gates within a short following window — a much cheaper proxy for "this cfg attribute is on the
+/// function we care about" than a full parse, but one a bare `source.contains(cfg_token)` doesn't give:
+/// an unrelated `#[cfg(unix)]` elsewhere in the file (a `#[cfg(unix)] #[test]`, say) would satisfy the
+/// bare check without saying anything about the owner-only writer specifically.
+fn cfg_gates_function(source: &str, cfg_token: &str, function_name: &str) -> bool {
+    const WINDOW: usize = 80;
+    source.match_indices(cfg_token).any(|(pos, _)| {
+        let end = (pos + cfg_token.len() + WINDOW).min(source.len());
+        source[pos..end].contains(function_name)
+    })
+}
+
+/// ADR 0027: every harness-owned "owner-only WRAPPER" — a function callers use to get platform-
+/// appropriate private-file semantics, as opposed to `fs.rs`'s `write_atomic_owner_only`, a Unix-only
+/// building block those wrappers call directly on Unix and skip entirely (falling back to the ordinary,
+/// still-atomic `write_atomic`/`write_atomic_sync`) on other platforms — must have BOTH a `#[cfg(unix)]`
+/// branch (real `0600`/`0700` mode bits) and a `#[cfg(not(unix))]` branch (Windows: accepted DACL
+/// inheritance from the parent dir, still crash-atomic). Dropping the non-Unix fallback would be invisible
+/// on this project's macOS dev/CI hosts — only the Unix branch needs to compile there — so this is a
+/// source-scan guard, not something the compiler alone would catch. Each check is tied to the specific
+/// function name via [`cfg_gates_function`], not a bare substring search, so an unrelated `#[cfg(unix)]`
+/// elsewhere in the same file (e.g. a `#[cfg(unix)]`-gated test) cannot satisfy it.
+#[test]
+fn owner_only_writers_have_both_platform_branches() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let wrappers = [
+        (
+            manifest
+                .join("src")
+                .join("shared")
+                .join("infra")
+                .join("config")
+                .join("writers.rs"),
+            "ensure_private_dir",
+        ),
+        (
+            manifest
+                .join("src")
+                .join("modules")
+                .join("provider")
+                .join("infrastructure")
+                .join("secrets")
+                .join("file_store.rs"),
+            "write_owner_only",
+        ),
+        (
+            manifest
+                .join("src")
+                .join("modules")
+                .join("extensions")
+                .join("infrastructure")
+                .join("trust_store.rs"),
+            "write_owner_only",
+        ),
+        (
+            manifest
+                .join("src")
+                .join("modules")
+                .join("sync")
+                .join("infrastructure")
+                .join("memory_ndjson.rs"),
+            "write_owner_only",
+        ),
+    ];
+    for (file, function_name) in &wrappers {
+        assert!(
+            file.is_file(),
+            "expected an owner-only writer wrapper at {}",
+            file.display()
+        );
+        let source = std::fs::read_to_string(file)
+            .unwrap_or_else(|error| panic!("read {}: {error}", file.display()));
+        assert!(
+            cfg_gates_function(&source, "cfg(unix)", function_name),
+            "{} must have a #[cfg(unix)] `{function_name}` branch (ADR 0027)",
+            file.display()
+        );
+        assert!(
+            cfg_gates_function(&source, "cfg(not(unix))", function_name),
+            "{} must have a #[cfg(not(unix))] `{function_name}` fallback branch — its absence would \
+             compile fine on this project's macOS hosts while silently dropping the documented Windows \
+             behavior (ADR 0027)",
+            file.display()
+        );
+    }
+
+    // `fs.rs` is the Unix-only owner-only building block the wrappers above call directly — it needs no
+    // `#[cfg(not(unix))]` sibling of its own (the wrappers' fallback is calling a DIFFERENT, already
+    // platform-agnostic function, not a counterpart defined here), but it must exist and stay Unix-gated.
+    let fs_rs = manifest
+        .join("src")
+        .join("shared")
+        .join("infra")
+        .join("fs.rs");
+    let source = std::fs::read_to_string(&fs_rs)
+        .unwrap_or_else(|error| panic!("read {}: {error}", fs_rs.display()));
+    assert!(
+        source.contains("cfg(unix)") && source.contains("write_atomic_owner_only"),
+        "{} must still define the Unix-gated write_atomic_owner_only building block (ADR 0027)",
+        fs_rs.display()
+    );
+}

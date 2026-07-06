@@ -147,36 +147,42 @@ pub async fn import(memory: &dyn SharedMemory, path: &Path) -> AgentResult<Merge
     Ok(report)
 }
 
+/// Refuse to follow a symlink/special file at `path`: the sync work-tree is materialized by
+/// `git reset --hard` from an untrusted remote, so a committed symlink here would let a write follow it
+/// out of the tree (arbitrary truncate/overwrite). A missing path is fine — it will be created fresh.
+async fn refuse_irregular_target(path: &Path) -> AgentResult<()> {
+    match fs::symlink_metadata(path).await {
+        Ok(metadata) if !metadata.file_type().is_file() => Err(AgentError::Memory(format!(
+            "refusing to write through a non-regular sync path (symlink or special file): {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AgentError::Memory(format!(
+            "stat {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
 /// Write `bytes` to `path` readable/writable by the owner only. On Unix this is `0600` set at `open` (no
 /// post-write chmod window) and re-coerced afterwards so a pre-existing wider mode is tightened; on
 /// Windows the file inherits the user-profile DACL (std exposes no ACL control) — the accepted
-/// equivalent, but the write is still crash-atomic (temp sibling + rename) via `write_atomic`. Mirrors
+/// equivalent. Both branches write via a temp sibling + rename, so a crash mid-write can never leave a
+/// truncated export — this Unix branch previously opened `path` directly with `truncate`, which was NOT
+/// crash-atomic, unlike its own non-Unix fallback below (found during #36's review; ADR 0027). Mirrors
 /// `provider/infrastructure/secrets/file_store.rs`.
 #[cfg(unix)]
 async fn write_owner_only(path: &Path, bytes: &[u8]) -> AgentResult<()> {
     use std::os::unix::fs::PermissionsExt;
     use tokio::io::AsyncWriteExt;
 
-    // Refuse to follow a symlink/special file at the target: the sync work-tree is materialized by
-    // `git reset --hard` from an untrusted remote, so a committed symlink here would let this write follow
-    // it out of the tree (arbitrary truncate/overwrite). Mirrors `import`'s symlink_metadata guard; a
-    // missing path is fine (created fresh below).
-    match fs::symlink_metadata(path).await {
-        Ok(metadata) if !metadata.file_type().is_file() => {
-            return Err(AgentError::Memory(format!(
-                "refusing to write through a non-regular sync path (symlink or special file): {}",
-                path.display()
-            )));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(AgentError::Memory(format!(
-                "stat {}: {error}",
-                path.display()
-            )));
-        }
-    }
+    let tmp = crate::shared::infra::fs::temp_sibling(path);
+    // Check both the target AND its temp sibling: a hostile tree could pre-place a symlink at the exact
+    // temp name this function is about to create, not just at the final target (mirrors
+    // `fs_work_tree.rs`'s `write_atomic` guard, which checks the same two paths for the same reason).
+    refuse_irregular_target(path).await?;
+    refuse_irregular_target(&tmp).await?;
 
     // tokio's `OpenOptions::mode` is an inherent `cfg(unix)` method, so no `OpenOptionsExt` import.
     let mut file = fs::OpenOptions::new()
@@ -184,19 +190,26 @@ async fn write_owner_only(path: &Path, bytes: &[u8]) -> AgentResult<()> {
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(path)
+        .open(&tmp)
         .await?;
-    // `mode()` only applies when the file is created; coerce a pre-existing wider mode (e.g. a 0644 file
-    // left by a prior export or materialized 0644 by `git reset --hard`) down to 0600 on every export.
+    // `mode()` only applies when the file is created; coerce a pre-existing wider mode (e.g. a 0644 temp
+    // left by an interrupted prior export) down to 0600 on every export.
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .await?;
     file.write_all(bytes).await?;
     file.flush().await?;
+    file.sync_all().await?;
+    drop(file);
+    fs::rename(&tmp, path).await?;
     Ok(())
 }
 
 #[cfg(not(unix))]
 async fn write_owner_only(path: &Path, bytes: &[u8]) -> AgentResult<()> {
+    // The Unix branch's symlink guard applies here too — a hostile tree's committed symlink is a
+    // cross-platform concern, not a Unix-specific one.
+    refuse_irregular_target(path).await?;
+    refuse_irregular_target(&crate::shared::infra::fs::temp_sibling(path)).await?;
     crate::shared::infra::fs::write_atomic(path, bytes).await?;
     Ok(())
 }
@@ -395,6 +408,59 @@ mod tests {
             std::fs::read(&outside).unwrap(),
             b"do not clobber\n",
             "the symlink target must be untouched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn export_refuses_a_symlinked_temp_sibling() {
+        // A hostile tree could pre-place a symlink at the exact TEMP name export is about to create
+        // (`.memory.ndjson.kiri-tmp`), not just at the final target — the same class of attack
+        // `export_refuses_a_symlinked_target` locks for the target itself.
+        let dir = TempDir::new().unwrap();
+        let src = memory(&dir, "src.db").await;
+        src.save(&entry("a", "alpha", "2026-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+
+        let outside = dir.path().join("victim");
+        std::fs::write(&outside, b"do not clobber\n").unwrap();
+        let path = dir.path().join("memory.ndjson");
+        let tmp = crate::shared::infra::fs::temp_sibling(&path);
+        std::os::unix::fs::symlink(&outside, &tmp).unwrap();
+
+        let error = export(&src, &path).await.unwrap_err();
+        assert!(
+            matches!(&error, AgentError::Memory(message) if message.contains("non-regular")),
+            "export through a symlinked temp sibling must be refused, got {error:?}"
+        );
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"do not clobber\n",
+            "the symlink target must be untouched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn export_is_crash_atomic_and_leaves_no_temp_sibling() {
+        // Issue #36 review: the Unix export path previously opened the target directly with `truncate`,
+        // not crash-atomic — unlike its own non-Unix fallback. Now both go through a temp sibling + rename;
+        // this locks that no temp artifact survives a successful export (mirroring
+        // `shared/infra/fs.rs`'s own `write_atomic_leaves_no_temp_sibling_on_success`).
+        let dir = TempDir::new().unwrap();
+        let src = memory(&dir, "src.db").await;
+        src.save(&entry("a", "alpha", "2026-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+        let path = dir.path().join("memory.ndjson");
+
+        export(&src, &path).await.unwrap();
+
+        assert!(path.exists(), "the export target must exist");
+        assert!(
+            !crate::shared::infra::fs::temp_sibling(&path).exists(),
+            "the rename must consume the temp sibling, leaving none behind"
         );
     }
 }
