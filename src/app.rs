@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use crate::modules::agent::application::agent_loop::AgentLoop;
+use crate::modules::agent::infrastructure::task_tool::TaskTool;
 use crate::modules::extensions::application::{ExtensionCatalog, ExtensionsLoader};
 use crate::modules::extensions::domain::gate::{self, GateState, content_hash};
 use crate::modules::extensions::domain::resource::McpServer;
@@ -163,10 +164,25 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // The file tools plus the plan-mode control tool. `present_plan` is advertised only in plan mode
     // (it carries `plan_only`); the registry's `schemas()` withholds it everywhere else.
     let mut tools = default_fs_tools(settings.plan_allow.clone(), settings.require_confinement);
-    tools.push(Box::new(PresentPlan));
+    tools.push(Arc::new(PresentPlan));
     tools.extend(memory_tools);
     tools.extend(default_extension_tools(Arc::new(extensions.skills.clone())));
     tools.extend(build_mcp_tools(&extensions, &trust_store, &mut boot_notices).await);
+    // ADR 0029: the `task` tool dispatches a loaded agent profile as a nested, read-only subagent. Its
+    // child pool is every tool assembled so far — never `task` itself, the structural depth-1 cap — so
+    // it is built last, cloning the pool before it moves into the registry. Skipped entirely when no
+    // agent profile is loaded, so a fresh install never advertises a dead tool.
+    let agents = Arc::new(extensions.agents.clone());
+    if !agents.is_empty() {
+        tools.push(Arc::new(TaskTool::new(
+            provider.clone(),
+            tools.clone(),
+            agents,
+            profile.model.clone(),
+            settings.checkpoint_budget,
+            settings.max_tool_calls,
+        )));
+    }
     let registry = ToolRegistry::new(tools);
     let agent_loop = AgentLoop::new(
         provider,
@@ -282,8 +298,8 @@ async fn build_mcp_tools(
     extensions: &ExtensionCatalog,
     trust: &ExtensionsTrustStore,
     notices: &mut Vec<BootNotice>,
-) -> Vec<Box<dyn Tool>> {
-    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+) -> Vec<Arc<dyn Tool>> {
+    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     let mut servers: Vec<&McpServer> = extensions.mcp_servers.values().collect();
     servers.sort_by(|a, b| a.id.cmp(&b.id));
     for server in servers {
@@ -322,7 +338,7 @@ async fn build_mcp_tools(
             Ok(specs) => {
                 let discovered = specs.len();
                 for spec in specs.into_iter().take(MAX_MCP_TOOLS_PER_SERVER) {
-                    tools.push(Box::new(McpToolProxy::new(
+                    tools.push(Arc::new(McpToolProxy::new(
                         &server.id,
                         spec,
                         connection.clone(),
@@ -441,7 +457,7 @@ async fn build_memory(
     embedder: Option<Arc<dyn EmbeddingProvider>>,
     project_id: String,
     notices: &mut Vec<BootNotice>,
-) -> Result<(Vec<Box<dyn Tool>>, String, Arc<dyn Memory>)> {
+) -> Result<(Vec<Arc<dyn Tool>>, String, Arc<dyn Memory>)> {
     if !settings.memory_enabled {
         return Ok((Vec::new(), String::new(), inert_memory_port(settings)?));
     }

@@ -72,7 +72,7 @@ async fn plan_mode_schemas_expose_only_plannable_tools() {
 async fn present_plan_is_plan_only() {
     use crate::modules::tools::infrastructure::control::present_plan::PresentPlan;
     let mut tools = default_fs_tools(Arc::from(Vec::<Regex>::new()), false);
-    tools.push(Box::new(PresentPlan));
+    tools.push(Arc::new(PresentPlan));
     let registry = ToolRegistry::new(tools);
 
     let names = |schemas: Vec<serde_json::Value>| -> Vec<String> {

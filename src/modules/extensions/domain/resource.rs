@@ -151,21 +151,25 @@ impl CommandSpec {
     }
 }
 
-/// An **agent** profile (ADR 0021): a named system-prompt a custom command binds to via its `agent:`
-/// field. Built from a `Resource`. Not an isolated sub-agent — the harness runs a single turn loop, so
-/// binding a command to an agent means "prepend this system-prompt to the turn", not "spawn a concurrent
-/// agent" (see `ExtensionCatalog::command_bodies`).
+/// An **agent** profile (ADR 0021): a named system-prompt. Built from a `Resource`. Consumed two ways:
+/// a custom command can bind to it via its `agent:` field, prepending the system-prompt to the command's
+/// expanded body (`ExtensionCatalog::command_bodies`) — a same-loop prompt overlay, not a spawn. Or the
+/// model can dispatch it directly as an isolated subagent via the `task` tool (ADR 0029), which runs a
+/// nested `AgentLoop` scoped to `model`/`allowed_tools` and returns only the final text to the parent.
 #[derive(Debug, Clone)]
 pub struct AgentProfile {
     pub id: String,
-    /// The agent's system-prompt text (the resource body), prepended to a bound command's expanded body.
+    /// The agent's system-prompt text (the resource body), prepended to a bound command's expanded body,
+    /// or seeded as the nested conversation's system prompt when dispatched via `task`.
     pub system_prompt: String,
     pub layer: Layer,
     pub path: String,
-    // ponytail: same ceiling as `CommandSpec::model`/`allowed_tools` — no per-turn override mechanism yet.
-    #[allow(dead_code)]
+    /// The model id a dispatched subagent runs with (ADR 0029); falls back to the session's active model
+    /// when absent. Unused by the command-binding path (that stays on the parent's model/turn).
     pub model: Option<String>,
-    #[allow(dead_code)]
+    /// The tool names a dispatched subagent may draw from (ADR 0029), intersected with "read-only" — v1
+    /// supports read-only subagents only. Empty means every read-only tool. Unused by the command-binding
+    /// path (that keeps the parent's full toolset).
     pub allowed_tools: Vec<String>,
 }
 

@@ -14,10 +14,10 @@ pub fn default_memory_tools(
     memory: Arc<dyn Memory>,
     docs: Arc<DocsLibrary>,
     project_id: String,
-) -> Vec<Box<dyn Tool>> {
+) -> Vec<Arc<dyn Tool>> {
     vec![
-        Box::new(recall_memory::RecallMemory::new(memory.clone())),
-        Box::new(remember::Remember::new(memory, project_id)),
-        Box::new(consult_docs::ConsultDocs::new(docs)),
+        Arc::new(recall_memory::RecallMemory::new(memory.clone())),
+        Arc::new(remember::Remember::new(memory, project_id)),
+        Arc::new(consult_docs::ConsultDocs::new(docs)),
     ]
 }
