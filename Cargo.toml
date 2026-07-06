@@ -46,6 +46,12 @@ rmcp = { version = "2.1.0", default-features = false, features = ["client", "tra
 
 [dev-dependencies]
 tempfile = "3"
+# Test-only (architecture_guards.rs is `#![cfg(test)]`): already present transitively (async-trait,
+# tokio-macros, serde_derive, …), so this promotes an already-compiled dependency rather than adding a new
+# one to the tree. Used to parse source files into a real AST for the process-I/O-confinement guards
+# (issue #50), so `use ... as Alias` and fully-qualified inline paths are matched by their real segments
+# rather than a literal substring search an alias/rename could dodge.
+syn = { version = "2", features = ["full", "visit"] }
 
 [lints.rust]
 unsafe_code = "forbid"
