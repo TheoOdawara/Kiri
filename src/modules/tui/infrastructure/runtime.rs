@@ -345,6 +345,14 @@ impl Tui {
             pending_reply: &mut pending_reply,
         };
 
+        // Render the first frame BEFORE awaiting SessionStart hooks below (issue #51): a slow or hung
+        // hook must not leave the terminal sitting blank for however long it takes to run. Any hook
+        // notices, once dispatch_hooks below completes, surface on whatever render happens next (the
+        // seed turn's streaming updates, or the main loop's first iteration) — no separate plumbing
+        // needed, since notices are part of `Model` and every render reads the current state.
+        run_loop.model.timeline.render_at = Some(Instant::now());
+        render::draw_and_copy(ui.terminal, &mut run_loop.model)?;
+
         // ADR 0021: fire every SessionStart hook before the first prompt (CLI seed or interactive) runs.
         dispatch_hooks(
             HookEvent::SessionStart,
@@ -626,6 +634,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn session_start_hooks_do_not_block_the_first_render() {
+        // Issue #51: the first `draw_and_copy` call must textually precede the SessionStart
+        // `dispatch_hooks` await in `Tui::run`, so a slow/hung hook cannot leave the terminal sitting
+        // blank while it runs. A source-scan guard rather than a live-terminal test: `Tui::run` calls
+        // `ratatui::init()`, which needs a real TTY unavailable in CI — mirrors the source-scan approach
+        // `runtime_has_no_sync_adapter_construction` already uses in this same file for a different
+        // invariant. Scanned only up to `mod tests` so the guard's own literals below can never
+        // self-match regardless of future reordering in this file.
+        let source = include_str!("runtime.rs")
+            .split("mod tests")
+            .next()
+            .expect("this module always contains its own source text");
+        let render_pos = source
+            .find("draw_and_copy(ui.terminal, &mut run_loop.model)")
+            .expect("the first-frame render call must exist");
+        let dispatch_pos = source
+            .find("HookEvent::SessionStart")
+            .expect("the SessionStart dispatch must exist");
+        assert!(
+            render_pos < dispatch_pos,
+            "the first frame must render BEFORE SessionStart hooks are awaited"
+        );
     }
 
     fn has_error_notice(model: &Model) -> bool {
