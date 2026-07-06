@@ -146,6 +146,51 @@ fn resolve_create_refuses_an_out_of_root_sensitive_file() {
     assert!(sb.resolve_create(leak.to_str().unwrap()).is_err());
 }
 
+// Issue #26: NTFS Alternate Data Stream syntax (`filename:streamname`) addresses a different byte
+// stream of the SAME underlying file — `id_rsa::$DATA` reads the exact same bytes as `id_rsa`, but as
+// a path component its whole text is `"id_rsa::$DATA"`, which the sensitive-name glob's anchored
+// `^id_rsa$` does not match. The guard must refuse ANY colon in a path component outright — checked
+// before any filesystem touch, so this holds regardless of whether the target file exists on the
+// current OS (macOS/Linux don't interpret `:` specially, so the same refusal applies everywhere, not
+// only on the Windows host where a real ADS would resolve).
+#[test]
+fn reject_ads_syntax_refuses_any_colon_in_a_component() {
+    assert!(reject_ads_syntax("id_rsa::$DATA").is_err());
+    assert!(reject_ads_syntax(".env:hidden").is_err());
+    assert!(reject_ads_syntax("sub/dir:stream/file.txt").is_err());
+    assert!(reject_ads_syntax("normal/relative/path.txt").is_ok());
+}
+
+#[test]
+fn resolve_existing_refuses_ads_syntax_even_when_nothing_exists_on_disk() {
+    let dir = TempDir::new().unwrap();
+    // An empty matcher, so a failure here is unambiguously the ADS check, not a sensitive-name match.
+    let sb = sandbox(&dir);
+    // Neither `id_rsa` nor an ADS-suffixed variant exists on disk — the guard must still refuse the
+    // syntax itself, before any canonicalize/exists check ever runs.
+    assert!(sb.resolve_existing("id_rsa::$DATA").is_err());
+}
+
+#[test]
+fn resolve_create_refuses_ads_syntax() {
+    let dir = TempDir::new().unwrap();
+    let sb = sandbox(&dir);
+    assert!(sb.resolve_create(".env:hidden").is_err());
+    assert!(sb.resolve_create("sub/id_rsa::$DATA").is_err());
+}
+
+#[test]
+fn resolve_refuses_ads_syntax_in_an_absolute_path() {
+    // Exercises the ABSOLUTE-path branch specifically (which skips `join_checked` entirely), not just
+    // the in-root relative branch.
+    let outside = TempDir::new().unwrap();
+    let ads_path = outside.path().join("id_rsa::$DATA");
+    let dir = TempDir::new().unwrap();
+    let sb = sandbox(&dir);
+    assert!(sb.resolve_existing(ads_path.to_str().unwrap()).is_err());
+    assert!(sb.resolve_create(ads_path.to_str().unwrap()).is_err());
+}
+
 // The single-path tools (read/write/edit/delete/move) resolve through these methods, so refusing a
 // path inside a credential directory here closes the gap the file-name guard misses (e.g. a
 // non-sensitive name like `config` living in `.aws`/`.ssh`/`.docker`).

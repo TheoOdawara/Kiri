@@ -165,6 +165,7 @@ impl Sandbox for FsSandbox {
     /// resolves under the active root and is asserted to stay within it; an absolute path (or `~/…`) is
     /// resolved as given — allowed outside the root, since the CLI gates it with explicit confirmation.
     fn resolve_existing(&self, rel: &str) -> Result<PathBuf, AgentError> {
+        reject_ads_syntax(rel)?;
         let expanded = expand_tilde(rel, home().as_deref());
         if is_absolute_path(rel, &expanded) {
             let real = std::fs::canonicalize(&expanded)
@@ -192,6 +193,7 @@ impl Sandbox for FsSandbox {
     /// within-root check (`confined == false`). It is still run through `assert_not_sensitive`, so
     /// secret paths are rejected regardless.
     fn resolve_create(&self, rel: &str) -> Result<CreateResolution, AgentError> {
+        reject_ads_syntax(rel)?;
         let expanded = expand_tilde(rel, home().as_deref());
         let (candidate, confined) = if is_absolute_path(rel, &expanded) {
             // Absolute/tilde-expanded paths are user-approved out-of-root targets — not confined here;
@@ -248,6 +250,41 @@ impl Sandbox for FsSandbox {
     fn is_sensitive_name(&self, name: &str) -> bool {
         self.sensitive.matches(name).is_some()
     }
+}
+
+/// Reject any path component containing a literal `:`. NTFS Alternate Data Stream syntax
+/// (`filename:streamname`) addresses a DIFFERENT byte stream of the SAME underlying file without the
+/// component's text matching the base file name at all — `id_rsa::$DATA` reads the exact same bytes as
+/// `id_rsa`, but as a path component its name is the whole string `"id_rsa::$DATA"`, which the sensitive-
+/// name matcher's anchored glob (`^id_rsa$`) does not match, and which does not equal any credential-
+/// directory name either. `std::path` never splits a component on `:` — it only recognizes a drive-letter
+/// PREFIX (`Component::Prefix`, not `Component::Normal`) at an absolute path's very start — so this checks
+/// the raw component text directly (issue #26).
+///
+/// Applied on every platform, not gated to `#[cfg(windows)]`: a literal colon in a bare file/dir name is
+/// vanishingly rare on any supported OS (and NTFS itself forbids one in an ordinary name outside this
+/// exact syntax), so refusing it outright is a safe, simple default-deny rather than trying to parse and
+/// selectively strip a stream suffix — which would also need to handle the bare `filename:` form (default
+/// `::$DATA` stream, no explicit suffix) and the `filename::$INDEX_ALLOCATION` directory-stream form.
+///
+/// `Component::Prefix` (the drive-letter form, e.g. `C:`) only exists in `std::path`'s Windows backend —
+/// on this project's current macOS/Linux dev and CI hosts, a string like `C:\Users\x` parses as ordinary
+/// `Component::Normal` segments (backslash is not a separator there either), so the drive-letter exemption
+/// this function relies on cannot be exercised by this test suite today. Untested by construction, not by
+/// oversight — add a `#[cfg(windows)]` regression once Windows is an actual build target (ADR-tracked
+/// distribution strategy: macOS is v1, Windows/Linux later) so a future edit to the `Component::Normal`
+/// guard can't silently start refusing legitimate Windows drive paths with zero test signal.
+fn reject_ads_syntax(rel: &str) -> Result<(), AgentError> {
+    for component in Path::new(rel).components() {
+        if let Component::Normal(segment) = component
+            && segment.to_str().is_some_and(|s| s.contains(':'))
+        {
+            return Err(AgentError::Sandbox(format!(
+                "path component contains ':' (NTFS alternate-data-stream syntax is not allowed): {rel}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl FsSandbox {
