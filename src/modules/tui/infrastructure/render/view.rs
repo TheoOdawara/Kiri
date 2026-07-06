@@ -1,6 +1,7 @@
 use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::widgets::Block;
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::Style;
+use ratatui::widgets::{Block, Paragraph, Wrap};
 
 use crate::modules::tui::domain::modal::ApprovalOption;
 use crate::modules::tui::domain::model::{ActiveModal, Model};
@@ -11,12 +12,26 @@ use crate::modules::tui::infrastructure::widgets::{
     selection_overlay, sidebar, transcript_pane, wizard,
 };
 
+/// The smallest terminal the normal layout can render as anything coherent. `main_area.height < 8 ||
+/// main_area.width < 60` (just below in this file) only freezes motion — the existing test suite proves
+/// the normal layout already degrades gracefully (short hint, no overflow) all the way down to 20x8, so
+/// the floor here is set at exactly that boundary rather than the motion threshold: only a terminal
+/// smaller than anything already handled gets this plain message instead of the normal regions (issue
+/// #8b).
+const MIN_WIDTH: u16 = 20;
+const MIN_HEIGHT: u16 = 8;
+
 /// The sole ratatui render entry point: project the model onto the frame's regions. Pure with respect
 /// to the model (takes `&Model`); all state changes happen in `update`. The whole frame is first painted
 /// with the Tamahagane Void base so every cell inherits steel-on-void.
 pub fn view(model: &Model, frame: &mut Frame) {
     frame.render_widget(Block::default().style(theme::base()), frame.area());
     let mut area = frame.area();
+
+    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+        render_too_small(frame, area);
+        return;
+    }
 
     // Add a top margin of 1 line on roomy terminals so everything is not glued to the top edge.
     if area.height >= 12 {
@@ -98,6 +113,22 @@ pub fn view(model: &Model, frame: &mut Frame) {
         let area = frame.area();
         selection_overlay::paint(frame.buffer_mut(), area, &sel, theme::selection());
     }
+}
+
+/// The whole-frame fallback for a terminal below [`MIN_WIDTH`]/[`MIN_HEIGHT`]: a centered, wrapped
+/// message instead of the normal (unusably clipped) layout.
+fn render_too_small(frame: &mut Frame, area: Rect) {
+    let text = format!(
+        "terminal muito pequeno — mínimo {MIN_WIDTH}x{MIN_HEIGHT}, atual {}x{}",
+        area.width, area.height
+    );
+    frame.render_widget(
+        Paragraph::new(text)
+            .style(Style::default().fg(theme::WARNING))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 /// Resolve the frame's stacked regions for the current model: the input height grows with the wrapped

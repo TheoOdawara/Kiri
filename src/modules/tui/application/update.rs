@@ -58,6 +58,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Tick => Vec::new(),
         Msg::TurnBegan => {
             model.status.streaming = true;
+            model.status.turn_failed = false;
             model.timeline.begin_turn();
             Vec::new()
         }

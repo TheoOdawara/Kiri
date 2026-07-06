@@ -106,6 +106,7 @@ pub(super) async fn on_turn_end(
                 // nothing usable (e.g. an empty stream). Surface it — never silent.
                 model
                     .notify_error("o provedor não retornou conteúdo — verifique o modelo/endpoint");
+                model.status.turn_failed = true;
             }
         }
         // A plan-mode turn called `present_plan`: render the finished plan and open the approval box.
@@ -137,6 +138,7 @@ pub(super) async fn on_turn_end(
                 model.notify_info("⨯ cancelado");
             } else {
                 model.notify_error(format!("erro: {error}"));
+                model.status.turn_failed = true;
             }
             conversation.rollback_dangling_user();
             if !cancelled && matches!(error, AgentError::ProviderRejected { .. }) {

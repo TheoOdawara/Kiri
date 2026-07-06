@@ -51,6 +51,11 @@ pub struct Status {
     pub streaming: bool,
     pub elapsed_secs: u64,
     pub spinner_frame: usize,
+    /// Set when the last turn ended in error (issue #8b); cleared the moment the next turn begins
+    /// (`Msg::TurnBegan`). A persistent meta-rule badge, unlike the transcript's own error `Notice` —
+    /// which scrolls out of view as more content is appended — so a failure stays visible until the user
+    /// has actually started again, not just until the next line of output.
+    pub turn_failed: bool,
 }
 
 impl Status {

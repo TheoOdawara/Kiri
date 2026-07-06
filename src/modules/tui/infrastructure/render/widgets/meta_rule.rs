@@ -16,16 +16,26 @@ const SAFETY: usize = 1;
 /// The quiet status spine directly above the input — the retired dash-rail. No rule, no caps strung on
 /// dashes: the context (`model · workspace`) sits dim at the left, the approval mode is ghosted right
 /// behind a single `◈` tsuba anchor, and only void breathes between them. While a turn runs the spinner
-/// and elapsed seconds take the one accent just left of the mode. Responsive: as width shrinks the
+/// and elapsed seconds take the one accent just left of the mode; once a turn ends in error, the same
+/// slot instead holds a persistent "✗ erro" badge (issue #8b) until the next turn begins — unlike the
+/// transcript's own error `Notice`, which scrolls out of view as more content is appended, this stays put
+/// so a failure is never missed just because more text landed after it. Responsive: as width shrinks the
 /// workspace is abbreviated then dropped, but the mode anchor always survives.
 pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
     let width = area.width as usize;
     let (mode_label, mode_style) = mode_badge(model.approval_mode);
-    let busy = if model.busy {
+    let (right_content, right_style) = if model.busy {
         let glyph = theme::spinner_glyph(model.status.spinner_frame);
-        format!("{glyph} {}", model.status.elapsed_label())
+        (
+            format!("{glyph} {}", model.status.elapsed_label()),
+            theme::accent(),
+        )
+    } else if model.status.turn_failed {
+        ("✗ erro".to_string(), Style::default().fg(theme::ERROR))
     } else {
-        String::new()
+        // The style is never read: `right_text` (built below) is empty, so the span carrying it is
+        // skipped entirely — `Style::default()` makes that explicit rather than reusing `accent()`.
+        (String::new(), Style::default())
     };
 
     // Build the context, shrinking it to fit. Prefer keeping the workspace; drop the model first, then
@@ -35,17 +45,17 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         &full,
         &model.status.workspace,
         width,
-        display_width(&busy),
+        display_width(&right_content),
         mode_label,
     );
 
-    // Layout: context …void fill… [busy ]MODE ◈ . The right cluster is the only thing pinned to the
+    // Layout: context …void fill… [right ]MODE ◈ . The right cluster is the only thing pinned to the
     // edge; the space between is the negative space (間) that kills the old boxed rule. Widths are
     // measured in display cells so a wide glyph never pushes the anchor off-screen.
-    let right_text = if busy.is_empty() {
+    let right_text = if right_content.is_empty() {
         String::new()
     } else {
-        format!("{busy} ")
+        format!("{right_content} ")
     };
     let head = display_width(&context);
     let tail = display_width(&right_text) + display_width(mode_label) + display_width(" ◈");
@@ -56,7 +66,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect) {
         Span::styled(" ".repeat(fill), theme::base()),
     ];
     if !right_text.is_empty() {
-        spans.push(Span::styled(right_text, theme::accent()));
+        spans.push(Span::styled(right_text, right_style));
     }
     spans.push(Span::styled(mode_label, mode_style));
     spans.push(Span::styled(" ◈", theme::dim()));

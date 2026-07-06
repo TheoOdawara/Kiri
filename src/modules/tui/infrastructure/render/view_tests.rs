@@ -411,6 +411,63 @@ fn narrow_terminal_keeps_prompt_and_short_hint_without_overflow() {
     assert!(out.contains("/help"), "short hint missing:\n{out}");
 }
 
+#[test]
+fn a_terminal_below_the_minimum_size_shows_a_plain_message_instead_of_the_clipped_layout() {
+    // Issue #8b: below the smallest size the normal layout is proven to degrade gracefully at (20x8,
+    // the test right above this one), `view` must show a plain notice instead of attempting the normal
+    // regions at all.
+    let model = Model::new("m".to_string(), "/w".to_string());
+    // "pequeno" is a single word, so it survives the aggressive wrapping a very narrow width forces —
+    // the fuller phrase "terminal muito pequeno" can itself be split across wrapped rows.
+    let too_narrow = render(&model, 19, 20);
+    assert!(
+        too_narrow.contains("pequeno"),
+        "too-small message missing for a narrow terminal:\n{too_narrow}"
+    );
+    assert!(
+        !too_narrow.contains("›▏"),
+        "the normal layout must not attempt to render at all:\n{too_narrow}"
+    );
+
+    let too_short = render(&model, 80, 7);
+    assert!(
+        too_short.contains("pequeno"),
+        "too-small message missing for a short terminal:\n{too_short}"
+    );
+
+    // Exactly at the floor (20x8), the normal layout still renders — confirms the boundary is inclusive,
+    // matching `narrow_terminal_keeps_prompt_and_short_hint_without_overflow` just above.
+    let at_floor = render(&model, 20, 8);
+    assert!(
+        !at_floor.contains("pequeno"),
+        "exactly at the minimum size, the normal layout must still render:\n{at_floor}"
+    );
+}
+
+#[test]
+fn a_failed_turn_shows_a_persistent_error_badge_until_the_next_turn_begins() {
+    // Issue #8b: unlike the transcript's own error Notice (which scrolls away as more content lands),
+    // the meta-rule badge must survive until the NEXT turn actually starts.
+    use crate::modules::tui::application::msg::Msg;
+    use crate::modules::tui::application::update::update;
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model.status.turn_failed = true;
+    let out = render(&model, 80, 20);
+    assert!(
+        out.contains("✗ erro"),
+        "persistent error badge missing:\n{out}"
+    );
+
+    // A new turn beginning clears it.
+    update(&mut model, Msg::TurnBegan);
+    assert!(!model.status.turn_failed, "TurnBegan must clear the flag");
+    let cleared = render(&model, 80, 20);
+    assert!(
+        !cleared.contains("✗ erro"),
+        "the badge must disappear once a new turn begins:\n{cleared}"
+    );
+}
+
 // --- screen selection overlay -------------------------------------------------
 
 fn render_buffer(model: &Model, w: u16, h: u16) -> ratatui::buffer::Buffer {

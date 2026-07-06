@@ -586,6 +586,7 @@ mod tests {
     use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
     use crate::shared::kernel::approval_mode::ApprovalMode;
     use crate::shared::kernel::conversation::Conversation;
+    use crate::shared::kernel::error::AgentError;
     use crate::shared::kernel::message::Message;
 
     /// A sandbox rooted at the current directory — these `on_turn_end` tests never touch it (an empty
@@ -1478,6 +1479,59 @@ mod tests {
         assert!(
             has_error_notice(&model),
             "an empty turn must surface an error notice"
+        );
+        assert!(
+            model.status.turn_failed,
+            "an empty completion must also raise the persistent error badge (issue #8b)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_genuine_turn_error_raises_the_persistent_error_badge() {
+        // Issue #8b: the OTHER on_turn_end failure branch (a real `Err`, not the empty-completion case
+        // above) must raise the same persistent badge — proven separately since it is a distinct match
+        // arm in `on_turn_end`, not shared code with the empty-completion path.
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("oi"));
+
+        on_turn_end(
+            Err(AgentError::Provider("boom".to_string())),
+            false,
+            &mut model,
+            &mut conversation,
+            &test_sandbox(),
+            &empty_hooks(),
+        )
+        .await;
+
+        assert!(has_error_notice(&model));
+        assert!(
+            model.status.turn_failed,
+            "a genuine turn error must raise the persistent error badge"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_turn_does_not_raise_the_persistent_error_badge() {
+        // A user-initiated ^C is not a "failure" — it must not trip the same badge a real error does.
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("oi"));
+
+        on_turn_end(
+            Err(AgentError::Provider("cancelled".to_string())),
+            true,
+            &mut model,
+            &mut conversation,
+            &test_sandbox(),
+            &empty_hooks(),
+        )
+        .await;
+
+        assert!(
+            !model.status.turn_failed,
+            "a user cancel must not raise the persistent error badge"
         );
     }
 
