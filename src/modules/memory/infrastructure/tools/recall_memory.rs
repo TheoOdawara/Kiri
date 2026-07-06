@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use crate::modules::memory::application::memory_port::Memory;
 use crate::modules::memory::domain::entry::MemoryEntry;
 use crate::modules::memory::domain::scope::RecallScope;
+use crate::modules::memory::domain::similarity::is_near_duplicate;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
@@ -29,6 +30,11 @@ fn default_scope() -> String {
 fn default_limit() -> usize {
     5
 }
+
+/// Hard ceiling on the model-supplied `limit`. The schema's `"minimum": 1` is advisory only (not
+/// enforced by the JSON parser), and the cross-store dedup below is O(project × shared) — an unbounded
+/// limit against a since-grown store would turn one tool call into real CPU cost (ADR 0023).
+const MAX_LIMIT: usize = 50;
 
 /// Read-only tool that recalls relevant memory entries (project, shared, or both) for a query, so the
 /// model can pull prior decisions/patterns/facts into the current turn on demand.
@@ -106,24 +112,46 @@ impl Tool for RecallMemory {
             ));
         };
 
-        let mut sections: Vec<String> = Vec::new();
+        let limit = args.limit.min(MAX_LIMIT);
+        let mut project_entries = Vec::new();
         if scope.includes_project() && self.memory.project_memory_available() {
-            match self.memory.recall_project(&args.query, args.limit).await {
-                Ok(entries) if !entries.is_empty() => {
-                    sections.push(render("Project memory", &entries))
-                }
-                Ok(_) => {}
+            match self.memory.recall_project(&args.query, limit).await {
+                Ok(entries) => project_entries = entries,
                 Err(error) => return ToolOutcome::Error(error.to_string()),
             }
         }
+        let mut shared_entries = Vec::new();
         if scope.includes_shared() && self.memory.shared_memory_available() {
-            match self.memory.recall_shared(&args.query, args.limit).await {
-                Ok(entries) if !entries.is_empty() => {
-                    sections.push(render("Shared memory", &entries))
-                }
-                Ok(_) => {}
+            match self.memory.recall_shared(&args.query, limit).await {
+                Ok(entries) => shared_entries = entries,
                 Err(error) => return ToolOutcome::Error(error.to_string()),
             }
+        }
+
+        // Cross-store provenance: project wins (ADR 0023). A fact present in both stores — e.g. the
+        // distiller wrote it to both, or the user entered it twice — surfaces once, from the project
+        // entry, rather than duplicated across both sections. The drop is counted, never silent: the
+        // model is told when a shared entry was withheld, mirroring the distiller's `DistillReport.skipped`.
+        let shared_before = shared_entries.len();
+        shared_entries.retain(|shared| {
+            !project_entries
+                .iter()
+                .any(|project| is_near_duplicate(&project.content, &shared.content))
+        });
+        let dropped = shared_before - shared_entries.len();
+
+        let mut sections: Vec<String> = Vec::new();
+        if !project_entries.is_empty() {
+            sections.push(render("Project memory", &project_entries));
+        }
+        if !shared_entries.is_empty() {
+            sections.push(render("Shared memory", &shared_entries));
+        }
+        if dropped > 0 {
+            sections.push(format!(
+                "({dropped} shared entr{} omitted as duplicate of project memory)",
+                if dropped == 1 { "y" } else { "ies" }
+            ));
         }
 
         if sections.is_empty() {
@@ -194,5 +222,72 @@ mod tests {
             .execute(&sandbox(), &call(r#"{"query":"x","scope":"nope"}"#))
             .await;
         assert!(matches!(bad, ToolOutcome::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn cross_store_near_duplicate_surfaces_once_favoring_project() {
+        let dir = TempDir::new().unwrap();
+        let port = temp_port(&dir).await;
+        port.remember_project(MemoryEntry::new(
+            MemoryKind::Fact,
+            "the api times out after 30 seconds".into(),
+            Default::default(),
+            Some("p".into()),
+        ))
+        .await
+        .unwrap();
+        // Same fact, different casing/spacing — normalizes equal to the project entry above. Written to
+        // the shared store, e.g. by the distiller classifying the same fact into both scopes across two
+        // sessions.
+        port.remember_shared(MemoryEntry::new(
+            MemoryKind::Fact,
+            "The API   times out after 30 seconds".into(),
+            Default::default(),
+            Some("p".into()),
+        ))
+        .await
+        .unwrap();
+        // An unrelated shared entry must still surface — the dedup only drops what near-duplicates a
+        // project entry, not the whole shared section.
+        port.remember_shared(MemoryEntry::new(
+            MemoryKind::Fact,
+            "the api rate limit is 100 requests per minute".into(),
+            Default::default(),
+            Some("p".into()),
+        ))
+        .await
+        .unwrap();
+
+        let tool = RecallMemory::new(port);
+        let out = tool
+            .execute(&sandbox(), &call(r#"{"query":"api","scope":"both"}"#))
+            .await;
+        match out {
+            ToolOutcome::Ok(body) => {
+                // Exactly two entries render (project's + the unrelated shared one) — not three. A
+                // literal-substring check on lowercase content would pass whether or not the retain
+                // actually fired (the shared duplicate here differs in case/spacing), so this counts the
+                // rendered `MemoryEntry` markers directly.
+                assert_eq!(
+                    body.matches("--- MemoryEntry").count(),
+                    2,
+                    "the cross-store duplicate must be dropped: {body}"
+                );
+                assert!(
+                    !body.contains("The API   times out after 30 seconds"),
+                    "the shared duplicate's own rendering must not appear: {body}"
+                );
+                assert!(body.contains("Project memory"));
+                assert!(
+                    body.contains("rate limit"),
+                    "an unrelated shared entry must still surface: {body}"
+                );
+                assert!(
+                    body.contains("1 shared entry omitted"),
+                    "the drop must be observable, not silent: {body}"
+                );
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
     }
 }

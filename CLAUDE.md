@@ -62,7 +62,9 @@ in the transcript rather than `eprintln!` behind the alternate-screen TUI.
   `SqliteSharedMemory` (a `SharedMemory`) for shared
   memory in `~/.kiri/memory/shared.db`, `DocsLibrary` over `docs/` — the `recall_memory`/`remember`/
   `consult_docs` tools, semantic recall via the `EmbeddingProvider` port with a keyword fallback (ADR 0014),
-  and the end-of-session `Distiller` that learns automatically (ADR 0013); see ADRs 0010/0013/0014),
+  the end-of-session `Distiller` that learns automatically (ADR 0013), and `recall_memory`'s cross-store
+  dedup (`domain::similarity::is_near_duplicate`, shared with the distiller) dropping a shared hit that
+  near-duplicates a project hit — project wins on provenance (ADR 0023); see ADRs 0010/0013/0014/0023),
   `session` (SQLite-persisted conversations in `~/.kiri/sessions.db`, keyed by project: the `Session`
   domain + `SessionStore` port + `SqliteSessionStore`, driving `/resume` and `/sessions`; ADR 0013),
   `sync` (portable-profile sync to a private git repo: the `Git` port + `GitCli` + NDJSON export/merge +
