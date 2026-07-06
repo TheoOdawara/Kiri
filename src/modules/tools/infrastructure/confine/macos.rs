@@ -65,6 +65,12 @@ impl CommandSandbox for MacosSeatbelt {
         if let Some(dir) = cwd {
             wrapped.current_dir(dir);
         }
+        // `get_envs()` only reports explicit overrides made via `env`/`env_remove`/`env_clear` on the
+        // ORIGINAL `cmd` — it cannot see whether `env_clear()` itself was called, so replaying it onto a
+        // fresh `Command` here is not enough on its own: without also clearing `wrapped`, a scrubbed
+        // caller's env (see `exec::run_shell`, issues #25/#49) would still fully inherit into this
+        // rebuilt process, silently re-leaking every credential the caller just cleared.
+        wrapped.env_clear();
         for (key, value) in envs {
             match value {
                 Some(value) => wrapped.env(key, value),
@@ -429,5 +435,42 @@ mod tests {
         assert!(args[1].contains("(deny network*)"));
         assert_eq!(args[2], "/bin/echo");
         assert_eq!(args[3], "hi");
+    }
+
+    #[tokio::test]
+    async fn confine_does_not_leak_the_full_parent_env_into_the_wrapped_command() {
+        // Regression for issues #25/#49. NOTE: asserting on `wrapped.as_std().get_envs()` here would be
+        // vacuous — `get_envs()` only reports explicit overrides, never whether `env_clear()` was called,
+        // so it reads identically whether `wrapped.env_clear()` is present or not (confirmed: deleting
+        // that line still passed a `get_envs()`-based assertion in an earlier draft of this test). This
+        // spawns the REAL wrapped command through `sandbox-exec` and inspects its actual environment,
+        // which DOES differ — that's the only way to catch the composition bug this locks.
+        if !Path::new(SANDBOX_EXEC).exists() {
+            return; // sandbox-exec unavailable on this host
+        }
+        let adapter = MacosSeatbelt;
+        let mut inner = tokio::process::Command::new("/usr/bin/env");
+        inner.env_clear();
+        inner.env("PATH", "/usr/bin");
+        let mut wrapped = adapter
+            .confine(inner, &policy(NetworkPolicy::Deny))
+            .unwrap();
+        let output = wrapped
+            .output()
+            .await
+            .expect("sandbox-exec runs /usr/bin/env");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let key = line.split('=').next().unwrap_or(line);
+            assert_eq!(
+                key, "PATH",
+                "the wrapped command must not inherit the full parent env, only the caller's explicit \
+                 overrides: saw {stdout:?}"
+            );
+        }
+        assert!(
+            stdout.contains("PATH="),
+            "the explicit override must still reach the child: {stdout:?}"
+        );
     }
 }
