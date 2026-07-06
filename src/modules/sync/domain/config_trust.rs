@@ -18,6 +18,10 @@ struct TrustView {
     sandbox: TrustSandbox,
     #[serde(default)]
     embeddings: TrustEmbeddings,
+    #[serde(default)]
+    paths: TrustPaths,
+    #[serde(default)]
+    http: TrustHttp,
 }
 
 #[derive(Deserialize, Default)]
@@ -46,13 +50,34 @@ struct TrustEmbeddings {
     provider: Option<String>,
 }
 
+/// `[paths].docs`: redirects `consult_docs`'s search root. Issue #30/S4-1: an incoming synced config
+/// changing this to an arbitrary directory (e.g. the user's home) let `DocsLibrary::search` surface
+/// excerpts of any `.md` file there to the model — a read-amplification the trust gate exists to prevent.
+#[derive(Deserialize, Default)]
+struct TrustPaths {
+    #[serde(default)]
+    docs: Option<String>,
+}
+
+/// `[http]` timeouts. Issue #30/S4-1: flagged on any change (not just widened) — the simplest, most
+/// conservative rule, matching how `embeddings.provider` is already flagged on any change rather than
+/// only a directional one.
+#[derive(Deserialize, Default, PartialEq)]
+struct TrustHttp {
+    #[serde(default)]
+    connect_timeout_ms: Option<u64>,
+    #[serde(default)]
+    read_timeout_ms: Option<u64>,
+}
+
 /// Identify risky differences in an incoming config that, applied as the trusted global layer, could
 /// redirect a credential or weaken the sandbox. Flags: a newly added provider; an existing provider's
 /// `base_url` added or changed; an existing provider's auth disabled; the active provider switching to a
-/// different endpoint; the embeddings provider changing; the sandbox confinement *weakened* by rank
-/// (`require → os`, `require → off`, `os → off`); the sandbox network widened to allow. Reasons over the
-/// typed kernel [`AuthMethod`]/[`SandboxMode`]/[`NetworkStance`] (no magic strings). Returns a
-/// human-readable list (empty = safe to apply).
+/// different endpoint; the embeddings provider changing; `[paths].docs` changing (issue #30/S4-1 —
+/// redirects `consult_docs`'s search root); `[http]` timeout settings changing; the sandbox confinement
+/// *weakened* by rank (`require → os`, `require → off`, `os → off`); the sandbox network widened to
+/// allow. Reasons over the typed kernel [`AuthMethod`]/[`SandboxMode`]/[`NetworkStance`] (no magic
+/// strings). Returns a human-readable list (empty = safe to apply).
 ///
 /// Standalone entry point: it re-parses both configs and owns its own incoming-TOML-validity guard (the
 /// `not valid TOML` arm below), so it stays correct when called directly — from its unit tests, or any
@@ -115,6 +140,20 @@ pub(crate) fn risky_config_changes(current: &str, incoming: &str) -> Vec<String>
     // Redirecting the embeddings provider sends the embedded text (and that provider's key) elsewhere.
     if incoming.embeddings.provider != current.embeddings.provider {
         risks.push("embeddings provider changes".to_string());
+    }
+
+    // Redirecting the docs search root lets a synced config point `consult_docs` at an arbitrary
+    // directory (e.g. the user's home), surfacing excerpts of any `.md` file there to the model —
+    // a read-amplification the trust gate exists to prevent (issue #30/S4-1).
+    if incoming.paths.docs != current.paths.docs {
+        risks.push("paths.docs changes".to_string());
+    }
+
+    // An http timeout change is a lower-impact (availability, not confidentiality) knob, but flagged on
+    // any change for the same reason `embeddings.provider` is: simplest and most conservative rule
+    // (issue #30/S4-1).
+    if incoming.http != current.http {
+        risks.push("http timeout settings change".to_string());
     }
 
     // Sandbox confinement must not weaken. Rank the modes (`Require > Os > Off`) so any strictly-lower
@@ -304,6 +343,52 @@ base_url = "https://evil.example/v1"
             "[embeddings]\nprovider = \"evil\"\n",
         );
         assert!(risks.iter().any(|r| r.contains("embeddings")), "{risks:?}");
+    }
+
+    #[test]
+    fn detects_docs_path_redirect() {
+        // Issue #30/S4-1: the exact reported hole — a synced config redirecting [paths].docs to an
+        // arbitrary directory (e.g. the victim's home) must require --force, not apply silently.
+        let risks = risky_config_changes(
+            "[paths]\ndocs = \"docs\"\n",
+            "[paths]\ndocs = \"/home/victim\"\n",
+        );
+        assert!(risks.iter().any(|r| r.contains("paths.docs")), "{risks:?}");
+    }
+
+    #[test]
+    fn identical_docs_path_is_safe() {
+        let config = "[paths]\ndocs = \"docs\"\n";
+        assert!(
+            !risky_config_changes(config, config)
+                .iter()
+                .any(|r| r.contains("paths.docs"))
+        );
+    }
+
+    #[test]
+    fn absent_docs_path_on_both_sides_is_safe() {
+        assert!(risky_config_changes("", "").is_empty());
+    }
+
+    #[test]
+    fn detects_http_timeout_change() {
+        // Issue #30/S4-1: an [http] change must also require --force.
+        let risks = risky_config_changes(
+            "[http]\nconnect_timeout_ms = 5000\n",
+            "[http]\nconnect_timeout_ms = 600000\n",
+        );
+        assert!(risks.iter().any(|r| r.contains("http")), "{risks:?}");
+    }
+
+    #[test]
+    fn identical_http_settings_are_safe() {
+        let config = "[http]\nconnect_timeout_ms = 5000\nread_timeout_ms = 30000\n";
+        assert!(
+            !risky_config_changes(config, config)
+                .iter()
+                .any(|r| r.contains("http"))
+        );
     }
 
     #[test]
