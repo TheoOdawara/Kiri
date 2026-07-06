@@ -64,3 +64,8 @@ transcript notice. View-only in v1; no inline editor.
 - The `--instructions` override is useful for scripted or CI invocations that need a specific prompt.
 - The project layer is read from the workspace root only — it is never parsed from `.kiri/` to keep
   the semantics clear: `.kiri/` is harness state, the root is the project contract.
+- Issue #12 (audit) closes against this ADR's already-shipped model: the view-only TUI surface and
+  file-based editing above are the deliberate decision, not a gap. The actual gap was test coverage —
+  `settings.rs` had none of the discovery order, layer-merge, or CLI-override behavior locked by a test;
+  `system_prompt.rs` had ordering tests but none with adversarial instructions content. Both closed
+  2026-07-05.
