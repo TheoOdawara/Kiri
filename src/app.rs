@@ -10,6 +10,7 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
@@ -81,11 +82,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // runtime can surface them in-transcript at boot, instead of `eprintln!` the alternate-screen TUI hides.
     let mut boot_notices: Vec<BootNotice> = Vec::new();
     // A timed HTTP client, built up front so both the chat provider and the (optional) embeddings adapter
-    // share it. `read_timeout` bounds a stalled stream without killing a long but active one.
-    let client = reqwest::Client::builder()
-        .connect_timeout(settings.connect_timeout)
-        .read_timeout(settings.read_timeout)
-        .build()
+    // share it.
+    let client = build_http_client(settings.connect_timeout, settings.read_timeout)
         .context("failed to build the HTTP client")?;
     let secrets = default_secret_store(settings.credentials_file.clone());
     // The workspace key both session persistence and project memory are keyed by — derived once here and
@@ -257,6 +255,23 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
 /// name (`Box::leak`, once per tool, never freed) — an approved-but-compromised server returning an
 /// unbounded tool list must not leak unbounded memory or bloat the schema payload sent to the provider.
 const MAX_MCP_TOOLS_PER_SERVER: usize = 200;
+
+/// Build the shared HTTP client for provider and embeddings traffic. `read_timeout` bounds a stalled
+/// stream without killing a long but active one. Redirects are disabled: every provider request carries a
+/// credential header (Authorization/x-api-key), and reqwest's default redirect policy would replay that
+/// header to whatever host a 3xx response names — a malicious or compromised provider endpoint could
+/// exfiltrate the key to an attacker-controlled host this way (issue #24). No legitimate provider API
+/// requires following a redirect.
+fn build_http_client(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
 
 /// Connect to every gate-approved MCP server (ADR 0021) and register its discovered tools. Global
 /// servers always connect; a project server needs the trust gate to currently approve its exact
@@ -682,13 +697,56 @@ fn resolve_credential(
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, resolve_credential, sync_memory_factory, wire_sync};
+    use super::{Settings, build_http_client, resolve_credential, sync_memory_factory, wire_sync};
     use crate::modules::provider::application::secret_store::SecretStore;
     use crate::shared::kernel::error::AgentError;
     use crate::shared::kernel::provider::{
         AuthMethod, Credential, ProviderKind, ProviderProfile, Secret,
     };
     use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// A loopback server that always replies with a 302 redirecting to a second loopback server, which
+    /// would return 200 if actually reached. Hermetic (loopback only); the redirect target need not even
+    /// be listening for the assertion below (a followed redirect would fail to connect and error, which
+    /// still distinguishes "followed" from "did not follow").
+    async fn serve_redirect_once() -> reqwest::Response {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let body = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/exfiltrate\r\n\
+                            Content-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(body.as_bytes()).await;
+                let _ = stream.flush().await;
+            }
+        });
+        let client = build_http_client(Duration::from_secs(5), Duration::from_secs(5)).unwrap();
+        client
+            .get(format!("http://{addr}/"))
+            .header("authorization", "Bearer super-secret-key")
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn build_http_client_does_not_follow_a_redirect() {
+        // Issue #24: a provider request carries a credential header; following a 3xx would replay it to
+        // whatever host `Location` names. Asserting the client surfaces the 302 itself (not a response
+        // from the redirect target, which reqwest's default policy would have followed to) proves the
+        // policy is disabled.
+        let response = serve_redirect_once().await;
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::FOUND,
+            "the client must return the 302 as-is, never follow it to the Location host"
+        );
+    }
 
     /// A `SecretStore` double returning a fixed stored credential (or none).
     struct FakeStore(Option<Credential>);
