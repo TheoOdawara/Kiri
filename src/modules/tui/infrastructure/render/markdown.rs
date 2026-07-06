@@ -7,7 +7,9 @@
 //! Supported: bold (`**`/`__`), italic (`*`/`_`), strikethrough (`~~`), inline code (`` ` ``), fenced
 //! code blocks, headings (`#`), unordered/ordered lists (`-`/`*`/`1.`), blockquotes (`>`), paragraphs,
 //! and hard breaks. Links render as their text. Unsupported block constructs fall back to paragraph
-//! text so nothing is lost.
+//! text so nothing is lost. A fenced block with a recognized language tag gets real per-token syntax
+//! highlighting via `syntect` (`render::highlight_code_block`); an untagged or unrecognized tag keeps
+//! the flat code style.
 //!
 //! Split along the `Block` AST boundary: `parse` turns markdown into `Block`s, `render` lays them out;
 //! this facade owns only the cached public entry point.
@@ -172,6 +174,46 @@ mod tests {
             .expect("a code line");
         let len: usize = code.spans.iter().map(|s| s.content.chars().count()).sum();
         assert_eq!(len, 12, "code row should be padded to the full width");
+    }
+
+    #[test]
+    fn a_tagged_fence_gets_real_per_token_syntax_highlighting() {
+        // Issue #8d: a keyword and a string literal must render in genuinely different colors, syntect's
+        // real tokenization — not the flat single-color style an untagged/unrecognized fence still gets
+        // (proven separately by the two tests above).
+        let md = "```rust\nlet s = \"hi\";\n```\n";
+        let lines = render(md, Style::default(), 40);
+        let colors: std::collections::HashSet<_> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter_map(|s| s.style.fg)
+            .collect();
+        assert!(
+            colors.len() > 1,
+            "a tagged code block must show more than one distinct token color: {colors:?}"
+        );
+        // Every span still keeps the app's own code background, not syntect's bundled theme background.
+        assert!(
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .all(|s| s.style.bg == Some(theme::CODE_BG) || s.content.trim().is_empty()),
+            "every code span must stay on this app's own CODE_BG"
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_language_tag_keeps_the_flat_code_style() {
+        // No regression for a fence whose language syntect doesn't recognize: same flat CODE_FG/CODE_BG
+        // as an untagged fence, not a broken/empty render.
+        let md = "```not-a-real-language\nx\n```\n";
+        let lines = render(md, Style::default(), 40);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.style.fg == Some(theme::CODE_FG))),
+            "an unrecognized language tag must keep the flat code style: {lines:?}"
+        );
     }
 
     #[test]
