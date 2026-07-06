@@ -53,3 +53,23 @@ as for any other tool call, not in the store's persistence format.
   side effect of this change rather than deferred, since the fix is a one-line clamp.
 - No trait/port signature changed; `Memory`, `MemoryStore`, `SharedStore` are untouched.
 - Closes #11.
+
+## Update — 2026-07-05 — cross-store dedup tightened to exact-normalized equality (audit #55)
+
+The accepted residual risk above is now closed rather than deferred. `recall_memory`'s cross-store dedup
+switched from `is_near_duplicate` (Jaccard token-overlap ≥ 0.8) to a new
+`memory::domain::similarity::is_exact_normalized_duplicate` (case/whitespace-normalized equality only, no
+token-overlap slack). The two call sites now use different strictness because they cross different trust
+boundaries: the `Distiller`'s write-time same-scope dedup compares entries the harness itself just derived
+in the same batch — a fuzzy reword match there is a quality nicety, not a security surface — so it keeps
+`is_near_duplicate`. `recall_memory`'s cross-store comparison pits a project entry (writable by the model
+itself, via `remember`, in a session that could have an earlier prompt-injection foothold) against a
+shared entry from a different trust level; a Jaccard threshold there was gameable by a single crafted
+token change. Exact-normalized equality has no such slack, at the cost of no longer catching a genuine
+reword as a duplicate across stores — accepted, since a duplicate *listing* is a context-budget wrinkle,
+not a security gap, and this was already the harder-to-hit case in practice (most cross-store duplicates
+are the distiller writing the identical fact to both scopes, which normalizes exactly equal either way).
+
+Locked by `is_exact_normalized_duplicate`'s own unit tests and by
+`cross_store_reword_is_no_longer_dropped_as_a_duplicate` in `recall_memory.rs`, which pins the specific
+behavior change: a reword that Jaccard would have dropped now survives. Closes #55.

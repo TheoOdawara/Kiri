@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use crate::modules::memory::application::memory_port::Memory;
 use crate::modules::memory::domain::entry::MemoryEntry;
 use crate::modules::memory::domain::scope::RecallScope;
-use crate::modules::memory::domain::similarity::is_near_duplicate;
+use crate::modules::memory::domain::similarity::is_exact_normalized_duplicate;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, function_schema,
@@ -132,11 +132,16 @@ impl Tool for RecallMemory {
         // distiller wrote it to both, or the user entered it twice — surfaces once, from the project
         // entry, rather than duplicated across both sections. The drop is counted, never silent: the
         // model is told when a shared entry was withheld, mirroring the distiller's `DistillReport.skipped`.
+        // Exact-normalized equality, not the distiller's Jaccard `is_near_duplicate`: this comparison
+        // crosses a trust boundary (project entries can be written by the model itself via `remember`), so
+        // a token-overlap threshold here would let a crafted project entry suppress a distinct, legitimate
+        // shared entry (issue #55). Jaccard stays for the distiller's own same-scope, same-trust-level
+        // write-time dedup.
         let shared_before = shared_entries.len();
         shared_entries.retain(|shared| {
             !project_entries
                 .iter()
-                .any(|project| is_near_duplicate(&project.content, &shared.content))
+                .any(|project| is_exact_normalized_duplicate(&project.content, &shared.content))
         });
         let dropped = shared_before - shared_entries.len();
 
@@ -286,6 +291,49 @@ mod tests {
                     body.contains("1 shared entry omitted"),
                     "the drop must be observable, not silent: {body}"
                 );
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_store_reword_is_no_longer_dropped_as_a_duplicate() {
+        // Issue #55: a shared entry that only *near*-duplicates a project entry (high token overlap, not
+        // exact after normalization) must now survive cross-store dedup. Jaccard would have dropped this
+        // pair (one added token clears the 0.8 threshold); exact-normalized equality does not, closing the
+        // vector where a crafted project-store entry (writable by the model itself via `remember`) could
+        // suppress a distinct, legitimate shared entry.
+        let dir = TempDir::new().unwrap();
+        let port = temp_port(&dir).await;
+        port.remember_project(MemoryEntry::new(
+            MemoryKind::Fact,
+            "always use tabs for indentation".into(),
+            Default::default(),
+            Some("p".into()),
+        ))
+        .await
+        .unwrap();
+        port.remember_shared(MemoryEntry::new(
+            MemoryKind::Fact,
+            "always use tabs for indentation here".into(),
+            Default::default(),
+            Some("p".into()),
+        ))
+        .await
+        .unwrap();
+
+        let tool = RecallMemory::new(port);
+        let out = tool
+            .execute(&sandbox(), &call(r#"{"query":"tabs","scope":"both"}"#))
+            .await;
+        match out {
+            ToolOutcome::Ok(body) => {
+                assert_eq!(
+                    body.matches("--- MemoryEntry").count(),
+                    2,
+                    "a mere reword must no longer be dropped across the trust boundary: {body}"
+                );
+                assert!(!body.contains("omitted as duplicate"));
             }
             other => panic!("expected Ok, got {other:?}"),
         }

@@ -24,6 +24,18 @@ pub fn is_near_duplicate(a: &str, b: &str) -> bool {
     (intersection as f32 / union as f32) >= NEAR_DUPLICATE_JACCARD
 }
 
+/// Whether two texts are the exact same fact once case and whitespace are normalized away — no
+/// token-overlap fuzziness. Used where the comparison crosses a trust boundary (`recall_memory`'s
+/// cross-store dedup, ADR 0023): the project store can be written by the model itself via `remember`, so
+/// a Jaccard threshold there is gameable — a single crafted token change (a negation flip, a changed
+/// number) on a long-enough entry can still clear 0.8 and wrongly suppress a distinct, legitimate shared
+/// entry. Exact-normalized equality has no such slack, at the cost of missing genuine rewords (accepted:
+/// a rewording is not a security gap, only a duplicate-listing wrinkle within a single trust level, so
+/// that case keeps `is_near_duplicate` instead).
+pub fn is_exact_normalized_duplicate(a: &str, b: &str) -> bool {
+    normalize(a) == normalize(b)
+}
+
 /// Lowercase and collapse all whitespace, for order-insensitive duplicate comparison.
 fn normalize(text: &str) -> String {
     text.split_whitespace()
@@ -97,6 +109,24 @@ mod tests {
         assert!(!is_near_duplicate(
             "use tabs",
             "always use tabs for indentation in rust source files"
+        ));
+    }
+
+    #[test]
+    fn exact_normalized_duplicate_ignores_only_case_and_whitespace() {
+        assert!(is_exact_normalized_duplicate(
+            "Always use tabs for indentation",
+            "always   use tabs for indentation"
+        ));
+        // A near-duplicate reword (one extra token) that `is_near_duplicate` would catch must NOT match
+        // here — exact-normalized equality has no token-overlap slack.
+        assert!(!is_exact_normalized_duplicate(
+            "always use tabs for indentation",
+            "always use tabs for indentation here"
+        ));
+        assert!(!is_exact_normalized_duplicate(
+            "use tabs for indentation",
+            "never use tabs for indentation"
         ));
     }
 
