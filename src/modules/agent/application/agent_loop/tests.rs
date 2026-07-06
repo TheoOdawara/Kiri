@@ -951,6 +951,76 @@ async fn iteration_cap_fires_the_checkpoint() {
 }
 
 #[tokio::test]
+async fn a_tool_timeout_is_never_auto_retried_within_the_turn() {
+    // Issue #53: tokio::fs/spawn_blocking-based mutating tools can't cancel their underlying syscall
+    // once dispatched, so a reported timeout doesn't guarantee the write actually stopped — an automatic
+    // retry could race a second attempt against the still-running first one and land unpredictably. The
+    // harness's invariant this residual risk depends on: a timed-out call produces exactly ONE execution
+    // attempt and one tool_result; only the model's own NEXT turn can decide to try again. run_command's
+    // real, exercisable timeout stands in for the same "the harness never re-issues a timed-out call by
+    // itself" behavior every tool relies on — the harness has no tool-specific retry logic anywhere.
+    let dir = TempDir::new().unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    // `timeout_ms` is clamped to a 1000ms floor (`RUN_COMMAND_MIN_TIMEOUT_MS`), so the requested 100ms
+    // below actually races a ~1s timeout — a slow command comfortably longer than that keeps the timeout
+    // deterministic rather than a close call.
+    let slow = if cfg!(windows) {
+        "ping -n 6 127.0.0.1 > nul"
+    } else {
+        "sleep 5"
+    };
+    let agent_loop = agent_loop_with(vec![
+        CompletedTurn {
+            content: "running".to_string(),
+            tool_calls: vec![tool_call(
+                "run_command",
+                &format!(r#"{{"command":"{slow}","timeout_ms":100}}"#),
+            )],
+            thinking: None,
+        },
+        CompletedTurn {
+            content: "done".to_string(),
+            tool_calls: vec![],
+            thinking: None,
+        },
+    ]);
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("run something slow"));
+    let mut io = TestIo::new(Approval::Approved);
+
+    let outcome = agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let tool_results: Vec<_> = conversation
+        .messages()
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .collect();
+    assert_eq!(
+        tool_results.len(),
+        1,
+        "a timed-out call must be answered exactly once, never retried within the same round"
+    );
+    assert!(
+        tool_results[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("timed out"),
+        "got: {:?}",
+        tool_results[0].content
+    );
+    assert_eq!(
+        io.finished.len(),
+        1,
+        "exactly one execution attempt must reach tool_finished — no automatic retry"
+    );
+}
+
+#[tokio::test]
 async fn the_call_cap_pauses_within_a_single_oversized_round() {
     // One assistant message carrying three write_file calls, cap 2, in auto. The cap must trip
     // WITHIN the round: the first two write, the third is paused-and-declined before executing —
