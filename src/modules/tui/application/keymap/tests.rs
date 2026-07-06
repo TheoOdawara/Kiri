@@ -592,6 +592,47 @@ fn provider_command_opens_a_picker_then_action_submenu_then_set_provider() {
     assert_eq!(effects, vec![Effect::SetProvider("claude".to_string())]);
 }
 
+/// Issue #10's list-view acceptance criterion: `/provider` shows id, kind, model, and auth status per
+/// row up front, not just after selecting one. Also locks that selecting a row still resolves the RAW id
+/// (not the composite display text) into the `ProviderAction` sub-menu — the id comes from
+/// `model.providers`, a parallel array to the (now decorated) `picker.options`.
+#[test]
+fn provider_picker_lists_kind_model_and_auth_per_row_and_selection_still_resolves_the_raw_id() {
+    use crate::modules::tui::domain::picker::PickerKind;
+    use crate::shared::kernel::provider::{AuthMethod, ProviderKind};
+    let claude = crate::shared::kernel::provider::ProviderProfile {
+        id: "claude".to_string(),
+        kind: ProviderKind::Anthropic,
+        base_url: "https://example.test/v1".to_string(),
+        model: "claude-opus-4-8".to_string(),
+        models: vec!["claude-opus-4-8".to_string()],
+        auth: AuthMethod::ApiKey,
+        thinking: None,
+    };
+    let mut m = Model::default().with_providers(
+        "nvidia".to_string(),
+        vec!["nvidia".to_string(), "claude".to_string()],
+        vec![claude],
+    );
+    submit_line(&mut m, "/provider");
+    let picker = m.picker.as_ref().expect("the provider picker should open");
+    assert_eq!(picker.kind, PickerKind::Provider);
+    assert_eq!(
+        picker.options[1], "claude · [anthropic] claude-opus-4-8 · api-key",
+        "each row must show id, kind, model, and auth status up front"
+    );
+    // Select row 1 ("claude") — must resolve to the raw id "claude", never the composite label.
+    on_key(&mut m, press(Key::Down));
+    on_key(&mut m, press(Key::Enter));
+    assert!(
+        matches!(
+            m.picker.as_ref().map(|p| &p.kind),
+            Some(PickerKind::ProviderAction(id)) if id == "claude"
+        ),
+        "selecting a decorated row must still open the ProviderAction sub-menu for the raw id"
+    );
+}
+
 /// A minimal profile for the provider-action-submenu tests below (issue #27/M7-1).
 fn provider_profile_for_tests(id: &str) -> crate::shared::kernel::provider::ProviderProfile {
     use crate::shared::kernel::provider::{AuthMethod, ProviderKind};
