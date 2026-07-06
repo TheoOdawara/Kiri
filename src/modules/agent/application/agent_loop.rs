@@ -130,6 +130,12 @@ impl AgentLoop {
         // mid-turn `ApprovedAuto` switch, or a Plan->Auto turn would gain the destructive tools that
         // plan mode withheld from the model.
         let mut mode = mode;
+        // Sticky to the turn's ORIGIN, never the live `mode`: a checkpoint's "keep going, don't ask
+        // again" can flip `mode` to `Auto` mid-turn (`checkpoint_transition`), but a turn that started in
+        // Plan must keep refusing a plan_check-blacklisted run_command (rm, mv, git commit, installs) —
+        // not merely fall back to Auto's live-confirmation gate, which would silently downgrade "refused"
+        // to "confirm-prompted" the moment the checkpoint fires (issue #28).
+        let started_in_plan = mode == ApprovalMode::Plan;
         let schemas = self.registry.schemas_for(mode);
         let mut checkpoint = Instant::now();
         let mut calls_since_checkpoint: usize = 0;
@@ -252,7 +258,7 @@ impl AgentLoop {
                     .unwrap_or_else(|| call.function.name.clone());
 
                 let result = self
-                    .decide_and_run(sandbox, call, &command, &mut mode, io)
+                    .decide_and_run(sandbox, call, &command, &mut mode, started_in_plan, io)
                     .await;
 
                 let Some((outcome, elapsed)) = result else {
@@ -314,6 +320,7 @@ impl AgentLoop {
         call: &ToolCall,
         command: &str,
         mode: &mut ApprovalMode,
+        started_in_plan: bool,
         io: &mut IO,
     ) -> Option<(ToolOutcome, Duration)> {
         match *mode {
@@ -322,6 +329,18 @@ impl AgentLoop {
             // confirmation. This is what keeps an unattended turn — including a prompt-injected
             // one — from silently destroying data or reaching outside the workspace, and it is
             // the only such guard on platforms without an OS sandbox.
+            //
+            // A turn that STARTED in Plan and later escalated to Auto via a checkpoint's "keep going,
+            // don't ask again" (`checkpoint_transition`) still has the plan-mode blacklist applied first
+            // (issue #28): the destructive-tool schema freeze (see `run`, above) already keeps such a
+            // turn from ever gaining write_file/edit_file/delete_file/etc., but run_command is advertised
+            // in Plan mode too, and without this check a blacklisted command (rm, mv, git commit,
+            // installs) would silently downgrade from "refused outright" to "just needs a live
+            // confirmation" — the same as any other Auto-mode run_command call — the instant the
+            // checkpoint fires, even though the model was never told the rules changed mid-turn.
+            ApprovalMode::Auto if started_in_plan => {
+                self.plan_checked_run(sandbox, call, command, io).await
+            }
             ApprovalMode::Auto => self.run_gated(sandbox, call, command, io).await,
             // Plan: non-plannable tools are withheld from the schema; if the model still names
             // one, refuse it without touching the filesystem. Plannable tools (read-only +
@@ -336,19 +355,12 @@ impl AgentLoop {
                     Duration::ZERO,
                 ))
             }
-            ApprovalMode::Plan => {
-                if let Some(reason) = self.registry.plan_check(sandbox, call) {
-                    io.tool_started(call, command);
-                    Some((ToolOutcome::Error(reason), Duration::ZERO))
-                } else {
-                    // SEC-01: a plannable tool is not a free pass. Apply the SAME confirmation gate auto
-                    // enforces — run_command (`confirm_in_auto`) and any out-of-root target
-                    // (`!default_accept`) still require a live confirmation — so a prompt-injected plan
-                    // turn cannot read an out-of-root file (`~/.ssh/id_rsa`, `/etc/passwd`) back to the
-                    // model or run an arbitrary command unattended. In-root reads/searches still run free.
-                    self.run_gated(sandbox, call, command, io).await
-                }
-            }
+            // SEC-01: a plannable tool is not a free pass. `plan_checked_run` applies the SAME
+            // confirmation gate auto enforces — run_command (`confirm_in_auto`) and any out-of-root
+            // target (`!default_accept`) still require a live confirmation — so a prompt-injected plan
+            // turn cannot read an out-of-root file (`~/.ssh/id_rsa`, `/etc/passwd`) back to the model or
+            // run an arbitrary command unattended. In-root reads/searches still run free.
+            ApprovalMode::Plan => self.plan_checked_run(sandbox, call, command, io).await,
             // Default: confirm each call through the UI before running it.
             ApprovalMode::Default => match self.registry.confirm(sandbox, call) {
                 Some(confirmation) => match io.decide(&confirmation).await {
@@ -411,6 +423,25 @@ impl AgentLoop {
                 io.tool_started(call, command);
                 Some(timed(self.registry.execute(sandbox, call)).await)
             }
+        }
+    }
+
+    /// Apply the plan-mode `plan_check` gate, then fall through to [`run_gated`](Self::run_gated) when
+    /// the call is allowed. Shared by `Plan` and by `Auto` for a turn that started in `Plan` (issue #28):
+    /// both states must refuse a `plan_check`-blocked call outright — no filesystem touch, no confirmation
+    /// prompt — never merely fall back to Auto's ordinary live-confirmation gate.
+    async fn plan_checked_run<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
+        &self,
+        sandbox: &dyn Sandbox,
+        call: &ToolCall,
+        command: &str,
+        io: &mut IO,
+    ) -> Option<(ToolOutcome, Duration)> {
+        if let Some(reason) = self.registry.plan_check(sandbox, call) {
+            io.tool_started(call, command);
+            Some((ToolOutcome::Error(reason), Duration::ZERO))
+        } else {
+            self.run_gated(sandbox, call, command, io).await
         }
     }
 

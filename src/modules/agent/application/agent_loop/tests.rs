@@ -489,6 +489,79 @@ async fn plan_mode_confirms_run_command() {
 }
 
 #[tokio::test]
+async fn checkpoint_approved_auto_does_not_reopen_the_plan_blacklist() {
+    // Issue #28: a turn that STARTS in Plan and escalates to Auto mid-turn via a checkpoint's "keep
+    // going, don't ask again" (ApprovedAuto) must still refuse a plan_check-blacklisted run_command —
+    // not silently downgrade from "refused outright" to "just needs a live confirmation" the instant the
+    // checkpoint fires. max_tool_calls=1 forces the checkpoint after round 1's single allowed call.
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("marker.txt"), b"still here").unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let agent_loop = AgentLoop::new(
+        Arc::new(ScriptedProvider {
+            turns: Mutex::new(VecDeque::from(vec![
+                // Round 1: an allow-listed command (echo), confirmed — the call cap then trips.
+                CompletedTurn {
+                    content: "planning".to_string(),
+                    tool_calls: vec![tool_call("run_command", r#"{"command":"echo hi"}"#)],
+                    thinking: None,
+                },
+                // Round 2, now mode == Auto (via the checkpoint's ApprovedAuto below): a command NOT in
+                // the plan-mode allow-list — must still be refused, not confirm-prompted.
+                CompletedTurn {
+                    content: "escalated".to_string(),
+                    tool_calls: vec![tool_call("run_command", r#"{"command":"rm marker.txt"}"#)],
+                    thinking: None,
+                },
+                CompletedTurn {
+                    content: "done".to_string(),
+                    tool_calls: vec![],
+                    thinking: None,
+                },
+            ])),
+        }),
+        registry_for_tests(),
+        "model".to_string(),
+        Duration::from_secs(3600),
+        1,
+    );
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("plan something"));
+    // Consumed in order: round 1's per-call confirmation, then the post-round checkpoint's decision.
+    let mut io = TestIo::new(Approval::Approved)
+        .with_decisions(vec![Approval::Approved, Approval::ApprovedAuto]);
+
+    let outcome = agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert!(
+        dir.path().join("marker.txt").exists(),
+        "the blacklisted command must never execute, even after the checkpoint escalates to Auto"
+    );
+    assert_eq!(
+        io.decide_calls, 1,
+        "the blocked round-2 call must be refused outright, never reaching a confirmation prompt"
+    );
+    let last_tool_msg = conversation
+        .messages()
+        .iter()
+        .rfind(|m| m.role == Role::Tool)
+        .unwrap();
+    assert!(
+        last_tool_msg
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("blocked in plan mode"),
+        "got: {:?}",
+        last_tool_msg.content
+    );
+}
+
+#[tokio::test]
 async fn plan_mode_confirms_out_of_root_read() {
     // SEC-01: an out-of-root read while planning must be confirmed (not default-accepted), so a
     // prompt-injected plan turn cannot exfiltrate `~/.ssh/id_rsa` / `/etc/passwd` back to the model.

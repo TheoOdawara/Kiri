@@ -69,3 +69,28 @@ or **cancel**. The choice/box machinery is shared with the approval widget.
   strings are unchanged).
 - Realizes the plan-mode engine behavior ADR 0004 deferred; the broader facilitator seam (`/test`,
   `/review`, `/spec`, live `/model`) remains future work.
+
+## Update — 2026-07-05 — the plan-mode run_command blacklist survives a mid-turn escalation (audit #28)
+
+A Plan-mode turn's advertised schema (destructive file tools excluded) is fixed for the whole turn — a
+mid-turn checkpoint's "keep going, don't ask again" (`ApprovedAuto`) flips the live `mode` to `Auto` but,
+by design, never recomputes the schema, so the model still cannot request `write_file`/`edit_file`/etc.
+for the rest of the turn. `run_command`, however, IS advertised in Plan mode, gated instead by
+`plan_check`'s own allow-list (only a configured leading program, no command chaining — read-only
+investigation and build/test commands). Audited as issue #28: `decide_and_run`'s `Auto` arm never called
+`plan_check` — it only applied Auto's live-confirmation gate (`run_gated`). So the instant a Plan-mode
+turn's checkpoint fired `ApprovedAuto`, a `plan_check`-blocked command (e.g. `rm`, `mv`, `git commit`, an
+installer — anything outside the allow-list) silently downgraded from "refused outright, no filesystem
+touch" to "just needs a live confirmation," identical to any other Auto-mode `run_command` call — even
+though the model was never told the rules had changed mid-turn.
+
+`AgentLoop::run` now captures `started_in_plan = mode == ApprovalMode::Plan` once, before `mode` is allowed
+to mutate, and threads it into `decide_and_run`. A turn that started in Plan keeps applying `plan_check`
+first even after `mode` becomes `Auto`; a turn that started in `Default`/`Auto` is unaffected (`plan_check`
+is a no-op for every tool but `run_command`, so this adds no new restriction outside that one path).
+
+Locked by `checkpoint_approved_auto_does_not_reopen_the_plan_blacklist`: a Plan-mode turn with
+`max_tool_calls = 1` runs one allow-listed `run_command` call, the checkpoint then fires `ApprovedAuto`,
+and a second-round `run_command` call outside the allow-list must still be refused — proven via a real
+side effect (a marker file that must survive) and `io.decide_calls == 1` (the blocked call never reaches a
+confirmation prompt at all). Closes #28.
