@@ -6,7 +6,7 @@
       },
       "default_accept": true,
       "label": "read",
-      "prompt": "Ler o arquivo. Aprova executar: cat a.txt? [S/n] ",
+      "prompt": "Ler o arquivo. Aprova executar: `cat a.txt`? [S/n] ",
       "tool": "read_file"
     },
     {
@@ -15,14 +15,14 @@
       },
       "default_accept": false,
       "label": "read_absolute",
-      "prompt": "Ler o arquivo. Aprova executar: cat /etc/hosts? [s/N] ",
+      "prompt": "Ler o arquivo. Aprova executar: `cat /etc/hosts`? [s/N] ",
       "tool": "read_file"
     },
     {
       "args": {},
       "default_accept": true,
       "label": "list",
-      "prompt": "Listar o diretório. Aprova executar: ls .? [S/n] ",
+      "prompt": "Listar o diretório. Aprova executar: `ls .`? [S/n] ",
       "tool": "list_dir"
     },
     {
@@ -31,7 +31,7 @@
       },
       "default_accept": true,
       "label": "search",
-      "prompt": "Buscar 'q'. Aprova executar: rg 'q' .? [S/n] ",
+      "prompt": "Buscar 'q'. Aprova executar: `rg 'q' .`? [S/n] ",
       "tool": "search"
     },
     {
@@ -41,7 +41,7 @@
       },
       "default_accept": true,
       "label": "write_new",
-      "prompt": "Criar e gravar o arquivo. Aprova executar: write new.txt? [S/n] ",
+      "prompt": "Criar e gravar o arquivo. Aprova executar: `write new.txt`? [S/n] ",
       "tool": "write_file"
     },
     {
@@ -51,7 +51,7 @@
       },
       "default_accept": true,
       "label": "write_overwrite",
-      "prompt": "Sobrescrever o arquivo. Aprova executar: write exists.txt? [S/n] ",
+      "prompt": "Sobrescrever o arquivo. Aprova executar: `write exists.txt`? [S/n] ",
       "tool": "write_file"
     },
     {
@@ -61,7 +61,7 @@
       },
       "default_accept": true,
       "label": "write_mkdir",
-      "prompt": "Criar diretório(s) 'a, a/b' e gravar o arquivo. Aprova executar: write a/b/c.txt? [S/n] ",
+      "prompt": "Criar diretório(s) 'a, a/b' e gravar o arquivo. Aprova executar: `write a/b/c.txt`? [S/n] ",
       "tool": "write_file"
     },
     {
@@ -72,7 +72,7 @@
       },
       "default_accept": true,
       "label": "edit",
-      "prompt": "Editar o arquivo. Aprova executar: edit exists.txt? [S/n] ",
+      "prompt": "Editar o arquivo. Aprova executar: `edit exists.txt`? [S/n] ",
       "tool": "edit_file"
     },
     {
@@ -81,7 +81,7 @@
       },
       "default_accept": true,
       "label": "delete_file",
-      "prompt": "Excluir o arquivo. Aprova executar: rm exists.txt? [S/n] ",
+      "prompt": "Excluir o arquivo. Aprova executar: `rm exists.txt`? [S/n] ",
       "tool": "delete_file"
     },
     {
@@ -90,7 +90,7 @@
       },
       "default_accept": true,
       "label": "create_dir",
-      "prompt": "Criar diretório. Aprova executar: mkdir newdir? [S/n] ",
+      "prompt": "Criar diretório. Aprova executar: `mkdir newdir`? [S/n] ",
       "tool": "create_dir"
     },
     {
@@ -99,7 +99,7 @@
       },
       "default_accept": true,
       "label": "delete_dir",
-      "prompt": "Excluir recursivamente o diretório e todo o seu conteúdo. Aprova executar: rm -rf d? [S/n] ",
+      "prompt": "Excluir recursivamente o diretório e todo o seu conteúdo. Aprova executar: `rm -rf d`? [S/n] ",
       "tool": "delete_dir"
     },
     {
@@ -109,7 +109,7 @@
       },
       "default_accept": true,
       "label": "move_clean",
-      "prompt": "Mover o caminho. Aprova executar: mv exists.txt b.txt? [S/n] ",
+      "prompt": "Mover o caminho. Aprova executar: `mv exists.txt b.txt`? [S/n] ",
       "tool": "move_path"
     },
     {
@@ -119,7 +119,7 @@
       },
       "default_accept": true,
       "label": "move_mkdir",
-      "prompt": "Criar diretório(s) 'x, x/y' e mover. Aprova executar: mv exists.txt x/y/c.txt? [S/n] ",
+      "prompt": "Criar diretório(s) 'x, x/y' e mover. Aprova executar: `mv exists.txt x/y/c.txt`? [S/n] ",
       "tool": "move_path"
     }
   ],

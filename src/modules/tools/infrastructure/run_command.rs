@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::modules::tools::application::path::is_absolute_target;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, Tool, ToolOutcome, confirm, confirm_execute_suffix, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{
     RUN_COMMAND_DEFAULT_TIMEOUT_MS, RunCommandArgs, parse_args,
@@ -172,8 +172,8 @@ impl Tool for RunCommand {
         // confirmation used to parse twice — once here and again inside `command_line`).
         let args: RunCommandArgs = parse_args(call).ok()?;
         let mut action = format!(
-            "Executar comando no shell. Aprova executar: {}?",
-            shell_display(&args.command)
+            "Executar comando no shell. {}",
+            confirm_execute_suffix(&shell_display(&args.command))
         );
         // SEC-05: the cwd is otherwise invisible in the prompt, yet an absolute / out-of-root cwd widens
         // the command's write sandbox to that directory (`execute` folds it into `extra_rw`). Surface a

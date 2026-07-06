@@ -8,7 +8,7 @@ use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::modules::memory::domain::scope::Scope;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, Tool, ToolOutcome, confirm, confirm_execute_suffix, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{parse, parse_args};
 use crate::shared::kernel::tool_call::ToolCall;
@@ -84,7 +84,7 @@ impl Tool for Remember {
     fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let cmd = self.command_line(sandbox, call)?;
         Some(confirm(
-            format!("Gravar na memória. Aprova executar: {cmd}?"),
+            format!("Gravar na memória. {}", confirm_execute_suffix(&cmd)),
             true,
         ))
     }

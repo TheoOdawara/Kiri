@@ -35,13 +35,23 @@ pub fn render(menu: &CommandMenu, frame: &mut Frame, anchor: Rect) {
         let (marker, style) = super::option_marker(row == menu.selected());
         // Truncate the blurb so the row never overflows the list width.
         let name = entry.name();
+        let aliases = entry.aliases();
+        // The command's other names (issue #8c), dim and parenthesized right after the canonical one —
+        // e.g. "/new (/novo)" — so a user typing the alias sees it is recognized without guessing.
+        let alias_text = if aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", aliases.join(", "))
+        };
         let name_cols = display_width(name);
-        let prefix_cols = 2 + name_cols + 2; // marker + name + gap
+        let alias_cols = display_width(&alias_text);
+        let prefix_cols = 2 + name_cols + alias_cols + 2; // marker + name + aliases + gap
         let blurb_budget = inner_w.saturating_sub(prefix_cols);
         let blurb = truncate_blurb(entry.blurb(), blurb_budget);
         lines.push(Line::from(vec![
             Span::styled(marker, style),
             Span::styled(name.to_string(), style),
+            Span::styled(alias_text, theme::dim()),
             Span::styled("  ", style),
             Span::styled(blurb, style),
         ]));
@@ -124,6 +134,15 @@ mod tests {
         assert!(out.contains("comandos"), "title missing:\n{out}");
         assert!(out.contains("/new"), "canonical names missing:\n{out}");
         assert!(out.contains("❯"), "highlight marker missing:\n{out}");
+    }
+
+    #[test]
+    fn menu_shows_aliases_next_to_the_canonical_name() {
+        // Issue #8c: "/novo" for "/new" must be visible in the menu, not only accepted by the parser.
+        let menu = CommandMenu::open("/new", &[]);
+        let out = paint(&menu, 64, 16);
+        assert!(out.contains("/new"), "canonical name missing:\n{out}");
+        assert!(out.contains("/novo"), "alias missing:\n{out}");
     }
 
     #[test]

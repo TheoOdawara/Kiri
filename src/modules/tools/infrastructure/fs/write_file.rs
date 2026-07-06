@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use crate::modules::tools::application::path::default_accept_for;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, confirm_execute_suffix, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, WriteArgs, parse, parse_args};
 use crate::modules::tools::infrastructure::exec;
@@ -43,17 +43,18 @@ impl Tool for WriteFile {
     fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let a: PathArgs = parse(call.function.arguments.as_str()).ok()?;
         let cmd = self.command_line(sandbox, call)?;
+        let suffix = confirm_execute_suffix(&cmd);
         let action = match sandbox.resolve_create(&a.path) {
             Ok(r) if !r.missing_dirs.is_empty() => format!(
-                "Criar diretório(s) '{}' e gravar o arquivo. Aprova executar: {cmd}?",
+                "Criar diretório(s) '{}' e gravar o arquivo. {suffix}",
                 missing_dirs_label(&r, sandbox),
             ),
             Ok(r) if r.target.exists() => {
-                format!("Sobrescrever o arquivo. Aprova executar: {cmd}?")
+                format!("Sobrescrever o arquivo. {suffix}")
             }
             // Also covers a resolve_create error: the user is still asked (returning None here would
             // skip confirmation), and execute() re-validates the path and surfaces the real error.
-            _ => format!("Criar e gravar o arquivo. Aprova executar: {cmd}?"),
+            _ => format!("Criar e gravar o arquivo. {suffix}"),
         };
         let default_accept = default_accept_for(&a.path);
         Some(confirm(action, default_accept))

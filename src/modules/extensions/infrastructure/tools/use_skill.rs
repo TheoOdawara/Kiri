@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::modules::extensions::domain::resource::Skill;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, Tool, ToolOutcome, confirm, confirm_execute_suffix, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{parse, parse_args};
 use crate::shared::kernel::tool_call::ToolCall;
@@ -60,7 +60,7 @@ impl Tool for UseSkill {
     fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let cmd = self.command_line(sandbox, call)?;
         Some(confirm(
-            format!("Consultar a skill. Aprova executar: {cmd}?"),
+            format!("Consultar a skill. {}", confirm_execute_suffix(&cmd)),
             true,
         ))
     }

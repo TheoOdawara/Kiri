@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use crate::modules::tools::application::path::default_accept_for;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, confirm_execute_suffix, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{MoveArgs, parse, parse_args};
 use crate::modules::tools::infrastructure::exec;
@@ -46,17 +46,18 @@ impl Tool for MovePath {
     fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let a: MoveArgs = parse(call.function.arguments.as_str()).ok()?;
         let cmd = self.command_line(sandbox, call)?;
+        let suffix = confirm_execute_suffix(&cmd);
         let action = match sandbox.resolve_create(&a.destination) {
             Ok(r) if !r.missing_dirs.is_empty() => format!(
-                "Criar diretório(s) '{}' e mover. Aprova executar: {cmd}?",
+                "Criar diretório(s) '{}' e mover. {suffix}",
                 missing_dirs_label(&r, sandbox),
             ),
             Ok(r) if r.target.exists() => {
-                format!("Sobrescrever o destino movendo. Aprova executar: {cmd}?")
+                format!("Sobrescrever o destino movendo. {suffix}")
             }
             // Also covers a resolve_create error: the user is still asked (returning None here would
             // skip confirmation), and execute() re-validates the path and surfaces the real error.
-            _ => format!("Mover o caminho. Aprova executar: {cmd}?"),
+            _ => format!("Mover o caminho. {suffix}"),
         };
         let default_accept = default_accept_for(&a.destination);
         Some(confirm(action, default_accept))
