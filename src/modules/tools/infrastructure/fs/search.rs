@@ -1,5 +1,3 @@
-use std::fs;
-
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::sandbox::Sandbox;
@@ -7,6 +5,7 @@ use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, function_schema, simple_command, simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{SearchArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::exec;
 use crate::modules::tools::infrastructure::sandbox::SECRET_DIRS;
 use crate::modules::tools::infrastructure::support::SEARCH_MAX_MATCHES;
 use crate::modules::tools::infrastructure::support::search_file;
@@ -68,62 +67,84 @@ impl Tool for Search {
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
 
-        let mut matches: Vec<String> = Vec::new();
         // Bound the recursion (and the displayed paths) to the resolved start directory, so a search
-        // begun outside the active workspace stays within its own subtree.
+        // begun outside the active workspace stays within its own subtree. The whole walk is bounded
+        // by `DEFAULT_TIMEOUT` (a wedged/stale network mount must fail fast, never stall the runtime).
+        // `matches`/`truncated` are captured by mutable reference (not moved into the future) so that
+        // whatever was found before a timeout survives the future's cancellation-on-drop.
         let base = start.clone();
-        let mut stack = vec![start];
+        let mut matches: Vec<String> = Vec::new();
         let mut truncated = false;
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let Ok(file_type) = entry.file_type() else {
-                    continue;
-                };
-                if file_type.is_symlink() {
-                    continue; // never follow symlinks: avoids escape and traversal loops
-                }
-                let path = entry.path();
-                if !path.starts_with(&base) {
-                    continue;
-                }
-                if file_type.is_dir() {
-                    // Never descend into a credential directory, so files there with non-sensitive
-                    // names (e.g. `.aws/config`) are not scanned.
-                    if entry.file_name().to_str().is_some_and(|name| {
-                        SECRET_DIRS.iter().any(|dir| dir.eq_ignore_ascii_case(name))
-                    }) {
+        let timed_out = {
+            let matches = &mut matches;
+            let truncated = &mut truncated;
+            let walk = async move {
+                let mut stack = vec![start];
+                'dirs: while let Some(dir) = stack.pop() {
+                    let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
                         continue;
-                    }
-                    stack.push(path);
-                } else if file_type.is_file() {
-                    if entry
-                        .file_name()
-                        .to_str()
-                        .is_some_and(|name| sandbox.is_sensitive_name(name))
-                    {
-                        continue; // never leak the contents of a sensitive file
-                    }
-                    search_file(&path, &args.query, &base, &mut matches);
-                    if matches.len() >= SEARCH_MAX_MATCHES {
-                        truncated = true;
-                        break;
+                    };
+                    loop {
+                        let entry = match entries.next_entry().await {
+                            Ok(Some(entry)) => entry,
+                            Ok(None) => break,
+                            // Mirrors `list_dir`'s tolerance for a single bad entry (the pre-existing
+                            // `entries.flatten()` behavior): skip it and keep scanning this directory.
+                            Err(_) => continue,
+                        };
+                        let Ok(file_type) = entry.file_type().await else {
+                            continue;
+                        };
+                        if file_type.is_symlink() {
+                            continue; // never follow symlinks: avoids escape and traversal loops
+                        }
+                        let path = entry.path();
+                        if !path.starts_with(&base) {
+                            continue;
+                        }
+                        if file_type.is_dir() {
+                            // Never descend into a credential directory, so files there with
+                            // non-sensitive names (e.g. `.aws/config`) are not scanned.
+                            if entry.file_name().to_str().is_some_and(|name| {
+                                SECRET_DIRS.iter().any(|dir| dir.eq_ignore_ascii_case(name))
+                            }) {
+                                continue;
+                            }
+                            stack.push(path);
+                        } else if file_type.is_file() {
+                            if entry
+                                .file_name()
+                                .to_str()
+                                .is_some_and(|name| sandbox.is_sensitive_name(name))
+                            {
+                                continue; // never leak the contents of a sensitive file
+                            }
+                            search_file(&path, &args.query, &base, matches).await;
+                            if matches.len() >= SEARCH_MAX_MATCHES {
+                                *truncated = true;
+                                break 'dirs;
+                            }
+                        }
                     }
                 }
-            }
-            if truncated {
-                break;
-            }
-        }
+            };
+            tokio::time::timeout(exec::DEFAULT_TIMEOUT, walk)
+                .await
+                .is_err()
+        };
 
         if matches.is_empty() {
-            return ToolOutcome::Ok("no matches".to_string());
+            return ToolOutcome::Ok(if timed_out {
+                "search timed out before any match was found".to_string()
+            } else {
+                "no matches".to_string()
+            });
         }
         let mut output = matches.join("\n");
         if truncated {
             output.push_str(&format!("\n… (truncated at {SEARCH_MAX_MATCHES} matches)"));
+        } else if timed_out {
+            output.push_str("\n… (search timed out; results may be incomplete)");
         }
         ToolOutcome::Ok(output)
     }

@@ -119,3 +119,11 @@ version and a native version.
   exists only on macOS; Linux and Windows `run_command` remain confirmation-only. This ADR does not
   change that — it only removes the coreutil/GNU-vs-BSD fragility and the home-resolution bug that block
   Kiri from running correctly on Windows at all, which had to land first.
+- **Follow-up closed:** promoting the `#[cfg(windows)]` bodies to the sole cross-platform implementation
+  carried over a gap tracked as issue #9 — those bodies did direct sync `std::fs` I/O on the async
+  runtime thread with no timeout, a defect that (by this ADR's own change) stopped being Windows-only
+  and became cross-platform the moment the Unix-shell arm was deleted. All nine file tools
+  (`read_file`/`write_file`/`edit_file`/`create_dir`/`delete_file`/`delete_dir`/`move_path`/`list_dir`/
+  `search`, plus the shared `support::read_capped`/`search_file`/`ensure_parent_dirs`) now route their
+  I/O through `tokio::fs` bounded by `tokio::time::timeout(exec::DEFAULT_TIMEOUT, …)`, mirroring
+  `edit_file`'s pre-existing pattern — the one file tool that was never affected by this gap.

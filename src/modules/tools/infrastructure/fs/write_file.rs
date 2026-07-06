@@ -6,6 +6,7 @@ use crate::modules::tools::application::tool::{
     Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, WriteArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::exec;
 use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -67,17 +68,28 @@ impl Tool for WriteFile {
             Ok(resolution) => resolution,
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
-        if let Err(out) = ensure_parent_dirs(&resolution, &args.path) {
+        if let Err(out) = ensure_parent_dirs(&resolution, &args.path).await {
             return out;
         }
 
-        match std::fs::write(&resolution.target, args.content.as_bytes()) {
-            Ok(()) => ToolOutcome::Ok(format!(
+        match tokio::time::timeout(
+            exec::DEFAULT_TIMEOUT,
+            tokio::fs::write(&resolution.target, args.content.as_bytes()),
+        )
+        .await
+        {
+            Ok(Ok(())) => ToolOutcome::Ok(format!(
                 "wrote {} bytes to {}",
                 args.content.len(),
                 args.path
             )),
-            Err(error) => ToolOutcome::Error(format!("cannot write {}: {error}", args.path)),
+            Ok(Err(error)) => ToolOutcome::Error(format!("cannot write {}: {error}", args.path)),
+            // `tokio::fs` runs on the blocking pool and can't be cancelled once dispatched: the write
+            // may still land after this timeout is reported (issue #53, security-debt).
+            Err(_) => ToolOutcome::Error(format!(
+                "cannot write {}: timed out (it may still complete in the background)",
+                args.path
+            )),
         }
     }
 }

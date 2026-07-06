@@ -5,6 +5,7 @@ use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, function_schema, simple_command, simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::exec;
 use crate::modules::tools::infrastructure::support::stat_guard;
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -68,9 +69,15 @@ impl Tool for DeleteDir {
             return out;
         }
 
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => ToolOutcome::Ok(format!("deleted directory {}", args.path)),
-            Err(error) => ToolOutcome::Error(format!("cannot delete {}: {error}", args.path)),
+        match tokio::time::timeout(exec::DEFAULT_TIMEOUT, tokio::fs::remove_dir_all(&path)).await {
+            Ok(Ok(())) => ToolOutcome::Ok(format!("deleted directory {}", args.path)),
+            Ok(Err(error)) => ToolOutcome::Error(format!("cannot delete {}: {error}", args.path)),
+            // `tokio::fs` runs on the blocking pool and can't be cancelled once dispatched: the
+            // recursive delete may still land after this timeout is reported (issue #53, security-debt).
+            Err(_) => ToolOutcome::Error(format!(
+                "cannot delete {}: timed out (it may still complete in the background)",
+                args.path
+            )),
         }
     }
 }
