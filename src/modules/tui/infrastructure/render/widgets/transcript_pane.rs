@@ -6,6 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::modules::tools::infrastructure::exec::STDERR_MARKER;
 use crate::modules::tui::domain::model::{Model, Motion};
 use crate::modules::tui::domain::transcript::{
     NoticeLevel, ToolActivity, ToolDiff, ToolStatus, TranscriptItem,
@@ -73,6 +74,7 @@ pub fn render(model: &Model, frame: &mut Frame, area: Rect, motion: Motion) {
             focused_pane: model.focused_pane,
             selected_item: model.selected_item,
             expanded_tools_indices: &model.expanded_tools_indices,
+            spinner_frame: model.status.spinner_frame,
         },
     );
 
@@ -140,6 +142,10 @@ struct TranscriptState<'a> {
     focused_pane: crate::modules::tui::domain::model::PaneFocus,
     selected_item: Option<usize>,
     expanded_tools_indices: &'a std::collections::HashSet<usize>,
+    /// The corner spinner's current frame, reused to animate a running tool's in-transcript marker
+    /// (issue #8a) so long-running tool output has a visible activity indicator in the body itself, not
+    /// only in the corner.
+    spinner_frame: usize,
 }
 
 /// Build the wrapped, styled transcript lines for the pane — the per-frame work, factored out of `render`
@@ -167,7 +173,15 @@ fn build_transcript_lines(
         let active = state.streaming && idx == last;
         let expanded = state.global_expanded || state.expanded_tools_indices.contains(&idx);
         let start_len = lines.len();
-        render_item(item, width, expanded, active, state.reveal, &mut lines);
+        render_item(
+            item,
+            width,
+            expanded,
+            active,
+            state.reveal,
+            state.spinner_frame,
+            &mut lines,
+        );
         let end_len = lines.len();
 
         let is_selected = state.focused_pane
@@ -200,6 +214,7 @@ fn render_item(
     expanded: bool,
     active: bool,
     reveal: Reveal,
+    spinner_frame: usize,
     out: &mut Vec<Line<'static>>,
 ) {
     match item {
@@ -210,10 +225,21 @@ fn render_item(
             out,
         ),
         TranscriptItem::Reasoning(text) => {
-            // Thinking reads clearly apart from the answer: a label plus a dim, italic body.
+            // Thinking reads clearly apart from the answer: a label, a dim/italic body, and a left rule
+            // (issue #8a) so a reasoning block never visually bleeds into the assistant answer that
+            // follows it — the same "▍ " left-bar idiom the selection indicator already uses elsewhere
+            // in this pane, reused here as a static (unselected) delimiter.
             let style = theme::dim().add_modifier(Modifier::ITALIC);
-            out.push(Line::styled("⋮ pensando", style));
-            render_body(text, style, width, active, out);
+            let rule = Span::styled("▍ ", theme::dim());
+            let body_start = out.len();
+            out.push(Line::from(vec![
+                rule.clone(),
+                Span::styled("⋮ pensando", style),
+            ]));
+            render_body(text, style, width.saturating_sub(2), active, out);
+            for line in &mut out[body_start + 1..] {
+                line.spans.insert(0, rule.clone());
+            }
         }
         TranscriptItem::Assistant(text) => {
             out.push(Line::styled("◆ kiri", Style::default().fg(theme::HEADING)));
@@ -234,7 +260,9 @@ fn render_item(
             ));
             render_body(text, Style::default().fg(theme::WARNING), width, false, out);
         }
-        TranscriptItem::Tool(activity) => render_tool(activity, width, expanded, out),
+        TranscriptItem::Tool(activity) => {
+            render_tool(activity, width, expanded, spinner_frame, out)
+        }
         TranscriptItem::Notice(level, text) => {
             let color = match level {
                 NoticeLevel::Info => theme::WARNING,
@@ -246,12 +274,15 @@ fn render_item(
 }
 
 /// Render one tool call: a `⏺ command` line, an inline diff for edits, then the indented `⎿` result
-/// (preview-bounded unless `expanded`). While the call is still running, a faint `⎿ …` placeholder
-/// shows it is in flight.
+/// (preview-bounded unless `expanded`). While the call is still running, an animated marker (the same
+/// glyph cycle as the corner spinner, issue #8a) shows the activity is ongoing right where the output
+/// will land, not only in a global corner indicator — useful for a long-running command with no output
+/// yet.
 fn render_tool(
     activity: &ToolActivity,
     width: usize,
     expanded: bool,
+    spinner_frame: usize,
     out: &mut Vec<Line<'static>>,
 ) {
     let running = activity.result.is_none();
@@ -272,14 +303,18 @@ fn render_tool(
     match &activity.result {
         None => out.push(Line::from(vec![
             Span::styled("  ⎿ ", theme::dim()),
-            Span::styled("● ", Style::default().fg(theme::WARNING)),
-            Span::styled("…", theme::dim()),
+            Span::styled(
+                format!("{} ", theme::spinner_glyph(spinner_frame)),
+                Style::default().fg(theme::WARNING),
+            ),
+            Span::styled("em andamento…", theme::dim()),
         ])),
         Some((status, output, elapsed)) => render_result(
             *status,
             output,
             *elapsed,
             activity.diff.is_some(),
+            activity.is_run_command,
             width,
             expanded,
             out,
@@ -291,11 +326,13 @@ fn render_tool(
 /// time, then (for multi-line read/list/search output) a bounded preview of the remaining lines with
 /// an elision hint. Errors render red, declines dim. A diff already showed the change, so an edit's
 /// one-line confirmation is enough.
+#[allow(clippy::too_many_arguments)]
 fn render_result(
     status: ToolStatus,
     output: &str,
     elapsed: Duration,
     has_diff: bool,
+    is_run_command: bool,
     width: usize,
     expanded: bool,
     out: &mut Vec<Line<'static>>,
@@ -309,6 +346,30 @@ fn render_result(
         ToolStatus::Declined => "recusado pelo usuário",
         _ => output.trim_end_matches('\n'),
     };
+
+    // Issue #8a: `run_command` sets stderr off with `STDERR_MARKER` (`exec::capped_combined_marking_stderr`)
+    // so it can be distinguished from stdout and always shown in full here — never bounded by
+    // `PREVIEW_LINES` like ordinary tool output. Gated on `is_run_command` (not just a text-content sniff):
+    // any other tool's output (e.g. `read_file` on a file that happens to contain the literal marker line)
+    // must never be mis-split and mislabeled as an error. A diff already rendered the change, so it takes
+    // priority over this split.
+    if is_run_command && !has_diff {
+        let boundary = format!("\n{STDERR_MARKER}\n");
+        if let Some((stdout_part, stderr_part)) = detail.split_once(&boundary) {
+            render_result_with_stderr(
+                marker_color,
+                text_style,
+                stdout_part,
+                stderr_part,
+                elapsed,
+                width,
+                expanded,
+                out,
+            );
+            return;
+        }
+    }
+
     let lines: Vec<&str> = if detail.is_empty() {
         vec!["(vazio)"]
     } else {
@@ -327,7 +388,20 @@ fn render_result(
     if has_diff || lines.len() <= 1 {
         return;
     }
-    let body = &lines[1..];
+    render_preview_body(&lines[1..], text_style, width, expanded, out);
+}
+
+/// The bounded-preview loop shared by `render_result` (ordinary stdout) and `render_result_with_stderr`
+/// (the stdout half of a `run_command` split): show up to `PREVIEW_LINES` of `body` (all of it once
+/// `expanded`), then an elision hint for the rest — one implementation so the two callers' truncation
+/// behavior can never silently drift apart.
+fn render_preview_body(
+    body: &[&str],
+    style: Style,
+    width: usize,
+    expanded: bool,
+    out: &mut Vec<Line<'static>>,
+) {
     let shown = if expanded {
         body.len()
     } else {
@@ -336,7 +410,7 @@ fn render_result(
     let indent = " ".repeat(PREVIEW_INDENT_WIDTH);
     for line in &body[..shown] {
         for row in hard_wrap(line, width.saturating_sub(PREVIEW_INDENT_WIDTH).max(1)) {
-            out.push(Line::styled(format!("{indent}{row}"), text_style));
+            out.push(Line::styled(format!("{indent}{row}"), style));
         }
     }
     if body.len() > shown {
@@ -344,6 +418,55 @@ fn render_result(
             format!("     … (+{}) · ^O para expandir", body.len() - shown),
             theme::dim(),
         ));
+    }
+}
+
+/// Render a `run_command` result whose output carries `STDERR_MARKER`: the head line and stdout body
+/// preview exactly as `render_result` would (still bounded by `PREVIEW_LINES` unless expanded), then a
+/// labeled stderr section that is ALWAYS shown in full — issue #8a's "distinguish tool stderr and always
+/// show the error in full" — styled distinctly from stdout regardless of the call's own `status` (a
+/// command can exit 0 and still print to stderr).
+#[allow(clippy::too_many_arguments)]
+fn render_result_with_stderr(
+    marker_color: Color,
+    text_style: Style,
+    stdout_part: &str,
+    stderr_part: &str,
+    elapsed: Duration,
+    width: usize,
+    expanded: bool,
+    out: &mut Vec<Line<'static>>,
+) {
+    let stdout_part = stdout_part.trim_end_matches('\n');
+    let stdout_lines: Vec<&str> = if stdout_part.is_empty() {
+        Vec::new()
+    } else {
+        stdout_part.split('\n').collect()
+    };
+    let head = match stdout_lines.first() {
+        Some(first) => format!("{first} · {}", fmt_dur(elapsed)),
+        None => format!("(stderr) · {}", fmt_dur(elapsed)),
+    };
+    out.push(Line::from(vec![
+        Span::styled("  ⎿ ", theme::dim()),
+        Span::styled("● ", Style::default().fg(marker_color)),
+        Span::styled(head, text_style),
+    ]));
+
+    if stdout_lines.len() > 1 {
+        render_preview_body(&stdout_lines[1..], text_style, width, expanded, out);
+    }
+
+    let indent = " ".repeat(PREVIEW_INDENT_WIDTH);
+    let stderr_style = Style::default().fg(theme::ERROR);
+    out.push(Line::styled(
+        format!("{indent}▍ stderr:"),
+        stderr_style.add_modifier(Modifier::BOLD),
+    ));
+    for line in stderr_part.trim_end_matches('\n').split('\n') {
+        for row in hard_wrap(line, width.saturating_sub(PREVIEW_INDENT_WIDTH).max(1)) {
+            out.push(Line::styled(format!("{indent}{row}"), stderr_style));
+        }
     }
 }
 
@@ -578,6 +701,7 @@ mod tests {
                     "src/a.rs:1: match\nsrc/b.rs:2: match\nsrc/c.rs:3: match".to_string(),
                     Duration::from_millis(12),
                 )),
+                is_run_command: false,
             }));
         }
         items
@@ -604,6 +728,7 @@ mod tests {
             focused_pane: crate::modules::tui::domain::model::PaneFocus::Input,
             selected_item: None,
             expanded_tools_indices: &empty_set,
+            spinner_frame: 0,
         };
         // Warm the markdown memoization cache (the expensive parse happens once per unique body).
         let _ = build_transcript_lines(&items, 88, state);

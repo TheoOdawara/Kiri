@@ -53,7 +53,7 @@ impl Tool for ReadFile {
 
         // Bound the read at `READ_FILE_MAX_BYTES + 1` (the `+1` lets the truncation check below tell
         // "exactly at the cap" from "more data follows" without re-stating the file).
-        let bytes = match read_capped(&path, READ_FILE_MAX_BYTES + 1) {
+        let bytes = match read_capped(&path, READ_FILE_MAX_BYTES + 1).await {
             Ok(bytes) => bytes,
             Err(error) => return ToolOutcome::Error(format!("cannot read {}: {error}", args.path)),
         };

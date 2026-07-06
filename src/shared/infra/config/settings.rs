@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,8 +17,8 @@ use super::raw::{
     read_config_file, read_project_config_lenient, resolve_layers, resolve_providers,
 };
 use super::resolve::{
-    compile_patterns, expand_home, load_extra_paths, load_net_allow, resolve_bool,
-    resolve_sandbox_mode, resolve_sandbox_network, resolve_timeout,
+    compile_patterns, expand_home, load_extra_paths, resolve_bool, resolve_sandbox_mode,
+    resolve_sandbox_network, resolve_timeout,
 };
 use super::writers::{default_provider, ensure_private_dir, write_starter_config};
 
@@ -54,10 +55,9 @@ pub struct Settings {
     pub sandbox_enabled: bool,
     /// `KIRI_SANDBOX=require`: refuse `run_command` when no OS sandbox is available.
     pub require_confinement: bool,
-    /// Base network stance for `run_command` (the dev-command allow-list may widen it per call).
+    /// Base network stance for `run_command` — deny by default, `KIRI_SANDBOX_NETWORK=allow` widens it
+    /// session-wide; no per-command widening (ADR 0022).
     pub sandbox_network: NetworkPolicy,
-    /// Commands allowed to reach the network under confinement (dev / package-manager tools).
-    pub net_allow: Arc<[Regex]>,
     /// Extra paths a confined command may read / write beyond the workspace (toolchain dirs, config).
     pub extra_ro: Arc<[PathBuf]>,
     pub extra_rw: Arc<[PathBuf]>,
@@ -108,13 +108,38 @@ pub struct EmbeddingSettings {
     pub model: String,
 }
 
+/// Largest instructions file read into memory, mirroring `docs_library`'s `MAX_FILE_BYTES` /
+/// `file_project_memory`'s `MAX_ENTRY_BYTES` — bounds a single read so an oversized committed file, or a
+/// symlink to an endless device that slipped past `find_instructions`'s guard (the explicit
+/// `--instructions` override does not go through that guard, by design — it names a path the user typed
+/// themselves), cannot hang or exhaust memory during config resolve.
+const MAX_INSTRUCTIONS_BYTES: u64 = 256 * 1024;
+
+/// Read at most `MAX_INSTRUCTIONS_BYTES` of `path` as lossy UTF-8.
+fn read_capped(path: &std::path::Path) -> std::io::Result<String> {
+    let file = std::fs::File::open(path)?;
+    let mut buf = Vec::new();
+    file.take(MAX_INSTRUCTIONS_BYTES).read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// True only for a regular file, never a symlink — mirrors `docs_library`'s directory-walk guard. A
+/// hostile committed symlink named e.g. `CLAUDE.md` must not redirect this harness-internal, pre-sandbox
+/// read to a file outside the project (`~/.ssh/id_rsa`, another project's `.env`, …): unlike the model's
+/// own `read_file` tool, this read never passes through `FsSandbox`'s sensitive-path denylist.
+fn is_regular_file(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+}
+
 /// Return the first instructions file found in `dir` by the discovery order `KIRI.md` → `AGENTS.md` →
-/// `CLAUDE.md`. Returns `None` if none of the candidates exist.
+/// `CLAUDE.md`. Returns `None` if none of the candidates exist (or exist only as a symlink).
 pub(super) fn find_instructions(dir: &std::path::Path) -> Option<PathBuf> {
     ["KIRI.md", "AGENTS.md", "CLAUDE.md"]
         .iter()
         .map(|name| dir.join(name))
-        .find(|p| p.is_file())
+        .find(|p| is_regular_file(p))
 }
 
 /// Discover and load instructions, merging global (`~/.kiri/`) and project (workspace root) layers.
@@ -125,15 +150,18 @@ fn load_instructions(
     cli_override: Option<PathBuf>,
 ) -> Result<(Option<String>, Vec<PathBuf>)> {
     if let Some(path) = cli_override {
-        let text = std::fs::read_to_string(&path)
+        let text = read_capped(&path)
             .map_err(|e| anyhow::anyhow!("--instructions: cannot read {}: {e}", path.display()))?;
         return Ok((Some(text), vec![path]));
     }
     let mut parts: Vec<String> = Vec::new();
     let mut paths: Vec<PathBuf> = Vec::new();
     for dir in [global_dir, workspace] {
+        // Best-effort: a read failure (permission denied, or the file vanished after the existence
+        // check) skips this layer rather than aborting config resolve — instructions are optional, and
+        // the harness must still boot.
         if let Some(p) = find_instructions(dir)
-            && let Ok(text) = std::fs::read_to_string(&p)
+            && let Ok(text) = read_capped(&p)
             && !text.trim().is_empty()
         {
             parts.push(text);
@@ -220,7 +248,6 @@ impl Settings {
             sandbox_enabled,
             require_confinement,
             sandbox_network: resolve_sandbox_network(config.sandbox.network.as_deref()),
-            net_allow: load_net_allow()?,
             extra_ro: load_extra_paths("KIRI_SANDBOX_RO_PATHS", &[]),
             extra_rw: load_extra_paths("KIRI_SANDBOX_RW_PATHS", DEFAULT_RW_DIRS),
             connect_timeout: resolve_timeout(
@@ -285,5 +312,165 @@ impl Settings {
                     self.active_provider
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn write(dir: &std::path::Path, name: &str, content: &str) {
+        std::fs::write(dir.join(name), content).unwrap();
+    }
+
+    #[test]
+    fn find_instructions_returns_none_when_absent() {
+        let dir = TempDir::new().unwrap();
+        assert!(find_instructions(dir.path()).is_none());
+    }
+
+    #[test]
+    fn find_instructions_prefers_kiri_over_agents_over_claude() {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "CLAUDE.md", "claude");
+        write(dir.path(), "AGENTS.md", "agents");
+        write(dir.path(), "KIRI.md", "kiri");
+        assert_eq!(
+            find_instructions(dir.path()).unwrap().file_name().unwrap(),
+            "KIRI.md"
+        );
+    }
+
+    #[test]
+    fn find_instructions_falls_back_agents_then_claude() {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "CLAUDE.md", "claude");
+        write(dir.path(), "AGENTS.md", "agents");
+        assert_eq!(
+            find_instructions(dir.path()).unwrap().file_name().unwrap(),
+            "AGENTS.md",
+            "AGENTS.md must win over CLAUDE.md when KIRI.md is absent"
+        );
+
+        std::fs::remove_file(dir.path().join("AGENTS.md")).unwrap();
+        assert_eq!(
+            find_instructions(dir.path()).unwrap().file_name().unwrap(),
+            "CLAUDE.md",
+            "CLAUDE.md is the last fallback"
+        );
+    }
+
+    #[test]
+    fn load_instructions_with_no_files_returns_none() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let (text, paths) = load_instructions(workspace.path(), global.path(), None).unwrap();
+        assert!(text.is_none());
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn load_instructions_uses_only_global_when_project_absent() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write(global.path(), "CLAUDE.md", "global rules");
+        let (text, paths) = load_instructions(workspace.path(), global.path(), None).unwrap();
+        assert_eq!(text.unwrap(), "global rules");
+        assert_eq!(paths, vec![global.path().join("CLAUDE.md")]);
+    }
+
+    #[test]
+    fn load_instructions_appends_project_after_global() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write(global.path(), "CLAUDE.md", "global rules");
+        write(workspace.path(), "CLAUDE.md", "project rules");
+        let (text, paths) = load_instructions(workspace.path(), global.path(), None).unwrap();
+        assert_eq!(
+            text.unwrap(),
+            "global rules\n\nproject rules",
+            "global must come first, project appended after a blank line"
+        );
+        assert_eq!(
+            paths,
+            vec![
+                global.path().join("CLAUDE.md"),
+                workspace.path().join("CLAUDE.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_instructions_skips_a_blank_layer() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write(global.path(), "CLAUDE.md", "   \n  ");
+        write(workspace.path(), "CLAUDE.md", "project rules");
+        let (text, paths) = load_instructions(workspace.path(), global.path(), None).unwrap();
+        assert_eq!(text.unwrap(), "project rules");
+        assert_eq!(paths, vec![workspace.path().join("CLAUDE.md")]);
+    }
+
+    #[test]
+    fn cli_override_replaces_both_layers() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let override_dir = TempDir::new().unwrap();
+        write(global.path(), "CLAUDE.md", "global rules");
+        write(workspace.path(), "CLAUDE.md", "project rules");
+        write(override_dir.path(), "custom.md", "override rules");
+        let override_path = override_dir.path().join("custom.md");
+
+        let (text, paths) =
+            load_instructions(workspace.path(), global.path(), Some(override_path.clone()))
+                .unwrap();
+        assert_eq!(text.unwrap(), "override rules");
+        assert_eq!(paths, vec![override_path]);
+    }
+
+    #[test]
+    fn cli_override_of_a_missing_file_errors() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let missing = workspace.path().join("nope.md");
+        assert!(load_instructions(workspace.path(), global.path(), Some(missing)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_instructions_skips_a_symlinked_candidate() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        // A secret outside the searched directory, reachable only via a symlink placed inside it under
+        // a candidate name — must never be followed by the auto-discovery.
+        let outside = TempDir::new().unwrap();
+        write(outside.path(), "secret.md", "outside secret");
+        symlink(
+            outside.path().join("secret.md"),
+            dir.path().join("CLAUDE.md"),
+        )
+        .unwrap();
+
+        assert!(
+            find_instructions(dir.path()).is_none(),
+            "a symlinked candidate must never be treated as found"
+        );
+    }
+
+    #[test]
+    fn load_instructions_caps_an_oversized_file() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let oversized = "a".repeat(MAX_INSTRUCTIONS_BYTES as usize + 1024);
+        write(global.path(), "CLAUDE.md", &oversized);
+
+        let (text, _) = load_instructions(workspace.path(), global.path(), None).unwrap();
+        assert_eq!(
+            text.unwrap().len(),
+            MAX_INSTRUCTIONS_BYTES as usize,
+            "an oversized instructions file must be truncated at the byte cap, not read in full"
+        );
     }
 }

@@ -5,9 +5,10 @@ use serde_json::{Value, json};
 use crate::modules::tools::application::path::default_accept_for;
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, PATH_DESC, Tool, ToolOutcome, confirm, confirm_execute_suffix, function_schema,
 };
 use crate::modules::tools::infrastructure::args::{MoveArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::exec;
 use crate::modules::tools::infrastructure::support::{ensure_parent_dirs, missing_dirs_label};
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -45,17 +46,18 @@ impl Tool for MovePath {
     fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
         let a: MoveArgs = parse(call.function.arguments.as_str()).ok()?;
         let cmd = self.command_line(sandbox, call)?;
+        let suffix = confirm_execute_suffix(&cmd);
         let action = match sandbox.resolve_create(&a.destination) {
             Ok(r) if !r.missing_dirs.is_empty() => format!(
-                "Criar diretório(s) '{}' e mover. Aprova executar: {cmd}?",
+                "Criar diretório(s) '{}' e mover. {suffix}",
                 missing_dirs_label(&r, sandbox),
             ),
             Ok(r) if r.target.exists() => {
-                format!("Sobrescrever o destino movendo. Aprova executar: {cmd}?")
+                format!("Sobrescrever o destino movendo. {suffix}")
             }
             // Also covers a resolve_create error: the user is still asked (returning None here would
             // skip confirmation), and execute() re-validates the path and surfaces the real error.
-            _ => format!("Mover o caminho. Aprova executar: {cmd}?"),
+            _ => format!("Mover o caminho. {suffix}"),
         };
         let default_accept = default_accept_for(&a.destination);
         Some(confirm(action, default_accept))
@@ -81,14 +83,26 @@ impl Tool for MovePath {
             Ok(resolution) => resolution,
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
-        if let Err(out) = ensure_parent_dirs(&resolution, &args.destination) {
+        if let Err(out) = ensure_parent_dirs(&resolution, &args.destination).await {
             return out;
         }
 
-        match rename_or_copy(&source, &resolution.target) {
-            Ok(()) => ToolOutcome::Ok(format!("moved {} to {}", args.source, args.destination)),
-            Err(error) => ToolOutcome::Error(format!(
+        match tokio::time::timeout(
+            exec::DEFAULT_TIMEOUT,
+            rename_or_copy(&source, &resolution.target),
+        )
+        .await
+        {
+            Ok(Ok(())) => ToolOutcome::Ok(format!("moved {} to {}", args.source, args.destination)),
+            Ok(Err(error)) => ToolOutcome::Error(format!(
                 "cannot move {} to {}: {error}",
+                args.source, args.destination
+            )),
+            // `tokio::fs` runs on the blocking pool and can't be cancelled once dispatched: the
+            // rename/copy/remove may still land after this timeout is reported (issue #53,
+            // security-debt).
+            Err(_) => ToolOutcome::Error(format!(
+                "cannot move {} to {}: timed out (it may still complete in the background)",
                 args.source, args.destination
             )),
         }
@@ -100,13 +114,21 @@ impl Tool for MovePath {
 /// `/tmp` on Linux). Only a plain file gets the fallback: a directory's cross-device move would need a
 /// recursive copy, and copying nested symlinks safely (without following one into an arbitrary target
 /// outside the tree) is a feature of its own — until it exists, a cross-device directory move surfaces
-/// this `CrossesDevices` error rather than silently mishandling a nested symlink.
-fn rename_or_copy(source: &Path, target: &Path) -> std::io::Result<()> {
-    match std::fs::rename(source, target) {
+/// this `CrossesDevices` error rather than silently mishandling a nested symlink. The caller bounds the
+/// whole sequence by `DEFAULT_TIMEOUT`.
+async fn rename_or_copy(source: &Path, target: &Path) -> std::io::Result<()> {
+    match tokio::fs::rename(source, target).await {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices && source.is_file() => {
-            std::fs::copy(source, target)?;
-            std::fs::remove_file(source)
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            let is_file = tokio::fs::metadata(source)
+                .await
+                .map(|metadata| metadata.is_file())
+                .unwrap_or(false);
+            if !is_file {
+                return Err(error);
+            }
+            tokio::fs::copy(source, target).await?;
+            tokio::fs::remove_file(source).await
         }
         Err(error) => Err(error),
     }

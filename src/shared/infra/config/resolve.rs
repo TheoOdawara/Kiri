@@ -8,8 +8,6 @@ use regex::Regex;
 use crate::shared::infra::home;
 use crate::shared::kernel::sandbox::{NetworkPolicy, NetworkStance, SandboxMode};
 
-use super::defaults::DEFAULT_NET_ALLOW;
-
 /// Parse a millisecond duration from raw text, falling back to `default` when absent, unparseable, or
 /// zero. Pure so the parsing is unit-testable.
 fn parse_duration_ms(raw: Option<&str>, default: Duration) -> Duration {
@@ -107,12 +105,6 @@ pub(super) fn resolve_sandbox_network(config: Option<&str>) -> NetworkPolicy {
         NetworkStance::Allow => NetworkPolicy::Allow,
         NetworkStance::Deny => NetworkPolicy::Deny,
     }
-}
-
-/// Load the network allow-list from `KIRI_SANDBOX_NET_ALLOW_CMDS` (newline-separated regexes, `#`
-/// comments, replaces the default) or the hardcoded dev-command default. Fails fast on a bad pattern.
-pub(super) fn load_net_allow() -> Result<Arc<[Regex]>> {
-    compile_patterns("KIRI_SANDBOX_NET_ALLOW_CMDS", DEFAULT_NET_ALLOW)
 }
 
 /// The separator between entries in a list env var (the extra docs/memory/sandbox paths) — `:` on Unix,

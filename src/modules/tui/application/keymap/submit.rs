@@ -201,6 +201,21 @@ fn open_effort_picker(model: &mut Model) -> Vec<Effect> {
     vec![]
 }
 
+/// One `/provider` list row: id, kind, model, and auth status (issue #10's list-view acceptance
+/// criterion) — compact enough for the picker's fixed width, unlike `modals::provider_detail_line`'s
+/// fuller `base_url`/`thinking` line (that one stays scoped to the single-selected action sub-menu).
+fn provider_row_label(id: &str, profile: Option<&ProviderProfile>) -> String {
+    match profile {
+        Some(p) => format!(
+            "{id} · [{}] {} · {}",
+            format!("{:?}", p.kind).to_ascii_lowercase(),
+            p.model,
+            p.auth.as_wire(),
+        ),
+        None => id.to_string(),
+    }
+}
+
 /// Open the `/provider` picker over the configured providers (plus the "+ adicionar" row that opens the
 /// add wizard), preselecting the active one. With no providers configured it surfaces a notice instead.
 fn open_provider_picker(model: &mut Model) -> Vec<Effect> {
@@ -213,8 +228,17 @@ fn open_provider_picker(model: &mut Model) -> Vec<Effect> {
             .iter()
             .position(|p| *p == current)
             .unwrap_or(0);
-        // The configured providers, plus the "+ adicionar" row that opens the add wizard.
-        let mut options = model.providers.clone();
+        // One row per configured provider (id, kind, model, auth), plus the "+ adicionar" row that
+        // opens the add wizard. `model.providers` (the raw ids) stays the source of truth for which
+        // provider an option maps to — see `on_picker_key`'s `PickerKind::Provider` arm.
+        let mut options: Vec<String> = model
+            .providers
+            .iter()
+            .map(|id| {
+                let profile = model.provider_profiles.iter().find(|p| p.id == *id);
+                provider_row_label(id, profile)
+            })
+            .collect();
         options.push(ADD_PROVIDER_LABEL.to_string());
         model.picker = Some(Picker::new(
             PickerKind::Provider,

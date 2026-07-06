@@ -134,7 +134,6 @@ fn registry_for_tests() -> ToolRegistry {
     // non-plannable, independent of this list.
     ToolRegistry::new(default_fs_tools(
         Arc::from(vec![Regex::new(r"\becho\b").unwrap()]),
-        Arc::from(Vec::<Regex>::new()),
         false,
     ))
 }
@@ -487,6 +486,79 @@ async fn plan_mode_confirms_run_command() {
         "run_command must be confirmed even in plan mode (SEC-01)"
     );
     assert!(matches!(io.finished.as_slice(), [ToolOutcome::Declined]));
+}
+
+#[tokio::test]
+async fn checkpoint_approved_auto_does_not_reopen_the_plan_blacklist() {
+    // Issue #28: a turn that STARTS in Plan and escalates to Auto mid-turn via a checkpoint's "keep
+    // going, don't ask again" (ApprovedAuto) must still refuse a plan_check-blacklisted run_command —
+    // not silently downgrade from "refused outright" to "just needs a live confirmation" the instant the
+    // checkpoint fires. max_tool_calls=1 forces the checkpoint after round 1's single allowed call.
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("marker.txt"), b"still here").unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let agent_loop = AgentLoop::new(
+        Arc::new(ScriptedProvider {
+            turns: Mutex::new(VecDeque::from(vec![
+                // Round 1: an allow-listed command (echo), confirmed — the call cap then trips.
+                CompletedTurn {
+                    content: "planning".to_string(),
+                    tool_calls: vec![tool_call("run_command", r#"{"command":"echo hi"}"#)],
+                    thinking: None,
+                },
+                // Round 2, now mode == Auto (via the checkpoint's ApprovedAuto below): a command NOT in
+                // the plan-mode allow-list — must still be refused, not confirm-prompted.
+                CompletedTurn {
+                    content: "escalated".to_string(),
+                    tool_calls: vec![tool_call("run_command", r#"{"command":"rm marker.txt"}"#)],
+                    thinking: None,
+                },
+                CompletedTurn {
+                    content: "done".to_string(),
+                    tool_calls: vec![],
+                    thinking: None,
+                },
+            ])),
+        }),
+        registry_for_tests(),
+        "model".to_string(),
+        Duration::from_secs(3600),
+        1,
+    );
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("plan something"));
+    // Consumed in order: round 1's per-call confirmation, then the post-round checkpoint's decision.
+    let mut io = TestIo::new(Approval::Approved)
+        .with_decisions(vec![Approval::Approved, Approval::ApprovedAuto]);
+
+    let outcome = agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert!(
+        dir.path().join("marker.txt").exists(),
+        "the blacklisted command must never execute, even after the checkpoint escalates to Auto"
+    );
+    assert_eq!(
+        io.decide_calls, 1,
+        "the blocked round-2 call must be refused outright, never reaching a confirmation prompt"
+    );
+    let last_tool_msg = conversation
+        .messages()
+        .iter()
+        .rfind(|m| m.role == Role::Tool)
+        .unwrap();
+    assert!(
+        last_tool_msg
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("blocked in plan mode"),
+        "got: {:?}",
+        last_tool_msg.content
+    );
 }
 
 #[tokio::test]
@@ -875,6 +947,76 @@ async fn iteration_cap_fires_the_checkpoint() {
     assert_eq!(
         tool_results, 1,
         "the call cap must pause the turn before the second tool round"
+    );
+}
+
+#[tokio::test]
+async fn a_tool_timeout_is_never_auto_retried_within_the_turn() {
+    // Issue #53: tokio::fs/spawn_blocking-based mutating tools can't cancel their underlying syscall
+    // once dispatched, so a reported timeout doesn't guarantee the write actually stopped — an automatic
+    // retry could race a second attempt against the still-running first one and land unpredictably. The
+    // harness's invariant this residual risk depends on: a timed-out call produces exactly ONE execution
+    // attempt and one tool_result; only the model's own NEXT turn can decide to try again. run_command's
+    // real, exercisable timeout stands in for the same "the harness never re-issues a timed-out call by
+    // itself" behavior every tool relies on — the harness has no tool-specific retry logic anywhere.
+    let dir = TempDir::new().unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    // `timeout_ms` is clamped to a 1000ms floor (`RUN_COMMAND_MIN_TIMEOUT_MS`), so the requested 100ms
+    // below actually races a ~1s timeout — a slow command comfortably longer than that keeps the timeout
+    // deterministic rather than a close call.
+    let slow = if cfg!(windows) {
+        "ping -n 6 127.0.0.1 > nul"
+    } else {
+        "sleep 5"
+    };
+    let agent_loop = agent_loop_with(vec![
+        CompletedTurn {
+            content: "running".to_string(),
+            tool_calls: vec![tool_call(
+                "run_command",
+                &format!(r#"{{"command":"{slow}","timeout_ms":100}}"#),
+            )],
+            thinking: None,
+        },
+        CompletedTurn {
+            content: "done".to_string(),
+            tool_calls: vec![],
+            thinking: None,
+        },
+    ]);
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("run something slow"));
+    let mut io = TestIo::new(Approval::Approved);
+
+    let outcome = agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let tool_results: Vec<_> = conversation
+        .messages()
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .collect();
+    assert_eq!(
+        tool_results.len(),
+        1,
+        "a timed-out call must be answered exactly once, never retried within the same round"
+    );
+    assert!(
+        tool_results[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("timed out"),
+        "got: {:?}",
+        tool_results[0].content
+    );
+    assert_eq!(
+        io.finished.len(),
+        1,
+        "exactly one execution attempt must reach tool_finished — no automatic retry"
     );
 }
 

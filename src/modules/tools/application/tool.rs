@@ -35,8 +35,15 @@ pub struct Confirmation {
 }
 
 /// Build a confirmation line from a phrased action and its default-accept flag, appending the `[S/n]`
-/// or `[s/N]` suffix. Shared by every tool so the suffix rule lives in one place.
+/// or `[s/N]` suffix. Shared by every tool so the suffix rule lives in one place — and the one place
+/// attacker/model-supplied substrings interpolated into `action` (a shell command, a path, a
+/// sensitive-path match) are normalized before they reach the approval box's markdown renderer. A blank
+/// line embedded in one of those substrings would otherwise split the CommonMark block structure (blocks
+/// are determined before inline/code-span parsing), letting the rest render as a real heading/bold block
+/// instead of literal prose — the approval box is the user's last line of defense before a destructive
+/// action, so this is not optional polish.
 pub fn confirm(action: String, default_accept: bool) -> Confirmation {
+    let action = action.replace(['\n', '\r'], " ");
     let suffix = if default_accept { "[S/n]" } else { "[s/N]" };
     Confirmation {
         prompt: format!("{action} {suffix} "),
@@ -44,7 +51,27 @@ pub fn confirm(action: String, default_accept: bool) -> Confirmation {
     }
 }
 
-/// Build the standard single-path confirmation: `{phrase}. Aprova executar: {cmd}?`, with the
+/// The shared "Aprova executar: `{cmd}`?" suffix every confirmation ends with. The command/target is
+/// backtick-wrapped so the approval box's markdown rendering shows it as inline code — visually set off
+/// from the surrounding prose, the same treatment used everywhere else in the TUI (issue #8c: "highlight
+/// the file path / parse the action for clarity"). One function so every tool's confirmation gets the
+/// highlight identically, instead of each hand-rolling the same literal phrase. `cmd` is a shell command
+/// or path the model supplied, so it may itself contain a backtick (e.g. legacy `` `whoami` `` shell
+/// substitution) — a single-backtick CommonMark span cannot contain an unescaped backtick, so wrapping
+/// would add a mismatched delimiter and mangle the render; this only skips adding that SECOND pair when
+/// one is already present — it does not neutralize a backtick already inside `cmd` (that already-present
+/// backtick was live CommonMark syntax before this function existed, same as today). A newline embedded
+/// in `cmd` is handled separately, unconditionally, by `confirm`, which every caller of this function
+/// also goes through.
+pub fn confirm_execute_suffix(cmd: &str) -> String {
+    if cmd.contains('`') {
+        format!("Aprova executar: {cmd}?")
+    } else {
+        format!("Aprova executar: `{cmd}`?")
+    }
+}
+
+/// Build the standard single-path confirmation: `{phrase}. Aprova executar: \`{cmd}\`?`, with the
 /// default-accept derived from whether `path` reaches outside the workspace (relative → accept
 /// `[S/n]`, explicit absolute/`~` → decline `[s/N]`). `None` when `command_line` is `None` (the args
 /// did not parse, so `execute` surfaces the parse error). Single-sources the prompt skeleton and the
@@ -56,7 +83,7 @@ pub fn simple_path_confirmation(
 ) -> Option<Confirmation> {
     let cmd = command_line?;
     Some(confirm(
-        format!("{phrase}. Aprova executar: {cmd}?"),
+        format!("{phrase}. {}", confirm_execute_suffix(&cmd)),
         default_accept_for(path),
     ))
 }
@@ -186,5 +213,42 @@ mod tests {
 
         // No command line (the args did not parse) yields no confirmation.
         assert!(simple_path_confirmation("Ler o arquivo", None, "a.txt").is_none());
+    }
+
+    #[test]
+    fn confirm_execute_suffix_highlights_the_command_as_inline_code() {
+        assert_eq!(
+            confirm_execute_suffix("cat a.txt"),
+            "Aprova executar: `cat a.txt`?"
+        );
+    }
+
+    #[test]
+    fn confirm_execute_suffix_skips_the_highlight_when_the_command_has_a_backtick() {
+        // A single-backtick CommonMark span cannot contain an unescaped backtick — wrapping this would
+        // mangle the render, so the highlight is skipped rather than risk garbled output.
+        let cmd = "echo `whoami`";
+        assert_eq!(
+            confirm_execute_suffix(cmd),
+            format!("Aprova executar: {cmd}?"),
+            "no extra wrapping backticks must be added around a command that already has one"
+        );
+    }
+
+    #[test]
+    fn confirm_strips_embedded_newlines_from_the_action() {
+        // Security review of issue #8c: a blank line inside an attacker/model-supplied substring
+        // (a command, a path, a sensitive-path match) would split the approval box's markdown block
+        // structure, letting the rest render as a real heading/bold block instead of literal prose — the
+        // approval box is the user's last line of defense, so this must never reach the renderer.
+        let confirmation = confirm(
+            "Executar. Aprova executar: `rm -rf x\n\n# PWNED\n\n`?".to_string(),
+            false,
+        );
+        assert!(
+            !confirmation.prompt.contains('\n'),
+            "the prompt must never carry an embedded newline: {:?}",
+            confirmation.prompt
+        );
     }
 }

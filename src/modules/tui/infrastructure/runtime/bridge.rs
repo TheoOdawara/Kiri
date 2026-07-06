@@ -28,6 +28,7 @@ pub(crate) enum EngineMsg {
     ToolStarted {
         command: String,
         diff: Option<ToolDiff>,
+        is_run_command: bool,
     },
     ToolFinished {
         status: ToolStatus,
@@ -126,6 +127,7 @@ impl ToolObserver for Bridge {
         let _ = self.push(EngineMsg::ToolStarted {
             command: command.to_string(),
             diff: edit_diff(call),
+            is_run_command: call.function.name == "run_command",
         });
     }
 

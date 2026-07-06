@@ -215,6 +215,9 @@ impl RunLoop {
                 self.model.transcript = rebuild_transcript(&session.messages);
                 self.model.attachments.clear();
                 self.model.scroll.pin();
+                // Resuming a different session IS "starting again" from the user's point of view — a
+                // stale error badge from the discarded session must not survive the switch (issue #8b).
+                self.model.status.turn_failed = false;
                 let title = if session.title.trim().is_empty() {
                     UNTITLED_SESSION_LABEL.to_string()
                 } else {
@@ -257,6 +260,9 @@ impl RunLoop {
                 self.cursor.session_id = None;
                 self.cursor.persisted_len = 0;
                 self.sandbox = new_sandbox;
+                // A new workspace detaches into a fresh session context — same "starting again" logic
+                // as `open_session`/`new_session` (issue #8b).
+                self.model.status.turn_failed = false;
                 self.model
                     .notify_info(format!("workspace: {}", self.model.status.workspace));
             }
@@ -276,6 +282,9 @@ impl RunLoop {
         self.model.transcript = Transcript::default();
         self.model.attachments.clear();
         self.model.scroll.pin();
+        // A fresh session IS "starting again" — a stale error badge from the discarded one must not
+        // linger (issue #8b).
+        self.model.status.turn_failed = false;
         self.model.notify_info("nova sessão");
     }
 }

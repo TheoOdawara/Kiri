@@ -53,7 +53,8 @@ pub trait Sandbox {
     /// The OS-confinement adapter every tool wraps its child process with before spawning.
     fn confiner(&self) -> &dyn CommandSandbox;
 
-    /// The base network stance (the default for `run_command` before its dev-command allow-list).
+    /// The sandbox's network stance — the sole source of truth for `run_command`, with no per-command
+    /// widening (ADR 0022).
     fn network(&self) -> NetworkPolicy;
 
     /// Whether a bare file name matches a sensitive pattern (secrets, keys, credentials). Exposed as a

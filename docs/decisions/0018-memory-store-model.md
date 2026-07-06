@@ -2,7 +2,8 @@
 
 **Status:** Accepted  
 **Date:** 2026-06-29  
-**Relates to:** ADR 0010, ADR 0013, ADR 0014, ADR 0015
+**Relates to:** ADR 0010, ADR 0013, ADR 0014, ADR 0015  
+**Amended by:** ADR 0023 (2026-07-05) — adds a cross-store dedup rule to "Store priority in recall" below.
 
 ## Context
 

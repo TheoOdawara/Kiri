@@ -58,6 +58,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Tick => Vec::new(),
         Msg::TurnBegan => {
             model.status.streaming = true;
+            model.status.turn_failed = false;
             model.timeline.begin_turn();
             Vec::new()
         }
@@ -84,8 +85,14 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.status.streaming = false;
             Vec::new()
         }
-        Msg::ToolStarted { command, diff } => {
-            model.transcript.push_tool_start(command, diff);
+        Msg::ToolStarted {
+            command,
+            diff,
+            is_run_command,
+        } => {
+            model
+                .transcript
+                .push_tool_start(command, diff, is_run_command);
             Vec::new()
         }
         Msg::ToolFinished {
@@ -145,6 +152,7 @@ mod tests {
             Msg::ToolStarted {
                 command: "cat a.txt".into(),
                 diff: None,
+                is_run_command: false,
             },
         );
         match m.transcript.items() {

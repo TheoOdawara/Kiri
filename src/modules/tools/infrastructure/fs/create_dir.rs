@@ -5,6 +5,7 @@ use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, function_schema, simple_command, simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{PathArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::exec;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct CreateDir;
@@ -47,13 +48,37 @@ impl Tool for CreateDir {
             Ok(resolution) => resolution,
             Err(error) => return ToolOutcome::Error(error.to_string()),
         };
-        if resolution.target.is_dir() {
+        // Bounded stat: `Path::is_dir` is a blocking syscall that can hang on a wedged mount just
+        // like the create below; a stat failure (including "does not exist") falls through to the
+        // create attempt, which surfaces the real error if there is one.
+        let already_exists = match tokio::time::timeout(
+            exec::DEFAULT_TIMEOUT,
+            tokio::fs::metadata(&resolution.target),
+        )
+        .await
+        {
+            Ok(Ok(metadata)) => metadata.is_dir(),
+            Ok(Err(_)) => false,
+            Err(_) => return ToolOutcome::Error(format!("cannot stat {}: timed out", args.path)),
+        };
+        if already_exists {
             return ToolOutcome::Ok(format!("directory already exists: {}", args.path));
         }
 
-        match std::fs::create_dir_all(&resolution.target) {
-            Ok(()) => ToolOutcome::Ok(format!("created directory {}", args.path)),
-            Err(error) => ToolOutcome::Error(format!("cannot create {}: {error}", args.path)),
+        match tokio::time::timeout(
+            exec::DEFAULT_TIMEOUT,
+            tokio::fs::create_dir_all(&resolution.target),
+        )
+        .await
+        {
+            Ok(Ok(())) => ToolOutcome::Ok(format!("created directory {}", args.path)),
+            Ok(Err(error)) => ToolOutcome::Error(format!("cannot create {}: {error}", args.path)),
+            // `tokio::fs` runs on the blocking pool and can't be cancelled once dispatched: the mkdir
+            // may still land after this timeout is reported (issue #53, security-debt).
+            Err(_) => ToolOutcome::Error(format!(
+                "cannot create {}: timed out (it may still complete in the background)",
+                args.path
+            )),
         }
     }
 }

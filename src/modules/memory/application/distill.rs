@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,6 +6,7 @@ use serde::Deserialize;
 use crate::modules::memory::application::memory_port::Memory;
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::modules::memory::domain::scope::Scope;
+use crate::modules::memory::domain::similarity::is_near_duplicate;
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, NullSink, TurnRequest,
 };
@@ -53,9 +53,6 @@ const DEFAULT_MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
 const DEDUP_QUERY_WORDS: usize = 6;
 /// How many existing entries to recall as duplicate candidates per write.
 const DEDUP_RECALL_LIMIT: usize = 5;
-/// Jaccard token-overlap at/above which two entries are treated as the same fact reworded (a strict
-/// superset scores lower and survives).
-const NEAR_DUPLICATE_JACCARD: f32 = 0.8;
 
 const DISTILL_SYSTEM_PROMPT: &str = concat!(
     "You distill durable knowledge from a coding session for a long-term memory. Read the transcript ",
@@ -236,27 +233,6 @@ struct Candidate {
     scope: Scope,
 }
 
-/// Whether two entries are the same fact (normalized equality or a high token-overlap reword). Crucially
-/// NOT plain substring containment: a terse older entry that is a substring of a richer new one is a
-/// strict superset, not a duplicate, so the more-informative entry is kept rather than dropped.
-fn is_near_duplicate(a: &str, b: &str) -> bool {
-    let na = normalize(a);
-    let nb = normalize(b);
-    if na == nb {
-        return true;
-    }
-    let ta: HashSet<&str> = na.split_whitespace().collect();
-    let tb: HashSet<&str> = nb.split_whitespace().collect();
-    if ta.is_empty() || tb.is_empty() {
-        return false;
-    }
-    let intersection = ta.intersection(&tb).count();
-    let union = ta.union(&tb).count();
-    // Jaccard ≥ NEAR_DUPLICATE_JACCARD ⇒ essentially the same fact reworded; a strict superset scores
-    // lower and survives.
-    (intersection as f32 / union as f32) >= NEAR_DUPLICATE_JACCARD
-}
-
 /// Render a bounded transcript: user and assistant text only (system and tool noise dropped), keeping the
 /// most recent tail within `max_bytes` so a long session still fits the distiller's context.
 fn render_transcript(messages: &[Message], max_bytes: usize) -> String {
@@ -295,14 +271,6 @@ fn parse_entries(content: &str) -> AgentResult<Vec<DistilledEntry>> {
         .map_err(|error| AgentError::Memory(format!("distillation: invalid model output: {error}")))
 }
 
-/// Lowercase and collapse all whitespace, for order-insensitive duplicate comparison.
-fn normalize(text: &str) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
 /// The first `n` whitespace-separated words of `text`, used as a recall query for dedup.
 fn leading_words(text: &str, n: usize) -> String {
     text.split_whitespace()
@@ -318,26 +286,6 @@ mod tests {
     use crate::modules::provider::application::completion_provider::EventSink;
     use crate::shared::kernel::completed_turn::CompletedTurn;
     use tempfile::TempDir;
-
-    #[test]
-    fn near_duplicate_catches_rewords_but_keeps_a_richer_superset() {
-        // Case-only difference normalizes equal → duplicate.
-        assert!(is_near_duplicate(
-            "Always use tabs for indentation",
-            "always use tabs for indentation"
-        ));
-        // A high-overlap reword (one extra token) → duplicate.
-        assert!(is_near_duplicate(
-            "always use tabs for indentation",
-            "always use tabs for indentation here"
-        ));
-        // A terse fact that is a substring of a much richer one is a SUPERSET, not a duplicate — the
-        // richer entry must be kept (the regression: plain containment dropped it).
-        assert!(!is_near_duplicate(
-            "use tabs",
-            "always use tabs for indentation in rust source files"
-        ));
-    }
 
     /// A provider that returns a fixed `content` once, ignoring the request.
     struct ScriptedProvider {

@@ -2,6 +2,9 @@
 
 - Status: Accepted
 - Date: 2026-06-24
+- **Amended by ADR 0022** (2026-07-05): the "Network is dev-friendly" section below describes the
+  original per-command allow-list, since replaced by network deny-by-default (issue #5). Read that
+  paragraph as historical context, not the current behavior.
 
 ## Context
 
@@ -83,8 +86,8 @@ ever trips, a single documented `#[allow(unsafe_code)]` scoped to one adapter mo
 relaxed crate-wide.
 
 **Config (env, fail-fast at boot):** `KIRI_SANDBOX` = `os` (default) | `off` | `require` (refuse
-`run_command` when no OS sandbox is available); `KIRI_SANDBOX_NETWORK` = `deny` (default) | `allow`;
-`KIRI_SANDBOX_NET_ALLOW_CMDS` (regex allow-list, replaces the dev-command default);
+`run_command` when no OS sandbox is available); `KIRI_SANDBOX_NETWORK` = `deny` (default) | `allow`
+(the only network control — `KIRI_SANDBOX_NET_ALLOW_CMDS` is gone, see ADR 0022);
 `KIRI_SANDBOX_RO_PATHS` / `KIRI_SANDBOX_RW_PATHS` (colon-separated, tilde-expanded). Toolchain dirs
 (`~/.cargo`, `~/.rustup`, …) are write-allowed by default so the first build works.
 

@@ -109,7 +109,12 @@ impl Tool for EditFile {
         {
             Ok(Ok(())) => ToolOutcome::Ok(format!("edited {}", args.path)),
             Ok(Err(error)) => ToolOutcome::Error(format!("cannot write {}: {error}", args.path)),
-            Err(_) => ToolOutcome::Error(format!("cannot write {}: timed out", args.path)),
+            // `tokio::fs` runs on the blocking pool and can't be cancelled once dispatched: the write
+            // may still land after this timeout is reported (issue #53, ADR 0024).
+            Err(_) => ToolOutcome::Error(format!(
+                "cannot write {}: timed out (it may still complete in the background)",
+                args.path
+            )),
         }
     }
 }

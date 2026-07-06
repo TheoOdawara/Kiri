@@ -97,11 +97,80 @@ pub fn render_plan_into(plan: &PendingPlan, frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use crate::modules::tui::infrastructure::text::display_width;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn hairline_is_exactly_width_cells() {
         assert_eq!(display_width(&hairline(0)), 0);
         assert_eq!(display_width(&hairline(5)), 5);
         assert_eq!(hairline(4), "┄┈┄┈");
+    }
+
+    #[test]
+    fn a_backtick_highlighted_command_renders_with_the_inline_code_style() {
+        // Issue #8c: "Aprova executar: `cat a.txt`?" (the shape every tool's Confirmation.prompt now
+        // takes, via tool::confirm_execute_suffix) must reach the screen with the file/command visually
+        // set off from the surrounding prose — not just as literal backtick characters.
+        let pending = PendingApproval::new(
+            "Ler o arquivo. Aprova executar: `cat a.txt`? [S/n] ".to_string(),
+            true,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        terminal
+            .draw(|frame| render(&pending, frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        // Locate a cell of the highlighted command text and confirm it carries the inline-code style —
+        // not just that the literal string appears (backticks themselves must NOT render, since
+        // `markdown::render` consumes them as the code-span delimiter).
+        let mut found_highlighted_c = false;
+        let mut saw_literal_backtick = false;
+        for cell in buffer.content() {
+            if cell.symbol() == "`" {
+                saw_literal_backtick = true;
+            }
+            if cell.symbol() == "c" && cell.style().bg == Some(theme::CODE_BG) {
+                found_highlighted_c = true;
+            }
+        }
+        assert!(
+            found_highlighted_c,
+            "the command text must render with the inline-code background"
+        );
+        assert!(
+            !saw_literal_backtick,
+            "the backtick delimiters must be consumed by markdown rendering, not shown literally"
+        );
+    }
+
+    #[test]
+    fn an_embedded_blank_line_in_the_command_never_renders_as_a_heading() {
+        // Security review of issue #8c, end-to-end: a model-supplied command containing a blank line
+        // (CommonMark block structure is determined before inline/code-span parsing) would otherwise
+        // split the approval box's markdown render, letting the rest appear as a real heading — the
+        // approval box is the user's last line of defense, so this proves the fix all the way to the
+        // rendered screen, not just at the string level.
+        use crate::modules::tools::application::tool::{confirm, confirm_execute_suffix};
+        let malicious_cmd = "rm -rf x\n\n# PWNED\n\nmore";
+        let confirmation = confirm(
+            format!("Executar. {}", confirm_execute_suffix(malicious_cmd)),
+            false,
+        );
+        let pending = PendingApproval::new(confirmation.prompt, confirmation.default_accept);
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        terminal
+            .draw(|frame| render(&pending, frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|cell| cell.style().fg != Some(theme::HEADING)),
+            "an embedded blank line in the command must never let attacker text render as a heading"
+        );
     }
 }

@@ -5,6 +5,7 @@ use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, function_schema, simple_command, simple_path_confirmation,
 };
 use crate::modules::tools::infrastructure::args::{ListArgs, parse, parse_args};
+use crate::modules::tools::infrastructure::exec;
 use crate::shared::kernel::tool_call::ToolCall;
 
 pub struct ListDir;
@@ -56,19 +57,37 @@ impl Tool for ListDir {
         // One entry per line, excluding `.`/`..`, directories suffixed with `/`. `file_type()` reads the
         // entry's own type without following a symlink, so a symlink (including a symlink-to-directory)
         // is never marked as a directory — the lines are sorted below so the order is
-        // byte-lexicographic and locale-independent.
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(error) => {
+        // byte-lexicographic and locale-independent. The whole listing is bounded by `DEFAULT_TIMEOUT`
+        // (a wedged/stale network mount must fail fast rather than stall the runtime).
+        let listing = async {
+            let mut entries = tokio::fs::read_dir(&dir).await?;
+            let mut names: Vec<String> = Vec::new();
+            // Mirrors the previous `entries.flatten()` behavior: an entry that fails to read is
+            // skipped rather than aborting the whole listing.
+            loop {
+                match entries.next_entry().await {
+                    Ok(Some(entry)) => {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        let is_dir = entry
+                            .file_type()
+                            .await
+                            .map(|kind| kind.is_dir())
+                            .unwrap_or(false);
+                        names.push(if is_dir { format!("{name}/") } else { name });
+                    }
+                    Ok(None) => break,
+                    Err(_) => continue,
+                }
+            }
+            Ok::<_, std::io::Error>(names)
+        };
+        let mut names = match tokio::time::timeout(exec::DEFAULT_TIMEOUT, listing).await {
+            Ok(Ok(names)) => names,
+            Ok(Err(error)) => {
                 return ToolOutcome::Error(format!("cannot list {}: {error}", args.path));
             }
+            Err(_) => return ToolOutcome::Error(format!("cannot list {}: timed out", args.path)),
         };
-        let mut names: Vec<String> = Vec::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-            names.push(if is_dir { format!("{name}/") } else { name });
-        }
 
         names.sort();
         if names.is_empty() {

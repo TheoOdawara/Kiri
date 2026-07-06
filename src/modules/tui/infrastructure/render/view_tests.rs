@@ -201,6 +201,7 @@ fn tool_activity_renders_command_result_and_diff() {
             "edited src/app.rs".to_string(),
             Duration::from_millis(7),
         )),
+        is_run_command: false,
     }));
     let out = render(&model, 80, 20);
     assert!(
@@ -235,6 +236,7 @@ fn long_tool_output_is_previewed_until_expanded() {
         command: "cat big.txt".to_string(),
         diff: None,
         result: Some((ToolStatus::Ok, output, Duration::from_millis(1))),
+        is_run_command: false,
     }));
     let collapsed = render(&model, 80, 40);
     assert!(
@@ -250,6 +252,129 @@ fn long_tool_output_is_previewed_until_expanded() {
     assert!(
         !expanded.contains("para expandir"),
         "no elision hint once expanded:\n{expanded}"
+    );
+}
+
+#[test]
+fn reasoning_block_is_set_off_with_a_left_rule() {
+    // Issue #8a: the reasoning block must be visually delimited (not just labeled) so it never bleeds
+    // into the assistant answer that follows it.
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model.transcript.push(TranscriptItem::Reasoning(
+        "pensando sobre o problema".to_string(),
+    ));
+    model
+        .transcript
+        .push(TranscriptItem::Assistant("a resposta".to_string()));
+    let out = render(&model, 80, 20);
+    assert!(
+        out.contains("⋮ pensando"),
+        "reasoning label missing:\n{out}"
+    );
+    let rows: Vec<&str> = out.lines().collect();
+    let label_row = rows
+        .iter()
+        .position(|l| l.contains("⋮ pensando"))
+        .expect("reasoning label row");
+    let body_row = rows
+        .iter()
+        .position(|l| l.contains("pensando sobre o problema"))
+        .expect("reasoning body row");
+    assert!(
+        rows[label_row].contains('▍'),
+        "reasoning label row must carry the left rule:\n{out}"
+    );
+    assert!(
+        rows[body_row].contains('▍'),
+        "reasoning body row must carry the left rule:\n{out}"
+    );
+    let answer_row = rows
+        .iter()
+        .position(|l| l.contains("a resposta"))
+        .expect("answer row");
+    assert!(
+        !rows[answer_row].contains('▍'),
+        "the left rule must not bleed into the assistant answer:\n{out}"
+    );
+}
+
+#[test]
+fn a_running_tool_shows_the_animated_spinner_glyph_inline() {
+    // Issue #8a: a long-running tool call must show visible activity in the transcript body itself,
+    // not just via the corner spinner — this is the SAME glyph cycle, threaded through.
+    use crate::modules::tui::domain::transcript::ToolActivity;
+    use crate::modules::tui::infrastructure::theme;
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model.transcript.push(TranscriptItem::Tool(ToolActivity {
+        command: "sleep 30".to_string(),
+        diff: None,
+        result: None,
+        is_run_command: true,
+    }));
+    model.status.spinner_frame = 3;
+    let out = render(&model, 80, 20);
+    assert!(
+        out.contains(theme::spinner_glyph(3)),
+        "the running tool marker must show the current spinner frame:\n{out}"
+    );
+}
+
+#[test]
+fn tool_stderr_is_labeled_and_never_truncated() {
+    // Issue #8a: stderr must be visually distinguished from stdout and always shown in full, even
+    // when it is far longer than the ordinary PREVIEW_LINES cap applied to stdout.
+    use crate::modules::tools::infrastructure::exec::STDERR_MARKER;
+    use crate::modules::tui::domain::transcript::{ToolActivity, ToolStatus};
+    use std::time::Duration;
+    let stderr_lines: Vec<String> = (1..=20).map(|i| format!("stderr-line-{i}")).collect();
+    let output = format!("stdout line\n{STDERR_MARKER}\n{}", stderr_lines.join("\n"));
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model.transcript.push(TranscriptItem::Tool(ToolActivity {
+        command: "run flaky script".to_string(),
+        diff: None,
+        result: Some((ToolStatus::Ok, output, Duration::from_millis(5))),
+        is_run_command: true,
+    }));
+    let out = render(&model, 80, 40);
+    assert!(out.contains("stderr:"), "stderr label missing:\n{out}");
+    for line in &stderr_lines {
+        assert!(
+            out.contains(line.as_str()),
+            "stderr must show every line in full, missing {line}:\n{out}"
+        );
+    }
+    assert!(
+        !out.contains("para expandir"),
+        "stderr must never be elided behind the expand hint:\n{out}"
+    );
+}
+
+#[test]
+fn a_non_run_command_tool_whose_output_contains_the_marker_text_is_never_mis_split() {
+    // Issue #8a follow-up (security review): the stderr split must be gated on the call actually being
+    // `run_command` (`ToolActivity::is_run_command`), not on sniffing the marker text in ANY tool's
+    // output. Otherwise a `read_file` on a file that happens to contain the literal line
+    // "--- stderr ---" would get mislabeled and its tail rendered as an unbounded "error", bypassing the
+    // ordinary PREVIEW_LINES cap for arbitrary file content.
+    use crate::modules::tools::infrastructure::exec::STDERR_MARKER;
+    use crate::modules::tui::domain::transcript::{ToolActivity, ToolStatus};
+    use std::time::Duration;
+    let output = format!("some file content\n{STDERR_MARKER}\nmore file content, not an error");
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model.transcript.push(TranscriptItem::Tool(ToolActivity {
+        command: "read src/notes.txt".to_string(),
+        diff: None,
+        result: Some((ToolStatus::Ok, output, Duration::from_millis(2))),
+        is_run_command: false,
+    }));
+    let out = render(&model, 80, 20);
+    assert!(
+        !out.contains("stderr:"),
+        "a non-run_command tool's output must never be relabeled as stderr:\n{out}"
+    );
+    assert!(
+        out.contains(STDERR_MARKER),
+        "the literal marker line is ordinary content here and must render as-is:\n{out}"
     );
 }
 
@@ -284,6 +409,63 @@ fn narrow_terminal_keeps_prompt_and_short_hint_without_overflow() {
     // The prompt glyph survives; the long hint collapses to the short form.
     assert!(out.contains("›▏"), "prompt glyph missing:\n{out}");
     assert!(out.contains("/help"), "short hint missing:\n{out}");
+}
+
+#[test]
+fn a_terminal_below_the_minimum_size_shows_a_plain_message_instead_of_the_clipped_layout() {
+    // Issue #8b: below the smallest size the normal layout is proven to degrade gracefully at (20x8,
+    // the test right above this one), `view` must show a plain notice instead of attempting the normal
+    // regions at all.
+    let model = Model::new("m".to_string(), "/w".to_string());
+    // "pequeno" is a single word, so it survives the aggressive wrapping a very narrow width forces —
+    // the fuller phrase "terminal muito pequeno" can itself be split across wrapped rows.
+    let too_narrow = render(&model, 19, 20);
+    assert!(
+        too_narrow.contains("pequeno"),
+        "too-small message missing for a narrow terminal:\n{too_narrow}"
+    );
+    assert!(
+        !too_narrow.contains("›▏"),
+        "the normal layout must not attempt to render at all:\n{too_narrow}"
+    );
+
+    let too_short = render(&model, 80, 7);
+    assert!(
+        too_short.contains("pequeno"),
+        "too-small message missing for a short terminal:\n{too_short}"
+    );
+
+    // Exactly at the floor (20x8), the normal layout still renders — confirms the boundary is inclusive,
+    // matching `narrow_terminal_keeps_prompt_and_short_hint_without_overflow` just above.
+    let at_floor = render(&model, 20, 8);
+    assert!(
+        !at_floor.contains("pequeno"),
+        "exactly at the minimum size, the normal layout must still render:\n{at_floor}"
+    );
+}
+
+#[test]
+fn a_failed_turn_shows_a_persistent_error_badge_until_the_next_turn_begins() {
+    // Issue #8b: unlike the transcript's own error Notice (which scrolls away as more content lands),
+    // the meta-rule badge must survive until the NEXT turn actually starts.
+    use crate::modules::tui::application::msg::Msg;
+    use crate::modules::tui::application::update::update;
+    let mut model = Model::new("m".to_string(), "/w".to_string());
+    model.status.turn_failed = true;
+    let out = render(&model, 80, 20);
+    assert!(
+        out.contains("✗ erro"),
+        "persistent error badge missing:\n{out}"
+    );
+
+    // A new turn beginning clears it.
+    update(&mut model, Msg::TurnBegan);
+    assert!(!model.status.turn_failed, "TurnBegan must clear the flag");
+    let cleared = render(&model, 80, 20);
+    assert!(
+        !cleared.contains("✗ erro"),
+        "the badge must disappear once a new turn begins:\n{cleared}"
+    );
 }
 
 // --- screen selection overlay -------------------------------------------------

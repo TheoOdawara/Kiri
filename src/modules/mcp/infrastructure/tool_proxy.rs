@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::modules::mcp::application::mcp_connection::{McpConnection, McpToolSpec};
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
-    Confirmation, Tool, ToolOutcome, confirm, function_schema,
+    Confirmation, Tool, ToolOutcome, confirm, confirm_execute_suffix, function_schema,
 };
 use crate::shared::kernel::tool_call::ToolCall;
 
@@ -63,8 +63,8 @@ impl Tool for McpToolProxy {
     fn confirmation(&self, _sandbox: &dyn Sandbox, _call: &ToolCall) -> Option<Confirmation> {
         Some(confirm(
             format!(
-                "Chamar a ferramenta MCP '{}'. Aprova executar?",
-                self.qualified_name
+                "Chamar a ferramenta MCP. {}",
+                confirm_execute_suffix(self.qualified_name)
             ),
             true,
         ))

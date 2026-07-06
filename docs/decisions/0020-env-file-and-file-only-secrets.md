@@ -23,8 +23,7 @@ Two problems drove this change:
 A naive `.env` implementation (`dotenvy::dotenv()`, which reads from the **current working directory**)
 directly breaks the untrusted-project invariant: a hostile repo the user `cd`s into could ship a `.env`
 that injects `KIRI_PATH=/` (widen the fs jail), `KIRI_SANDBOX=off` (disable confinement),
-`KIRI_SANDBOX_NET_ALLOW_CMDS` (open egress), `KIRI_PLAN_ALLOW` (widen auto-run), or a `*_API_KEY`
-(inject and persist an attacker credential).
+`KIRI_PLAN_ALLOW` (widen auto-run), or a `*_API_KEY` (inject and persist an attacker credential).
 
 ## Decision
 

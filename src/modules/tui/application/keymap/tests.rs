@@ -592,6 +592,184 @@ fn provider_command_opens_a_picker_then_action_submenu_then_set_provider() {
     assert_eq!(effects, vec![Effect::SetProvider("claude".to_string())]);
 }
 
+/// Issue #10's list-view acceptance criterion: `/provider` shows id, kind, model, and auth status per
+/// row up front, not just after selecting one. Also locks that selecting a row still resolves the RAW id
+/// (not the composite display text) into the `ProviderAction` sub-menu — the id comes from
+/// `model.providers`, a parallel array to the (now decorated) `picker.options`.
+#[test]
+fn provider_picker_lists_kind_model_and_auth_per_row_and_selection_still_resolves_the_raw_id() {
+    use crate::modules::tui::domain::picker::PickerKind;
+    use crate::shared::kernel::provider::{AuthMethod, ProviderKind};
+    let claude = crate::shared::kernel::provider::ProviderProfile {
+        id: "claude".to_string(),
+        kind: ProviderKind::Anthropic,
+        base_url: "https://example.test/v1".to_string(),
+        model: "claude-opus-4-8".to_string(),
+        models: vec!["claude-opus-4-8".to_string()],
+        auth: AuthMethod::ApiKey,
+        thinking: None,
+    };
+    let mut m = Model::default().with_providers(
+        "nvidia".to_string(),
+        vec!["nvidia".to_string(), "claude".to_string()],
+        vec![claude],
+    );
+    submit_line(&mut m, "/provider");
+    let picker = m.picker.as_ref().expect("the provider picker should open");
+    assert_eq!(picker.kind, PickerKind::Provider);
+    assert_eq!(
+        picker.options[1], "claude · [anthropic] claude-opus-4-8 · api-key",
+        "each row must show id, kind, model, and auth status up front"
+    );
+    // Select row 1 ("claude") — must resolve to the raw id "claude", never the composite label.
+    on_key(&mut m, press(Key::Down));
+    on_key(&mut m, press(Key::Enter));
+    assert!(
+        matches!(
+            m.picker.as_ref().map(|p| &p.kind),
+            Some(PickerKind::ProviderAction(id)) if id == "claude"
+        ),
+        "selecting a decorated row must still open the ProviderAction sub-menu for the raw id"
+    );
+}
+
+/// A minimal profile for the provider-action-submenu tests below (issue #27/M7-1).
+fn provider_profile_for_tests(id: &str) -> crate::shared::kernel::provider::ProviderProfile {
+    use crate::shared::kernel::provider::{AuthMethod, ProviderKind};
+    crate::shared::kernel::provider::ProviderProfile {
+        id: id.to_string(),
+        kind: ProviderKind::Anthropic,
+        base_url: "https://example.test/v1".to_string(),
+        model: "m1".to_string(),
+        models: vec!["m1".to_string()],
+        auth: AuthMethod::ApiKey,
+        thinking: None,
+    }
+}
+
+/// Open the `/provider` picker, move to `claude`, and open its ProviderAction sub-menu — the shared setup
+/// for every test below.
+fn open_provider_action_submenu(m: &mut Model) {
+    use crate::modules::tui::domain::picker::PickerKind;
+    submit_line(m, "/provider");
+    on_key(m, press(Key::Down)); // to "claude"
+    on_key(m, press(Key::Enter)); // opens the ProviderAction sub-menu
+    assert!(
+        matches!(m.picker.as_ref().map(|p| &p.kind), Some(PickerKind::ProviderAction(id)) if id == "claude"),
+        "setup must land on claude's ProviderAction sub-menu"
+    );
+}
+
+#[test]
+fn provider_action_editar_opens_the_wizard_for_the_selected_profile() {
+    // Issue #27/M7-1: the "Editar" arm (index 1) was never reducer-tested.
+    let mut m = Model::default().with_providers(
+        "nvidia".to_string(),
+        vec!["nvidia".to_string(), "claude".to_string()],
+        vec![
+            provider_profile_for_tests("nvidia"),
+            provider_profile_for_tests("claude"),
+        ],
+    );
+    open_provider_action_submenu(&mut m);
+    // Down to "Editar" (index 1), Enter.
+    on_key(&mut m, press(Key::Down));
+    let effects = on_key(&mut m, press(Key::Enter));
+    assert!(
+        effects.is_empty(),
+        "opening the edit wizard emits no effect"
+    );
+    assert!(
+        m.wizard.is_some(),
+        "'Editar' must open the wizard for claude's own profile"
+    );
+    assert!(
+        m.picker.is_none(),
+        "the action sub-menu must close once the wizard opens"
+    );
+}
+
+#[test]
+fn provider_action_remover_opens_delete_confirm_with_cancelar_preselected() {
+    // Issue #27/M7-1: the "Remover" arm (index 2) and the delete-confirm's safety default (Cancelar
+    // preselected, per `modals.rs`'s `Picker::new(..., 1)`) had no test.
+    use crate::modules::tui::domain::picker::PickerKind;
+    let mut m = Model::default().with_providers(
+        "nvidia".to_string(),
+        vec!["nvidia".to_string(), "claude".to_string()],
+        vec![
+            provider_profile_for_tests("nvidia"),
+            provider_profile_for_tests("claude"),
+        ],
+    );
+    open_provider_action_submenu(&mut m);
+    // Down, Down to "Remover" (index 2), Enter.
+    on_key(&mut m, press(Key::Down));
+    on_key(&mut m, press(Key::Down));
+    let effects = on_key(&mut m, press(Key::Enter));
+    assert!(
+        effects.is_empty(),
+        "opening the delete-confirm emits no effect yet"
+    );
+    let picker = m
+        .picker
+        .as_ref()
+        .expect("the delete-confirm picker must open");
+    assert_eq!(
+        picker.kind,
+        PickerKind::ProviderDeleteConfirm("claude".to_string())
+    );
+    assert_eq!(
+        picker.options,
+        vec!["Sim, remover".to_string(), "Cancelar".to_string()]
+    );
+    assert_eq!(
+        picker.selected, 1,
+        "Cancelar must be preselected — a destructive default must never be the easy Enter"
+    );
+}
+
+#[test]
+fn provider_delete_confirm_preselected_cancelar_emits_no_effect() {
+    // Enter on the preselected ("Cancelar") row must not delete anything.
+    let mut m = Model::default().with_providers(
+        "nvidia".to_string(),
+        vec!["nvidia".to_string(), "claude".to_string()],
+        vec![
+            provider_profile_for_tests("nvidia"),
+            provider_profile_for_tests("claude"),
+        ],
+    );
+    open_provider_action_submenu(&mut m);
+    on_key(&mut m, press(Key::Down));
+    on_key(&mut m, press(Key::Down));
+    on_key(&mut m, press(Key::Enter)); // opens delete-confirm, Cancelar preselected
+    let effects = on_key(&mut m, press(Key::Enter));
+    assert!(
+        effects.is_empty(),
+        "confirming on the preselected Cancelar row must emit no effect"
+    );
+}
+
+#[test]
+fn provider_delete_confirm_sim_remover_emits_delete_provider() {
+    let mut m = Model::default().with_providers(
+        "nvidia".to_string(),
+        vec!["nvidia".to_string(), "claude".to_string()],
+        vec![
+            provider_profile_for_tests("nvidia"),
+            provider_profile_for_tests("claude"),
+        ],
+    );
+    open_provider_action_submenu(&mut m);
+    on_key(&mut m, press(Key::Down));
+    on_key(&mut m, press(Key::Down));
+    on_key(&mut m, press(Key::Enter)); // opens delete-confirm, Cancelar preselected
+    on_key(&mut m, press(Key::Up)); // to "Sim, remover" (index 0)
+    let effects = on_key(&mut m, press(Key::Enter));
+    assert_eq!(effects, vec![Effect::DeleteProvider("claude".to_string())]);
+}
+
 #[test]
 fn picker_esc_closes_without_an_effect() {
     let mut m = Model::default().with_provider_catalog(vec!["a".to_string()], Effort::default());

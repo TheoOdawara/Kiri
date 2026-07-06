@@ -198,6 +198,15 @@ impl MenuEntry<'_> {
             Self::Custom(entry) => &entry.blurb,
         }
     }
+
+    /// The command's other names (e.g. `/novo` for `/new`), for the menu row (issue #8c) — empty for a
+    /// custom/extension command, which has no alias concept.
+    pub fn aliases(&self) -> &'static [&'static str] {
+        match self {
+            Self::Static(spec) => spec.aliases,
+            Self::Custom(_) => &[],
+        }
+    }
 }
 
 /// Which catalog a filtered row's index resolves against.

@@ -188,3 +188,24 @@ sandbox wiring) and passes them in, then concatenates the memory digest as befor
 its `system_prompt: &'static str` field. Locked by tests: `system_prompt_reflects_a_sensitive_override`,
 `system_prompt_renders_limits_from_the_named_constants`, `schema_default_timeout_equals_the_const`,
 `sensitive::globs_returns_the_original_patterns`, and `system_prompt_keeps_all_nine_section_headers`.
+
+## Update — 2026-07-05 — single-pass token substitution (audit #56)
+
+`render_system_prompt` used to fill its seven placeholders via a chain of `str::replace` calls on one
+growing string. Each `.replace()` rescans the *entire current string*, including text already spliced in
+by an earlier call — so a literal `{SENSITIVE_LIST}` (or any other token) embedded in an untrusted
+`RULES`/`SKILLS`/`INSTRUCTIONS` block would be picked up and rewritten with the real live value by a
+later call in the chain, at a position the untrusted content chose. An interim fix reordered the chain
+(trusted tokens first) to stop the highest-impact case — untrusted content impersonating a harness-owned
+value — but left one untrusted block able to reposition another's content (e.g. `RULES` containing a
+literal `{SKILLS}`).
+
+Replaced the whole chain with `render_template`, a single left-to-right scan over the **pristine**
+template: it finds each `{TOKEN}`, substitutes its value from a token→value list, and continues scanning
+*after* that position — it never re-examines text it has already spliced in. This closes the bleed
+category by construction, for every token pair, not just trusted-before-untrusted. `SYSTEM_PROMPT_TEMPLATE`
+contains no literal `{` or `}` outside its seven known placeholders, so the scan cannot misfire on the
+static prose itself. No new dependency — a ~15-line manual scan, not a regex.
+
+Locked by `untrusted_content_containing_a_trusted_token_renders_verbatim` and
+`untrusted_blocks_cannot_bleed_into_each_other`. Closes #56.

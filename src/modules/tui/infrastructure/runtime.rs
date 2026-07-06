@@ -345,6 +345,14 @@ impl Tui {
             pending_reply: &mut pending_reply,
         };
 
+        // Render the first frame BEFORE awaiting SessionStart hooks below (issue #51): a slow or hung
+        // hook must not leave the terminal sitting blank for however long it takes to run. Any hook
+        // notices, once dispatch_hooks below completes, surface on whatever render happens next (the
+        // seed turn's streaming updates, or the main loop's first iteration) — no separate plumbing
+        // needed, since notices are part of `Model` and every render reads the current state.
+        run_loop.model.timeline.render_at = Some(Instant::now());
+        render::draw_and_copy(ui.terminal, &mut run_loop.model)?;
+
         // ADR 0021: fire every SessionStart hook before the first prompt (CLI seed or interactive) runs.
         dispatch_hooks(
             HookEvent::SessionStart,
@@ -578,6 +586,7 @@ mod tests {
     use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
     use crate::shared::kernel::approval_mode::ApprovalMode;
     use crate::shared::kernel::conversation::Conversation;
+    use crate::shared::kernel::error::AgentError;
     use crate::shared::kernel::message::Message;
 
     /// A sandbox rooted at the current directory — these `on_turn_end` tests never touch it (an empty
@@ -628,6 +637,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn session_start_hooks_do_not_block_the_first_render() {
+        // Issue #51: the first `draw_and_copy` call must textually precede the SessionStart
+        // `dispatch_hooks` await in `Tui::run`, so a slow/hung hook cannot leave the terminal sitting
+        // blank while it runs. A source-scan guard rather than a live-terminal test: `Tui::run` calls
+        // `ratatui::init()`, which needs a real TTY unavailable in CI — mirrors the source-scan approach
+        // `runtime_has_no_sync_adapter_construction` already uses in this same file for a different
+        // invariant. Scanned only up to `mod tests` so the guard's own literals below can never
+        // self-match regardless of future reordering in this file.
+        let source = include_str!("runtime.rs")
+            .split("mod tests")
+            .next()
+            .expect("this module always contains its own source text");
+        let render_pos = source
+            .find("draw_and_copy(ui.terminal, &mut run_loop.model)")
+            .expect("the first-frame render call must exist");
+        let dispatch_pos = source
+            .find("HookEvent::SessionStart")
+            .expect("the SessionStart dispatch must exist");
+        assert!(
+            render_pos < dispatch_pos,
+            "the first frame must render BEFORE SessionStart hooks are awaited"
+        );
+    }
+
+    // Issue #27/G2-2: `apply_delete_provider`'s fallback-to-next-provider path used to duplicate
+    // `apply_set_provider`'s "install a switch" block inline, and the copy had already drifted (missing
+    // the `self.model.models` refresh, leaving `/models` offering the deleted provider's catalog). Both
+    // now route through the single `install_switch` helper (`runtime/provider_swap.rs`), so this can never
+    // silently drift apart again. This guard only locks the *structural* failure (a second inline copy of
+    // the block) — it does not assert the block's body still contains the `self.model.models` refresh; the
+    // `provider_crud` test module below (issue #10's "unit tests for domain-level provider CRUD logic"
+    // acceptance criterion) closes that behavioral gap with a real `RunLoop` fixture — empirically verified
+    // to fail if the refresh line is removed (`deleting_the_active_provider_refreshes_the_new_actives_model_catalog`,
+    // `switching_provider_refreshes_the_models_catalog`).
+    #[test]
+    fn provider_switch_install_has_exactly_one_implementation() {
+        let source = include_str!("runtime/provider_swap.rs");
+        assert_eq!(
+            source.matches("fn install_switch").count(),
+            1,
+            "there must be exactly one install_switch definition — a second copy is exactly how G2-2 \
+             happened"
+        );
+        // Both call sites route through it: apply_set_provider's Ok arm and apply_delete_provider's
+        // fallback Ok arm.
+        assert_eq!(
+            source.matches("self.install_switch(").count(),
+            2,
+            "both apply_set_provider and apply_delete_provider's fallback path must call install_switch, \
+             not duplicate its body inline"
+        );
+    }
+
     fn has_error_notice(model: &Model) -> bool {
         model
             .transcript
@@ -662,7 +725,9 @@ mod tests {
 
     /// Tests for the live provider swap. The nested module can reach `ProviderSwap`'s private fields and
     /// methods (privacy is visible to descendant modules). Building an adapter does no I/O, so these run
-    /// hermetically against a fake credential store.
+    /// hermetically against a fake credential store. `profile`/`swap`/`api_key` are `pub(super)` so the
+    /// sibling `provider_crud` module (issue #10's `RunLoop`-level CRUD tests) can reuse them instead of
+    /// duplicating a second profile/credential builder.
     mod provider_swap {
         use super::super::ProviderSwap;
         use crate::modules::provider::application::secret_store::SecretStore;
@@ -687,7 +752,7 @@ mod tests {
             }
         }
 
-        fn profile(id: &str, kind: ProviderKind, model: &str) -> ProviderProfile {
+        pub(super) fn profile(id: &str, kind: ProviderKind, model: &str) -> ProviderProfile {
             ProviderProfile {
                 id: id.into(),
                 kind,
@@ -712,9 +777,22 @@ mod tests {
             }
         }
 
-        fn api_key() -> Credential {
+        pub(super) fn api_key() -> Credential {
             Credential::ApiKey {
                 key: Secret::new("k"),
+            }
+        }
+
+        fn api_key_with(value: &str) -> Credential {
+            Credential::ApiKey {
+                key: Secret::new(value),
+            }
+        }
+
+        fn expose(credential: &Credential) -> &str {
+            match credential {
+                Credential::ApiKey { key } => key.expose(),
+                other => panic!("expected an api key credential, got {other:?}"),
             }
         }
 
@@ -735,7 +813,7 @@ mod tests {
             }
         }
 
-        fn swap(
+        pub(super) fn swap(
             providers: Vec<ProviderProfile>,
             active: &str,
             stored: &[(&str, Credential)],
@@ -828,6 +906,82 @@ mod tests {
             );
             assert!(s.rebuild_with_effort(Effort::Max).is_err());
             assert_eq!(s.effort, Effort::High, "the effort dial must not change");
+        }
+
+        #[test]
+        fn resolve_credential_for_edit_reuses_the_cache_for_the_active_provider() {
+            let s = swap(
+                vec![profile("nvidia", ProviderKind::Nvidia, "m1")],
+                "nvidia",
+                &[("nvidia", api_key_with("active-cached-key"))],
+            );
+            let credential = s
+                .resolve_credential_for_edit(&profile("nvidia", ProviderKind::Nvidia, "m1"))
+                .unwrap();
+            assert_eq!(expose(&credential), "active-cached-key");
+        }
+
+        #[test]
+        fn resolve_credential_for_edit_never_leaks_the_active_credential_to_another_provider() {
+            // Issue #27a: editing a DIFFERENT, non-active provider with a blank key must resolve THAT
+            // provider's own stored credential, never the active provider's cached one — the cache is
+            // keyed by "the active provider," not by the profile being edited. Two distinct stored keys
+            // prove which one comes back.
+            let s = swap(
+                vec![
+                    profile("nvidia", ProviderKind::Nvidia, "m1"),
+                    profile("claude", ProviderKind::Anthropic, "claude-opus-4-8"),
+                ],
+                "nvidia",
+                &[
+                    ("nvidia", api_key_with("active-nvidia-key")),
+                    ("claude", api_key_with("claudes-own-key")),
+                ],
+            );
+            let credential = s
+                .resolve_credential_for_edit(&profile(
+                    "claude",
+                    ProviderKind::Anthropic,
+                    "claude-opus-4-8",
+                ))
+                .unwrap();
+            assert_eq!(
+                expose(&credential),
+                "claudes-own-key",
+                "must resolve claude's own stored key, never nvidia's active-cached one"
+            );
+        }
+
+        #[test]
+        fn resolve_credential_for_edit_falls_back_to_the_store_when_nothing_is_cached() {
+            // Editing a provider that was never activated this session (no cached credential at all):
+            // resolves fresh from the store rather than erroring.
+            let s = ProviderSwap::new(
+                reqwest::Client::new(),
+                Box::new(FakeStore {
+                    creds: HashMap::from([(
+                        "claude".to_string(),
+                        api_key_with("claudes-store-key"),
+                    )]),
+                }),
+                vec![profile(
+                    "claude",
+                    ProviderKind::Anthropic,
+                    "claude-opus-4-8",
+                )],
+                "claude".into(),
+                None,
+                true,
+                Effort::High,
+            );
+            let credential = s
+                .resolve_credential_for_edit(&profile(
+                    "claude",
+                    ProviderKind::Anthropic,
+                    "claude-opus-4-8",
+                ))
+                .unwrap();
+            assert_eq!(expose(&credential), "claudes-store-key");
         }
 
         #[test]
@@ -928,6 +1082,375 @@ mod tests {
         }
     }
 
+    /// `RunLoop`-level behavioral tests for the provider CRUD flow (issue #10's own acceptance criterion:
+    /// "unit tests for domain-level provider CRUD logic"). Building an adapter does no I/O, so a fixture
+    /// needs only inert/no-op fakes for the ports these `apply_*` handlers never touch (`SessionStore`,
+    /// `Memory`, `Git`, `SyncWorkTree`) — the same nested-module privacy that lets `provider_swap` reach
+    /// `ProviderSwap`'s internals applies here to `RunLoop`'s. Where the source-scan guard
+    /// (`provider_switch_install_has_exactly_one_implementation`, above) can only prove `install_switch` is
+    /// not duplicated, these tests prove what it actually DOES: `self.model.models` genuinely reflects the
+    /// new active provider's own catalog after a delete-fallback or a direct switch (issue #27/G2-2).
+    mod provider_crud {
+        use std::path::Path;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use super::super::{RunLoop, SessionCursor, SharedMemoryFactory, SyncContext};
+        use super::{empty_hooks, test_sandbox};
+        use crate::modules::agent::application::agent_loop::AgentLoop;
+        use crate::modules::memory::application::memory_port::Memory;
+        use crate::modules::memory::domain::entry::MemoryEntry;
+        use crate::modules::memory::domain::scope::Scope;
+        use crate::modules::session::application::session_store::SessionStore;
+        use crate::modules::session::domain::session::{Session, SessionSummary};
+        use crate::modules::sync::application::git::{Git, GitOutput};
+        use crate::modules::sync::application::work_tree::SyncWorkTree;
+        use crate::modules::tools::application::registry::ToolRegistry;
+        use crate::modules::tui::domain::model::Model;
+        use crate::shared::kernel::conversation::Conversation;
+        use crate::shared::kernel::error::{AgentError, AgentResult};
+        use crate::shared::kernel::message::Message;
+        use crate::shared::kernel::provider::{Credential, ProviderKind, ProviderProfile, Secret};
+
+        /// A `Git` that never runs — none of these tests touch `/sync`.
+        struct NullGit;
+        #[async_trait::async_trait]
+        impl Git for NullGit {
+            async fn run(&self, _args: &[&str], _cwd: &Path) -> AgentResult<GitOutput> {
+                Err(AgentError::Config("git disabled in test fixture".into()))
+            }
+        }
+
+        /// A `SyncWorkTree` that must never run — none of these tests touch `/sync`. Panics rather than a
+        /// silent `Ok` so a future `apply_*` handler that grows a `/sync` side effect fails the fixture
+        /// loudly instead of passing on a fabricated no-op.
+        struct NullSyncWorkTree;
+        #[async_trait::async_trait]
+        impl SyncWorkTree for NullSyncWorkTree {
+            async fn ensure_dir(&self, _dir: &Path) -> AgentResult<()> {
+                unreachable!("provider CRUD tests must never touch the sync work tree")
+            }
+            async fn write(&self, _path: &Path, _contents: &str) -> AgentResult<()> {
+                unreachable!("provider CRUD tests must never touch the sync work tree")
+            }
+            async fn write_atomic(&self, _path: &Path, _contents: &str) -> AgentResult<()> {
+                unreachable!("provider CRUD tests must never touch the sync work tree")
+            }
+            async fn copy(&self, _from: &Path, _to: &Path) -> AgentResult<()> {
+                unreachable!("provider CRUD tests must never touch the sync work tree")
+            }
+            async fn read_to_string(&self, _path: &Path) -> AgentResult<Option<String>> {
+                unreachable!("provider CRUD tests must never touch the sync work tree")
+            }
+            async fn exists(&self, _path: &Path) -> AgentResult<bool> {
+                unreachable!("provider CRUD tests must never touch the sync work tree")
+            }
+        }
+
+        /// A `SessionStore` that must never be used — none of these tests touch sessions. `is_available`
+        /// stays a plain `false` (an honest state report, not a swallowed failure); every other method
+        /// panics rather than silently succeeding.
+        struct NullSessionStore;
+        #[async_trait::async_trait]
+        impl SessionStore for NullSessionStore {
+            async fn init(&self) -> AgentResult<()> {
+                unreachable!("provider CRUD tests must never touch the session store")
+            }
+            async fn create(&self, _project_id: &str) -> AgentResult<Session> {
+                unreachable!("provider CRUD tests must never touch the session store")
+            }
+            async fn append_messages(
+                &self,
+                _session_id: &str,
+                _messages: &[Message],
+            ) -> AgentResult<()> {
+                unreachable!("provider CRUD tests must never touch the session store")
+            }
+            async fn set_title(&self, _session_id: &str, _title: &str) -> AgentResult<()> {
+                unreachable!("provider CRUD tests must never touch the session store")
+            }
+            async fn latest_for_project(
+                &self,
+                _project_id: &str,
+            ) -> AgentResult<Option<SessionSummary>> {
+                unreachable!("provider CRUD tests must never touch the session store")
+            }
+            async fn list_for_project(
+                &self,
+                _project_id: &str,
+                _limit: usize,
+            ) -> AgentResult<Vec<SessionSummary>> {
+                unreachable!("provider CRUD tests must never touch the session store")
+            }
+            async fn load(&self, _session_id: &str) -> AgentResult<Option<Session>> {
+                unreachable!("provider CRUD tests must never touch the session store")
+            }
+            fn is_available(&self) -> bool {
+                false
+            }
+        }
+
+        /// A `Memory` that must never be used — none of these tests touch memory. The `*_available`
+        /// queries stay plain `false` (an honest state report); every other method panics rather than
+        /// silently succeeding.
+        struct NullMemory;
+        #[async_trait::async_trait]
+        impl Memory for NullMemory {
+            async fn recall_project(
+                &self,
+                _query: &str,
+                _limit: usize,
+            ) -> AgentResult<Vec<MemoryEntry>> {
+                unreachable!("provider CRUD tests must never touch memory")
+            }
+            async fn recall_shared(
+                &self,
+                _query: &str,
+                _limit: usize,
+            ) -> AgentResult<Vec<MemoryEntry>> {
+                unreachable!("provider CRUD tests must never touch memory")
+            }
+            async fn recall_batch(
+                &self,
+                _scope: Scope,
+                _queries: &[String],
+                _limit: usize,
+            ) -> AgentResult<Vec<Vec<MemoryEntry>>> {
+                unreachable!("provider CRUD tests must never touch memory")
+            }
+            async fn remember_project(&self, _entry: MemoryEntry) -> AgentResult<()> {
+                unreachable!("provider CRUD tests must never touch memory")
+            }
+            async fn remember_shared(&self, _entry: MemoryEntry) -> AgentResult<()> {
+                unreachable!("provider CRUD tests must never touch memory")
+            }
+            fn project_memory_available(&self) -> bool {
+                false
+            }
+            fn shared_memory_available(&self) -> bool {
+                false
+            }
+        }
+
+        /// Assemble a `RunLoop` wired with `providers`/`active`/`stored` (via the shared `provider_swap`
+        /// test builder) and inert fakes for every port `apply_set_provider`/`apply_delete_provider`/
+        /// `apply_save_provider` never touch. Returns the `TempDir` alongside so it outlives the test (its
+        /// `Drop` would otherwise delete `config_path`'s parent while the persist calls still use it).
+        fn build_run_loop(
+            providers: Vec<ProviderProfile>,
+            active: &str,
+            stored: &[(&str, Credential)],
+        ) -> (RunLoop, tempfile::TempDir) {
+            let tempdir = tempfile::TempDir::new().expect("create a fixture tempdir");
+            let config_path = tempdir.path().join("config.toml");
+            let mut provider_swap = super::provider_swap::swap(providers, active, stored);
+            let switch = provider_swap
+                .switch_to(active)
+                .expect("fixture profile must build an adapter");
+            let agent_loop = AgentLoop::new(
+                switch.provider,
+                ToolRegistry::new(Vec::new()),
+                switch.model,
+                Duration::from_secs(60),
+                50,
+            );
+            let model = Model::new(
+                provider_swap
+                    .active_profile()
+                    .map(|p| p.model.clone())
+                    .unwrap_or_default(),
+                "/test-workspace".to_string(),
+            )
+            .with_provider_catalog(
+                provider_swap
+                    .active_profile()
+                    .map(|p| p.models.clone())
+                    .unwrap_or_default(),
+                provider_swap.effort,
+            )
+            .with_providers(
+                provider_swap.active.clone(),
+                provider_swap.provider_ids(),
+                provider_swap.profiles().to_vec(),
+            );
+            let memory_factory: SharedMemoryFactory = Arc::new(|| {
+                Box::pin(async { Err(AgentError::Config("sync disabled in test fixture".into())) })
+            });
+            let run_loop = RunLoop {
+                agent_loop,
+                sandbox: test_sandbox(),
+                conversation: Conversation::new("system prompt"),
+                model,
+                system_prompt: "system prompt".to_string(),
+                provider_swap,
+                config_path: config_path.clone(),
+                sync_context: SyncContext::new(
+                    Arc::new(NullGit),
+                    memory_factory,
+                    Arc::new(NullSyncWorkTree),
+                    tempdir.path().to_path_buf(),
+                    config_path,
+                ),
+                session_store: Arc::new(NullSessionStore),
+                memory: Arc::new(NullMemory),
+                project_id: "test-workspace".to_string(),
+                cursor: SessionCursor {
+                    session_id: None,
+                    persisted_len: 0,
+                },
+                hooks: empty_hooks(),
+            };
+            (run_loop, tempdir)
+        }
+
+        fn credential() -> Credential {
+            Credential::ApiKey {
+                key: Secret::new("k"),
+            }
+        }
+
+        #[test]
+        fn deleting_the_active_provider_refreshes_the_new_actives_model_catalog() {
+            // The real behavioral proof the G2-2 source-scan guard admits it cannot give: after deleting
+            // the active provider, `/models` must reflect the NEW active provider's own catalog — not the
+            // deleted one's, and not an empty one.
+            let (mut run_loop, _tempdir) = build_run_loop(
+                vec![
+                    super::provider_swap::profile("nvidia", ProviderKind::Nvidia, "m1"),
+                    super::provider_swap::profile(
+                        "claude",
+                        ProviderKind::Anthropic,
+                        "claude-opus-4-8",
+                    ),
+                ],
+                "nvidia",
+                &[("nvidia", credential()), ("claude", credential())],
+            );
+            assert_eq!(
+                run_loop.model.models,
+                vec!["m1".to_string()],
+                "sanity: starts on nvidia's catalog"
+            );
+
+            run_loop.apply_delete_provider("nvidia".to_string());
+
+            assert_eq!(run_loop.model.status.provider, "claude");
+            assert_eq!(
+                run_loop.model.models,
+                vec!["claude-opus-4-8".to_string()],
+                "deleting the active provider must refresh /models to the new active provider's own \
+                 catalog, not leave the deleted one's"
+            );
+        }
+
+        #[test]
+        fn deleting_the_last_remaining_provider_enters_onboarding() {
+            let (mut run_loop, _tempdir) = build_run_loop(
+                vec![super::provider_swap::profile(
+                    "nvidia",
+                    ProviderKind::Nvidia,
+                    "m1",
+                )],
+                "nvidia",
+                &[("nvidia", credential())],
+            );
+
+            run_loop.apply_delete_provider("nvidia".to_string());
+
+            assert!(
+                run_loop.model.unconfigured,
+                "no providers left must re-enter the onboarding/submit-gated state"
+            );
+            assert!(run_loop.model.status.provider.is_empty());
+            assert!(run_loop.model.status.model.is_empty());
+        }
+
+        #[test]
+        fn deleting_a_non_active_provider_leaves_the_active_one_untouched() {
+            // `apply_delete_provider`'s early `if !was_active { return; }` path (and `remove_provider`'s
+            // fallback logic it deliberately skips) had zero direct test coverage before this: only the
+            // "delete active" and "delete last" paths were exercised. A regression that accidentally
+            // rebuilt the adapter or reactivated a different provider here would have sailed through.
+            let (mut run_loop, _tempdir) = build_run_loop(
+                vec![
+                    super::provider_swap::profile("nvidia", ProviderKind::Nvidia, "m1"),
+                    super::provider_swap::profile(
+                        "claude",
+                        ProviderKind::Anthropic,
+                        "claude-opus-4-8",
+                    ),
+                ],
+                "nvidia",
+                &[("nvidia", credential()), ("claude", credential())],
+            );
+
+            run_loop.apply_delete_provider("claude".to_string());
+
+            assert_eq!(
+                run_loop.model.status.provider, "nvidia",
+                "deleting a non-active provider must not touch which provider is active"
+            );
+            assert_eq!(
+                run_loop.model.models,
+                vec!["m1".to_string()],
+                "the active provider's own catalog must be untouched by an unrelated delete"
+            );
+            assert!(
+                !run_loop.model.providers.iter().any(|id| id == "claude"),
+                "the deleted provider must be gone from the catalog"
+            );
+            assert!(run_loop.model.providers.iter().any(|id| id == "nvidia"));
+        }
+
+        #[test]
+        fn switching_provider_refreshes_the_models_catalog() {
+            let (mut run_loop, _tempdir) = build_run_loop(
+                vec![
+                    super::provider_swap::profile("nvidia", ProviderKind::Nvidia, "m1"),
+                    super::provider_swap::profile(
+                        "claude",
+                        ProviderKind::Anthropic,
+                        "claude-opus-4-8",
+                    ),
+                ],
+                "nvidia",
+                &[("nvidia", credential()), ("claude", credential())],
+            );
+
+            run_loop.apply_set_provider("claude".to_string());
+
+            assert_eq!(run_loop.model.status.provider, "claude");
+            assert_eq!(run_loop.model.models, vec!["claude-opus-4-8".to_string()]);
+        }
+
+        #[test]
+        fn saving_a_new_provider_adds_it_to_the_catalog_and_activates_it() {
+            let (mut run_loop, _tempdir) = build_run_loop(
+                vec![super::provider_swap::profile(
+                    "nvidia",
+                    ProviderKind::Nvidia,
+                    "m1",
+                )],
+                "nvidia",
+                &[("nvidia", credential())],
+            );
+            run_loop.model.pending_credential = Some(Secret::new("claudes-new-key"));
+
+            run_loop.apply_save_provider(
+                super::provider_swap::profile("claude", ProviderKind::Anthropic, "claude-opus-4-8"),
+                false,
+            );
+
+            assert_eq!(run_loop.model.status.provider, "claude");
+            assert_eq!(run_loop.model.models, vec!["claude-opus-4-8".to_string()]);
+            assert!(run_loop.model.providers.iter().any(|id| id == "claude"));
+            assert!(
+                run_loop.model.providers.iter().any(|id| id == "nvidia"),
+                "adding a provider must not drop the existing catalog"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn empty_completion_surfaces_a_notice_and_no_plan_box() {
         // The exact regression: a plan-mode turn whose provider returned nothing must NOT show a plan
@@ -956,6 +1479,59 @@ mod tests {
         assert!(
             has_error_notice(&model),
             "an empty turn must surface an error notice"
+        );
+        assert!(
+            model.status.turn_failed,
+            "an empty completion must also raise the persistent error badge (issue #8b)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_genuine_turn_error_raises_the_persistent_error_badge() {
+        // Issue #8b: the OTHER on_turn_end failure branch (a real `Err`, not the empty-completion case
+        // above) must raise the same persistent badge — proven separately since it is a distinct match
+        // arm in `on_turn_end`, not shared code with the empty-completion path.
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("oi"));
+
+        on_turn_end(
+            Err(AgentError::Provider("boom".to_string())),
+            false,
+            &mut model,
+            &mut conversation,
+            &test_sandbox(),
+            &empty_hooks(),
+        )
+        .await;
+
+        assert!(has_error_notice(&model));
+        assert!(
+            model.status.turn_failed,
+            "a genuine turn error must raise the persistent error badge"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_turn_does_not_raise_the_persistent_error_badge() {
+        // A user-initiated ^C is not a "failure" — it must not trip the same badge a real error does.
+        let mut model = Model::new("m".to_string(), "/w".to_string());
+        let mut conversation = Conversation::new("system");
+        conversation.push(Message::user("oi"));
+
+        on_turn_end(
+            Err(AgentError::Provider("cancelled".to_string())),
+            true,
+            &mut model,
+            &mut conversation,
+            &test_sandbox(),
+            &empty_hooks(),
+        )
+        .await;
+
+        assert!(
+            !model.status.turn_failed,
+            "a user cancel must not raise the persistent error badge"
         );
     }
 

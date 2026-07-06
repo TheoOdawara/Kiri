@@ -236,9 +236,12 @@ pub(super) fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         },
         PickerKind::Provider => {
             // The configured ids come first; the last row (`index == providers.len()`) is the
-            // "+ adicionar" sentinel, which opens the add wizard instead of switching.
+            // "+ adicionar" sentinel, which opens the add wizard instead of switching. The option's
+            // display text is now a composite "id · [kind] model · auth" row (issue #10's list view),
+            // so the raw id comes from `model.providers` — the parallel array `submit::open_provider_picker`
+            // built the options from — not by parsing it back out of `picker.options`.
             if index < model.providers.len() {
-                let id = match picker.options.get(index) {
+                let id = match model.providers.get(index) {
                     Some(id) => id.clone(),
                     None => return vec![],
                 };

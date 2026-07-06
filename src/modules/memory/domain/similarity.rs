@@ -1,3 +1,49 @@
+use std::collections::HashSet;
+
+/// Jaccard token-overlap at/above which two texts are treated as the same fact reworded (a strict
+/// superset scores lower and survives).
+const NEAR_DUPLICATE_JACCARD: f32 = 0.8;
+
+/// Whether two texts are the same fact (normalized equality or a high token-overlap reword). Crucially
+/// NOT plain substring containment: a terse text that is a substring of a richer one is a strict
+/// superset, not a duplicate, so the more-informative text is kept rather than dropped. Shared by the
+/// distiller's intra-batch/store dedup and `recall_memory`'s cross-store dedup (ADR 0023).
+pub fn is_near_duplicate(a: &str, b: &str) -> bool {
+    let na = normalize(a);
+    let nb = normalize(b);
+    if na == nb {
+        return true;
+    }
+    let ta: HashSet<&str> = na.split_whitespace().collect();
+    let tb: HashSet<&str> = nb.split_whitespace().collect();
+    if ta.is_empty() || tb.is_empty() {
+        return false;
+    }
+    let intersection = ta.intersection(&tb).count();
+    let union = ta.union(&tb).count();
+    (intersection as f32 / union as f32) >= NEAR_DUPLICATE_JACCARD
+}
+
+/// Whether two texts are the exact same fact once case and whitespace are normalized away — no
+/// token-overlap fuzziness. Used where the comparison crosses a trust boundary (`recall_memory`'s
+/// cross-store dedup, ADR 0023): the project store can be written by the model itself via `remember`, so
+/// a Jaccard threshold there is gameable — a single crafted token change (a negation flip, a changed
+/// number) on a long-enough entry can still clear 0.8 and wrongly suppress a distinct, legitimate shared
+/// entry. Exact-normalized equality has no such slack, at the cost of missing genuine rewords (accepted:
+/// a rewording is not a security gap, only a duplicate-listing wrinkle within a single trust level, so
+/// that case keeps `is_near_duplicate` instead).
+pub fn is_exact_normalized_duplicate(a: &str, b: &str) -> bool {
+    normalize(a) == normalize(b)
+}
+
+/// Lowercase and collapse all whitespace, for order-insensitive duplicate comparison.
+fn normalize(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 /// Cosine similarity between two equal-length vectors, in `[-1, 1]`. Returns `0.0` for a length mismatch
 /// or a zero-magnitude vector — degenerate inputs rank as "unrelated" rather than panicking or producing
 /// NaN. Pure, so the ranking math is unit-testable in isolation from any store or provider.
@@ -45,6 +91,44 @@ pub fn rank_by_similarity<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn near_duplicate_catches_rewords_but_keeps_a_richer_superset() {
+        // Case-only difference normalizes equal → duplicate.
+        assert!(is_near_duplicate(
+            "Always use tabs for indentation",
+            "always use tabs for indentation"
+        ));
+        // A high-overlap reword (one extra token) → duplicate.
+        assert!(is_near_duplicate(
+            "always use tabs for indentation",
+            "always use tabs for indentation here"
+        ));
+        // A terse fact that is a substring of a much richer one is a SUPERSET, not a duplicate — the
+        // richer entry must be kept (the regression: plain containment dropped it).
+        assert!(!is_near_duplicate(
+            "use tabs",
+            "always use tabs for indentation in rust source files"
+        ));
+    }
+
+    #[test]
+    fn exact_normalized_duplicate_ignores_only_case_and_whitespace() {
+        assert!(is_exact_normalized_duplicate(
+            "Always use tabs for indentation",
+            "always   use tabs for indentation"
+        ));
+        // A near-duplicate reword (one extra token) that `is_near_duplicate` would catch must NOT match
+        // here — exact-normalized equality has no token-overlap slack.
+        assert!(!is_exact_normalized_duplicate(
+            "always use tabs for indentation",
+            "always use tabs for indentation here"
+        ));
+        assert!(!is_exact_normalized_duplicate(
+            "use tabs for indentation",
+            "never use tabs for indentation"
+        ));
+    }
 
     #[test]
     fn identical_vectors_score_one() {

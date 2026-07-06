@@ -14,6 +14,7 @@ use crate::modules::tui::domain::model::{Model, Motion};
 use crate::modules::tui::domain::selection::SelectionState;
 use crate::modules::tui::infrastructure::view::{frame_regions, view};
 use crate::modules::tui::infrastructure::widgets::{editor, selection_overlay};
+use crate::shared::kernel::error::AgentError;
 
 /// Draw a frame and, if a copy was requested, scrape the just-rendered selection to the OS clipboard.
 /// The caller stamps `model.render_at` first (so line landings share the frame instant). Returns the
@@ -46,13 +47,24 @@ pub(super) fn draw_and_copy(terminal: &mut DefaultTerminal, model: &mut Model) -
     Ok(())
 }
 
-/// Copy text to the OS clipboard, surfacing a failure as a transcript notice — copy is a direct user
-/// intent, so it must never fail silently. An empty text is a no-op (the clipboard is left untouched).
+/// Copy text to the OS clipboard, surfacing the outcome as a transcript notice either way — copy is a
+/// direct user intent, so it must never be silent in success OR failure (issue #8c: transient copy
+/// feedback).
 pub(super) fn copy_to_clipboard(model: &mut Model, text: &str) {
-    if let Err(error) = clipboard::copy_text(text) {
-        model.notify_error(format!(
+    notify_copy_result(model, clipboard::copy_text(text), !text.is_empty());
+}
+
+/// The pure "map a copy attempt to a notice" decision, split out of `copy_to_clipboard` so it is testable
+/// without touching the real OS clipboard (mirrors `provider_swap::persist_or_notice`'s split of
+/// decision from I/O). `copied_something` is `false` for an empty text — `clipboard::copy_text("")` is a
+/// deliberate no-op (the clipboard is left untouched), so it gets no "copied" notice either.
+fn notify_copy_result(model: &mut Model, result: Result<(), AgentError>, copied_something: bool) {
+    match result {
+        Ok(()) if copied_something => model.notify_info("copiado para a área de transferência"),
+        Ok(()) => {}
+        Err(error) => model.notify_error(format!(
             "falha ao copiar para a área de transferência: {error}"
-        ));
+        )),
     }
 }
 
@@ -105,5 +117,53 @@ pub(super) fn resolve_motion() -> Motion {
         Motion::Reduced
     } else {
         Motion::Full
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::tui::domain::transcript::{NoticeLevel, TranscriptItem};
+    use crate::shared::kernel::error::AgentError;
+
+    #[test]
+    fn a_successful_copy_of_real_text_notifies_success() {
+        let mut model = Model::default();
+        notify_copy_result(&mut model, Ok(()), true);
+        assert_eq!(
+            model.transcript.items().last(),
+            Some(&TranscriptItem::Notice(
+                NoticeLevel::Info,
+                "copiado para a área de transferência".to_string()
+            )),
+            "a real copy must surface transient success feedback (issue #8c)"
+        );
+    }
+
+    #[test]
+    fn a_no_op_copy_of_empty_text_stays_silent() {
+        let mut model = Model::default();
+        notify_copy_result(&mut model, Ok(()), false);
+        assert!(
+            model.transcript.is_empty(),
+            "nothing was actually copied, so there is nothing to confirm"
+        );
+    }
+
+    #[test]
+    fn a_failed_copy_notifies_the_error() {
+        let mut model = Model::default();
+        notify_copy_result(
+            &mut model,
+            Err(AgentError::Io(io::Error::other("boom"))),
+            true,
+        );
+        assert_eq!(
+            model.transcript.items().last(),
+            Some(&TranscriptItem::Notice(
+                NoticeLevel::Error,
+                "falha ao copiar para a área de transferência: boom".to_string()
+            ))
+        );
     }
 }
