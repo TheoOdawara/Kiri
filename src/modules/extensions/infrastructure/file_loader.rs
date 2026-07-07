@@ -228,21 +228,28 @@ mod tests {
         let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
         let catalog = loader.load().await.unwrap();
 
-        assert_eq!(catalog.rules.len(), 2);
-        let always_on: Vec<&Rule> = catalog.rules.iter().filter(|r| r.always).collect();
-        assert_eq!(always_on.len(), 1);
-        assert_eq!(always_on[0].id, "style");
-        assert_eq!(always_on[0].body, "Use Rust fmt.");
-        assert_eq!(always_on[0].layer, Layer::Global);
+        // 3, not 2: the bundled `ponytail` rule (ADR 0028) always folds in as a third, lowest-precedence
+        // rule alongside the two user-authored ones.
+        assert_eq!(catalog.rules.len(), 3);
+        let style = catalog.rules.iter().find(|r| r.id == "style").unwrap();
+        assert!(style.always);
+        assert_eq!(style.body, "Use Rust fmt.");
+        assert_eq!(style.layer, Layer::Global);
+        let team = catalog.rules.iter().find(|r| r.id == "team").unwrap();
+        assert!(!team.always);
     }
 
     #[tokio::test]
-    async fn empty_dirs_yield_no_rules() {
+    async fn empty_dirs_yield_only_the_bundled_ponytail_rule() {
+        // No user rule files at all: the bundled `ponytail` rule (ADR 0028, always-on) is still present —
+        // rules are never truly empty by default. Commands have no bundled default, so they stay empty.
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
         let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
         let catalog = loader.load().await.unwrap();
-        assert!(catalog.rules.is_empty());
+        assert_eq!(catalog.rules.len(), 1);
+        assert_eq!(catalog.rules[0].id, "ponytail");
+        assert!(catalog.rules[0].always);
         assert!(catalog.commands.is_empty());
     }
 
@@ -349,8 +356,17 @@ mod tests {
         assert_eq!(catalog.agents.len(), 2);
         assert!(catalog.agents.contains_key("search"));
         assert!(catalog.agents.contains_key("planning"));
-        assert_eq!(catalog.skills.len(), 4);
-        for id in ["plano", "gh", "commit", "ponytail"] {
+        assert_eq!(catalog.skills.len(), 8);
+        for id in [
+            "plano",
+            "gh",
+            "commit",
+            "ponytail",
+            "ponytail-review",
+            "ponytail-audit",
+            "ponytail-debt",
+            "ponytail-gain",
+        ] {
             assert!(
                 catalog.skills.contains_key(id),
                 "missing bundled skill {id}"

@@ -1,10 +1,20 @@
-//! Default extension resources shipped inside the binary (ADR 0028): skills and agent profiles that make
-//! Kiri useful from the first prompt, with no filesystem setup required. Content lives as plain Markdown
-//! files under `bundled/`, compiled in via `include_str!` — the same pattern already used for the config
-//! source characterization test (`shared/infra/config.rs`). Parsing reuses `Frontmatter::parse` and the
-//! exact id-resolution rule `file_loader::load_one` uses for a disk file, so a bundled `Resource` is
+//! Default extension resources shipped inside the binary (ADR 0028): rules, skills, and agent profiles
+//! that make Kiri useful from the first prompt, with no filesystem setup required. Content lives as plain
+//! Markdown files under `bundled/`, compiled in via `include_str!` — the same pattern already used for the
+//! config source characterization test (`shared/infra/config.rs`). Parsing reuses `Frontmatter::parse` and
+//! the exact id-resolution rule `file_loader::load_one` uses for a disk file, so a bundled `Resource` is
 //! indistinguishable in shape from one loaded off disk; every downstream consumer (`skills_index`,
-//! `command_bodies`, the `/skills`/`/agents` displays) treats it uniformly.
+//! `agents_index`, `command_bodies`, the `/rules`/`/skills`/`/agents` displays) treats it uniformly.
+//!
+//! The `ponytail` rule and the `ponytail`/`ponytail-review`/`ponytail-audit`/`ponytail-debt`/`ponytail-gain`
+//! skills are third-party content, MIT-licensed, from <https://github.com/DietrichGebert/ponytail> by
+//! DietrichGebert — embedded verbatim (each carries `license`/`source`/`credit` frontmatter). See `NOTICE`
+//! at the repo root for the full license text. Kiri has no per-skill argument mechanism (the upstream
+//! `argument-hint: [lite|full|ultra]` selects an intensity via a slash-command argument); the skill and
+//! rule ship the upstream body verbatim, which already documents all three levels inline, defaulting to
+//! `full`.
+//! // ponytail: no skill-argument plumbing exists to switch `lite`/`ultra` at runtime; add a
+//! // per-invocation argument to `use_skill`/`task` if that granularity is ever needed.
 
 use crate::modules::extensions::domain::frontmatter::Frontmatter;
 use crate::modules::extensions::domain::resource::Resource;
@@ -13,6 +23,11 @@ use crate::modules::extensions::domain::scope::Layer;
 /// One bundled resource: its resource-type subdirectory name (matching `file_loader::RESOURCE_TYPES`),
 /// its file stem (the id fallback, same rule as a disk file), and its Markdown content.
 const BUNDLED: &[(&str, &str, &str)] = &[
+    (
+        "rules",
+        "ponytail",
+        include_str!("bundled/rules/ponytail.md"),
+    ),
     ("skills", "plano", include_str!("bundled/skills/plano.md")),
     ("skills", "gh", include_str!("bundled/skills/gh.md")),
     ("skills", "commit", include_str!("bundled/skills/commit.md")),
@@ -20,6 +35,26 @@ const BUNDLED: &[(&str, &str, &str)] = &[
         "skills",
         "ponytail",
         include_str!("bundled/skills/ponytail.md"),
+    ),
+    (
+        "skills",
+        "ponytail-review",
+        include_str!("bundled/skills/ponytail-review.md"),
+    ),
+    (
+        "skills",
+        "ponytail-audit",
+        include_str!("bundled/skills/ponytail-audit.md"),
+    ),
+    (
+        "skills",
+        "ponytail-debt",
+        include_str!("bundled/skills/ponytail-debt.md"),
+    ),
+    (
+        "skills",
+        "ponytail-gain",
+        include_str!("bundled/skills/ponytail-gain.md"),
     ),
     ("agents", "search", include_str!("bundled/agents/search.md")),
     (
@@ -132,6 +167,53 @@ mod tests {
         assert!(agents.contains(&"search".to_string()));
         assert!(agents.contains(&"planning".to_string()));
 
-        assert_eq!(bundled_for("rules").count(), 0);
+        let rules: Vec<_> = bundled_for("rules").map(|r| r.id).collect();
+        assert_eq!(rules, vec!["ponytail".to_string()]);
+    }
+
+    #[test]
+    fn ponytail_rule_is_always_on() {
+        let rule = bundled_for("rules")
+            .find(|r| r.id == "ponytail")
+            .expect("bundled ponytail rule must exist");
+        assert_eq!(rule.frontmatter.get("always"), Some("true"));
+        assert!(rule.body.contains("lazy senior developer"));
+    }
+
+    #[test]
+    fn ponytail_suite_is_fully_bundled() {
+        let skills: Vec<_> = bundled_for("skills").map(|r| r.id).collect();
+        for id in [
+            "ponytail",
+            "ponytail-review",
+            "ponytail-audit",
+            "ponytail-debt",
+            "ponytail-gain",
+        ] {
+            assert!(skills.contains(&id.to_string()), "missing {id}");
+        }
+    }
+
+    #[test]
+    fn every_ponytail_resource_carries_attribution() {
+        let ponytail_ids = [
+            ("rules", "ponytail"),
+            ("skills", "ponytail"),
+            ("skills", "ponytail-review"),
+            ("skills", "ponytail-audit"),
+            ("skills", "ponytail-debt"),
+            ("skills", "ponytail-gain"),
+        ];
+        for (type_name, id) in ponytail_ids {
+            let res = bundled_for(type_name)
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("missing bundled {type_name}/{id}"));
+            assert_eq!(res.frontmatter.get("license"), Some("MIT"));
+            assert_eq!(
+                res.frontmatter.get("source"),
+                Some("https://github.com/DietrichGebert/ponytail")
+            );
+            assert_eq!(res.frontmatter.get("credit"), Some("DietrichGebert"));
+        }
     }
 }
