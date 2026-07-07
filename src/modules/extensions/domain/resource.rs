@@ -159,6 +159,14 @@ impl CommandSpec {
 #[derive(Debug, Clone)]
 pub struct AgentProfile {
     pub id: String,
+    /// A human-readable display name (frontmatter `name:`), falling back to `id` when absent. Display
+    /// only — `task`/command `agent:` bindings always address the agent by `id`.
+    pub name: String,
+    /// One-line purpose statement (frontmatter `description:`), rendered into the `# Agents` system-prompt
+    /// index (`ExtensionCatalog::agents_index`, ADR 0029) so the model can pick a `task` target without
+    /// guessing an id. Empty when absent — the catalog fold does not fail on a missing description, but a
+    /// bundled agent must always carry one (locked by `bundled.rs`'s guard test).
+    pub description: String,
     /// The agent's system-prompt text (the resource body), prepended to a bound command's expanded body,
     /// or seeded as the nested conversation's system prompt when dispatched via `task`.
     pub system_prompt: String,
@@ -176,6 +184,17 @@ pub struct AgentProfile {
 impl AgentProfile {
     /// Build an agent profile from a frontmatter-parsed resource.
     pub fn from_resource(res: &Resource) -> Self {
+        let name = res
+            .frontmatter
+            .get("name")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| res.id.clone());
+        let description = res
+            .frontmatter
+            .get("description")
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         let model = res
             .frontmatter
             .get("model")
@@ -188,6 +207,8 @@ impl AgentProfile {
             .unwrap_or_default();
         Self {
             id: res.id.clone(),
+            name,
+            description,
             system_prompt: res.body.clone(),
             layer: res.layer,
             path: res.path.clone(),
@@ -494,15 +515,30 @@ mod tests {
     fn agent_profile_reads_system_prompt_and_bindings() {
         let res = resource(
             "researcher",
-            "---\nmodel: gpt-pro\nallowed-tools:\n  - search\n---\n",
+            "---\nname: Researcher\ndescription: Deep-research specialist.\nmodel: gpt-pro\nallowed-tools:\n  - search\n---\n",
             "You are a deep-research agent.",
             Layer::Global,
         );
         let agent = AgentProfile::from_resource(&res);
         assert_eq!(agent.id, "researcher");
+        assert_eq!(agent.name, "Researcher");
+        assert_eq!(agent.description, "Deep-research specialist.");
         assert_eq!(agent.system_prompt, "You are a deep-research agent.");
         assert_eq!(agent.model.as_deref(), Some("gpt-pro"));
         assert_eq!(agent.allowed_tools, ["search"]);
+    }
+
+    #[test]
+    fn agent_profile_absent_name_falls_back_to_id_and_description_is_empty() {
+        let res = resource(
+            "researcher",
+            "---\nmodel: gpt-pro\n---\n",
+            "You are a deep-research agent.",
+            Layer::Global,
+        );
+        let agent = AgentProfile::from_resource(&res);
+        assert_eq!(agent.name, "researcher");
+        assert_eq!(agent.description, "");
     }
 
     #[test]

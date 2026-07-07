@@ -331,6 +331,8 @@ mod tests {
     fn profile(id: &str, allowed_tools: Vec<&str>) -> AgentProfile {
         AgentProfile {
             id: id.to_string(),
+            name: id.to_string(),
+            description: format!("{id} test agent."),
             system_prompt: "You are a test agent.".to_string(),
             layer: Layer::Bundled,
             path: format!("<bundled>/agents/{id}.md"),

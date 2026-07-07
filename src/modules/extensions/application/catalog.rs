@@ -129,8 +129,8 @@ impl ExtensionCatalog {
         }
     }
 
-    /// The `/agents` display text: one line per loaded agent profile (id, layer, source path), sorted by
-    /// id. `None` when no agents were loaded.
+    /// The `/agents` display text: one line per loaded agent profile (id, name, description, layer,
+    /// source path), sorted by id. `None` when no agents were loaded.
     pub fn agents_display(&self) -> Option<String> {
         if self.agents.is_empty() {
             return None;
@@ -139,7 +139,35 @@ impl ExtensionCatalog {
         agents.sort_by(|a, b| a.id.cmp(&b.id));
         let lines: Vec<String> = agents
             .iter()
-            .map(|agent| format!("- {} [{}] {}", agent.id, agent.layer.label(), agent.path))
+            .map(|agent| {
+                let label = if agent.name != agent.id {
+                    format!("{} ({})", agent.id, agent.name)
+                } else {
+                    agent.id.clone()
+                };
+                let desc = if agent.description.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", agent.description)
+                };
+                format!("- {label}{desc} [{}] {}", agent.layer.label(), agent.path)
+            })
+            .collect();
+        Some(lines.join("\n"))
+    }
+
+    /// The always-on agent index for the system prompt: one `id — description` line per agent, sorted by
+    /// id, mirroring `skills_index` — so the model can pick a `task` dispatch target (by id) without
+    /// guessing (ADR 0029). `None` when no agents were loaded.
+    pub fn agents_index(&self) -> Option<String> {
+        if self.agents.is_empty() {
+            return None;
+        }
+        let mut agents: Vec<&AgentProfile> = self.agents.values().collect();
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
+        let lines: Vec<String> = agents
+            .iter()
+            .map(|agent| format!("- {} — {}", agent.id, agent.description))
             .collect();
         Some(lines.join("\n"))
     }
@@ -405,6 +433,8 @@ mod tests {
     fn agent(id: &str, system_prompt: &str) -> AgentProfile {
         AgentProfile {
             id: id.to_string(),
+            name: id.to_string(),
+            description: format!("{id} description"),
             system_prompt: system_prompt.to_string(),
             layer: Layer::Global,
             path: format!("/fake/{id}.md"),
@@ -475,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_display_lists_id_layer_and_path() {
+    fn agents_display_lists_id_description_layer_and_path() {
         let mut agents = HashMap::new();
         agents.insert("researcher".to_string(), agent("researcher", "..."));
         let catalog = ExtensionCatalog {
@@ -483,7 +513,40 @@ mod tests {
             ..ExtensionCatalog::default()
         };
         let display = catalog.agents_display().unwrap();
-        assert!(display.contains("- researcher [global] /fake/researcher.md"));
+        assert!(
+            display.contains("- researcher — researcher description [global] /fake/researcher.md")
+        );
+    }
+
+    #[test]
+    fn agents_display_shows_the_name_when_it_differs_from_the_id() {
+        let mut profile = agent("researcher", "...");
+        profile.name = "Deep Researcher".to_string();
+        let mut agents = HashMap::new();
+        agents.insert("researcher".to_string(), profile);
+        let catalog = ExtensionCatalog {
+            agents,
+            ..ExtensionCatalog::default()
+        };
+        let display = catalog.agents_display().unwrap();
+        assert!(display.contains("- researcher (Deep Researcher) — researcher description"));
+    }
+
+    #[test]
+    fn empty_catalog_yields_no_agents_index() {
+        assert!(ExtensionCatalog::default().agents_index().is_none());
+    }
+
+    #[test]
+    fn agents_index_lists_id_and_description() {
+        let mut agents = HashMap::new();
+        agents.insert("researcher".to_string(), agent("researcher", "..."));
+        let catalog = ExtensionCatalog {
+            agents,
+            ..ExtensionCatalog::default()
+        };
+        let index = catalog.agents_index().unwrap();
+        assert_eq!(index, "- researcher — researcher description");
     }
 
     fn skill(id: &str, description: &str, tags: &[&str]) -> Skill {

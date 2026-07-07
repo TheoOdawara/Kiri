@@ -98,6 +98,7 @@ const SYSTEM_PROMPT_TEMPLATE: &str = concat!(
     "summarize at the end — just capture preferences as they surface.\n\n",
     "{RULES}",
     "{SKILLS}",
+    "{AGENTS}",
     "{INSTRUCTIONS}",
     "# Security\n",
     "Never read, write, edit, delete, or move files matching a sensitive pattern — the harness ",
@@ -113,29 +114,46 @@ const SYSTEM_PROMPT_TEMPLATE: &str = concat!(
     "what you saw.",
 );
 
-/// Render the system prompt, filling the four runtime placeholders plus the optional extension-rules,
-/// skill-index, and user-instructions blocks (all injected before `# Security` — rules, then skills,
-/// then instructions, ADR 0021 — so the Security section always takes precedence over any extension- or
-/// user-supplied text). The values arrive as parameters so this leaf module gains no dependency on the
-/// `tools` layer (SEC-06).
+/// The optional extension/user text blocks the system prompt injects before `# Security` (ADR 0019/0021/
+/// 0029): rules, then skills, then agents, then instructions, in that order — grouped into one struct so
+/// `render_system_prompt` stays under the argument-count lint as this set grows (the same pattern
+/// `ExtensionCatalog` already uses for `file_loader::load_type`'s accumulators).
+pub struct PromptExtensions<'a> {
+    pub rules: Option<&'a str>,
+    pub skills: Option<&'a str>,
+    pub agents: Option<&'a str>,
+    pub instructions: Option<&'a str>,
+}
+
+/// Render the system prompt, filling the four runtime placeholders plus `extensions`'s optional
+/// rules/skills/agents/instructions blocks (all injected before `# Security` so the Security section
+/// always takes precedence over any extension- or user-supplied text). The values arrive as parameters so
+/// this leaf module gains no dependency on the `tools` layer (SEC-06).
 pub fn render_system_prompt(
     sensitive_globs: &[&str],
     default_timeout_ms: u64,
     output_cap_bytes: usize,
     checkpoint: Duration,
-    rules: Option<&str>,
-    skills: Option<&str>,
-    instructions: Option<&str>,
+    extensions: PromptExtensions,
 ) -> String {
-    let rules_block = match rules {
+    let rules_block = match extensions.rules {
         Some(text) if !text.trim().is_empty() => format!("# Rules\n{}\n\n", text.trim()),
         _ => String::new(),
     };
-    let skills_block = match skills {
+    let skills_block = match extensions.skills {
         Some(text) if !text.trim().is_empty() => format!("# Skills\n{}\n\n", text.trim()),
         _ => String::new(),
     };
-    let instructions_block = match instructions {
+    let agents_block = match extensions.agents {
+        Some(text) if !text.trim().is_empty() => format!(
+            "# Agents\n\
+             Dispatchable read-only subagents (the `task` tool), one line per loaded agent (id — \
+             description):\n{}\n\n",
+            text.trim()
+        ),
+        _ => String::new(),
+    };
+    let instructions_block = match extensions.instructions {
         Some(text) if !text.trim().is_empty() => format!(
             "# User Instructions\n\
              The following is user- or workspace-supplied guidance (KIRI.md/AGENTS.md/CLAUDE.md or \
@@ -158,6 +176,7 @@ pub fn render_system_prompt(
             ("{CHECKPOINT_MINUTES}", &checkpoint_minutes),
             ("{RULES}", &rules_block),
             ("{SKILLS}", &skills_block),
+            ("{AGENTS}", &agents_block),
             ("{INSTRUCTIONS}", &instructions_block),
         ],
     )
@@ -194,15 +213,27 @@ fn render_template(template: &str, tokens: &[(&str, &str)]) -> String {
 mod tests {
     use super::*;
 
+    fn blocks<'a>(
+        rules: Option<&'a str>,
+        skills: Option<&'a str>,
+        agents: Option<&'a str>,
+        instructions: Option<&'a str>,
+    ) -> PromptExtensions<'a> {
+        PromptExtensions {
+            rules,
+            skills,
+            agents,
+            instructions,
+        }
+    }
+
     fn render() -> String {
         render_system_prompt(
             &[".env", "id_rsa", "*.pem"],
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
-            None,
-            None,
-            None,
+            blocks(None, None, None, None),
         )
     }
 
@@ -222,9 +253,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
-            None,
-            None,
-            None,
+            blocks(None, None, None, None),
         );
         assert!(
             prompt.contains("Sensitive names: *.secret, vault.json."),
@@ -249,9 +278,7 @@ mod tests {
             timeout_ms,
             cap_bytes,
             Duration::from_secs(30 * 60),
-            None,
-            None,
-            None,
+            blocks(None, None, None, None),
         );
         assert!(
             prompt.contains(&format!("{}s timeout enforced", timeout_ms / 1000)),
@@ -270,9 +297,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(45 * 60),
-            None,
-            None,
-            None,
+            blocks(None, None, None, None),
         );
         assert!(
             prompt.contains("Every ~45 minutes"),
@@ -311,9 +336,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
-            None,
-            None,
-            Some("Always use Rust."),
+            blocks(None, None, None, Some("Always use Rust.")),
         );
         assert!(prompt.contains("Always use Rust."));
         let instr_pos = prompt.find("# User Instructions").unwrap();
@@ -334,9 +357,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
-            None,
-            None,
-            Some("Always use Rust."),
+            blocks(None, None, None, Some("Always use Rust.")),
         );
         assert!(
             prompt.contains("not harness policy"),
@@ -367,9 +388,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
-            None,
-            None,
-            Some(adversarial),
+            blocks(None, None, None, Some(adversarial)),
         );
         let user_instructions_pos = prompt.find("# User Instructions").unwrap();
         let real_security_pos = prompt
@@ -400,9 +419,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
-            None,
-            None,
-            Some(payload),
+            blocks(None, None, None, Some(payload)),
         );
         assert!(
             prompt.contains("{SENSITIVE_LIST}") && prompt.contains("{TIMEOUT_SECONDS}"),
@@ -428,9 +445,12 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
-            Some(rules),
-            Some("real skill content"),
-            Some("real instructions content"),
+            blocks(
+                Some(rules),
+                Some("real skill content"),
+                None,
+                Some("real instructions content"),
+            ),
         );
         assert!(
             prompt.contains("{SKILLS} and {INSTRUCTIONS} are literal placeholders"),
@@ -456,9 +476,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
-            None,
-            None,
-            Some("   \n  "),
+            blocks(None, None, None, Some("   \n  ")),
         );
         assert!(!prompt.contains("# User Instructions"));
     }
@@ -476,9 +494,12 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
-            Some("Always use Rust fmt."),
-            None,
-            Some("Always use Rust."),
+            blocks(
+                Some("Always use Rust fmt."),
+                None,
+                None,
+                Some("Always use Rust."),
+            ),
         );
         assert!(prompt.contains("# Rules\nAlways use Rust fmt."));
         let rules_pos = prompt.find("# Rules").unwrap();
@@ -497,9 +518,7 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
-            Some("   \n  "),
-            None,
-            None,
+            blocks(Some("   \n  "), None, None, None),
         );
         assert!(!prompt.contains("# Rules"));
     }
@@ -517,9 +536,12 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
-            Some("Always use Rust fmt."),
-            Some("- pdf-extract — Extract text from PDFs"),
-            Some("Always use Rust."),
+            blocks(
+                Some("Always use Rust fmt."),
+                Some("- pdf-extract — Extract text from PDFs"),
+                None,
+                Some("Always use Rust."),
+            ),
         );
         assert!(prompt.contains("# Skills\n- pdf-extract — Extract text from PDFs"));
         let rules_pos = prompt.find("# Rules").unwrap();
@@ -539,10 +561,52 @@ mod tests {
             30_000,
             64 * 1024,
             Duration::from_secs(30 * 60),
-            None,
-            Some("   \n  "),
-            None,
+            blocks(None, Some("   \n  "), None, None),
         );
         assert!(!prompt.contains("# Skills"));
+    }
+
+    #[test]
+    fn no_agents_leaves_no_agents_section() {
+        let prompt = render();
+        assert!(!prompt.contains("# Agents"));
+    }
+
+    #[test]
+    fn agents_block_is_injected_between_skills_and_instructions() {
+        let prompt = render_system_prompt(
+            &[".env"],
+            30_000,
+            64 * 1024,
+            Duration::from_secs(30 * 60),
+            blocks(
+                Some("Always use Rust fmt."),
+                Some("- pdf-extract — Extract text from PDFs"),
+                Some("- search — Locate code read-only."),
+                Some("Always use Rust."),
+            ),
+        );
+        assert!(prompt.contains("# Agents\n"));
+        assert!(prompt.contains("- search — Locate code read-only."));
+        let skills_pos = prompt.find("# Skills").unwrap();
+        let agents_pos = prompt.find("# Agents").unwrap();
+        let instr_pos = prompt.find("# User Instructions").unwrap();
+        let sec_pos = prompt.find("# Security").unwrap();
+        assert!(
+            skills_pos < agents_pos && agents_pos < instr_pos && instr_pos < sec_pos,
+            "skills, then agents, then instructions, all before Security"
+        );
+    }
+
+    #[test]
+    fn blank_agents_are_treated_as_none() {
+        let prompt = render_system_prompt(
+            &[".env"],
+            30_000,
+            64 * 1024,
+            Duration::from_secs(30 * 60),
+            blocks(None, None, Some("   \n  "), None),
+        );
+        assert!(!prompt.contains("# Agents"));
     }
 }

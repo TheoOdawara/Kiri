@@ -311,7 +311,7 @@ mod tests {
         write(
             global.path(),
             "agents/researcher.md",
-            "---\nmodel: gpt-pro\n---\n\nYou are a deep-research agent.\n",
+            "---\nname: Researcher\ndescription: Deep-research specialist.\nmodel: gpt-pro\n---\n\nYou are a deep-research agent.\n",
         )
         .await;
         write(
@@ -326,6 +326,8 @@ mod tests {
         let catalog = loader.load().await.unwrap();
 
         let agent = catalog.agents.get("researcher").unwrap();
+        assert_eq!(agent.name, "Researcher");
+        assert_eq!(agent.description, "Deep-research specialist.");
         assert_eq!(agent.system_prompt, "You are a deep-research agent.");
         assert_eq!(agent.model.as_deref(), Some("gpt-pro"));
 

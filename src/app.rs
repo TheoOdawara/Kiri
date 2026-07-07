@@ -67,7 +67,7 @@ use crate::modules::tui::infrastructure::runtime::{
     BootNotice, HookContext, ProviderSwap, SharedMemoryFactory, SyncContext, Tui, TuiParams,
 };
 use crate::shared::infra::config::{
-    Settings, SyncAction, ensure_private_dir, render_system_prompt,
+    PromptExtensions, Settings, SyncAction, ensure_private_dir, render_system_prompt,
 };
 use crate::shared::kernel::error::AgentResult;
 use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile};
@@ -118,6 +118,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     ));
     let rules_text = extensions.render_rules();
     let skills_text = extensions.skills_index().unwrap_or_default();
+    let agents_text = extensions.agents_index().unwrap_or_default();
     let hooks_display = extensions.hooks_display();
     let mcp_display = extensions.mcp_display();
     let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
@@ -134,9 +135,12 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         RUN_COMMAND_DEFAULT_TIMEOUT_MS,
         EXEC_MAX_BYTES,
         settings.checkpoint_budget,
-        (!rules_text.is_empty()).then_some(rules_text.as_str()),
-        (!skills_text.is_empty()).then_some(skills_text.as_str()),
-        settings.instructions.as_deref(),
+        PromptExtensions {
+            rules: (!rules_text.is_empty()).then_some(rules_text.as_str()),
+            skills: (!skills_text.is_empty()).then_some(skills_text.as_str()),
+            agents: (!agents_text.is_empty()).then_some(agents_text.as_str()),
+            instructions: settings.instructions.as_deref(),
+        },
     );
     let sandbox = FsSandbox::with_confinement(
         &settings.path,
