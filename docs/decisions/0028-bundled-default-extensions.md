@@ -59,3 +59,46 @@ the latter made dispatchable by ADR 0029.
   non-empty description, agents list only read-only tools) and `file_loader.rs`'s precedence tests
   (`empty_dirs_yield_only_the_bundled_defaults`, `user_global_skill_overrides_bundled_default_of_same_id`,
   `project_skill_overrides_bundled_default_of_same_id`).
+
+## Amendment (2026-07-07) — a bundled rule, `name`/`description` frontmatter, third-party attribution
+
+Three gaps surfaced once the bundled set was measured against market-standard tooling (Claude Code's own
+skill/subagent conventions) and against shipping a real third-party skill rather than a paraphrase of one.
+
+**A fourth resource type joins the bundled set: rules.** `bundled/rules/ponytail.md` (`always: true`) is
+the first bundled `rules/*.md` entry — `bundled_for("rules")` was reachable since this ADR's original text
+but had no content until now. It folds into `render_rules()` exactly like a user-authored always-on rule,
+so a fresh install's very first turn already carries it in `# Rules`, no `use_skill` call needed. This is
+what makes an always-on default (a persona, a house style) actually always-on, versus a skill the model
+might not reach for.
+
+**`name:` frontmatter, on `Skill` and `AgentProfile`.** Both previously had no display name distinct from
+`id` (the file stem). `Skill.name`/`AgentProfile.name` read frontmatter `name:`, falling back to `id`.
+**Display only** — `use_skill`/`task` always address a resource by `id`, never by `name`, so a skill or
+agent whose `name` differs from its `id` cannot become uninvocable by a display change. This also unblocks
+ADR 0029's discoverability fix, below, and is a straight prerequisite for embedding ponytail's own
+`SKILL.md` files verbatim — they carry a `name:` field, and dropping it silently would mean "verbatim"
+wasn't true.
+
+**Third-party content policy.** Bundled content is not exclusively Kiri's own prose: `ponytail` (the skill
+and its `-review`/`-audit`/`-debt`/`-gain` suite, plus the new always-on rule) is embedded **verbatim**
+from <https://github.com/DietrichGebert/ponytail> (MIT, Copyright (c) 2026 DietrichGebert), not a paraphrase
+— the user's explicit ask was "the real tool as it presents itself," which for an always-on persona means
+its actual shipped text, not our summary of it. Every such file carries `license`/`source`/`credit`
+frontmatter scalars (harmless additions the parser already supports; not read by any domain type, purely
+attribution metadata), and a repo-root `NOTICE` carries the license's full text. Any future third-party
+bundled content follows the same rule: verbatim body, attribution frontmatter, a `NOTICE` entry. Kiri's own
+bundled content (`plano`/`gh`/`commit`, the `search`/`planning` agents) carries no such frontmatter — it is
+Kiri's own prose, already MIT under the repo's own `LICENSE`.
+
+**Content shipped now:** the four resource types are `rules` (1: `ponytail`, always-on), `skills` (8:
+`plano`, `gh`, `commit`, `ponytail`, `ponytail-review`, `ponytail-audit`, `ponytail-debt`, `ponytail-gain`),
+`agents` (2: `search`, `planning`, both now carrying a `description` — see ADR 0029's amendment for why).
+
+Consequences: `file_loader.rs`'s `empty_dirs_yield_no_rules` no longer holds (renamed
+`empty_dirs_yield_only_the_bundled_ponytail_rule`) — an empty `.kiri/` now yields exactly one rule, not
+zero. `loads_rules_from_global_and_project`'s rule count grew from 2 to 3 for the same reason, and its
+always-on assertion switched from an index-0 assumption (safe only while exactly one always-on rule
+existed) to a `find(|r| r.id == "style")` lookup, since two always-on rules can now coexist in
+non-deterministic `HashMap`-iteration order. New guard tests: `ponytail_rule_is_always_on`,
+`ponytail_suite_is_fully_bundled`, `every_ponytail_resource_carries_attribution`.

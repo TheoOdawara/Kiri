@@ -74,11 +74,16 @@ in the transcript rather than `eprintln!` behind the alternate-screen TUI.
   rules/commands/agents/skills/hooks/mcp, each with a global `~/.kiri/` and project `<workspace>/.kiri/`
   layer, plus a third `Layer::Bundled` — Markdown compiled into the binary via `include_str!`
   (`infrastructure::bundled`), trusted like global, folded in as the lowest-precedence layer so a fresh
-  install ships default skills (`plano`/`gh`/`commit`/`ponytail`) and read-only agent profiles
-  (`search`/`planning`) with no `~/.kiri/` setup required; see ADR 0028 — the `Frontmatter` parser, the
-  `Resource`/`Rule`/`CommandSpec`/`AgentProfile`/`Skill`/`Hook`/
+  install ships an always-on rule (`ponytail`, verbatim + credited third-party content — MIT,
+  github.com/DietrichGebert/ponytail, see `NOTICE`), default skills (`plano`/`gh`/`commit`/`ponytail`/
+  `ponytail-review`/`ponytail-audit`/`ponytail-debt`/`ponytail-gain`), and read-only agent profiles
+  (`search`/`planning`) with no `~/.kiri/` setup required; see ADR 0028 — the `Frontmatter` parser (flat
+  scalars/lists only, plus a `name:` on `Skill`/`AgentProfile` — display-only, invocation always keys by
+  `id`), the `Resource`/`Rule`/`CommandSpec`/`AgentProfile`/`Skill`/`Hook`/
   `McpServer` domain types, the `ExtensionsLoader` port + `FileExtensionsLoader` adapter assembling an
-  `ExtensionCatalog`, the pure trust-gate decision `domain::gate::resolve`/`content_hash` (blake3) + the
+  `ExtensionCatalog` — whose `agents_index()` (ADR 0029 amend) mirrors `skills_index()` into a `# Agents`
+  system-prompt block so a dispatchable agent is discoverable, not just invocable — the pure trust-gate
+  decision `domain::gate::resolve`/`content_hash` (blake3) + the
   `0600`-file `ExtensionsTrustStore` recording TOFU approvals — `/rules`/`/commands`/`/agents`/`/skills`/
   `/hooks`/`/approve-hook`/`/mcp`/`/approve-mcp` manage it live), `hooks` (the sanctioned site for the
   `hooks` extension type's process I/O: the `HookRunner` port + `ShellHookRunner` adapter running a hook's

@@ -89,3 +89,32 @@ pins every site.
 - **Cross-provider subagents** (a different provider/endpoint, not just a different model on the same
   provider) — needs a provider registry the composition root can hand a `TaskTool` beyond its single
   boot-time `Arc<dyn CompletionProvider>`.
+
+## Amendment (2026-07-07) — agent discoverability: the `# Agents` section this ADR always assumed
+
+`TaskTool::schema()` has, since this ADR's original text, told the model to pick an agent id "as listed in
+'# Agents'" (the schema quoted above). That section never existed: `render_system_prompt` took no `agents`
+parameter, `ExtensionCatalog` had no `agents_index`, and `AgentProfile` had no `description` field to index
+in the first place. A model with `search`/`planning` loaded could dispatch `task`, but only by guessing an
+id and reading `TaskTool::execute`'s "unknown agent 'x'; loaded agents: planning, search" error — the
+feature was invocable but not discoverable, the same gap `use_skill`/`# Skills` never had.
+
+Closed by mirroring the skill-discovery chain exactly:
+
+- `AgentProfile` gained `description` (frontmatter `description:`), read the same way `Skill.description`
+  already was.
+- `ExtensionCatalog::agents_index()` mirrors `skills_index()`: one `- {id} — {description}` line per agent,
+  sorted by id, keyed by `id` (never the new display-only `name` — see ADR 0028's amendment — so the string
+  the model reads in `# Agents` is always exactly what `task`'s `agent` parameter expects).
+- `render_system_prompt` grew a `PromptExtensions` struct (`rules`/`skills`/`agents`/`instructions`) instead
+  of a fifth positional parameter, since a fifth `Option<&str>` tripped clippy's `too_many_arguments` —
+  grouping them mirrors the `ExtensionCatalog`-as-accumulator pattern `file_loader::load_type` already uses
+  for the same lint. The rendered order is unchanged in spirit: Rules → Skills → **Agents** → Instructions →
+  Security, so Security still always has the last, precedence-holding word.
+- The two bundled agents (`search`, `planning`) both gained a `description` — an empty one would have shipped
+  a broken index line, the same failure mode `bundled_skills_have_a_nonempty_description` already guarded
+  against for skills; a matching `bundled_agents_have_a_nonempty_description` now guards agents.
+
+No change to `TaskTool` itself (the schema's `# Agents` reference was already correct; it just pointed at
+nothing) and no change to the v1 boundaries above (read-only, sequential, headless, depth-1) — this
+amendment is pure discoverability, not a capability expansion.
