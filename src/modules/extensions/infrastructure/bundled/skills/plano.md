@@ -1,5 +1,6 @@
 ---
-description: Plan before non-trivial work — outline goal, files, order, and risks, then execute.
+name: Plano
+description: Plan before non-trivial work — outline the goal, files to touch, order, and risks before editing. Use for any task spanning multiple files, a new feature, a migration, or an ambiguous or destructive ask; skip it for a one-line edit. Trigger on "make a plan", "plan this out", "what's the approach", or when scope is unclear.
 tags:
   - planning
   - workflow

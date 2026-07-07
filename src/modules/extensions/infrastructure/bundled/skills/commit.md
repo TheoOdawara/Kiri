@@ -1,5 +1,6 @@
 ---
-description: Write Conventional Commits; show the diff and get approval before committing.
+name: Commit
+description: Write Conventional Commits and get explicit approval before committing — show `git status` and the diff first, one logical change per commit. Trigger whenever the user asks to commit, stage changes, or prepare a commit message.
 tags:
   - git
   - commit

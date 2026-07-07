@@ -109,6 +109,20 @@ mod tests {
     }
 
     #[test]
+    fn bundled_agents_have_a_nonempty_description() {
+        // `agents_index` injects `id — description` into the `# Agents` system-prompt block; an empty
+        // description would ship a broken index line and leave the agent undiscoverable (ADR 0029).
+        for res in bundled_for("agents") {
+            let description = res.frontmatter.get("description").unwrap_or_default();
+            assert!(
+                !description.is_empty(),
+                "bundled agent '{}' has no description",
+                res.id
+            );
+        }
+    }
+
+    #[test]
     fn bundled_for_filters_by_type() {
         let skills: Vec<_> = bundled_for("skills").map(|r| r.id).collect();
         assert!(skills.contains(&"plano".to_string()));

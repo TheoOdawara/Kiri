@@ -183,6 +183,11 @@ impl ExtensionCatalog {
         let lines: Vec<String> = skills
             .iter()
             .map(|skill| {
+                let label = if skill.name != skill.id {
+                    format!("{} ({})", skill.id, skill.name)
+                } else {
+                    skill.id.clone()
+                };
                 let tags = if skill.tags.is_empty() {
                     String::new()
                 } else {
@@ -190,21 +195,16 @@ impl ExtensionCatalog {
                     sorted.sort_unstable();
                     format!(" (tags: {})", sorted.join(", "))
                 };
-                format!(
-                    "- {}{} [{}] {}",
-                    skill.id,
-                    tags,
-                    skill.layer.label(),
-                    skill.path
-                )
+                format!("- {label}{tags} [{}] {}", skill.layer.label(), skill.path)
             })
             .collect();
         Some(lines.join("\n"))
     }
 
-    /// The always-on skill index for the system prompt: one `name — description` line per skill, sorted
-    /// by id, so the model knows what `use_skill` can fetch without carrying every body up front. `None`
-    /// when no skills were loaded.
+    /// The always-on skill index for the system prompt: one `id — description` line per skill (keyed by
+    /// `id`, the exact string `use_skill` expects — never `name`, which is display-only and may differ),
+    /// sorted by id, so the model knows what `use_skill` can fetch without carrying every body up front.
+    /// `None` when no skills were loaded.
     pub fn skills_index(&self) -> Option<String> {
         if self.skills.is_empty() {
             return None;
@@ -552,6 +552,7 @@ mod tests {
     fn skill(id: &str, description: &str, tags: &[&str]) -> Skill {
         Skill {
             id: id.to_string(),
+            name: id.to_string(),
             description: description.to_string(),
             body: format!("{id} body"),
             layer: Layer::Project,
@@ -581,6 +582,20 @@ mod tests {
         };
         let display = catalog.skills_display().unwrap();
         assert!(display.contains("- pdf-extract (tags: docs, pdf) [project] /fake/pdf-extract.md"));
+    }
+
+    #[test]
+    fn skills_display_shows_the_name_when_it_differs_from_the_id() {
+        let mut s = skill("pdf-extract", "Extract text from PDFs", &["pdf"]);
+        s.name = "PDF Extractor".to_string();
+        let mut skills = HashMap::new();
+        skills.insert("pdf-extract".to_string(), s);
+        let catalog = ExtensionCatalog {
+            skills,
+            ..ExtensionCatalog::default()
+        };
+        let display = catalog.skills_display().unwrap();
+        assert!(display.contains("- pdf-extract (PDF Extractor) (tags: pdf) [project]"));
     }
 
     #[test]

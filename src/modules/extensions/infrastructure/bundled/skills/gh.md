@@ -1,5 +1,6 @@
 ---
-description: Use the `gh` CLI for GitHub work — PRs, issues, reviews — run via run_command.
+name: GitHub CLI
+description: Use the `gh` CLI (run via run_command) for GitHub work instead of the raw API or web UI — pull requests, issues, reviews, always non-interactive. Trigger whenever the task creates, views, or reviews a PR or issue, or the user mentions GitHub, a PR, or an issue.
 tags:
   - github
   - git

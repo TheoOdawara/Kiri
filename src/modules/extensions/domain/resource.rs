@@ -224,6 +224,9 @@ impl AgentProfile {
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub id: String,
+    /// A human-readable display name (frontmatter `name:`), falling back to `id` when absent. Display
+    /// only — `use_skill` always addresses the skill by `id`.
+    pub name: String,
     pub description: String,
     pub body: String,
     pub layer: Layer,
@@ -238,6 +241,12 @@ pub struct Skill {
 impl Skill {
     /// Build a skill from a frontmatter-parsed resource.
     pub fn from_resource(res: &Resource) -> Self {
+        let name = res
+            .frontmatter
+            .get("name")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| res.id.clone());
         let description = res
             .frontmatter
             .get("description")
@@ -255,6 +264,7 @@ impl Skill {
             .filter(|s| !s.is_empty());
         Self {
             id: res.id.clone(),
+            name,
             description,
             body: res.body.clone(),
             layer: res.layer,
@@ -545,11 +555,12 @@ mod tests {
     fn skill_reads_description_tags_and_script() {
         let res = resource(
             "pdf-extract",
-            "---\ndescription: Extract text from PDFs\ntags:\n  - pdf\n  - docs\nscript: extract.py\n---\n",
+            "---\nname: PDF Extractor\ndescription: Extract text from PDFs\ntags:\n  - pdf\n  - docs\nscript: extract.py\n---\n",
             "Use pdftotext for extraction.",
             Layer::Project,
         );
         let skill = Skill::from_resource(&res);
+        assert_eq!(skill.name, "PDF Extractor");
         assert_eq!(skill.description, "Extract text from PDFs");
         assert!(skill.tags.contains("pdf"));
         assert!(skill.tags.contains("docs"));
@@ -561,6 +572,13 @@ mod tests {
         let res = resource("doc", "---\n---\n", "Write docs.", Layer::Project);
         let skill = Skill::from_resource(&res);
         assert!(skill.script.is_none());
+    }
+
+    #[test]
+    fn skill_absent_name_falls_back_to_id() {
+        let res = resource("doc", "---\n---\n", "Write docs.", Layer::Project);
+        let skill = Skill::from_resource(&res);
+        assert_eq!(skill.name, "doc");
     }
 
     #[test]
