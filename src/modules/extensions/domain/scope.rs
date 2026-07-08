@@ -19,6 +19,17 @@ impl Layer {
             Layer::Bundled => "bundled",
         }
     }
+
+    /// Precedence rank, lowest-value = highest-precedence: global > project > bundled. The single
+    /// source for any layer-order sort (e.g. `render_rules` joining always-on rules deterministically),
+    /// so a HashMap-sourced resource list renders in a stable order rather than an arbitrary one.
+    pub fn precedence(self) -> u8 {
+        match self {
+            Layer::Global => 0,
+            Layer::Project => 1,
+            Layer::Bundled => 2,
+        }
+    }
 }
 
 #[cfg(test)]

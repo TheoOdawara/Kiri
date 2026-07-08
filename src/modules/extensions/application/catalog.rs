@@ -33,20 +33,19 @@ pub struct ExtensionCatalog {
 }
 
 impl ExtensionCatalog {
-    /// The merged text of every always-on rule, in layer order (global first, project after), for
-    /// injection into the system prompt. An empty string when there are no always-on rules.
+    /// The merged text of every always-on rule, in layer order (global > project > bundled, ties by id),
+    /// for injection into the system prompt. `self.rules` is built from a `HashMap`, so it must be sorted
+    /// here — otherwise the injected order (and thus the prompt) would vary between boots. An empty string
+    /// when there are no always-on rules.
     pub fn render_rules(&self) -> String {
-        let mut lines: Vec<&str> = Vec::new();
-        for rule in &self.rules {
-            if rule.always {
-                lines.push(rule.body.as_str());
-            }
-        }
-        if lines.is_empty() {
-            return String::new();
-        }
-        // The bodies are already trimmed at load time; join with a newline separator.
-        lines.join("\n\n")
+        let mut always_on: Vec<&Rule> = self.rules.iter().filter(|rule| rule.always).collect();
+        always_on.sort_by(|a, b| (a.layer.precedence(), &a.id).cmp(&(b.layer.precedence(), &b.id)));
+        // The bodies are already trimmed at load time; join with a newline separator (empty when none).
+        always_on
+            .iter()
+            .map(|rule| rule.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     /// The `/rules` display text: one line per loaded rule (id, layer, always-on marker, source path),
@@ -333,6 +332,43 @@ mod tests {
         assert!(!rendered.contains("On demand only."));
         // Two always-on bodies are joined by `\n\n`.
         assert!(rendered.contains("\n\n"));
+    }
+
+    #[test]
+    fn render_rules_orders_by_layer_then_id_regardless_of_vec_order() {
+        // `self.rules` is HashMap-sourced, so insertion order is arbitrary. The injected system-prompt
+        // text must still be deterministic: global > project > bundled, ties broken by id. Insert in
+        // reverse-precedence order to prove the sort — not the Vec order — decides the output.
+        let catalog = ExtensionCatalog {
+            rules: vec![
+                Rule {
+                    id: "z-bundled".into(),
+                    always: true,
+                    body: "BUNDLED".into(),
+                    layer: Layer::Bundled,
+                    path: "<bundled>/rules/z.md".into(),
+                    tags: Default::default(),
+                },
+                Rule {
+                    id: "m-project".into(),
+                    always: true,
+                    body: "PROJECT".into(),
+                    layer: Layer::Project,
+                    path: "/fake/m.md".into(),
+                    tags: Default::default(),
+                },
+                Rule {
+                    id: "a-global".into(),
+                    always: true,
+                    body: "GLOBAL".into(),
+                    layer: Layer::Global,
+                    path: "/fake/a.md".into(),
+                    tags: Default::default(),
+                },
+            ],
+            ..ExtensionCatalog::default()
+        };
+        assert_eq!(catalog.render_rules(), "GLOBAL\n\nPROJECT\n\nBUNDLED");
     }
 
     #[test]
