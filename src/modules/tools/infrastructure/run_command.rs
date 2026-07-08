@@ -297,6 +297,9 @@ mod tests {
     use crate::modules::tools::infrastructure::fs::default_fs_tools;
     use crate::modules::tools::infrastructure::sandbox::FsSandbox;
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    // Used only by the macOS/Linux OS-sandbox tests below; Windows has no such tests, so gate the
+    // import to unix to avoid an unused-import warning there.
+    #[cfg(unix)]
     use crate::shared::kernel::sandbox::NetworkPolicy;
     use crate::shared::kernel::tool_call::FunctionCall;
     use regex::Regex;

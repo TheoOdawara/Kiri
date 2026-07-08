@@ -266,8 +266,7 @@ mod tests {
         let last_ro_bind = strings
             .iter()
             .enumerate()
-            .filter(|(_, a)| a.as_str() == "--ro-bind")
-            .next_back()
+            .rfind(|(_, a)| a.as_str() == "--ro-bind")
             .map(|(i, _)| i)
             .expect("at least one --ro-bind present");
         // The last --ro-bind flag emitted must be the explicit extra_ro re-allow, not the base `/`.
