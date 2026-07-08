@@ -118,3 +118,41 @@ Closed by mirroring the skill-discovery chain exactly:
 No change to `TaskTool` itself (the schema's `# Agents` reference was already correct; it just pointed at
 nothing) and no change to the v1 boundaries above (read-only, sequential, headless, depth-1) — this
 amendment is pure discoverability, not a capability expansion.
+
+## Trust posture (2026-07-07) — project agents are passive-trusted; containment is the read-only boundary
+
+Making agents discoverable means a **project-layer** profile (`<workspace>/.kiri/agents/`) is now both
+model-dispatchable and injected into the system prompt (its `description` into `# Agents`, its
+`system_prompt` becoming a subagent persona). Unlike the two *active* capability types — hooks and MCP
+servers, which pass through the ADR 0021 TOFU trust gate (`gate::resolve`) before they may run — agents,
+like rules/skills/commands, are **passive resources: trusted on load, not gated**. A hostile
+`<workspace>/.kiri/agents/evil.md` in a cloned repo is therefore loaded and dispatchable without an
+approval prompt. This is deliberate and consistent with the existing ADR 0021 posture for the other
+passive types; PR #64 extends the same untrusted-injection surface to agents rather than inventing a new
+one. Containment does not rest on the gate — it rests on two independent invariants:
+
+- **The subagent is read-only and in-root.** Whatever persona a malicious profile injects, the dispatched
+  loop can only ever hold the read-only tool intersection, and `HeadlessIo` refuses every out-of-root
+  target (SEC-01). The read-only surface is now locked by a guard test per tool-set builder
+  (`default_fs_tools`/`default_memory_tools`/`default_extension_tools`), so a future read-only tool that
+  does not self-gate an agent-supplied path cannot silently widen what a subagent can read.
+- **`# Security` renders last.** A profile's `system_prompt` and `description` land in earlier prompt
+  sections; the harness Security block always follows and holds precedence (same single-pass guarantee ADR
+  0007/0019 give user instructions).
+
+Two operational notes that follow from v1's headless design, worth stating so they are not mistaken for
+defects:
+
+- **A subagent always runs `ApprovalMode::Auto`**, even when the parent session is in Default or Plan mode
+  (`task_tool.rs` hardcodes it). Approving a single `task` dispatch therefore grants the subagent
+  unattended in-root reads for its whole lifetime. No privilege is gained (read-only, in-root; out-of-root
+  is declined), but the trust nuance is "one approval → many unattended reads," not "one approval → one
+  read."
+- **`task` is plannable** (`is_read_only() == true`), so a subagent can be dispatched during plan mode and
+  will make real, billable provider calls while the parent is nominally only planning. Bounded by the
+  parent's `max_tool_calls` and the checkpoint budget, and desirable for the `planning` agent, but real
+  spend nonetheless.
+
+Folding passive project resources under the TOFU gate as well is a possible future tightening, deferred
+here: it would add an approval prompt to first use of any project rule/skill/command/agent, a UX cost the
+read-only + Security-last containment does not currently justify.
