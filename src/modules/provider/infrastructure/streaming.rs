@@ -10,7 +10,7 @@ use std::time::Duration;
 use eventsource_stream::Eventsource;
 use tokio_stream::StreamExt;
 
-use crate::modules::provider::infrastructure::http_error::error_from_status;
+use crate::modules::provider::infrastructure::http_error::{bounded_preview, error_from_status};
 use crate::shared::kernel::error::AgentError;
 
 /// Cap on the bytes a single streamed turn may accumulate (streamed content + reasoning + tool-call
@@ -78,6 +78,27 @@ async fn drain_sse_with_limits(
     raw_cap: usize,
     mut on_data: impl FnMut(&str) -> Result<(), AgentError>,
 ) -> Result<(), AgentError> {
+    // A 200 whose body is NOT an SSE stream is not a completion — most often a misconfigured base URL
+    // (LM Studio answers an unknown route with 200 + `{"error":"Unexpected endpoint or method"}` on a
+    // JSON body, so `ensure_success` passes and `.eventsource()` then yields no events, leaving an empty
+    // turn the user only sees as "no content"). Surface the body instead.
+    // ponytail: only fires when the header is present AND clearly not a stream; a stream that omits the
+    // Content-Type header (None) still drains normally, so a header-less compliant server is not rejected.
+    if let Some(content_type) = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        && !content_type.contains("event-stream")
+    {
+        let content_type = content_type.to_string();
+        let body = read_error_body(response).await;
+        return Err(AgentError::Provider(format!(
+            "provider returned a non-stream response (content-type {content_type}); \
+             check the base URL/model: {}",
+            bounded_preview(&body)
+        )));
+    }
+
     // Counts raw bytes as they arrive off the wire, BEFORE `.eventsource()` ever assembles them into a
     // complete event — `take_while` ends the stream (rather than erroring inline) once the cap is passed,
     // so the raw total is checked again after the drain loop to turn "stream ended early" into a real
@@ -240,6 +261,24 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(seen, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn drain_sse_surfaces_a_non_stream_200_body() {
+        // The LM Studio regression: a base URL missing `/v1` hits an unknown route, which LM Studio
+        // answers with 200 OK + a JSON error body (Content-Type not event-stream). `ensure_success`
+        // passes it, so drain_sse must surface the body instead of draining it into an empty turn the
+        // user only sees as the generic "no content".
+        let body = r#"{"error":"Unexpected endpoint or method. (POST /chat/completions)"}"#;
+        let response = serve_once(raw_with_body("200 OK", body)).await; // raw_with_body sets text/plain
+        let error = drain_sse(response, |_data| Ok(()))
+            .await
+            .expect_err("a non-stream 200 body must fail the turn");
+        assert!(matches!(error, AgentError::Provider(_)));
+        assert!(
+            error.to_string().contains("Unexpected endpoint or method"),
+            "the provider body must be surfaced: {error}"
+        );
     }
 
     #[tokio::test]

@@ -109,6 +109,12 @@ fn wizard_prompt(wizard: &ProviderWizard) -> String {
     match wizard.step {
         WizardStep::Kind | WizardStep::Thinking => String::new(),
         WizardStep::ProviderId => "Identificador (ex.: lmstudio, openrouter):".to_string(),
+        // Keyless-capable kinds are the OpenAI-compatible local servers (LM Studio / Ollama), whose base
+        // URL must carry `/v1` — the adapter only appends `chat/completions`. Vendor kinds keep the plain
+        // prompt (their canonical base URL already includes any version segment).
+        WizardStep::BaseUrl if !wizard.key_required() => {
+            "Base URL (inclua /v1, ex.: http://host:1234/v1):".to_string()
+        }
         WizardStep::BaseUrl => "Base URL:".to_string(),
         WizardStep::Model => "Modelo default:".to_string(),
         WizardStep::ExtraModels => "Modelos extras (separados por vírgula, opcional):".to_string(),
