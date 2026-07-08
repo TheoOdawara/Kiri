@@ -4,7 +4,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 
 use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
-use crate::modules::tools::application::path::{expand_tilde, home, is_absolute_path};
+use crate::modules::tools::application::path::{
+    anchor_to_root_drive, expand_tilde, home, is_absolute_path,
+};
 use crate::modules::tools::application::sandbox::{CreateResolution, Sandbox};
 #[cfg(test)]
 use crate::modules::tools::infrastructure::confine::noop::NoConfinement;
@@ -93,7 +95,7 @@ impl FsSandbox {
     pub fn relocated(&self, arg: &str) -> Result<Self> {
         let expanded = expand_tilde(arg, home().as_deref());
         let target = if is_absolute_path(arg, &expanded) {
-            expanded
+            anchor_to_root_drive(&expanded, &self.root)
         } else {
             self.root.join(arg)
         };
@@ -168,7 +170,8 @@ impl Sandbox for FsSandbox {
         reject_ads_syntax(rel)?;
         let expanded = expand_tilde(rel, home().as_deref());
         if is_absolute_path(rel, &expanded) {
-            let real = std::fs::canonicalize(&expanded)
+            let target = anchor_to_root_drive(&expanded, &self.root);
+            let real = std::fs::canonicalize(&target)
                 .map_err(|_| AgentError::Sandbox(format!("path not found: {rel}")))?;
             self.assert_not_sensitive(&real, rel)?;
             self.assert_not_in_secret_dir(&real, rel)?;
@@ -198,7 +201,7 @@ impl Sandbox for FsSandbox {
         let (candidate, confined) = if is_absolute_path(rel, &expanded) {
             // Absolute/tilde-expanded paths are user-approved out-of-root targets — not confined here;
             // see the security model above.
-            (expanded, false)
+            (anchor_to_root_drive(&expanded, &self.root), false)
         } else {
             (self.join_checked(rel)?, true)
         };
