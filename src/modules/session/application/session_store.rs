@@ -13,8 +13,17 @@ pub trait SessionStore: Send + Sync {
     async fn create(&self, project_id: &str) -> AgentResult<Session>;
 
     /// Append messages to a session, advancing its `updated_at`. The caller passes only the new tail
-    /// (the messages not yet persisted), in order.
-    async fn append_messages(&self, session_id: &str, messages: &[Message]) -> AgentResult<()>;
+    /// (the messages not yet persisted), in order, plus `base_index` (the tail's absolute position in
+    /// the conversation body) and `salt` (the caller's per-conversation random identity). Together they
+    /// derive a stable per-message identity the store uses to silently deduplicate a retried call with
+    /// an unmoved cursor — see `SqliteSessionStore`'s `MESSAGE_UUID_NAMESPACE` doc (issue #34).
+    async fn append_messages(
+        &self,
+        session_id: &str,
+        base_index: usize,
+        salt: &str,
+        messages: &[Message],
+    ) -> AgentResult<()>;
 
     /// Set a session's title (derived from the first user message).
     async fn set_title(&self, session_id: &str, title: &str) -> AgentResult<()>;
