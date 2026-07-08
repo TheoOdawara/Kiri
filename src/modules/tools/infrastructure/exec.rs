@@ -258,6 +258,9 @@ mod tests {
     /// cwd, `SHLVL` defaults to 1 with no inherited value, `_` is `sh`'s own "last command" bookkeeping.
     const SHELL_SYNTHESIZED_VARS: &[&str] = &["PWD", "OLDPWD", "SHLVL", "_"];
 
+    // The env allowlist (INHERITED_ENV_VARS) is Unix-oriented; Windows needs OS vars like SYSTEMROOT that
+    // are intentionally outside it, so this scrubbing assertion is Unix-only (Windows is not a v1 target).
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_shell_scrubs_env_down_to_the_allowlist() {
         // End-to-end: whatever this test process's REAL environment contains (cargo/CI vars, any local

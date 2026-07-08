@@ -678,18 +678,17 @@ mod tests {
         }
     }
 
+    // Unix shell loop to generate the output; Windows (`cmd /C`) is not a v1 target and its `for /L`
+    // output did not reliably exceed the cap under confinement.
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_command_truncates_large_output() {
         let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
 
-        // Generate enough output to exceed exec::EXEC_MAX_BYTES. The shell loop syntax differs
-        // between bash and cmd — the assertion only cares about the truncation marker.
-        #[cfg(unix)]
+        // Generate enough output to exceed exec::EXEC_MAX_BYTES.
         let spam = "for i in $(seq 1 50000); do echo $i; done";
-        #[cfg(windows)]
-        let spam = "for /L %i in (1,1,50000) do @echo %i";
 
         let outcome = reg
             .execute(&sb, &call("run_command", json!({"command": spam})))

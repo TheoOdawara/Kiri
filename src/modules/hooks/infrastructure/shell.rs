@@ -92,6 +92,8 @@ mod tests {
         }
     }
 
+    // Unix shell semantics (`echo` output shape); Windows (`cmd /C`) is not a v1 target.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_successful_command_reports_ok_with_its_first_output_line() {
         let dir = TempDir::new().unwrap();
@@ -112,6 +114,8 @@ mod tests {
         assert!(!outcome.ok);
     }
 
+    // `true` is a Unix builtin/binary; `cmd /C true` fails on Windows, which is not a v1 target.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_command_with_no_output_summarizes_the_exit_code() {
         let dir = TempDir::new().unwrap();
