@@ -256,6 +256,8 @@ mod tests {
     /// Vars a POSIX shell synthesizes itself on startup, from nothing — never inherited from the parent,
     /// so scrubbing the parent env cannot leak anything through them. `PWD` derives from the process's
     /// cwd, `SHLVL` defaults to 1 with no inherited value, `_` is `sh`'s own "last command" bookkeeping.
+    /// Only the `#[cfg(unix)]` scrub test below reads it, so it is unix-gated too (unused on Windows).
+    #[cfg(unix)]
     const SHELL_SYNTHESIZED_VARS: &[&str] = &["PWD", "OLDPWD", "SHLVL", "_"];
 
     // The env allowlist (INHERITED_ENV_VARS) is Unix-oriented; Windows needs OS vars like SYSTEMROOT that
