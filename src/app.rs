@@ -139,7 +139,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
             rules: (!rules_text.is_empty()).then_some(rules_text.as_str()),
             skills: (!skills_text.is_empty()).then_some(skills_text.as_str()),
             agents: (!agents_text.is_empty()).then_some(agents_text.as_str()),
-            instructions: settings.instructions.as_deref(),
+            instructions_global: settings.instructions_global.as_deref(),
+            instructions_project: settings.instructions_project.as_deref(),
         },
     );
     let sandbox = FsSandbox::with_confinement(
@@ -902,7 +903,8 @@ mod tests {
             active_provider: String::new(),
             effort: Effort::High,
             embeddings: None,
-            instructions: None,
+            instructions_global: None,
+            instructions_project: None,
             instruction_paths: vec![],
         }
     }
