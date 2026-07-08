@@ -93,10 +93,14 @@ pub struct Settings {
     /// Optional embeddings config for semantic recall: which configured provider to reuse and the model.
     /// `None` keeps recall keyword-only. Trusted (global) layer only.
     pub embeddings: Option<EmbeddingSettings>,
-    /// The merged instructions text to inject into the system prompt (global + project, or a CLI
-    /// override). `None` when no instructions file was found.
-    pub instructions: Option<String>,
-    /// The file paths that contributed to `instructions`, in discovery order, for TUI display.
+    /// Instructions from the trusted global layer (`~/.kiri/`), or the `--instructions` CLI override
+    /// (an explicit user-typed path — trusted the same way). Rendered as authoritative user guidance.
+    pub instructions_global: Option<String>,
+    /// Instructions from the untrusted project layer (the workspace root) — a cloned/third-party repo's
+    /// KIRI.md/AGENTS.md/CLAUDE.md may be attacker-authored, so this is rendered as untrusted guidance,
+    /// never as an authoritative directive (S3-1). `None` when a CLI override replaced both layers.
+    pub instructions_project: Option<String>,
+    /// The file paths that contributed to the instructions above, in discovery order, for TUI display.
     pub instruction_paths: Vec<PathBuf>,
 }
 
@@ -142,38 +146,35 @@ pub(super) fn find_instructions(dir: &std::path::Path) -> Option<PathBuf> {
         .find(|p| is_regular_file(p))
 }
 
-/// Discover and load instructions, merging global (`~/.kiri/`) and project (workspace root) layers.
-/// A CLI override (`--instructions`) replaces both layers. Returns `(merged_text, contributing_paths)`.
+/// Discover and load instructions, keeping the global (`~/.kiri/`, trusted) and project (workspace root,
+/// untrusted — S3-1) layers separate so each can be framed by its own trust level in the system prompt.
+/// A CLI override (`--instructions`) replaces both layers and is treated as global-tier: the user typed
+/// the path themselves, so it carries the same trust as `~/.kiri`, not the workspace. Returns
+/// `(global_text, project_text, contributing_paths)`.
 fn load_instructions(
     workspace: &std::path::Path,
     global_dir: &std::path::Path,
     cli_override: Option<PathBuf>,
-) -> Result<(Option<String>, Vec<PathBuf>)> {
+) -> Result<(Option<String>, Option<String>, Vec<PathBuf>)> {
     if let Some(path) = cli_override {
         let text = read_capped(&path)
             .map_err(|e| anyhow::anyhow!("--instructions: cannot read {}: {e}", path.display()))?;
-        return Ok((Some(text), vec![path]));
+        return Ok((Some(text), None, vec![path]));
     }
-    let mut parts: Vec<String> = Vec::new();
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for dir in [global_dir, workspace] {
-        // Best-effort: a read failure (permission denied, or the file vanished after the existence
-        // check) skips this layer rather than aborting config resolve — instructions are optional, and
-        // the harness must still boot.
-        if let Some(p) = find_instructions(dir)
-            && let Ok(text) = read_capped(&p)
-            && !text.trim().is_empty()
-        {
-            parts.push(text);
-            paths.push(p);
-        }
-    }
-    let merged = if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n\n"))
+    // Best-effort: a read failure (permission denied, or the file vanished after the existence check)
+    // skips this layer rather than aborting config resolve — instructions are optional, and the harness
+    // must still boot.
+    let load_layer = |dir: &std::path::Path| -> Option<(String, PathBuf)> {
+        let p = find_instructions(dir)?;
+        let text = read_capped(&p).ok()?;
+        (!text.trim().is_empty()).then_some((text, p))
     };
-    Ok((merged, paths))
+    let global = load_layer(global_dir);
+    let project = load_layer(workspace);
+    let mut paths = Vec::new();
+    paths.extend(global.as_ref().map(|(_, p)| p.clone()));
+    paths.extend(project.as_ref().map(|(_, p)| p.clone()));
+    Ok((global.map(|(t, _)| t), project.map(|(t, _)| t), paths))
 }
 
 impl Settings {
@@ -236,7 +237,7 @@ impl Settings {
             .or_else(|| std::env::var_os("KIRI_DOCS_PATH").map(PathBuf::from))
             .unwrap_or_else(|| path.join("docs"));
 
-        let (loaded_instructions, loaded_paths) =
+        let (loaded_instructions_global, loaded_instructions_project, loaded_paths) =
             load_instructions(&path, &global_dir, cli_instructions)?;
 
         Ok(Self {
@@ -282,21 +283,31 @@ impl Settings {
                 }
                 _ => None,
             },
-            instructions: loaded_instructions,
+            instructions_global: loaded_instructions_global,
+            instructions_project: loaded_instructions_project,
             instruction_paths: loaded_paths,
         })
     }
 
-    /// The instructions text formatted for TUI display: paths header followed by the merged content.
-    /// Returns `None` when no instructions were loaded.
+    /// The instructions text formatted for TUI display: paths header followed by both layers' content
+    /// (global first, then project) — display-only, so it merges freely unlike the trust-separated
+    /// system-prompt blocks.
     pub fn instructions_display(&self) -> Option<String> {
-        let text = self.instructions.as_deref()?;
+        if self.instructions_global.is_none() && self.instructions_project.is_none() {
+            return None;
+        }
         let header = self
             .instruction_paths
             .iter()
             .map(|p| format!("- {}", p.display()))
             .collect::<Vec<_>>()
             .join("\n");
+        let text = [&self.instructions_global, &self.instructions_project]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n\n");
         Some(format!("Arquivos carregados:\n{header}\n\n{text}"))
     }
 
@@ -365,8 +376,10 @@ mod tests {
     fn load_instructions_with_no_files_returns_none() {
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
-        let (text, paths) = load_instructions(workspace.path(), global.path(), None).unwrap();
-        assert!(text.is_none());
+        let (global_text, project_text, paths) =
+            load_instructions(workspace.path(), global.path(), None).unwrap();
+        assert!(global_text.is_none());
+        assert!(project_text.is_none());
         assert!(paths.is_empty());
     }
 
@@ -375,23 +388,27 @@ mod tests {
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
         write(global.path(), "CLAUDE.md", "global rules");
-        let (text, paths) = load_instructions(workspace.path(), global.path(), None).unwrap();
-        assert_eq!(text.unwrap(), "global rules");
+        let (global_text, project_text, paths) =
+            load_instructions(workspace.path(), global.path(), None).unwrap();
+        assert_eq!(global_text.unwrap(), "global rules");
+        assert!(project_text.is_none());
         assert_eq!(paths, vec![global.path().join("CLAUDE.md")]);
     }
 
     #[test]
-    fn load_instructions_appends_project_after_global() {
+    fn load_instructions_keeps_global_and_project_separate() {
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
         write(global.path(), "CLAUDE.md", "global rules");
         write(workspace.path(), "CLAUDE.md", "project rules");
-        let (text, paths) = load_instructions(workspace.path(), global.path(), None).unwrap();
+        let (global_text, project_text, paths) =
+            load_instructions(workspace.path(), global.path(), None).unwrap();
         assert_eq!(
-            text.unwrap(),
-            "global rules\n\nproject rules",
-            "global must come first, project appended after a blank line"
+            global_text.unwrap(),
+            "global rules",
+            "global layer must never merge with the untrusted project layer (S3-1)"
         );
+        assert_eq!(project_text.unwrap(), "project rules");
         assert_eq!(
             paths,
             vec![
@@ -407,8 +424,10 @@ mod tests {
         let workspace = TempDir::new().unwrap();
         write(global.path(), "CLAUDE.md", "   \n  ");
         write(workspace.path(), "CLAUDE.md", "project rules");
-        let (text, paths) = load_instructions(workspace.path(), global.path(), None).unwrap();
-        assert_eq!(text.unwrap(), "project rules");
+        let (global_text, project_text, paths) =
+            load_instructions(workspace.path(), global.path(), None).unwrap();
+        assert!(global_text.is_none());
+        assert_eq!(project_text.unwrap(), "project rules");
         assert_eq!(paths, vec![workspace.path().join("CLAUDE.md")]);
     }
 
@@ -422,10 +441,15 @@ mod tests {
         write(override_dir.path(), "custom.md", "override rules");
         let override_path = override_dir.path().join("custom.md");
 
-        let (text, paths) =
+        let (global_text, project_text, paths) =
             load_instructions(workspace.path(), global.path(), Some(override_path.clone()))
                 .unwrap();
-        assert_eq!(text.unwrap(), "override rules");
+        assert_eq!(
+            global_text.unwrap(),
+            "override rules",
+            "a CLI override is user-typed, so it is treated as global-tier trust"
+        );
+        assert!(project_text.is_none());
         assert_eq!(paths, vec![override_path]);
     }
 
@@ -466,9 +490,9 @@ mod tests {
         let oversized = "a".repeat(MAX_INSTRUCTIONS_BYTES as usize + 1024);
         write(global.path(), "CLAUDE.md", &oversized);
 
-        let (text, _) = load_instructions(workspace.path(), global.path(), None).unwrap();
+        let (global_text, _, _) = load_instructions(workspace.path(), global.path(), None).unwrap();
         assert_eq!(
-            text.unwrap().len(),
+            global_text.unwrap().len(),
             MAX_INSTRUCTIONS_BYTES as usize,
             "an oversized instructions file must be truncated at the byte cap, not read in full"
         );

@@ -562,6 +562,64 @@ async fn checkpoint_approved_auto_does_not_reopen_the_plan_blacklist() {
 }
 
 #[tokio::test]
+async fn checkpoint_approved_auto_does_not_defeat_present_plan_interception() {
+    // Issue #28 (second gap, found by adversarial re-verification): the sibling test above locks
+    // run_command's plan_check blacklist surviving a mid-turn ApprovedAuto escalation, but the
+    // present_plan interception itself (`AgentLoop::run`) used to gate on the live `mode` instead of
+    // `started_in_plan` — so after the same escalation, a `present_plan` call fell through to
+    // `decide_and_run`'s `Auto if started_in_plan` arm and executed as an ordinary tool (echoing the
+    // plan) instead of ending the turn with `TurnOutcome::PlanProposed`. max_tool_calls=1 forces the
+    // checkpoint after round 1's single allowed call, exactly like the sibling test.
+    let dir = TempDir::new().unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let agent_loop = AgentLoop::new(
+        Arc::new(ScriptedProvider {
+            turns: Mutex::new(VecDeque::from(vec![
+                // Round 1: an allow-listed command (echo), confirmed — the call cap then trips. Mirrors
+                // the sibling test above: run_command is the call that actually consumes a `decide`
+                // confirmation, so the post-round checkpoint consumes the SECOND queued decision
+                // (ApprovedAuto) and genuinely flips `mode` to Auto before round 2 — a plannable
+                // read-only call here (e.g. list_dir) needs no confirmation and would let the
+                // checkpoint consume the wrong decision, leaving `mode` at Plan and making this test
+                // pass vacuously regardless of the fix.
+                CompletedTurn {
+                    content: "investigating".to_string(),
+                    tool_calls: vec![tool_call("run_command", r#"{"command":"echo hi"}"#)],
+                    thinking: None,
+                },
+                // Round 2, now mode == Auto (via the checkpoint's ApprovedAuto below): present_plan
+                // must still end the turn as PlanProposed, never execute as an ordinary tool.
+                CompletedTurn {
+                    content: "escalated".to_string(),
+                    tool_calls: vec![tool_call("present_plan", r#"{"plan":"Plano final"}"#)],
+                    thinking: None,
+                },
+            ])),
+        }),
+        registry_for_tests(),
+        "model".to_string(),
+        Duration::from_secs(3600),
+        1,
+    );
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("plan something"));
+    // Consumed in order: round 1's per-call confirmation, then the post-round checkpoint's decision.
+    let mut io = TestIo::new(Approval::Approved)
+        .with_decisions(vec![Approval::Approved, Approval::ApprovedAuto]);
+
+    let outcome = agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        TurnOutcome::PlanProposed("Plano final".to_string()),
+        "present_plan must still end the turn as PlanProposed after a mid-turn ApprovedAuto escalation"
+    );
+}
+
+#[tokio::test]
 async fn plan_mode_confirms_out_of_root_read() {
     // SEC-01: an out-of-root read while planning must be confirmed (not default-accepted), so a
     // prompt-injected plan turn cannot exfiltrate `~/.ssh/id_rsa` / `/etc/passwd` back to the model.

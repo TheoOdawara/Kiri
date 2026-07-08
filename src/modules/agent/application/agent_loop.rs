@@ -141,7 +141,10 @@ impl AgentLoop {
         let mut calls_since_checkpoint: usize = 0;
         loop {
             io.begin_round();
-            let turn_messages = if mode == ApprovalMode::Plan {
+            // Sticky to the turn's origin like the schema and the run_command blacklist (issue #28):
+            // a checkpoint's ApprovedAuto must not make the model stop seeing the plan-mode reminder
+            // mid-turn, or it silently stops calling `present_plan` at all.
+            let turn_messages = if started_in_plan {
                 let mut msgs = conversation.messages().to_vec();
                 msgs.push(Message::system(
                     "CRITICAL: The active approval mode is PLAN. You are restricted to read-only tools and run_command. \
@@ -194,7 +197,13 @@ impl AgentLoop {
             // plan for approval and end the planning turn without executing anything. Every call in the
             // turn gets a tool result so the round stays a valid OpenAI tool exchange (each `tool_call`
             // must be answered before the next message).
-            if mode == ApprovalMode::Plan
+            //
+            // Gated on `started_in_plan`, not the live `mode` (issue #28): a checkpoint's ApprovedAuto
+            // flips `mode` to `Auto` mid-turn, but `present_plan` is still advertised (the schema is
+            // sticky too) and still plannable, so without this it would fall through to `decide_and_run`'s
+            // `Auto if started_in_plan` arm and execute as an ordinary tool — echoing the plan back
+            // instead of ending the turn with `TurnOutcome::PlanProposed`.
+            if started_in_plan
                 && let Some(plan_call) =
                     calls.iter().find(|call| call.function.name == PRESENT_PLAN)
             {

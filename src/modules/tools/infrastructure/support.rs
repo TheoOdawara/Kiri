@@ -18,6 +18,16 @@ pub const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 /// Read at most `cap` bytes from `path`, bounding allocation against very large files. Bounded by
 /// `DEFAULT_TIMEOUT`: a wedged/stale mount must fail fast rather than stall the runtime.
 pub async fn read_capped(path: &Path, cap: usize) -> std::io::Result<Vec<u8>> {
+    read_capped_within(path, cap, exec::DEFAULT_TIMEOUT).await
+}
+
+/// `read_capped`'s real implementation, with the timeout as a parameter — a testable seam so a test can
+/// force the timeout branch without waiting out the real `DEFAULT_TIMEOUT` (30s).
+async fn read_capped_within(
+    path: &Path,
+    cap: usize,
+    timeout: std::time::Duration,
+) -> std::io::Result<Vec<u8>> {
     let read = async {
         let mut buffer = Vec::new();
         tokio::fs::File::open(path)
@@ -27,7 +37,7 @@ pub async fn read_capped(path: &Path, cap: usize) -> std::io::Result<Vec<u8>> {
             .await?;
         Ok(buffer)
     };
-    match tokio::time::timeout(exec::DEFAULT_TIMEOUT, read).await {
+    match tokio::time::timeout(timeout, read).await {
         Ok(result) => result,
         Err(_) => Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
@@ -197,5 +207,38 @@ mod tests {
             result.is_err(),
             "expected an error reading a directory as a file"
         );
+    }
+
+    // Issue #39 (P1-1): the DEFAULT_TIMEOUT branch itself was never exercised by a test — only the
+    // happy path and a plain open() failure. A FIFO with no writer blocks on open() until one appears,
+    // giving a fast, deterministic way to force a real hang without waiting out DEFAULT_TIMEOUT (30s).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_capped_within_times_out_on_a_stalled_read() {
+        let dir = std::env::temp_dir();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let fifo = dir.join(format!("t-cli-support-fifo-{}-{n}", std::process::id()));
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo must be available on the unix test host");
+        assert!(status.success(), "mkfifo failed to create the test FIFO");
+
+        let result =
+            super::read_capped_within(&fifo, 1024, std::time::Duration::from_millis(50)).await;
+
+        // `read_capped_within`'s open() runs on tokio's blocking pool and, once the timeout wins the
+        // race, is left detached still blocked in the FIFO's open() syscall — the same "may still
+        // complete in the background" ceiling exec.rs/write_file.rs already document for a timed-out
+        // tokio::fs op. Open the write end so that leaked reader unblocks and exits before this test
+        // (and the runtime it owns) tears down: dropping a Tokio runtime blocks the current thread
+        // until every outstanding blocking task completes, so a reader that never unblocks would hang
+        // the whole test process, not just this test.
+        let _ = tokio::fs::File::options().write(true).open(&fifo).await;
+        let _ = fs::remove_file(&fifo);
+
+        let error =
+            result.expect_err("opening a FIFO with no writer must block until it times out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 }
