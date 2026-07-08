@@ -7,9 +7,13 @@ use tokio::task::spawn_blocking;
 
 use crate::shared::kernel::error::AgentError;
 
-/// Upper bound for a single blocking database operation, so a wedged lock or pathological query surfaces
-/// as a clear error instead of hanging the runtime. Shared by every SQLite-backed store (memory, session).
-pub const DB_OP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Upper bound for a single blocking database operation, so an op that never returns (a wedged lock or
+/// pathological query) surfaces as a clear error instead of hanging the runtime. Shared by every
+/// SQLite-backed store (memory, session). This is a last-resort safety valve, not a hot path: it wraps
+/// `spawn_blocking`, so it also counts pool-queue wait, and on a contended CI runner (Windows Defender
+/// scanning a freshly-created `.db`, ~1000 tests in parallel) a cold `init()` can spike past a tight
+/// bound and flake. Kept generous — a genuine hang is still caught, just later; a false-positive is not.
+pub const DB_OP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Open (creating its parent directory if needed) a SQLite database. The parent-dir failure flows to
 /// `AgentError::Io` via the kernel `#[from]`; the open failure is classified through `map_err`, so each
@@ -91,7 +95,7 @@ mod tests {
     #[tokio::test]
     async fn run_blocking_times_out_via_the_constructor() {
         // The testable seam: a near-zero timeout against a closure that blocks past it exercises the
-        // timeout branch in milliseconds, never the production 5s DB_OP_TIMEOUT.
+        // timeout branch in milliseconds, never the production 30s DB_OP_TIMEOUT.
         let error = run_blocking_with_timeout(
             || {
                 std::thread::sleep(Duration::from_millis(100));
