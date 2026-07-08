@@ -354,11 +354,18 @@ impl ProjectMemory for FileProjectMemory {
 
     async fn list(&self, offset: usize, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let index = self.index.read().await;
-        let ids: Vec<String> = index.entries.keys().cloned().collect();
+        let mut ids: Vec<(String, String)> = index
+            .entries
+            .iter()
+            .map(|(id, e)| (id.clone(), e.updated_at.clone()))
+            .collect();
         drop(index);
+        // Newest-first, mirroring `embedded_candidates`'s sort and the SQLite adapter's
+        // `ORDER BY updated_at DESC` — the boot digest documents this list as "most recent".
+        ids.sort_by(|a, b| b.1.cmp(&a.1));
 
         let mut results = Vec::new();
-        for id in ids.into_iter().skip(offset).take(limit) {
+        for (id, _) in ids.into_iter().skip(offset).take(limit) {
             if let Some(entry) = self.load(&id).await? {
                 results.push(entry);
             }
@@ -368,16 +375,17 @@ impl ProjectMemory for FileProjectMemory {
 
     async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let index = self.index.read().await;
-        let ids: Vec<String> = index
+        let mut ids: Vec<(String, String)> = index
             .entries
             .iter()
             .filter(|(_, e)| e.kind == kind)
-            .map(|(id, _)| id.clone())
+            .map(|(id, e)| (id.clone(), e.updated_at.clone()))
             .collect();
         drop(index);
+        ids.sort_by(|a, b| b.1.cmp(&a.1));
 
         let mut results = Vec::new();
-        for id in ids.into_iter().take(limit) {
+        for (id, _) in ids.into_iter().take(limit) {
             if let Some(entry) = self.load(&id).await? {
                 results.push(entry);
             }
@@ -387,16 +395,17 @@ impl ProjectMemory for FileProjectMemory {
 
     async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         let index = self.index.read().await;
-        let ids: Vec<String> = index
+        let mut ids: Vec<(String, String)> = index
             .entries
             .iter()
             .filter(|(_, e)| e.tags.iter().any(|t| t == tag))
-            .map(|(id, _)| id.clone())
+            .map(|(id, e)| (id.clone(), e.updated_at.clone()))
             .collect();
         drop(index);
+        ids.sort_by(|a, b| b.1.cmp(&a.1));
 
         let mut results = Vec::new();
-        for id in ids.into_iter().take(limit) {
+        for (id, _) in ids.into_iter().take(limit) {
             if let Some(entry) = self.load(&id).await? {
                 results.push(entry);
             }
@@ -592,6 +601,97 @@ mod tests {
         let rust = memory.list_by_tag("rust", 10).await.unwrap();
         assert_eq!(rust.len(), 1);
         assert!(rust[0].content.contains("rust"));
+    }
+
+    /// Regression for issue #38: `list` must return entries newest-`updated_at`-first, not in
+    /// `HashMap` iteration order, so the boot digest (`app.rs`'s `list(0, DIGEST_PROJECT_CAP)`)
+    /// is deterministic and actually the most recent knowledge.
+    #[tokio::test]
+    async fn list_returns_most_recent_first() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        let memory = FileProjectMemory::new(root);
+        memory.init().await.unwrap();
+
+        // Saved out of chronological order so a HashMap-order bug would not accidentally pass.
+        for (content, updated_at) in [
+            ("oldest", "2026-01-01T00:00:00Z"),
+            ("newest", "2026-01-03T00:00:00Z"),
+            ("middle", "2026-01-02T00:00:00Z"),
+        ] {
+            let mut entry =
+                MemoryEntry::new(MemoryKind::Fact, content.into(), HashSet::new(), None);
+            entry.updated_at = updated_at.into();
+            memory.save(&entry).await.unwrap();
+        }
+
+        let all = memory.list(0, 10).await.unwrap();
+        let contents: Vec<&str> = all.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(contents, vec!["newest", "middle", "oldest"]);
+
+        let page = memory.list(1, 1).await.unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].content, "middle");
+    }
+
+    #[tokio::test]
+    async fn list_by_kind_returns_most_recent_first() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        let memory = FileProjectMemory::new(root);
+        memory.init().await.unwrap();
+
+        for (content, updated_at) in [
+            ("oldest", "2026-01-01T00:00:00Z"),
+            ("newest", "2026-01-03T00:00:00Z"),
+            ("middle", "2026-01-02T00:00:00Z"),
+        ] {
+            let mut entry =
+                MemoryEntry::new(MemoryKind::Pattern, content.into(), HashSet::new(), None);
+            entry.updated_at = updated_at.into();
+            memory.save(&entry).await.unwrap();
+        }
+        // A different kind must not appear, and must not disturb the ordering of the ones that do.
+        memory
+            .save(&MemoryEntry::new(
+                MemoryKind::Fact,
+                "unrelated".into(),
+                HashSet::new(),
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let patterns = memory.list_by_kind(MemoryKind::Pattern, 10).await.unwrap();
+        let contents: Vec<&str> = patterns.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(contents, vec!["newest", "middle", "oldest"]);
+    }
+
+    #[tokio::test]
+    async fn list_by_tag_returns_most_recent_first() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".kiri").join("memory");
+        let memory = FileProjectMemory::new(root);
+        memory.init().await.unwrap();
+
+        for (content, updated_at) in [
+            ("oldest", "2026-01-01T00:00:00Z"),
+            ("newest", "2026-01-03T00:00:00Z"),
+            ("middle", "2026-01-02T00:00:00Z"),
+        ] {
+            let mut entry = MemoryEntry::new(
+                MemoryKind::Fact,
+                content.into(),
+                ["rust"].into_iter().map(String::from).collect(),
+                None,
+            );
+            entry.updated_at = updated_at.into();
+            memory.save(&entry).await.unwrap();
+        }
+
+        let rust = memory.list_by_tag("rust", 10).await.unwrap();
+        let contents: Vec<&str> = rust.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(contents, vec!["newest", "middle", "oldest"]);
     }
 
     #[tokio::test]
