@@ -12,7 +12,7 @@ mod writers;
 
 pub use cli::{Cli, CliCommand, SyncAction};
 pub use settings::{Settings, load_global_env};
-pub use system_prompt::render_system_prompt;
+pub use system_prompt::{PromptExtensions, render_system_prompt};
 pub use writers::{
     delete_provider, persist_active_model, persist_active_provider, persist_effort, upsert_provider,
 };

@@ -117,6 +117,7 @@ mod tests {
     fn skill(id: &str, body: &str) -> Skill {
         Skill {
             id: id.to_string(),
+            name: id.to_string(),
             description: format!("{id} description"),
             body: body.to_string(),
             layer: Layer::Global,

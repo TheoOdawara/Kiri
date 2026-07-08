@@ -1,8 +1,9 @@
 //! Loads extension resources from the filesystem: Markdown files with optional YAML frontmatter.
 //! Scans the six resource-type subdirectories (`rules/`, `commands/`, `agents/`, `skills/`, `hooks/`,
 //! `mcp/`) under both `~/.kiri/` (global) and `<workspace>/.kiri/` (project) — merging by id (global
-//! first, project extends). Follows the same convention as `DocsLibrary`: depth-first walk, capped,
-//! symlink-skipping.
+//! first, project extends), then folding in the binary-shipped defaults (`infrastructure::bundled`,
+//! ADR 0028) as a third, lowest-precedence layer. Follows the same convention as `DocsLibrary`:
+//! depth-first walk, capped, symlink-skipping.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ use crate::modules::extensions::domain::resource::{
     AgentProfile, CommandSpec as ExtCommandSpec, Hook, McpServer, Resource, Rule, Skill,
 };
 use crate::modules::extensions::domain::scope::Layer;
+use crate::modules::extensions::infrastructure::bundled::bundled_for;
 use crate::shared::kernel::error::AgentResult;
 
 /// The six extension resource types this loader scans, in discovery order. Each is a subdirectory name
@@ -119,10 +121,12 @@ impl FileExtensionsLoader {
     }
 
     /// Discover and fold one resource type into `catalog`: scans the global then project `type_name/`
-    /// subdirectory (a fresh resources map per type, so ids never collide across types), then builds the
-    /// typed entries into the matching catalog field. Takes `&mut ExtensionCatalog` rather than one
-    /// mutable ref per field — the catalog already groups every accumulator this needs, so this stays
-    /// under the argument-count lint as new resource types are added.
+    /// subdirectory (a fresh resources map per type, so ids never collide across types), then folds in the
+    /// binary-shipped defaults (ADR 0028) as a third, lowest-precedence layer, then builds the typed
+    /// entries into the matching catalog field. Precedence is global > project > bundled — the map is
+    /// `or_insert` (first wins), so a user file of the same id always overrides a bundled default. Takes
+    /// `&mut ExtensionCatalog` rather than one mutable ref per field — the catalog already groups every
+    /// accumulator this needs, so this stays under the argument-count lint as new resource types are added.
     async fn load_type(&self, type_name: &str, catalog: &mut ExtensionCatalog) -> AgentResult<()> {
         let mut resources: HashMap<String, Resource> = HashMap::new();
         let global_root = self.global_dir.join(type_name);
@@ -132,6 +136,9 @@ impl FileExtensionsLoader {
         let project_root = self.project_dir.join(type_name);
         if project_root.is_dir() {
             load_layer(&project_root, Layer::Project, &mut resources).await?;
+        }
+        for res in bundled_for(type_name) {
+            resources.entry(res.id.clone()).or_insert(res);
         }
 
         for res in resources.values() {
@@ -221,21 +228,28 @@ mod tests {
         let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
         let catalog = loader.load().await.unwrap();
 
-        assert_eq!(catalog.rules.len(), 2);
-        let always_on: Vec<&Rule> = catalog.rules.iter().filter(|r| r.always).collect();
-        assert_eq!(always_on.len(), 1);
-        assert_eq!(always_on[0].id, "style");
-        assert_eq!(always_on[0].body, "Use Rust fmt.");
-        assert_eq!(always_on[0].layer, Layer::Global);
+        // 3, not 2: the bundled `ponytail` rule (ADR 0028) always folds in as a third, lowest-precedence
+        // rule alongside the two user-authored ones.
+        assert_eq!(catalog.rules.len(), 3);
+        let style = catalog.rules.iter().find(|r| r.id == "style").unwrap();
+        assert!(style.always);
+        assert_eq!(style.body, "Use Rust fmt.");
+        assert_eq!(style.layer, Layer::Global);
+        let team = catalog.rules.iter().find(|r| r.id == "team").unwrap();
+        assert!(!team.always);
     }
 
     #[tokio::test]
-    async fn empty_dirs_yield_no_rules() {
+    async fn empty_dirs_yield_only_the_bundled_ponytail_rule() {
+        // No user rule files at all: the bundled `ponytail` rule (ADR 0028, always-on) is still present —
+        // rules are never truly empty by default. Commands have no bundled default, so they stay empty.
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
         let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
         let catalog = loader.load().await.unwrap();
-        assert!(catalog.rules.is_empty());
+        assert_eq!(catalog.rules.len(), 1);
+        assert_eq!(catalog.rules[0].id, "ponytail");
+        assert!(catalog.rules[0].always);
         assert!(catalog.commands.is_empty());
     }
 
@@ -289,8 +303,13 @@ mod tests {
         let cmd = catalog.commands.get("/x").unwrap();
         assert_eq!(cmd.body, "Global.");
         assert_eq!(cmd.layer, Layer::Global);
-        // Both resources are in the catalog for display.
-        assert_eq!(catalog.resources.len(), 1);
+        // Exactly one raw resource is kept for id "x" (global wins, project never adds a second entry).
+        // `resources` also holds the unrelated bundled agents/skills (ADR 0028), so its total length is
+        // not asserted here.
+        assert_eq!(
+            catalog.resources.get("x").map(|r| r.layer),
+            Some(Layer::Global)
+        );
     }
 
     #[tokio::test]
@@ -299,7 +318,7 @@ mod tests {
         write(
             global.path(),
             "agents/researcher.md",
-            "---\nmodel: gpt-pro\n---\n\nYou are a deep-research agent.\n",
+            "---\nname: Researcher\ndescription: Deep-research specialist.\nmodel: gpt-pro\n---\n\nYou are a deep-research agent.\n",
         )
         .await;
         write(
@@ -314,6 +333,8 @@ mod tests {
         let catalog = loader.load().await.unwrap();
 
         let agent = catalog.agents.get("researcher").unwrap();
+        assert_eq!(agent.name, "Researcher");
+        assert_eq!(agent.description, "Deep-research specialist.");
         assert_eq!(agent.system_prompt, "You are a deep-research agent.");
         assert_eq!(agent.model.as_deref(), Some("gpt-pro"));
 
@@ -324,13 +345,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_dirs_yield_no_agents_or_skills() {
+    async fn empty_dirs_yield_only_the_bundled_defaults() {
+        // No user files at all: agents/skills are exactly the binary-shipped defaults (ADR 0028) — the
+        // catalog is never truly empty for these two types, which is the point (efficient from the first
+        // prompt). `resources.len()` for agents+skills is asserted precisely to lock the exact count.
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
         let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
         let catalog = loader.load().await.unwrap();
-        assert!(catalog.agents.is_empty());
-        assert!(catalog.skills.is_empty());
+        assert_eq!(catalog.agents.len(), 2);
+        assert!(catalog.agents.contains_key("search"));
+        assert!(catalog.agents.contains_key("planning"));
+        assert_eq!(catalog.skills.len(), 8);
+        for id in [
+            "plano",
+            "gh",
+            "commit",
+            "ponytail",
+            "ponytail-review",
+            "ponytail-audit",
+            "ponytail-debt",
+            "ponytail-gain",
+        ] {
+            assert!(
+                catalog.skills.contains_key(id),
+                "missing bundled skill {id}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn user_global_skill_overrides_bundled_default_of_same_id() {
+        let global = TempDir::new().unwrap();
+        write(
+            global.path(),
+            "skills/plano.md",
+            "---\ndescription: User override\n---\n\nUser body.\n",
+        )
+        .await;
+        let workspace = TempDir::new().unwrap();
+        let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
+        let catalog = loader.load().await.unwrap();
+
+        let skill = catalog.skills.get("plano").unwrap();
+        assert_eq!(skill.body, "User body.");
+        assert_eq!(skill.layer, Layer::Global);
+    }
+
+    #[tokio::test]
+    async fn project_skill_overrides_bundled_default_of_same_id() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write(
+            &workspace.path().join(".kiri"),
+            "skills/plano.md",
+            "---\ndescription: Project override\n---\n\nProject body.\n",
+        )
+        .await;
+        let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
+        let catalog = loader.load().await.unwrap();
+
+        let skill = catalog.skills.get("plano").unwrap();
+        assert_eq!(skill.body, "Project body.");
+        assert_eq!(skill.layer, Layer::Project);
     }
 
     #[tokio::test]

@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use crate::modules::agent::application::agent_loop::AgentLoop;
+use crate::modules::agent::infrastructure::task_tool::TaskTool;
 use crate::modules::extensions::application::{ExtensionCatalog, ExtensionsLoader};
 use crate::modules::extensions::domain::gate::{self, GateState, content_hash};
 use crate::modules::extensions::domain::resource::McpServer;
@@ -66,7 +67,7 @@ use crate::modules::tui::infrastructure::runtime::{
     BootNotice, HookContext, ProviderSwap, SharedMemoryFactory, SyncContext, Tui, TuiParams,
 };
 use crate::shared::infra::config::{
-    Settings, SyncAction, ensure_private_dir, render_system_prompt,
+    PromptExtensions, Settings, SyncAction, ensure_private_dir, render_system_prompt,
 };
 use crate::shared::kernel::error::AgentResult;
 use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile};
@@ -117,6 +118,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     ));
     let rules_text = extensions.render_rules();
     let skills_text = extensions.skills_index().unwrap_or_default();
+    let agents_text = extensions.agents_index().unwrap_or_default();
     let hooks_display = extensions.hooks_display();
     let mcp_display = extensions.mcp_display();
     let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
@@ -133,9 +135,12 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         RUN_COMMAND_DEFAULT_TIMEOUT_MS,
         EXEC_MAX_BYTES,
         settings.checkpoint_budget,
-        (!rules_text.is_empty()).then_some(rules_text.as_str()),
-        (!skills_text.is_empty()).then_some(skills_text.as_str()),
-        settings.instructions.as_deref(),
+        PromptExtensions {
+            rules: (!rules_text.is_empty()).then_some(rules_text.as_str()),
+            skills: (!skills_text.is_empty()).then_some(skills_text.as_str()),
+            agents: (!agents_text.is_empty()).then_some(agents_text.as_str()),
+            instructions: settings.instructions.as_deref(),
+        },
     );
     let sandbox = FsSandbox::with_confinement(
         &settings.path,
@@ -163,10 +168,25 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // The file tools plus the plan-mode control tool. `present_plan` is advertised only in plan mode
     // (it carries `plan_only`); the registry's `schemas()` withholds it everywhere else.
     let mut tools = default_fs_tools(settings.plan_allow.clone(), settings.require_confinement);
-    tools.push(Box::new(PresentPlan));
+    tools.push(Arc::new(PresentPlan));
     tools.extend(memory_tools);
     tools.extend(default_extension_tools(Arc::new(extensions.skills.clone())));
     tools.extend(build_mcp_tools(&extensions, &trust_store, &mut boot_notices).await);
+    // ADR 0029: the `task` tool dispatches a loaded agent profile as a nested, read-only subagent. Its
+    // child pool is every tool assembled so far — never `task` itself, the structural depth-1 cap — so
+    // it is built last, cloning the pool before it moves into the registry. Skipped entirely when no
+    // agent profile is loaded, so a fresh install never advertises a dead tool.
+    let agents = Arc::new(extensions.agents.clone());
+    if !agents.is_empty() {
+        tools.push(Arc::new(TaskTool::new(
+            provider.clone(),
+            tools.clone(),
+            agents,
+            profile.model.clone(),
+            settings.checkpoint_budget,
+            settings.max_tool_calls,
+        )));
+    }
     let registry = ToolRegistry::new(tools);
     let agent_loop = AgentLoop::new(
         provider,
@@ -282,13 +302,13 @@ async fn build_mcp_tools(
     extensions: &ExtensionCatalog,
     trust: &ExtensionsTrustStore,
     notices: &mut Vec<BootNotice>,
-) -> Vec<Box<dyn Tool>> {
-    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+) -> Vec<Arc<dyn Tool>> {
+    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     let mut servers: Vec<&McpServer> = extensions.mcp_servers.values().collect();
     servers.sort_by(|a, b| a.id.cmp(&b.id));
     for server in servers {
         let approved = match server.layer {
-            Layer::Global => true,
+            Layer::Global | Layer::Bundled => true,
             Layer::Project => {
                 let hash = content_hash(&server.hash_key());
                 // Fail closed on a trust-store read error (corrupt/unreadable file): treat as
@@ -322,7 +342,7 @@ async fn build_mcp_tools(
             Ok(specs) => {
                 let discovered = specs.len();
                 for spec in specs.into_iter().take(MAX_MCP_TOOLS_PER_SERVER) {
-                    tools.push(Box::new(McpToolProxy::new(
+                    tools.push(Arc::new(McpToolProxy::new(
                         &server.id,
                         spec,
                         connection.clone(),
@@ -346,9 +366,12 @@ async fn build_mcp_tools(
     tools
 }
 
-/// Wire the extensions framework (ADR 0021): rules + commands, discovered from `~/.kiri/{rules,commands}`
-/// (global, trusted) and `<workspace>/.kiri/{rules,commands}` (project). Auxiliary like memory/session — a
-/// load failure degrades to an empty catalog (surfaced as a boot notice) rather than aborting the boot.
+/// Wire the extensions framework (ADR 0021): rules, commands, agents, skills, hooks, and MCP servers,
+/// discovered from `~/.kiri/{...}` (global, trusted) and `<workspace>/.kiri/{...}` (project), with the
+/// binary-shipped defaults (ADR 0028) folded in as a third, lowest-precedence layer per resource type —
+/// so a fresh install is never empty, and any user file overrides a default of the same id. Auxiliary
+/// like memory/session — a load failure degrades to an empty catalog (surfaced as a boot notice) rather
+/// than aborting the boot.
 async fn build_extensions(settings: &Settings, notices: &mut Vec<BootNotice>) -> ExtensionCatalog {
     let loader = FileExtensionsLoader::new(settings.global_dir.clone(), &settings.path);
     match loader.load().await {
@@ -438,7 +461,7 @@ async fn build_memory(
     embedder: Option<Arc<dyn EmbeddingProvider>>,
     project_id: String,
     notices: &mut Vec<BootNotice>,
-) -> Result<(Vec<Box<dyn Tool>>, String, Arc<dyn Memory>)> {
+) -> Result<(Vec<Arc<dyn Tool>>, String, Arc<dyn Memory>)> {
     if !settings.memory_enabled {
         return Ok((Vec::new(), String::new(), inert_memory_port(settings)?));
     }

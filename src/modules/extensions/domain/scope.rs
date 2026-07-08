@@ -1,10 +1,13 @@
 /// The layer an extension resource was discovered in, mirroring the two-layer model used for instructions
-/// (ADR 0019) and config (ADR 0012). `Global` is the trusted `~/.kiri/` layer; `Project` is the untrusted
-/// `<workspace>/.kiri/` layer. Pure data only — no path knowledge, no I/O.
+/// (ADR 0019) and config (ADR 0012), plus the binary-shipped `Bundled` layer (ADR 0028). `Global` is the
+/// trusted `~/.kiri/` layer; `Project` is the untrusted `<workspace>/.kiri/` layer; `Bundled` is compiled
+/// into the binary, trusted like `Global`, and sits at the lowest precedence — any user file of the same
+/// id overrides it. Pure data only — no path knowledge, no I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layer {
     Global,
     Project,
+    Bundled,
 }
 
 impl Layer {
@@ -13,6 +16,18 @@ impl Layer {
         match self {
             Layer::Global => "global",
             Layer::Project => "project",
+            Layer::Bundled => "bundled",
+        }
+    }
+
+    /// Precedence rank, lowest-value = highest-precedence: global > project > bundled. The single
+    /// source for any layer-order sort (e.g. `render_rules` joining always-on rules deterministically),
+    /// so a HashMap-sourced resource list renders in a stable order rather than an arbitrary one.
+    pub fn precedence(self) -> u8 {
+        match self {
+            Layer::Global => 0,
+            Layer::Project => 1,
+            Layer::Bundled => 2,
         }
     }
 }
@@ -25,5 +40,6 @@ mod tests {
     fn layer_labels() {
         assert_eq!(Layer::Global.label(), "global");
         assert_eq!(Layer::Project.label(), "project");
+        assert_eq!(Layer::Bundled.label(), "bundled");
     }
 }

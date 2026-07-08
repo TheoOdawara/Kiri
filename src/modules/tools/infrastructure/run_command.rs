@@ -297,6 +297,9 @@ mod tests {
     use crate::modules::tools::infrastructure::fs::default_fs_tools;
     use crate::modules::tools::infrastructure::sandbox::FsSandbox;
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
+    // Used only by the macOS/Linux OS-sandbox tests below; Windows has no such tests, so gate the
+    // import to unix to avoid an unused-import warning there.
+    #[cfg(unix)]
     use crate::shared::kernel::sandbox::NetworkPolicy;
     use crate::shared::kernel::tool_call::FunctionCall;
     use regex::Regex;
@@ -675,18 +678,17 @@ mod tests {
         }
     }
 
+    // Unix shell loop to generate the output; Windows (`cmd /C`) is not a v1 target and its `for /L`
+    // output did not reliably exceed the cap under confinement.
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_command_truncates_large_output() {
         let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let reg = registry();
 
-        // Generate enough output to exceed exec::EXEC_MAX_BYTES. The shell loop syntax differs
-        // between bash and cmd — the assertion only cares about the truncation marker.
-        #[cfg(unix)]
+        // Generate enough output to exceed exec::EXEC_MAX_BYTES.
         let spam = "for i in $(seq 1 50000); do echo $i; done";
-        #[cfg(windows)]
-        let spam = "for /L %i in (1,1,50000) do @echo %i";
 
         let outcome = reg
             .execute(&sb, &call("run_command", json!({"command": spam})))

@@ -1,16 +1,21 @@
+use std::sync::Arc;
+
 use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{Confirmation, Tool, ToolOutcome};
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// Holds the registered tools and dispatches by name. Replaces the central `tool_definitions`/
-/// `execute`/`confirmation_prompt` match: a tool advertises, confirms, and runs itself.
+/// `execute`/`confirmation_prompt` match: a tool advertises, confirms, and runs itself. Tools are `Arc`
+/// (not `Box`) so the same instances can be cheaply shared into a filtered child registry for a
+/// dispatched subagent (ADR 0029) — a stateful tool (e.g. an MCP proxy) is never rebuilt or
+/// double-connected just to hand a subset to a nested `AgentLoop`.
 pub struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: Vec<Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
-    pub fn new(tools: Vec<Box<dyn Tool>>) -> Self {
+    pub fn new(tools: Vec<Arc<dyn Tool>>) -> Self {
         Self { tools }
     }
 

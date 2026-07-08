@@ -151,27 +151,50 @@ impl CommandSpec {
     }
 }
 
-/// An **agent** profile (ADR 0021): a named system-prompt a custom command binds to via its `agent:`
-/// field. Built from a `Resource`. Not an isolated sub-agent — the harness runs a single turn loop, so
-/// binding a command to an agent means "prepend this system-prompt to the turn", not "spawn a concurrent
-/// agent" (see `ExtensionCatalog::command_bodies`).
+/// An **agent** profile (ADR 0021): a named system-prompt. Built from a `Resource`. Consumed two ways:
+/// a custom command can bind to it via its `agent:` field, prepending the system-prompt to the command's
+/// expanded body (`ExtensionCatalog::command_bodies`) — a same-loop prompt overlay, not a spawn. Or the
+/// model can dispatch it directly as an isolated subagent via the `task` tool (ADR 0029), which runs a
+/// nested `AgentLoop` scoped to `model`/`allowed_tools` and returns only the final text to the parent.
 #[derive(Debug, Clone)]
 pub struct AgentProfile {
     pub id: String,
-    /// The agent's system-prompt text (the resource body), prepended to a bound command's expanded body.
+    /// A human-readable display name (frontmatter `name:`), falling back to `id` when absent. Display
+    /// only — `task`/command `agent:` bindings always address the agent by `id`.
+    pub name: String,
+    /// One-line purpose statement (frontmatter `description:`), rendered into the `# Agents` system-prompt
+    /// index (`ExtensionCatalog::agents_index`, ADR 0029) so the model can pick a `task` target without
+    /// guessing an id. Empty when absent — the catalog fold does not fail on a missing description, but a
+    /// bundled agent must always carry one (locked by `bundled.rs`'s guard test).
+    pub description: String,
+    /// The agent's system-prompt text (the resource body), prepended to a bound command's expanded body,
+    /// or seeded as the nested conversation's system prompt when dispatched via `task`.
     pub system_prompt: String,
     pub layer: Layer,
     pub path: String,
-    // ponytail: same ceiling as `CommandSpec::model`/`allowed_tools` — no per-turn override mechanism yet.
-    #[allow(dead_code)]
+    /// The model id a dispatched subagent runs with (ADR 0029); falls back to the session's active model
+    /// when absent. Unused by the command-binding path (that stays on the parent's model/turn).
     pub model: Option<String>,
-    #[allow(dead_code)]
+    /// The tool names a dispatched subagent may draw from (ADR 0029), intersected with "read-only" — v1
+    /// supports read-only subagents only. Empty means every read-only tool. Unused by the command-binding
+    /// path (that keeps the parent's full toolset).
     pub allowed_tools: Vec<String>,
 }
 
 impl AgentProfile {
     /// Build an agent profile from a frontmatter-parsed resource.
     pub fn from_resource(res: &Resource) -> Self {
+        let name = res
+            .frontmatter
+            .get("name")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| res.id.clone());
+        let description = res
+            .frontmatter
+            .get("description")
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         let model = res
             .frontmatter
             .get("model")
@@ -184,6 +207,8 @@ impl AgentProfile {
             .unwrap_or_default();
         Self {
             id: res.id.clone(),
+            name,
+            description,
             system_prompt: res.body.clone(),
             layer: res.layer,
             path: res.path.clone(),
@@ -199,6 +224,9 @@ impl AgentProfile {
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub id: String,
+    /// A human-readable display name (frontmatter `name:`), falling back to `id` when absent. Display
+    /// only — `use_skill` always addresses the skill by `id`.
+    pub name: String,
     pub description: String,
     pub body: String,
     pub layer: Layer,
@@ -213,6 +241,12 @@ pub struct Skill {
 impl Skill {
     /// Build a skill from a frontmatter-parsed resource.
     pub fn from_resource(res: &Resource) -> Self {
+        let name = res
+            .frontmatter
+            .get("name")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| res.id.clone());
         let description = res
             .frontmatter
             .get("description")
@@ -230,6 +264,7 @@ impl Skill {
             .filter(|s| !s.is_empty());
         Self {
             id: res.id.clone(),
+            name,
             description,
             body: res.body.clone(),
             layer: res.layer,
@@ -490,26 +525,42 @@ mod tests {
     fn agent_profile_reads_system_prompt_and_bindings() {
         let res = resource(
             "researcher",
-            "---\nmodel: gpt-pro\nallowed-tools:\n  - search\n---\n",
+            "---\nname: Researcher\ndescription: Deep-research specialist.\nmodel: gpt-pro\nallowed-tools:\n  - search\n---\n",
             "You are a deep-research agent.",
             Layer::Global,
         );
         let agent = AgentProfile::from_resource(&res);
         assert_eq!(agent.id, "researcher");
+        assert_eq!(agent.name, "Researcher");
+        assert_eq!(agent.description, "Deep-research specialist.");
         assert_eq!(agent.system_prompt, "You are a deep-research agent.");
         assert_eq!(agent.model.as_deref(), Some("gpt-pro"));
         assert_eq!(agent.allowed_tools, ["search"]);
     }
 
     #[test]
+    fn agent_profile_absent_name_falls_back_to_id_and_description_is_empty() {
+        let res = resource(
+            "researcher",
+            "---\nmodel: gpt-pro\n---\n",
+            "You are a deep-research agent.",
+            Layer::Global,
+        );
+        let agent = AgentProfile::from_resource(&res);
+        assert_eq!(agent.name, "researcher");
+        assert_eq!(agent.description, "");
+    }
+
+    #[test]
     fn skill_reads_description_tags_and_script() {
         let res = resource(
             "pdf-extract",
-            "---\ndescription: Extract text from PDFs\ntags:\n  - pdf\n  - docs\nscript: extract.py\n---\n",
+            "---\nname: PDF Extractor\ndescription: Extract text from PDFs\ntags:\n  - pdf\n  - docs\nscript: extract.py\n---\n",
             "Use pdftotext for extraction.",
             Layer::Project,
         );
         let skill = Skill::from_resource(&res);
+        assert_eq!(skill.name, "PDF Extractor");
         assert_eq!(skill.description, "Extract text from PDFs");
         assert!(skill.tags.contains("pdf"));
         assert!(skill.tags.contains("docs"));
@@ -521,6 +572,13 @@ mod tests {
         let res = resource("doc", "---\n---\n", "Write docs.", Layer::Project);
         let skill = Skill::from_resource(&res);
         assert!(skill.script.is_none());
+    }
+
+    #[test]
+    fn skill_absent_name_falls_back_to_id() {
+        let res = resource("doc", "---\n---\n", "Write docs.", Layer::Project);
+        let skill = Skill::from_resource(&res);
+        assert_eq!(skill.name, "doc");
     }
 
     #[test]

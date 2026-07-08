@@ -38,21 +38,24 @@ impl BwrapSandbox {
     }
 }
 
-/// Run bwrap against `/bin/true` inside the same minimal jail shape `confine()` builds (whole-FS
-/// read-only bind, network unshared, `/dev` present) and require exit 0. A cheap, synchronous check —
-/// called once at startup (`detect`) and again on every `confine()` call (fail-closed).
+/// Run bwrap against `/bin/true` inside the *actual* jail shape `confine()` builds — via the same
+/// `build_args` — and require exit 0. It must be representative, not a lenient subset: an environment
+/// where a minimal `--ro-bind / /` jail runs but the full jail (`--proc`, `--tmpfs`, a writable `--bind`,
+/// the credential shadows) does not — e.g. a hardened CI runner that permits only a partial unprivileged
+/// user namespace — would otherwise pass detection yet fail every real confined command. A cheap,
+/// synchronous check — called once at startup (`detect`) and again on every `confine()` call (fail-closed).
 fn probe() -> bool {
+    let policy = SandboxPolicy {
+        root: std::env::temp_dir(),
+        network: NetworkPolicy::Deny,
+        extra_ro: Vec::new(),
+        extra_rw: Vec::new(),
+    };
+    let mut args = build_args(&policy, None);
+    args.push(OsString::from("--"));
+    args.push(OsString::from("/bin/true"));
     std::process::Command::new(BWRAP)
-        .args([
-            "--ro-bind",
-            "/",
-            "/",
-            "--unshare-net",
-            "--dev",
-            "/dev",
-            "--",
-            "/bin/true",
-        ])
+        .args(&args)
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -266,8 +269,7 @@ mod tests {
         let last_ro_bind = strings
             .iter()
             .enumerate()
-            .filter(|(_, a)| a.as_str() == "--ro-bind")
-            .next_back()
+            .rfind(|(_, a)| a.as_str() == "--ro-bind")
             .map(|(i, _)| i)
             .expect("at least one --ro-bind present");
         // The last --ro-bind flag emitted must be the explicit extra_ro re-allow, not the base `/`.

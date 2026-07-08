@@ -33,20 +33,19 @@ pub struct ExtensionCatalog {
 }
 
 impl ExtensionCatalog {
-    /// The merged text of every always-on rule, in layer order (global first, project after), for
-    /// injection into the system prompt. An empty string when there are no always-on rules.
+    /// The merged text of every always-on rule, in layer order (global > project > bundled, ties by id),
+    /// for injection into the system prompt. `self.rules` is built from a `HashMap`, so it must be sorted
+    /// here — otherwise the injected order (and thus the prompt) would vary between boots. An empty string
+    /// when there are no always-on rules.
     pub fn render_rules(&self) -> String {
-        let mut lines: Vec<&str> = Vec::new();
-        for rule in &self.rules {
-            if rule.always {
-                lines.push(rule.body.as_str());
-            }
-        }
-        if lines.is_empty() {
-            return String::new();
-        }
-        // The bodies are already trimmed at load time; join with a newline separator.
-        lines.join("\n\n")
+        let mut always_on: Vec<&Rule> = self.rules.iter().filter(|rule| rule.always).collect();
+        always_on.sort_by(|a, b| (a.layer.precedence(), &a.id).cmp(&(b.layer.precedence(), &b.id)));
+        // The bodies are already trimmed at load time; join with a newline separator (empty when none).
+        always_on
+            .iter()
+            .map(|rule| rule.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     /// The `/rules` display text: one line per loaded rule (id, layer, always-on marker, source path),
@@ -129,8 +128,8 @@ impl ExtensionCatalog {
         }
     }
 
-    /// The `/agents` display text: one line per loaded agent profile (id, layer, source path), sorted by
-    /// id. `None` when no agents were loaded.
+    /// The `/agents` display text: one line per loaded agent profile (id, name, description, layer,
+    /// source path), sorted by id. `None` when no agents were loaded.
     pub fn agents_display(&self) -> Option<String> {
         if self.agents.is_empty() {
             return None;
@@ -139,7 +138,35 @@ impl ExtensionCatalog {
         agents.sort_by(|a, b| a.id.cmp(&b.id));
         let lines: Vec<String> = agents
             .iter()
-            .map(|agent| format!("- {} [{}] {}", agent.id, agent.layer.label(), agent.path))
+            .map(|agent| {
+                let label = if agent.name != agent.id {
+                    format!("{} ({})", agent.id, agent.name)
+                } else {
+                    agent.id.clone()
+                };
+                let desc = if agent.description.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", agent.description)
+                };
+                format!("- {label}{desc} [{}] {}", agent.layer.label(), agent.path)
+            })
+            .collect();
+        Some(lines.join("\n"))
+    }
+
+    /// The always-on agent index for the system prompt: one `id — description` line per agent, sorted by
+    /// id, mirroring `skills_index` — so the model can pick a `task` dispatch target (by id) without
+    /// guessing (ADR 0029). `None` when no agents were loaded.
+    pub fn agents_index(&self) -> Option<String> {
+        if self.agents.is_empty() {
+            return None;
+        }
+        let mut agents: Vec<&AgentProfile> = self.agents.values().collect();
+        agents.sort_by(|a, b| a.id.cmp(&b.id));
+        let lines: Vec<String> = agents
+            .iter()
+            .map(|agent| format!("- {} — {}", agent.id, agent.description))
             .collect();
         Some(lines.join("\n"))
     }
@@ -155,6 +182,11 @@ impl ExtensionCatalog {
         let lines: Vec<String> = skills
             .iter()
             .map(|skill| {
+                let label = if skill.name != skill.id {
+                    format!("{} ({})", skill.id, skill.name)
+                } else {
+                    skill.id.clone()
+                };
                 let tags = if skill.tags.is_empty() {
                     String::new()
                 } else {
@@ -162,21 +194,16 @@ impl ExtensionCatalog {
                     sorted.sort_unstable();
                     format!(" (tags: {})", sorted.join(", "))
                 };
-                format!(
-                    "- {}{} [{}] {}",
-                    skill.id,
-                    tags,
-                    skill.layer.label(),
-                    skill.path
-                )
+                format!("- {label}{tags} [{}] {}", skill.layer.label(), skill.path)
             })
             .collect();
         Some(lines.join("\n"))
     }
 
-    /// The always-on skill index for the system prompt: one `name — description` line per skill, sorted
-    /// by id, so the model knows what `use_skill` can fetch without carrying every body up front. `None`
-    /// when no skills were loaded.
+    /// The always-on skill index for the system prompt: one `id — description` line per skill (keyed by
+    /// `id`, the exact string `use_skill` expects — never `name`, which is display-only and may differ),
+    /// sorted by id, so the model knows what `use_skill` can fetch without carrying every body up front.
+    /// `None` when no skills were loaded.
     pub fn skills_index(&self) -> Option<String> {
         if self.skills.is_empty() {
             return None;
@@ -308,6 +335,43 @@ mod tests {
     }
 
     #[test]
+    fn render_rules_orders_by_layer_then_id_regardless_of_vec_order() {
+        // `self.rules` is HashMap-sourced, so insertion order is arbitrary. The injected system-prompt
+        // text must still be deterministic: global > project > bundled, ties broken by id. Insert in
+        // reverse-precedence order to prove the sort — not the Vec order — decides the output.
+        let catalog = ExtensionCatalog {
+            rules: vec![
+                Rule {
+                    id: "z-bundled".into(),
+                    always: true,
+                    body: "BUNDLED".into(),
+                    layer: Layer::Bundled,
+                    path: "<bundled>/rules/z.md".into(),
+                    tags: Default::default(),
+                },
+                Rule {
+                    id: "m-project".into(),
+                    always: true,
+                    body: "PROJECT".into(),
+                    layer: Layer::Project,
+                    path: "/fake/m.md".into(),
+                    tags: Default::default(),
+                },
+                Rule {
+                    id: "a-global".into(),
+                    always: true,
+                    body: "GLOBAL".into(),
+                    layer: Layer::Global,
+                    path: "/fake/a.md".into(),
+                    tags: Default::default(),
+                },
+            ],
+            ..ExtensionCatalog::default()
+        };
+        assert_eq!(catalog.render_rules(), "GLOBAL\n\nPROJECT\n\nBUNDLED");
+    }
+
+    #[test]
     fn empty_catalog_yields_no_rules_display() {
         assert!(ExtensionCatalog::default().rules_display().is_none());
     }
@@ -405,6 +469,8 @@ mod tests {
     fn agent(id: &str, system_prompt: &str) -> AgentProfile {
         AgentProfile {
             id: id.to_string(),
+            name: id.to_string(),
+            description: format!("{id} description"),
             system_prompt: system_prompt.to_string(),
             layer: Layer::Global,
             path: format!("/fake/{id}.md"),
@@ -475,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_display_lists_id_layer_and_path() {
+    fn agents_display_lists_id_description_layer_and_path() {
         let mut agents = HashMap::new();
         agents.insert("researcher".to_string(), agent("researcher", "..."));
         let catalog = ExtensionCatalog {
@@ -483,12 +549,46 @@ mod tests {
             ..ExtensionCatalog::default()
         };
         let display = catalog.agents_display().unwrap();
-        assert!(display.contains("- researcher [global] /fake/researcher.md"));
+        assert!(
+            display.contains("- researcher — researcher description [global] /fake/researcher.md")
+        );
+    }
+
+    #[test]
+    fn agents_display_shows_the_name_when_it_differs_from_the_id() {
+        let mut profile = agent("researcher", "...");
+        profile.name = "Deep Researcher".to_string();
+        let mut agents = HashMap::new();
+        agents.insert("researcher".to_string(), profile);
+        let catalog = ExtensionCatalog {
+            agents,
+            ..ExtensionCatalog::default()
+        };
+        let display = catalog.agents_display().unwrap();
+        assert!(display.contains("- researcher (Deep Researcher) — researcher description"));
+    }
+
+    #[test]
+    fn empty_catalog_yields_no_agents_index() {
+        assert!(ExtensionCatalog::default().agents_index().is_none());
+    }
+
+    #[test]
+    fn agents_index_lists_id_and_description() {
+        let mut agents = HashMap::new();
+        agents.insert("researcher".to_string(), agent("researcher", "..."));
+        let catalog = ExtensionCatalog {
+            agents,
+            ..ExtensionCatalog::default()
+        };
+        let index = catalog.agents_index().unwrap();
+        assert_eq!(index, "- researcher — researcher description");
     }
 
     fn skill(id: &str, description: &str, tags: &[&str]) -> Skill {
         Skill {
             id: id.to_string(),
+            name: id.to_string(),
             description: description.to_string(),
             body: format!("{id} body"),
             layer: Layer::Project,
@@ -518,6 +618,20 @@ mod tests {
         };
         let display = catalog.skills_display().unwrap();
         assert!(display.contains("- pdf-extract (tags: docs, pdf) [project] /fake/pdf-extract.md"));
+    }
+
+    #[test]
+    fn skills_display_shows_the_name_when_it_differs_from_the_id() {
+        let mut s = skill("pdf-extract", "Extract text from PDFs", &["pdf"]);
+        s.name = "PDF Extractor".to_string();
+        let mut skills = HashMap::new();
+        skills.insert("pdf-extract".to_string(), s);
+        let catalog = ExtensionCatalog {
+            skills,
+            ..ExtensionCatalog::default()
+        };
+        let display = catalog.skills_display().unwrap();
+        assert!(display.contains("- pdf-extract (PDF Extractor) (tags: pdf) [project]"));
     }
 
     #[test]

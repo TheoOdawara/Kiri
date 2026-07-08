@@ -13,12 +13,13 @@ pub enum GateState {
     Pending,
 }
 
-/// Resolve the gate state for a capability discovered at `layer`. Global is always `Approved`; project is
-/// `Approved` only when `previously_approved` (a trust-store hit for the capability's current content
+/// Resolve the gate state for a capability discovered at `layer`. Global and Bundled are always
+/// `Approved` — both are trusted (the user's own `~/.kiri/`, or content compiled into the binary); project
+/// is `Approved` only when `previously_approved` (a trust-store hit for the capability's current content
 /// hash) is `true`, else `Pending` — the runtime surfaces a `BootNotice` and asks the user.
 pub fn resolve(layer: Layer, previously_approved: bool) -> GateState {
     match layer {
-        Layer::Global => GateState::Approved,
+        Layer::Global | Layer::Bundled => GateState::Approved,
         Layer::Project if previously_approved => GateState::Approved,
         Layer::Project => GateState::Pending,
     }
@@ -40,6 +41,12 @@ mod tests {
     fn global_is_always_approved() {
         assert_eq!(resolve(Layer::Global, false), GateState::Approved);
         assert_eq!(resolve(Layer::Global, true), GateState::Approved);
+    }
+
+    #[test]
+    fn bundled_is_always_approved() {
+        assert_eq!(resolve(Layer::Bundled, false), GateState::Approved);
+        assert_eq!(resolve(Layer::Bundled, true), GateState::Approved);
     }
 
     #[test]

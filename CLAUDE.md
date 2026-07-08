@@ -46,7 +46,9 @@ in the transcript rather than `eprintln!` behind the alternate-screen TUI.
   implementing the ports.
 - **Modules (bounded contexts):** `agent` (the `AgentLoop` + the UI
   ports `Presenter`/`ApprovalPolicy`/`ToolObserver`, plus the provider's `EventSink`; the conversation
-  types it drives live in shared/kernel), `provider` (the `CompletionProvider`
+  types it drives live in shared/kernel; `infrastructure` holds the one exception to "agent has no
+  adapters" — the `task` tool (`TaskTool`), which dispatches a loaded `AgentProfile` as a nested, read-only
+  `AgentLoop` turn behind `HeadlessIo`, structurally capped at depth 1; see ADR 0029), `provider` (the `CompletionProvider`
   port + two API-key adapters — `openai` (chat-completions: NVIDIA / compatible / custom / OpenAI) and
   `anthropic` (Messages API) — plus the `SecretStore` port with the `0600`-file adapter (`FileSecretStore`,
   the only backend — the OS keyring was removed, ADR 0020) and the
@@ -70,9 +72,18 @@ in the transcript rather than `eprintln!` behind the alternate-screen TUI.
   `sync` (portable-profile sync to a private git repo: the `Git` port + `GitCli` + NDJSON export/merge +
   `SyncService`, behind `kiri sync …` and `/sync`; ADR 0015), `extensions` (ADR 0021 workflow surface:
   rules/commands/agents/skills/hooks/mcp, each with a global `~/.kiri/` and project `<workspace>/.kiri/`
-  layer — the `Frontmatter` parser, the `Resource`/`Rule`/`CommandSpec`/`AgentProfile`/`Skill`/`Hook`/
+  layer, plus a third `Layer::Bundled` — Markdown compiled into the binary via `include_str!`
+  (`infrastructure::bundled`), trusted like global, folded in as the lowest-precedence layer so a fresh
+  install ships an always-on rule (`ponytail`, verbatim + credited third-party content — MIT,
+  github.com/DietrichGebert/ponytail, see `NOTICE`), default skills (`plano`/`gh`/`commit`/`ponytail`/
+  `ponytail-review`/`ponytail-audit`/`ponytail-debt`/`ponytail-gain`), and read-only agent profiles
+  (`search`/`planning`) with no `~/.kiri/` setup required; see ADR 0028 — the `Frontmatter` parser (flat
+  scalars/lists only, plus a `name:` on `Skill`/`AgentProfile` — display-only, invocation always keys by
+  `id`), the `Resource`/`Rule`/`CommandSpec`/`AgentProfile`/`Skill`/`Hook`/
   `McpServer` domain types, the `ExtensionsLoader` port + `FileExtensionsLoader` adapter assembling an
-  `ExtensionCatalog`, the pure trust-gate decision `domain::gate::resolve`/`content_hash` (blake3) + the
+  `ExtensionCatalog` — whose `agents_index()` (ADR 0029 amend) mirrors `skills_index()` into a `# Agents`
+  system-prompt block so a dispatchable agent is discoverable, not just invocable — the pure trust-gate
+  decision `domain::gate::resolve`/`content_hash` (blake3) + the
   `0600`-file `ExtensionsTrustStore` recording TOFU approvals — `/rules`/`/commands`/`/agents`/`/skills`/
   `/hooks`/`/approve-hook`/`/mcp`/`/approve-mcp` manage it live), `hooks` (the sanctioned site for the
   `hooks` extension type's process I/O: the `HookRunner` port + `ShellHookRunner` adapter running a hook's
