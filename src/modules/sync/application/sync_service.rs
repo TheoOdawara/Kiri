@@ -458,6 +458,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn push_with_an_unavailable_shared_store_fails_fast() {
+        // Issue #33: sync IS initialized here (unlike `push_before_init_errors`, which never reaches
+        // export), but the shared memory store was never `init()`'d — the degraded-fallback shape a
+        // broken `shared.db` produces. `push` must abort at export rather than commit+push an empty
+        // `memory.ndjson` over the remote profile.
+        let dir = TempDir::new().unwrap();
+        let global = dir.path().to_path_buf();
+        let config = global.join("config.toml");
+        std::fs::write(&config, "[providers.nvidia]\nbase_url = \"https://x/v1\"\n").unwrap();
+        let inert = SqliteSharedMemory::in_memory().unwrap();
+        let exchange = NdjsonMemoryExchange::new(&inert);
+        let git = FakeGit::new();
+        let work_tree = FsSyncWorkTree;
+        let service = SyncService::new(&git, global.clone(), config, &exchange, &work_tree);
+        service.init("git@example:me/profile.git").await.unwrap();
+
+        let error = service.push().await.unwrap_err();
+        assert!(
+            matches!(&error, AgentError::Memory(message) if message.contains("unavailable")),
+            "expected an unavailable-store refusal, got {error:?}"
+        );
+        let sync_dir = global.join("sync");
+        assert!(
+            !sync_dir.join("memory.ndjson").exists(),
+            "an aborted export must not have written a snapshot"
+        );
+        let calls = git.calls.lock().unwrap();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("commit") || c.starts_with("push")),
+            "commit/push must never run once export refused: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn push_before_init_errors() {
         let dir = TempDir::new().unwrap();
         let global = dir.path().to_path_buf();

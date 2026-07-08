@@ -46,10 +46,26 @@ impl MemoryExchange for NdjsonMemoryExchange<'_> {
     }
 }
 
+/// Issue #33: refuse to `{verb}` an unavailable (never `init`'d) store — for sync the store is the
+/// operand, not an auxiliary, so a degraded fallback must fail fast rather than silently produce an
+/// empty export or a merge that vanishes at process exit.
+fn require_available(memory: &dyn SharedMemory, verb: &str) -> AgentResult<()> {
+    if memory.is_available() {
+        Ok(())
+    } else {
+        Err(AgentError::Memory(format!(
+            "shared memory unavailable; refusing to {verb} an inert/empty store"
+        )))
+    }
+}
+
 /// Export the shared memory to deterministic NDJSON (one entry per line, sorted by id) so the synced repo
 /// diffs cleanly and merges by line. Embedding vectors are NOT exported — they are machine-local derived
 /// data, re-derivable from content on each machine.
 pub async fn export(memory: &dyn SharedMemory, path: &Path) -> AgentResult<usize> {
+    // Issue #33: for sync, the store is the operand, not an auxiliary — an unavailable (never `init`'d)
+    // store must fail fast here rather than silently write an empty snapshot over the remote.
+    require_available(memory, "export")?;
     let mut entries = memory.list(0, EXPORT_CAP).await?;
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     let mut body = String::new();
@@ -71,6 +87,9 @@ pub async fn export(memory: &dyn SharedMemory, path: &Path) -> AgentResult<usize
 /// **streamed line-by-line** (never slurped whole) under the entry cap (`IMPORT_CAP`), with the streamed
 /// bytes bounded too. A malformed line aborts with a clear error rather than silently dropping knowledge.
 pub async fn import(memory: &dyn SharedMemory, path: &Path) -> AgentResult<MergeReport> {
+    // Issue #33: refuse to merge into an unavailable (never `init`'d) store — it would report a
+    // successful merge into entries that vanish at process exit, discarding the pulled knowledge.
+    require_available(memory, "import into")?;
     // `symlink_metadata` does NOT follow symlinks: reject a symlink or any non-regular file before it is
     // opened. The work-tree file is materialized by `git reset --hard` from an attacker-controlled remote,
     // so a committed `memory.ndjson -> /dev/zero` (infinite read → OOM) or `-> <fifo>` (blocking read, no
@@ -232,6 +251,44 @@ mod tests {
         e.id = id_seed.to_string();
         e.updated_at = updated_at.to_string();
         e
+    }
+
+    // Issue #33: an inert (never-`init`'d) store must never be treated as a valid sync operand — export
+    // must refuse rather than silently write an empty `memory.ndjson` over the remote snapshot, and
+    // import must refuse rather than merge into a store that vanishes at process exit.
+    #[tokio::test]
+    async fn export_refuses_an_unavailable_store() {
+        let dir = TempDir::new().unwrap();
+        let inert = SqliteSharedMemory::in_memory().unwrap();
+        let path = dir.path().join("memory.ndjson");
+
+        let error = export(&inert, &path).await.unwrap_err();
+        assert!(
+            matches!(&error, AgentError::Memory(message) if message.contains("unavailable")),
+            "expected an unavailable-store refusal, got {error:?}"
+        );
+        assert!(
+            !path.exists(),
+            "export must not write anything for an unavailable store"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_refuses_an_unavailable_store() {
+        let dir = TempDir::new().unwrap();
+        let src = memory(&dir, "src.db").await;
+        src.save(&entry("a", "alpha", "2026-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+        let path = dir.path().join("memory.ndjson");
+        export(&src, &path).await.unwrap();
+
+        let inert = SqliteSharedMemory::in_memory().unwrap();
+        let error = import(&inert, &path).await.unwrap_err();
+        assert!(
+            matches!(&error, AgentError::Memory(message) if message.contains("unavailable")),
+            "expected an unavailable-store refusal, got {error:?}"
+        );
     }
 
     #[tokio::test]
