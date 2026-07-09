@@ -69,14 +69,18 @@ borderless prompt whose gate glyph changes color with its state.
 
 - **Directed agent loop** — the model plans, then acts through tools, **one approved call at a time**.
 - **Streaming reasoning + content** — thoughts and answer stream token-by-token over SSE.
-- **9 filesystem tools** behind a **path sandbox** — the workspace root is the single I/O chokepoint.
+- **Filesystem tools + `run_command`** behind a **path sandbox** — the workspace root is the single
+  I/O chokepoint; shell runs are timeout-bound and env-scrubbed.
+- **Memory, MCP, and nested agents** — durable project/shared memory, TOFU-gated MCP tools, and
+  read-only `task` agent profiles when configured.
 - **Full-screen TUI** — a [ratatui](https://ratatui.rs) terminal UI: live transcript, a rich approval
   box, and slash commands (requires an interactive terminal).
 - **Three approval modes** — cycle with `Shift+Tab`: **default** confirms every call, **auto** runs them
   unattended, **plan** stays read-only and proposes a plan you approve before it executes.
 - **Runaway guard** — a 30-minute wall-clock checkpoint pauses long turns to ask whether to keep going.
 - **Provider-agnostic, by API key** — NVIDIA (default), any OpenAI-compatible / custom endpoint,
-  OpenAI (GPT), and Anthropic (Claude). Switch or add providers live from the TUI; secrets in the OS keyring.
+  OpenAI (GPT), and Anthropic (Claude). Switch or add providers live from the TUI; secrets in a
+  `0600` file under `~/.kiri/` (not the OS keyring).
 - **Built to hold up** — modular-hexagonal, single binary, `unsafe` forbidden, green-gated.
 
 ## Getting started
@@ -88,9 +92,11 @@ borderless prompt whose gate glyph changes color with its state.
   Anthropic from the Console, or OpenAI from the Platform. **API key, not a subscription** — Kiri bills
   pay-per-token against your own account; subscription (Claude Pro/Max, ChatGPT Plus/Pro) is not supported.
 
-**Configure** — Kiri manages its own config (`~/.kiri/config.toml`) and secrets (the OS keyring, or a
-`0600` fallback file). There is **no `.env`**. The fastest start is to seed the default NVIDIA provider
-from an env var on the first run; it is imported once into the keyring (the key is **never** a CLI flag):
+**Configure** — Kiri manages its own config (`~/.kiri/config.toml`) and secrets in a **`0600`
+`~/.kiri/credentials.json`** (file-only; the OS keyring is not used — ADR 0020). An optional
+**`~/.kiri/.env`** may seed process env on boot; a project-cwd `.env` is **never** read (a hostile
+repo must not inject credentials). The fastest start is to seed the default NVIDIA provider from an
+env var on the first run; it is imported once into `credentials.json` (the key is **never** a CLI flag):
 
 ```bash
 export NVIDIA_API_KEY=nvapi-...
@@ -98,7 +104,7 @@ export NVIDIA_MODEL=moonshotai/kimi-k2-instruct   # any model from NVIDIA's cata
 ```
 
 Then add or switch providers from inside the TUI: **`/provider`** (switch, or run the add wizard for
-Claude / GPT / a custom endpoint — paste the API key, it is masked and stored in the keyring),
+Claude / GPT / a custom endpoint — paste the API key, it is masked and stored in `credentials.json`),
 **`/models`** (switch the model), **`/effort`** (reasoning effort). Generic keys also work via
 `KIRI_<ID>_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
 

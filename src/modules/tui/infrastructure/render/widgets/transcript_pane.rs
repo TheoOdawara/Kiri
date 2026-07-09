@@ -33,6 +33,9 @@ struct Reveal<'a> {
 const PREVIEW_LINES: usize = 6;
 /// Per side (old/new) diff lines shown before eliding, unless expanded.
 const DIFF_LINES_PER_SIDE: usize = 6;
+/// Cap each side of an edit diff before running `similar::TextDiff` LCS (F-PERF-001 / #83). Display
+/// already limits shown lines; this bounds the quadratic cost of the diff itself.
+const MAX_DIFF_BYTES_PER_SIDE: usize = 64 * 1024;
 /// Columns each previewed body line is indented under its tool-call header.
 const PREVIEW_INDENT_WIDTH: usize = 5;
 /// Milliseconds in one second — the threshold below which an elapsed label stays in `ms`.
@@ -471,6 +474,15 @@ fn render_result_with_stderr(
 }
 
 fn render_diff(diff_data: &ToolDiff, width: usize, expanded: bool, out: &mut Vec<Line<'static>>) {
+    if diff_data.old.len() > MAX_DIFF_BYTES_PER_SIDE
+        || diff_data.new.len() > MAX_DIFF_BYTES_PER_SIDE
+    {
+        out.push(Line::styled(
+            "  (diff omitido — conteúdo grande demais para comparar)",
+            theme::dim(),
+        ));
+        return;
+    }
     let diff = similar::TextDiff::from_lines(&diff_data.old, &diff_data.new);
     let hunks = diff.grouped_ops(3);
 

@@ -214,6 +214,67 @@ fn resolve_refuses_out_of_root_credential_dir() {
     assert!(sb.resolve_existing(inside_creds.to_str().unwrap()).is_err());
 }
 
+/// F-SEC-001 / #79: the global harness tree under `$HOME/.kiri` is denied even when the workspace is
+/// `$HOME` itself (relative `.kiri/…`) or the path is absolute. Project-local `.kiri/` is still allowed.
+#[test]
+fn resolve_refuses_harness_private_under_home_but_allows_project_kiri() {
+    let project = TempDir::new().unwrap();
+    fs::create_dir_all(project.path().join(".kiri").join("memory")).unwrap();
+    fs::write(
+        project.path().join(".kiri").join("memory").join("note.md"),
+        b"x",
+    )
+    .unwrap();
+    let sb = sandbox(&project);
+    assert!(
+        sb.resolve_existing(".kiri/memory/note.md").is_ok(),
+        "project-local .kiri must remain reachable"
+    );
+
+    let Some(home_dir) = home() else {
+        return;
+    };
+    // Absolute create under the real harness home (file need not exist).
+    let probe = home_dir.join(".kiri").join("audit_p0_probe.toml");
+    let probe_str = probe.to_str().expect("utf-8 home path");
+    assert!(
+        sb.resolve_create(probe_str).is_err(),
+        "absolute path under ~/.kiri must be refused"
+    );
+
+    // Workspace root = home: relative .kiri stays in-root but is still harness-private.
+    if let Ok(home_sb) = FsSandbox::new(&home_dir, SensitiveMatcher::empty()) {
+        assert!(
+            home_sb
+                .resolve_create(".kiri/audit_p0_relative.toml")
+                .is_err(),
+            "relative .kiri under a home workspace must be refused"
+        );
+    }
+}
+
+#[test]
+fn resolve_refuses_home_secret_subpaths() {
+    let Some(home_dir) = home() else {
+        return;
+    };
+    let sb = sandbox(&TempDir::new().unwrap());
+    let gh_hosts = home_dir.join(".config").join("gh").join("hosts.yml");
+    assert!(
+        sb.resolve_create(gh_hosts.to_str().expect("utf-8"))
+            .is_err(),
+        "~/.config/gh must be refused"
+    );
+    let gcloud = home_dir
+        .join(".config")
+        .join("gcloud")
+        .join("application_default_credentials.json");
+    assert!(
+        sb.resolve_create(gcloud.to_str().expect("utf-8")).is_err(),
+        "~/.config/gcloud must be refused"
+    );
+}
+
 #[test]
 fn rejects_empty_path() {
     let dir = TempDir::new().unwrap();

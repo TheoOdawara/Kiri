@@ -88,7 +88,10 @@ impl RunLoop {
                     maybe = ui.events.next() => match maybe {
                         Some(Ok(event)) if is_ctrl_c(&event) => DistillStep::Skip,
                         // Other input is ignored during the (brief) distillation.
-                        _ => DistillStep::Tick,
+                        Some(Ok(_)) => DistillStep::Tick,
+                        // Stream closed or I/O error: do not map to Tick under `biased` (would spin
+                        // and starve the distill future — F-BUG-001 / #80). End best-effort distill.
+                        _ => DistillStep::Skip,
                     },
                     _ = ui.ticker.tick() => DistillStep::Tick,
                     done = &mut distillation => DistillStep::Done(done),

@@ -552,6 +552,26 @@ fn submit_while_unconfigured_is_gated_and_reopens_wizard() {
 }
 
 #[test]
+fn custom_slash_while_unconfigured_is_gated_and_reopens_wizard() {
+    let mut m = Model {
+        unconfigured: true,
+        ..Default::default()
+    };
+    m.custom_command_bodies
+        .insert("/plano".to_string(), "draft a plan".to_string());
+    let effects = submit_line(&mut m, "/plano");
+    assert!(
+        effects.is_empty(),
+        "a gated custom slash emits no SubmitPrompt"
+    );
+    assert!(!m.busy, "the gate must not arm a turn (no stuck busy)");
+    assert!(
+        m.wizard.as_ref().is_some_and(|w| w.onboarding),
+        "the gate re-opens the onboarding wizard"
+    );
+}
+
+#[test]
 fn slash_provider_works_while_unconfigured() {
     let mut m =
         Model::default().with_providers("nvidia".to_string(), vec!["nvidia".to_string()], vec![]);

@@ -40,6 +40,7 @@ const DEFAULT_SENSITIVE_PATTERNS: &[&str] = &[
     "*~",
     "service-account*.json",
     "*-credentials.json",
+    "application_default_credentials.json",
     "authorized_keys",
     "known_hosts",
 ];
@@ -190,6 +191,10 @@ mod tests {
         assert_eq!(
             m.matches("aws-credentials.json"),
             Some("*-credentials.json")
+        );
+        assert_eq!(
+            m.matches("application_default_credentials.json"),
+            Some("application_default_credentials.json")
         );
     }
 

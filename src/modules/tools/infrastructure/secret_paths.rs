@@ -10,7 +10,9 @@
 /// `search` could recurse into `~/.ssh` and print `id_rsa` line by line, and `read_file` could read
 /// `~/.aws/config` (a non-sensitive *name* in a secret *dir*). Re-exported from `sandbox` so
 /// `search`/`run_command` keep resolving `sandbox::SECRET_DIRS`. Compared case-insensitively (macOS APFS).
-pub(crate) const SECRET_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker"];
+pub(crate) const SECRET_DIRS: &[&str] = &[
+    ".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".docker", ".azure", ".gcloud",
+];
 
 /// Well-known credential files directly under the user's home, denied to confined children by the macOS
 /// Seatbelt profile and shadowed by the Linux bwrap adapter. They mirror names already in
@@ -22,9 +24,14 @@ pub(crate) const SECRET_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".ku
 pub(crate) const HOME_SECRET_FILES: &[&str] =
     &[".netrc", ".npmrc", ".pypirc", ".pgpass", ".git-credentials"];
 
+/// Multi-component secret stores under home that must not be blanket-denied via a single top-level
+/// name (denying all of `.config` would be far too broad). Each entry is a sequence of path
+/// components under `$HOME` (e.g. `[".config", "gh"]` → `~/.config/gh`). Consumed by path resolution
+/// and the macOS/Linux OS-confinement adapters.
+pub(crate) const HOME_SECRET_SUBPATHS: &[&[&str]] = &[&[".config", "gh"], &[".config", "gcloud"]];
+
 /// The harness's own private directory under home (`~/.kiri`), which holds `credentials.json` (the
-/// `0600` API-key fallback) and other state. Denied to confined children so a `run_command` cannot read
-/// it back to the model.
-// Only consumed by the macOS/Linux OS-confinement adapters, so it is dead on other targets.
-#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+/// `0600` API-key store) and other state. Denied to confined children so a `run_command` cannot read
+/// it back to the model, and denied in file-tool path resolution (not via `SECRET_DIRS` — project
+/// workspaces legitimately use a local `.kiri/`).
 pub(crate) const HARNESS_PRIVATE_DIR: &str = ".kiri";

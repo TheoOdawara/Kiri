@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
 use crate::modules::tools::infrastructure::secret_paths::{
-    HARNESS_PRIVATE_DIR, HOME_SECRET_FILES, SECRET_DIRS,
+    HARNESS_PRIVATE_DIR, HOME_SECRET_FILES, HOME_SECRET_SUBPATHS, SECRET_DIRS,
 };
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::sandbox::NetworkPolicy;
@@ -141,6 +141,13 @@ fn build_args(policy: &SandboxPolicy, cwd: Option<&Path>) -> Vec<OsString> {
             push_dest_only(&mut args, "--tmpfs", &home.join(dir));
         }
         push_dest_only(&mut args, "--tmpfs", &home.join(HARNESS_PRIVATE_DIR));
+        for components in HOME_SECRET_SUBPATHS {
+            let mut sub = home.clone();
+            for component in *components {
+                sub.push(component);
+            }
+            push_dest_only(&mut args, "--tmpfs", &sub);
+        }
         for file in HOME_SECRET_FILES {
             push_shadow_file(&mut args, &home.join(file));
         }

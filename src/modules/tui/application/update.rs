@@ -75,7 +75,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }
             if let Some(now) = model.timeline.render_at {
                 for _ in 0..text.matches('\n').count() {
-                    model.timeline.stream_landings.push(now);
+                    model.timeline.push_stream_landing(now);
                 }
             }
             model.transcript.push_content_delta(&text);

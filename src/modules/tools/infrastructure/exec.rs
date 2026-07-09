@@ -7,7 +7,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::Command;
+use tokio::io::AsyncReadExt;
+use tokio::process::{Child, Command};
 
 use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
 
@@ -31,6 +32,10 @@ pub const STDERR_MARKER: &str = "--- stderr ---";
 /// and hooks route through this one function, so scrubbing here closes both surfaces at once.
 const INHERITED_ENV_VARS: &[&str] = &[
     "PATH",
+    // Windows: after env scrub, PowerShell/cmd resolve `ping` → `ping.exe` via PATHEXT. Without it,
+    // `run_command` timeout tests (and any bare tool name) fail with "not recognized" even when the
+    // binary is on PATH.
+    "PATHEXT",
     "HOME",
     "USERPROFILE",
     "SystemRoot",
@@ -154,43 +159,128 @@ pub fn capped_combined_marking_stderr(result: &ExecResult) -> String {
 /// Truncate `combined` at [`EXEC_MAX_BYTES`], the shared byte-cap logic behind both `capped_combined`
 /// variants above.
 fn truncate_at_cap(combined: Vec<u8>) -> String {
-    if combined.len() > EXEC_MAX_BYTES {
-        let head = String::from_utf8_lossy(&combined[..EXEC_MAX_BYTES]);
+    truncate_tool_output_bytes(&combined)
+}
+
+/// Truncate model/tool-facing text at [`EXEC_MAX_BYTES`] with a stable marker. Shared by shell output
+/// and MCP tool results so every path that feeds the transcript applies the same bound.
+pub fn truncate_tool_output(text: &str) -> String {
+    truncate_tool_output_bytes(text.as_bytes())
+}
+
+fn truncate_tool_output_bytes(bytes: &[u8]) -> String {
+    if bytes.len() > EXEC_MAX_BYTES {
+        let head = String::from_utf8_lossy(&bytes[..EXEC_MAX_BYTES]);
         format!("{head}\n… (truncated at {EXEC_MAX_BYTES} bytes)")
     } else {
-        String::from_utf8_lossy(&combined).into_owned()
+        String::from_utf8_lossy(bytes).into_owned()
     }
 }
 
-/// Spawn, capture stdout/stderr, and bound the whole thing by `timeout`. `kill_on_drop` ensures a
-/// timed-out child is killed when the future is dropped. Stdin is always `null` — `run_command` is the
-/// sole caller and never feeds input, so a command that would otherwise prompt (e.g. on a
-/// write-protected target) sees EOF instead of hanging.
+/// Spawn, capture stdout/stderr with a **streaming** byte cap, and bound the whole thing by `timeout`.
+/// `kill_on_drop` ensures a timed-out child is killed when the future is dropped; on Unix the child is
+/// also placed in its own process group so timeout can signal the whole tree (F-BUG-002 / #42).
+/// Stdin is always `null` — `run_command` is the sole caller and never feeds input, so a command that
+/// would otherwise prompt (e.g. on a write-protected target) sees EOF instead of hanging.
 async fn run(mut cmd: Command, timeout: Duration) -> Result<ExecResult, ExecError> {
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
+    // Own process group so grandchildren (e.g. `sh -c 'sleep 100 &'`) die with the shell on timeout.
+    // Windows residual: only the direct child is killed (Job Object needs deps/`unsafe` — tracked on #42).
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
 
     let ms = timeout.as_millis() as u64;
-    let fut = async {
-        let output = cmd
-            .spawn()
-            .map_err(|error| ExecError::Spawn(error.to_string()))?
-            .wait_with_output()
-            .await
-            .map_err(|error| ExecError::Spawn(error.to_string()))?;
-        Ok(ExecResult {
-            stdout: output.stdout,
-            stderr: output.stderr,
-            exit_code: output.status.code(),
-        })
+    let mut child = cmd
+        .spawn()
+        .map_err(|error| ExecError::Spawn(error.to_string()))?;
+    let child_id = child.id();
+
+    let collect = collect_output(&mut child);
+    match tokio::time::timeout(timeout, collect).await {
+        Ok(result) => result,
+        Err(_) => {
+            kill_child_tree(&mut child, child_id).await;
+            Err(ExecError::Timeout(ms))
+        }
+    }
+}
+
+/// Drain stdout/stderr with a hard per-stream cap of [`EXEC_MAX_BYTES`], discarding the remainder so the
+/// child never blocks on a full pipe. Bounds harness RSS even when the model-facing combined cap is
+/// applied later via [`capped_combined`].
+async fn collect_output(child: &mut Child) -> Result<ExecResult, ExecError> {
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| ExecError::Spawn("child stdout pipe missing".to_string()))?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| ExecError::Spawn("child stderr pipe missing".to_string()))?;
+
+    let stdout_task = async {
+        let mut buf = Vec::new();
+        read_capped_stream(&mut stdout_pipe, &mut buf, EXEC_MAX_BYTES).await?;
+        Ok::<Vec<u8>, std::io::Error>(buf)
+    };
+    let stderr_task = async {
+        let mut buf = Vec::new();
+        read_capped_stream(&mut stderr_pipe, &mut buf, EXEC_MAX_BYTES).await?;
+        Ok::<Vec<u8>, std::io::Error>(buf)
     };
 
-    match tokio::time::timeout(timeout, fut).await {
-        Ok(result) => result,
-        Err(_) => Err(ExecError::Timeout(ms)),
+    let (stdout_res, stderr_res) = tokio::join!(stdout_task, stderr_task);
+    let stdout = stdout_res.map_err(|error| ExecError::Spawn(error.to_string()))?;
+    let stderr = stderr_res.map_err(|error| ExecError::Spawn(error.to_string()))?;
+    let status = child
+        .wait()
+        .await
+        .map_err(|error| ExecError::Spawn(error.to_string()))?;
+    Ok(ExecResult {
+        stdout,
+        stderr,
+        exit_code: status.code(),
+    })
+}
+
+/// Read from `reader` until EOF, appending at most `cap` bytes and discarding the rest.
+async fn read_capped_stream(
+    reader: &mut (impl AsyncReadExt + Unpin),
+    dest: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<()> {
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        if dest.len() < cap {
+            let take = (cap - dest.len()).min(n);
+            dest.extend_from_slice(&chunk[..take]);
+        }
     }
+    Ok(())
+}
+
+/// Kill the direct child and, on Unix, its process group (negative pgid). Best-effort — timeout already
+/// means the tool result is `Timeout` regardless of kill success.
+async fn kill_child_tree(child: &mut Child, child_id: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = child_id {
+        // `process_group(0)` makes the child's pgid equal its pid; `kill -KILL -pid` hits the whole group.
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .status();
+    }
+    #[cfg(not(unix))]
+    let _ = child_id;
+    let _ = child.kill().await;
 }
 
 #[cfg(test)]
@@ -334,6 +424,32 @@ mod tests {
         let text = capped_combined(&result);
         assert!(text.contains("truncated at"));
         assert!(text.len() <= EXEC_MAX_BYTES + 200);
+    }
+
+    /// Streaming drain must cap in-memory buffers during collection, not only after the process exits.
+    #[tokio::test]
+    async fn run_shell_caps_output_while_streaming() {
+        let oversized = EXEC_MAX_BYTES + 50_000;
+        let cmd = if cfg!(windows) {
+            format!("$s = 'a' * {oversized}; [Console]::Out.Write($s)")
+        } else {
+            // Portable: no `dd`/`yes` dependency — Python is available on the CI images used here.
+            format!("python3 -c \"import sys; sys.stdout.write('a' * {oversized})\"")
+        };
+        let result = run_shell(
+            &cmd,
+            None,
+            Duration::from_secs(30),
+            &NoConfinement,
+            &policy(),
+        )
+        .await
+        .expect("script runs");
+        assert!(
+            result.stdout.len() <= EXEC_MAX_BYTES,
+            "stdout buffer must be capped during drain, got {}",
+            result.stdout.len()
+        );
     }
 
     #[test]

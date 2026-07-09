@@ -107,6 +107,9 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
         Some(Command::Effort) => open_effort_picker(model),
         Some(Command::Provider) => open_provider_picker(model),
         Some(Command::Unknown(token)) => match model.custom_command_bodies.get(&token).cloned() {
+            // Custom/bundled slash bodies start a turn — same unconfigured gate as free-text submit
+            // (F-UX-002 / #86). Meta commands (`/provider`, `/help`, …) stay on their own arms above.
+            Some(_) if model.unconfigured => gate_unconfigured(model),
             Some(body) => submit_custom_command(model, &line, body),
             None => {
                 model.notify_error(format!("comando desconhecido: {} (use /help)", line.trim()));
@@ -114,15 +117,7 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
             }
         },
         None if line.trim().is_empty() && model.attachments.is_empty() => vec![],
-        None if model.unconfigured => {
-            // No usable provider yet: never send to the null provider silently. Drop the staged images,
-            // surface a clear notice, and re-open onboarding. `busy` is intentionally left false so no
-            // turn is armed and the UI is not stranded.
-            model.attachments.clear();
-            model.notify_info("configure um provider primeiro — escolha um e informe a API key");
-            model.wizard = Some(ProviderWizard::onboarding());
-            vec![]
-        }
+        None if model.unconfigured => gate_unconfigured(model),
         None => {
             // Drain the staged images into the prompt; a turn can carry text, images, or both.
             let images: Vec<String> = std::mem::take(&mut model.attachments)
@@ -139,6 +134,15 @@ pub(super) fn submit(model: &mut Model) -> Vec<Effect> {
             vec![Effect::SubmitPrompt { text: line, images }]
         }
     }
+}
+
+/// No usable provider yet: never send to the null provider silently. Drop staged images, surface a
+/// clear notice, and re-open onboarding. `busy` stays false so no turn is armed.
+fn gate_unconfigured(model: &mut Model) -> Vec<Effect> {
+    model.attachments.clear();
+    model.notify_info("configure um provider primeiro — escolha um e informe a API key");
+    model.wizard = Some(ProviderWizard::onboarding());
+    vec![]
 }
 
 /// Expand and submit an extension-provided custom command (ADR 0021): the transcript shows what the user

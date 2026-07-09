@@ -18,6 +18,9 @@ use crate::shared::kernel::sandbox::NetworkPolicy;
 /// Seatbelt read-deny. Single-sourced in `secret_paths` and re-exported so existing importers
 /// (`search.rs`, `run_command.rs`) keep resolving `sandbox::SECRET_DIRS` unchanged.
 pub(crate) use crate::modules::tools::infrastructure::secret_paths::SECRET_DIRS;
+use crate::modules::tools::infrastructure::secret_paths::{
+    HARNESS_PRIVATE_DIR, HOME_SECRET_SUBPATHS,
+};
 
 /// Confines every file operation to a canonicalized root directory, and refuses CRUD on files
 /// whose name matches a sensitive pattern (secrets, keys, credentials). All file tools resolve
@@ -175,6 +178,8 @@ impl Sandbox for FsSandbox {
                 .map_err(|_| AgentError::Sandbox(format!("path not found: {rel}")))?;
             self.assert_not_sensitive(&real, rel)?;
             self.assert_not_in_secret_dir(&real, rel)?;
+            self.assert_not_under_harness_private(&real, rel)?;
+            self.assert_not_under_home_secret_subpaths(&real, rel)?;
             return Ok(real);
         }
         let candidate = self.join_checked(rel)?;
@@ -183,6 +188,8 @@ impl Sandbox for FsSandbox {
         self.assert_within(&real)?;
         self.assert_not_sensitive(&real, rel)?;
         self.assert_not_in_secret_dir(&real, rel)?;
+        self.assert_not_under_harness_private(&real, rel)?;
+        self.assert_not_under_home_secret_subpaths(&real, rel)?;
         Ok(real)
     }
 
@@ -242,6 +249,8 @@ impl Sandbox for FsSandbox {
 
         self.assert_not_sensitive(&real_target, rel)?;
         self.assert_not_in_secret_dir(&real_target, rel)?;
+        self.assert_not_under_harness_private(&real_target, rel)?;
+        self.assert_not_under_home_secret_subpaths(&real_target, rel)?;
         Ok(CreateResolution {
             target: real_target,
             missing_dirs,
@@ -354,6 +363,64 @@ impl FsSandbox {
         }
         Ok(())
     }
+
+    /// Refuse any path under the harness global private tree (`~/.kiri`). Unlike `SECRET_DIRS`, this
+    /// is a **prefix** check against the resolved home harness dir — project-local `.kiri/` under a
+    /// workspace that is not the home directory remains allowed (memory, project config).
+    fn assert_not_under_harness_private(
+        &self,
+        real: &Path,
+        display: &str,
+    ) -> Result<(), AgentError> {
+        if path_is_under_home_join(real, home().as_deref(), &[HARNESS_PRIVATE_DIR]) {
+            return Err(AgentError::Sandbox(format!(
+                "path is inside the harness private directory '{HARNESS_PRIVATE_DIR}': {display}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Refuse multi-component home secret stores (e.g. `~/.config/gh`) that cannot be expressed as a
+    /// single `SECRET_DIRS` component without denying all of `.config`.
+    fn assert_not_under_home_secret_subpaths(
+        &self,
+        real: &Path,
+        display: &str,
+    ) -> Result<(), AgentError> {
+        let Some(home_dir) = home() else {
+            return Ok(());
+        };
+        for components in HOME_SECRET_SUBPATHS {
+            if path_is_under_home_join(real, Some(home_dir.as_path()), components) {
+                let label = components.join("/");
+                return Err(AgentError::Sandbox(format!(
+                    "path is inside the secret directory '{label}': {display}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether `real` equals or is a descendant of `home.join(components…)`.
+///
+/// Home is canonicalized first (it always exists) so the joined target shares the same path form as
+/// `resolve_*` outputs (including the Windows `\\?\` verbatim prefix). Canonicalizing only the final
+/// target fails when the leaf does not exist yet (`resolve_create`), and a plain `C:\…` prefix never
+/// matches a `\\?\C:\…` resolved path.
+fn path_is_under_home_join(real: &Path, home: Option<&Path>, components: &[&str]) -> bool {
+    let Some(home) = home else {
+        return false;
+    };
+    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let mut target = home;
+    for component in components {
+        target.push(component);
+    }
+    // Prefer a fully-canonical target when every component exists (symlink-safe); otherwise keep the
+    // lexical join under the canonical home so create-into-missing-dirs still matches.
+    let target = std::fs::canonicalize(&target).unwrap_or(target);
+    real == target.as_path() || real.starts_with(&target)
 }
 
 #[path = "sandbox_tests.rs"]

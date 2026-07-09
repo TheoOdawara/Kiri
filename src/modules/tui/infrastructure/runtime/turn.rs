@@ -241,7 +241,14 @@ impl RunLoop {
                             self.model.timeline.last_event_at = Some(Instant::now());
                             input::to_msg(event).map(Step::Apply).unwrap_or(Step::Idle)
                         }
-                        _ => Step::Idle,
+                        // Stream closed or I/O error: mirror the main event loop. Mapping these to
+                        // Idle under `biased` keeps this arm always-ready and starves the turn future
+                        // (hang / CPU spin). Quit and abort instead (F-BUG-001 / #80).
+                        _ => {
+                            self.model.should_quit = true;
+                            engine.cancel.cancel();
+                            Step::Done(Ok(TurnOutcome::Aborted))
+                        }
                     },
                     Some(received) = engine.engine_rx.recv() => {
                         Step::Apply(engine_msg(received, engine.pending_reply))

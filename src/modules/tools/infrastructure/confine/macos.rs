@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
 use crate::modules::tools::infrastructure::secret_paths::{
-    HARNESS_PRIVATE_DIR, HOME_SECRET_FILES, SECRET_DIRS,
+    HARNESS_PRIVATE_DIR, HOME_SECRET_FILES, HOME_SECRET_SUBPATHS, SECRET_DIRS,
 };
 use crate::modules::tools::infrastructure::sensitive::sensitive_globs;
 use crate::shared::kernel::error::AgentError;
@@ -187,6 +187,9 @@ fn push_home_denies(profile: &mut String, home: &Path) {
         push_deny_read(profile, &home.join(dir));
     }
     push_deny_read(profile, &home.join(HARNESS_PRIVATE_DIR));
+    for components in HOME_SECRET_SUBPATHS {
+        push_deny_read(profile, &join_home_subpath(home, components));
+    }
     for file in HOME_SECRET_FILES {
         push_deny_read(profile, &home.join(file));
     }
@@ -200,9 +203,20 @@ fn push_home_write_denies(profile: &mut String, home: &Path) {
         push_deny_write(profile, &home.join(dir));
     }
     push_deny_write(profile, &home.join(HARNESS_PRIVATE_DIR));
+    for components in HOME_SECRET_SUBPATHS {
+        push_deny_write(profile, &join_home_subpath(home, components));
+    }
     for file in HOME_SECRET_FILES {
         push_deny_write(profile, &home.join(file));
     }
+}
+
+fn join_home_subpath(home: &Path, components: &[&str]) -> PathBuf {
+    let mut path = home.to_path_buf();
+    for component in components {
+        path.push(component);
+    }
+    path
 }
 
 fn push_allow_read(profile: &mut String, dir: &Path) {

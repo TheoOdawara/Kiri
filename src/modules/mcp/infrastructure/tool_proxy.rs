@@ -10,6 +10,7 @@ use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, confirm_execute_suffix, function_schema,
 };
+use crate::modules::tools::infrastructure::exec::truncate_tool_output;
 use crate::shared::kernel::tool_call::ToolCall;
 
 /// `qualified_name` is leaked once at boot to satisfy `Tool::name`'s `&'static str`. Tools are discovered
@@ -66,13 +67,20 @@ impl Tool for McpToolProxy {
         ))
     }
 
+    /// MCP servers are unrestricted subprocesses past TOFU approval — never run unattended in Auto
+    /// (F-SEC-003 / #82), same high-blast-radius stance as `run_command` / irreversible fs tools.
+    fn confirm_in_auto(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
         let args: Value = match serde_json::from_str(call.function.arguments.as_str()) {
             Ok(value) => value,
             Err(error) => return ToolOutcome::Error(format!("invalid arguments: {error}")),
         };
         match self.connection.call_tool(&self.remote_name, args).await {
-            Ok(text) => ToolOutcome::Ok(text),
+            // Cap before the result reaches the transcript / markdown highlighter (#62).
+            Ok(text) => ToolOutcome::Ok(truncate_tool_output(&text)),
             Err(error) => ToolOutcome::Error(error.to_string()),
         }
     }
@@ -183,5 +191,50 @@ mod tests {
         let outcome = proxy.execute(&sandbox(), &call("not json")).await;
         assert!(matches!(outcome, ToolOutcome::Error(_)));
         assert!(conn.last_call.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn mcp_tools_require_confirmation_in_auto() {
+        let conn = Arc::new(FakeConnection {
+            last_call: Mutex::new(None),
+            result: Ok(String::new()),
+        });
+        let proxy = McpToolProxy::new(
+            "fs",
+            McpToolSpec {
+                name: "read_file".to_string(),
+                description: "Read a file".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            conn,
+        );
+        assert!(proxy.confirm_in_auto());
+    }
+
+    #[tokio::test]
+    async fn execute_caps_oversized_tool_output() {
+        use crate::modules::tools::infrastructure::exec::EXEC_MAX_BYTES;
+        let huge = "x".repeat(EXEC_MAX_BYTES + 2_000);
+        let conn = Arc::new(FakeConnection {
+            last_call: Mutex::new(None),
+            result: Ok(huge),
+        });
+        let proxy = McpToolProxy::new(
+            "fs",
+            McpToolSpec {
+                name: "read_file".to_string(),
+                description: "Read a file".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            conn,
+        );
+        let outcome = proxy
+            .execute(&sandbox(), &call(r#"{"path":"a.txt"}"#))
+            .await;
+        let ToolOutcome::Ok(text) = outcome else {
+            panic!("expected Ok outcome");
+        };
+        assert!(text.contains("truncated at"));
+        assert!(text.len() <= EXEC_MAX_BYTES + 200);
     }
 }

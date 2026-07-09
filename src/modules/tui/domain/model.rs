@@ -70,6 +70,10 @@ impl Status {
     }
 }
 
+/// Max landing instants retained for the cooling-steel stream reveal (F-PERF-002 / #84). Further
+/// newlines after the cap are ignored — older lines have already cooled.
+pub const STREAM_LANDINGS_CAP: usize = 256;
+
 /// The animation/timing cluster: the motion preference plus every wall-clock instant the render reads,
 /// grouped so a lifecycle transition resets them together instead of stranding one stale instant. The
 /// runtime stamps `render_at`/`last_event_at`; the rest are derived render state.
@@ -83,6 +87,8 @@ pub struct Timeline {
     pub render_at: Option<Instant>,
     /// Landing instants of the completed lines of the active streaming answer (one per `\n`), stamped with
     /// `render_at`. Drives the cooling-steel reveal; cleared at each turn and answer boundary.
+    /// Growth is capped at [`STREAM_LANDINGS_CAP`] so a multi-megabyte stream cannot allocate one
+    /// `Instant` per newline (F-PERF-002 / #84).
     pub stream_landings: Vec<Instant>,
     /// When the last turn settled (`TurnEnded`), stamped with `render_at`. Drives the one-shot temper
     /// quench on the idle gate; cleared when a new turn begins.
@@ -119,6 +125,13 @@ impl Timeline {
     /// lifecycle instants intact.
     pub fn reset_stream(&mut self) {
         self.stream_landings.clear();
+    }
+
+    /// Record a completed-line landing for the cooling reveal, ignoring pushes past [`STREAM_LANDINGS_CAP`].
+    pub fn push_stream_landing(&mut self, at: Instant) {
+        if self.stream_landings.len() < STREAM_LANDINGS_CAP {
+            self.stream_landings.push(at);
+        }
     }
 }
 
@@ -502,6 +515,16 @@ mod tests {
         assert!(matches!(m.active_modal(), Some(ActiveModal::Wizard(_))));
         m.wizard = None;
         assert!(m.active_modal().is_none());
+    }
+
+    #[test]
+    fn stream_landings_cap_stops_unbounded_growth() {
+        let now = Instant::now();
+        let mut t = Timeline::default();
+        for _ in 0..(STREAM_LANDINGS_CAP + 50) {
+            t.push_stream_landing(now);
+        }
+        assert_eq!(t.stream_landings.len(), STREAM_LANDINGS_CAP);
     }
 
     #[test]
