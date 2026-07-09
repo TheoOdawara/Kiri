@@ -315,6 +315,10 @@ impl SharedMemory for SqliteSharedMemory {
         )
         .await
     }
+
+    fn is_available(&self) -> bool {
+        self.initialized.load(Ordering::Relaxed)
+    }
 }
 
 #[async_trait::async_trait]
@@ -384,6 +388,40 @@ mod tests {
             tags.iter().map(|t| t.to_string()).collect(),
             project.map(String::from),
         )
+    }
+
+    // Issue #33: `is_available()` (SharedMemory) is the sync path's fail-fast signal — it must track
+    // `init()`, not construction, so a store that was opened but never (or unsuccessfully) initialized
+    // reports unavailable rather than silently degrading to an empty-but-"available" operand.
+    #[tokio::test]
+    async fn not_init_reports_unavailable() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("memory").join("shared.db");
+        let memory = SqliteSharedMemory::new(db).unwrap();
+        assert!(
+            !SharedMemory::is_available(&memory),
+            "a store that was opened but never init'd must report unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_reports_available() {
+        let dir = TempDir::new().unwrap();
+        let memory = memory(&dir).await;
+        assert!(
+            SharedMemory::is_available(&memory),
+            "a successfully init'd store must report available"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_fallback_stays_unavailable_until_init() {
+        // Mirrors the degraded-fallback shape `build_sync_memory_at`/`build_memory` construct: an
+        // `in_memory()` store is inert (unavailable) until `init()` succeeds on it explicitly.
+        let memory = SqliteSharedMemory::in_memory().unwrap();
+        assert!(!SharedMemory::is_available(&memory));
+        memory.init().await.unwrap();
+        assert!(SharedMemory::is_available(&memory));
     }
 
     #[tokio::test]

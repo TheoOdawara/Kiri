@@ -9,7 +9,16 @@ pub trait SessionStore: Send + Sync {
     async fn create(&self, project_id: &str) -> AgentResult<Session>;
 
     /// `messages` is only the not-yet-persisted tail, in order — not the whole conversation.
-    async fn append_messages(&self, session_id: &str, messages: &[Message]) -> AgentResult<()>;
+    /// `base_index` (the tail's absolute position) and `salt` (the caller's per-conversation identity)
+    /// derive a stable per-message identity, so a retried call with an unmoved cursor deduplicates
+    /// silently — see `MESSAGE_UUID_NAMESPACE`.
+    async fn append_messages(
+        &self,
+        session_id: &str,
+        base_index: usize,
+        salt: &str,
+        messages: &[Message],
+    ) -> AgentResult<()>;
 
     async fn set_title(&self, session_id: &str, title: &str) -> AgentResult<()>;
 

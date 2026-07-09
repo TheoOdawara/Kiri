@@ -1,6 +1,8 @@
 //! Session persistence orchestration and the session-management effect handlers: flush the conversation
 //! tail, open/resume a session, list sessions for the picker, change workspace, and start a new session.
 
+use uuid::Uuid;
+
 use crate::modules::memory::domain::project_id::project_id_from_path;
 use crate::modules::session::domain::session::{UNTITLED_SESSION_LABEL, derive_title};
 use crate::modules::tools::application::sandbox::Sandbox;
@@ -14,11 +16,29 @@ use crate::shared::kernel::role::Role;
 use super::{RunLoop, UiDriver};
 
 /// Session persistence cursor: the id of the row backing the current conversation (lazily created on the
-/// first flush, so an empty session never hits the DB) and how many non-system messages have already
-/// been written, so each flush appends only the new tail.
+/// first flush, so an empty session never hits the DB), how many non-system messages have already been
+/// written (so each flush appends only the new tail), and `salt` — a random per-conversation identity
+/// mixed into every flushed message's uuid (issue #34). A fresh `salt` is drawn whenever the cursor
+/// detaches from its session row (new session, resumed session, workspace switch), matching the
+/// invariant `append_messages` relies on: within one salt's lifetime, a given `base_index` names exactly
+/// one message, so a retried flush at an unmoved cursor is recognized and deduplicated, while two
+/// different conversations (different salts) racing the same `base_index` are never falsely merged.
 pub(super) struct SessionCursor {
     pub(super) session_id: Option<String>,
     pub(super) persisted_len: usize,
+    pub(super) salt: String,
+}
+
+impl SessionCursor {
+    /// A fresh, empty cursor with a newly drawn salt — used whenever persistence detaches from its
+    /// current session row (construction, `/new`, `/resume`, `/cd`).
+    pub(super) fn fresh() -> Self {
+        Self {
+            session_id: None,
+            persisted_len: 0,
+            salt: Uuid::now_v7().to_string(),
+        }
+    }
 }
 
 /// How many recent sessions the `/sessions` picker lists.
@@ -101,7 +121,11 @@ impl RunLoop {
         };
 
         let first_flush = cursor == 0;
-        if let Err(error) = self.session_store.append_messages(&id, delta).await {
+        if let Err(error) = self
+            .session_store
+            .append_messages(&id, cursor, &self.cursor.salt, delta)
+            .await
+        {
             self.model
                 .notify_error(format!("não persistiu a sessão: {error}"));
             return;
@@ -233,6 +257,10 @@ impl RunLoop {
                 self.conversation = fresh;
                 self.cursor.session_id = Some(session.id);
                 self.cursor.persisted_len = session.messages.len();
+                // A resumed session is a new local conversation context: draw a fresh salt so this
+                // process's future appends (starting at `persisted_len`) get their own message
+                // identities, distinct from whatever process/salt originally wrote the resumed tail.
+                self.cursor.salt = Uuid::now_v7().to_string();
             }
             Ok(None) => self.model.notify_error("sessão não encontrada"),
             Err(error) => self
@@ -257,8 +285,7 @@ impl RunLoop {
                 // fallback for project-id keying (the sandbox already proved the dir exists and is usable).
                 let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
                 self.project_id = project_id_from_path(&canonical_root);
-                self.cursor.session_id = None;
-                self.cursor.persisted_len = 0;
+                self.cursor = SessionCursor::fresh();
                 self.sandbox = new_sandbox;
                 // A new workspace detaches into a fresh session context — same "starting again" logic
                 // as `open_session`/`new_session` (issue #8b).
@@ -277,8 +304,7 @@ impl RunLoop {
         self.drive_distillation(ui).await;
         self.conversation = Conversation::new(self.system_prompt.clone());
         // Detach from the persisted row: the next turn lazily creates a fresh session.
-        self.cursor.session_id = None;
-        self.cursor.persisted_len = 0;
+        self.cursor = SessionCursor::fresh();
         self.model.transcript = Transcript::default();
         self.model.attachments.clear();
         self.model.scroll.pin();

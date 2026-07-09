@@ -325,12 +325,9 @@ impl Tui {
             memory,
             project_id,
             // Session persistence cursor: the row backing the current conversation (lazily created on the
-            // first flush, so an empty session never hits the DB) and how many non-system messages have
-            // already been written, so each flush appends only the new tail.
-            cursor: SessionCursor {
-                session_id: None,
-                persisted_len: 0,
-            },
+            // first flush, so an empty session never hits the DB), how many non-system messages have
+            // already been written, and a fresh random salt (issue #34).
+            cursor: SessionCursor::fresh(),
             hooks,
         };
         let mut ui = UiDriver {
@@ -1181,6 +1178,8 @@ mod tests {
             async fn append_messages(
                 &self,
                 _session_id: &str,
+                _base_index: usize,
+                _salt: &str,
                 _messages: &[Message],
             ) -> AgentResult<()> {
                 unreachable!("provider CRUD tests must never touch the session store")
@@ -1320,10 +1319,7 @@ mod tests {
                 session_store: Arc::new(NullSessionStore),
                 memory: Arc::new(NullMemory),
                 project_id: "test-workspace".to_string(),
-                cursor: SessionCursor {
-                    session_id: None,
-                    persisted_len: 0,
-                },
+                cursor: SessionCursor::fresh(),
                 hooks: empty_hooks(),
             };
             (run_loop, tempdir)

@@ -37,7 +37,7 @@ arboard = { version = "3.6.1", features = ["image-data"] }
 png = "0.18.1"
 base64 = "0.22.1"
 regex = "1.11"
-uuid = { version = "1.12", features = ["v7", "serde"] }
+uuid = { version = "1.12", features = ["v5", "v7", "serde"] }
 toml = "0.8"
 zeroize = "1"
 dotenvy = "0.15.7"

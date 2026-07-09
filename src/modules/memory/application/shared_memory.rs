@@ -35,4 +35,11 @@ pub trait SharedMemory: Send + Sync {
     /// Reserved for the memory-management UI.
     #[allow(dead_code)]
     async fn count(&self) -> AgentResult<usize>;
+
+    /// Whether `init` has completed successfully — the canonical signal that this store is real and
+    /// backed by a live schema, not a degraded stand-in. The sync export/import path (issue #33) gates
+    /// on this before treating the store as an operand: a fallback constructed but never `init`'d must
+    /// report `false`, so `kiri sync push`/`pull` fail fast instead of silently operating on an inert,
+    /// empty store.
+    fn is_available(&self) -> bool;
 }
