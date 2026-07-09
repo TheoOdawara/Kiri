@@ -1,19 +1,12 @@
-//! Small request-building idioms shared by the OpenAI-compatible adapters (and the URL join by
-//! Anthropic): the base-URL join that tolerates a trailing slash, and the keyless-aware bearer header.
-//! Sibling to `http_error` (which classifies the *response*); this shapes the *request*.
-
 use crate::shared::kernel::provider::Secret;
 
-/// Join an endpoint `suffix` onto a configured `base_url`, tolerating a trailing slash on the base so a
-/// hand-edited `http://host/` and `http://host` both yield `http://host/{suffix}` rather than a `//`.
+/// Tolerates a trailing slash on `base`, so a hand-edited `http://host/` does not yield a `//`.
 pub(crate) fn join_url(base: &str, suffix: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), suffix)
 }
 
-/// Attach `Authorization: Bearer <key>` only when a key is present. A keyless endpoint (local LM Studio
-/// / Ollama) must send NO `Authorization` header — sending `Bearer ` (empty) makes some local servers
-/// reject the request — so `None` leaves the builder untouched. Exposes the secret only at this one call
-/// site.
+/// A keyless endpoint (local LM Studio / Ollama) must send no `Authorization` header at all: some local
+/// servers reject an empty `Bearer `.
 pub(crate) fn apply_optional_bearer(
     request: reqwest::RequestBuilder,
     api_key: &Option<Secret>,
@@ -41,7 +34,6 @@ mod tests {
 
     #[test]
     fn apply_optional_bearer_omits_header_when_keyless() {
-        // The locked LM Studio / Ollama regression: a keyless adapter sends no Authorization header.
         let client = reqwest::Client::new();
         let keyless = apply_optional_bearer(client.get("http://x/"), &None)
             .build()

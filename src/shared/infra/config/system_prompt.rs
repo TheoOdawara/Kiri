@@ -1,13 +1,8 @@
 use std::time::Duration;
 
-/// The static prose of the session's first message, broken into 9 named sections (Identity, Quality,
-/// Posture, Workspace & paths, Tools, Approval modes, Turn mechanics, Memory & preferences, Security) so
-/// the model can ground each concern independently. Provider-agnostic. The tool/limit/sensitive facts are
-/// NOT hardcoded here: the `{SENSITIVE_LIST}`, `{TIMEOUT_SECONDS}`, `{OUTPUT_CAP_KIB}`, and
-/// `{CHECKPOINT_MINUTES}` placeholders are filled by `render_system_prompt` from live single sources, so
-/// an override cannot make the prompt lie (SEC-06). Revision in
-/// docs/decisions/0007-system-prompt-revision.md; it supersedes the prior shape noted in
-/// docs/decisions/0002-tool-calling-and-sandbox.md.
+/// The static prose of the session's first message. The tool/limit/sensitive facts are deliberately NOT
+/// hardcoded: `render_system_prompt` fills the placeholders from live single sources, so an override
+/// cannot make the prompt lie (SEC-06). See docs/decisions/0007-system-prompt-revision.md.
 const SYSTEM_PROMPT_TEMPLATE: &str = concat!(
     "# Identity\n",
     "You are Kiri, a coding agent that operates on the user's local filesystem through a small ",
@@ -114,28 +109,22 @@ const SYSTEM_PROMPT_TEMPLATE: &str = concat!(
     "what you saw.",
 );
 
-/// The optional extension/user text blocks the system prompt injects before `# Security` (ADR 0019/0021/
-/// 0029): rules, then skills, then agents, then instructions, in that order — grouped into one struct so
-/// `render_system_prompt` stays under the argument-count lint as this set grows (the same pattern
-/// `ExtensionCatalog` already uses for `file_loader::load_type`'s accumulators).
+/// The optional blocks injected before `# Security` (ADR 0019/0021/0029), grouped into one struct so
+/// `render_system_prompt` stays under the argument-count lint as the set grows.
 pub struct PromptExtensions<'a> {
     pub rules: Option<&'a str>,
     pub skills: Option<&'a str>,
     pub agents: Option<&'a str>,
-    /// Trusted global-layer (`~/.kiri/`, or an explicit `--instructions` override) instructions —
-    /// authoritative user guidance.
+    /// Trusted global layer: authoritative user guidance.
     pub instructions_global: Option<&'a str>,
-    /// Untrusted project-layer (workspace root) instructions — a cloned/third-party repo's
-    /// KIRI.md/AGENTS.md/CLAUDE.md may be attacker-authored (S3-1), so this is framed as untrusted
-    /// guidance the model must not obey as a directive to weaken Security, mirroring the memory
-    /// digest's framing of the same data class (`digest.rs`).
+    /// Untrusted: a cloned repo's KIRI.md may be attacker-authored (S3-1), so it is framed as guidance the
+    /// model must not obey as a directive to weaken Security.
     pub instructions_project: Option<&'a str>,
 }
 
-/// Render the system prompt, filling the four runtime placeholders plus `extensions`'s optional
-/// rules/skills/agents/instructions blocks (all injected before `# Security` so the Security section
-/// always takes precedence over any extension- or user-supplied text). The values arrive as parameters so
-/// this leaf module gains no dependency on the `tools` layer (SEC-06).
+/// Every optional block is injected before `# Security`, so that section always takes precedence over
+/// extension- or user-supplied text. The values arrive as parameters so this leaf module gains no
+/// dependency on the `tools` layer (SEC-06).
 pub fn render_system_prompt(
     sensitive_globs: &[&str],
     default_timeout_ms: u64,
@@ -201,13 +190,10 @@ pub fn render_system_prompt(
     )
 }
 
-/// Substitute every `{TOKEN}` in `template` with its value from `tokens`, in a single left-to-right scan
-/// over `template` itself. Unlike a chain of `str::replace` calls — where each call rescans the *entire
-/// accumulating string*, including text spliced in by an earlier call — this never re-examines
-/// already-substituted content. So a literal `{SOME_TOKEN}` embedded in one untrusted value (rules,
-/// skills, or instructions) can never be mistaken for a real placeholder and rewritten with another
-/// value: it renders verbatim, because the scan has already moved past that position in `template` by
-/// the time the value is spliced in. An unrecognized `{...}` also renders verbatim.
+/// A single left-to-right scan over `template`, never re-examining substituted content — unlike a chain of
+/// `str::replace`, where each call rescans the accumulating string. So a literal `{SOME_TOKEN}` inside an
+/// untrusted value cannot be mistaken for a real placeholder: the scan has already moved past that
+/// position by the time the value is spliced in. An unrecognized `{...}` renders verbatim.
 fn render_template(template: &str, tokens: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;

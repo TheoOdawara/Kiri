@@ -1,17 +1,9 @@
-//! Shared mapping of a non-success provider HTTP response into an [`AgentError`]. Both the OpenAI and
-//! Anthropic adapters classify a failed request the same way — a 4xx means the body we sent is
-//! unacceptable (resending it fails identically), anything else is a (typically transient) transport
-//! failure — so the rule lives in one place rather than duplicated per adapter.
-
 use crate::shared::kernel::error::AgentError;
 
-/// Cap a provider error body before it reaches the transcript. The body can reflect the request we
-/// sent (which may include file contents the agent read), so it is bounded to a short preview rather
-/// than surfaced in full.
+/// An error body can echo the request, which may carry file contents the agent read, so the transcript
+/// gets a preview rather than the whole thing.
 const MAX_ERROR_BODY_CHARS: usize = 600;
 
-/// Bound untrusted provider error text to a short, transcript-safe preview. Shared with the SSE adapters
-/// so an in-band stream error (`{"error": …}` on a 200 stream) is capped exactly like an HTTP error body.
 pub(crate) fn bounded_preview(text: &str) -> String {
     if text.chars().count() <= MAX_ERROR_BODY_CHARS {
         return text.to_string();
@@ -24,14 +16,11 @@ fn truncate_body(body: String) -> String {
     bounded_preview(&body)
 }
 
-/// Classify a non-success response into the matching error. A 4xx becomes [`AgentError::ProviderRejected`]
-/// (carrying the status + a bounded body) so the frontend can drop the offending turn instead of
-/// resending it forever; a 5xx/other becomes a plain (transient) [`AgentError::Provider`].
+/// A 4xx means the body we sent is unacceptable, so [`AgentError::ProviderRejected`] tells the frontend
+/// to drop the turn rather than resend it forever. Everything else is transient.
 pub(crate) fn error_from_status(status: reqwest::StatusCode, body: String) -> AgentError {
-    // 429 (rate limit) and 408 (request timeout) are 4xx but transient throttles, not body defects:
-    // the same request succeeds after a backoff. Classify them as a retryable `Provider` error so the
-    // frontend keeps the turn instead of discarding it as a permanent rejection (the single most common
-    // failure on free/low tiers must not silently lose the user's message).
+    // 429 and 408 are 4xx but transient throttles, and the same request succeeds after a backoff —
+    // rejecting them would silently lose the user's message on free tiers.
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS
         || status == reqwest::StatusCode::REQUEST_TIMEOUT
     {
@@ -97,7 +86,6 @@ mod tests {
 
     #[test]
     fn rate_limit_and_request_timeout_are_transient_not_rejected() {
-        // 429/408 must NOT become ProviderRejected (which the frontend drops); they are retryable.
         for status in [
             reqwest::StatusCode::TOO_MANY_REQUESTS,
             reqwest::StatusCode::REQUEST_TIMEOUT,

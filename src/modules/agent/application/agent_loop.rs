@@ -19,29 +19,23 @@ use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::message::Message;
 use crate::shared::kernel::tool_call::ToolCall;
 
-/// Model-facing tool-result content, single-sourced here. These are protocol strings the model reads
-/// back in the conversation history, so they stay English (the contract: code/protocol in English) —
-/// distinct from the user-facing pt-BR confirmation prompts, which live in the `Bridge` adapter.
+/// Protocol strings the model reads back in the conversation history, so they stay English — unlike the
+/// user-facing pt-BR confirmation prompts in the `Bridge` adapter.
 const TOOL_RESULT_PLAN_PRESENTED: &str = "Plan presented to the user for approval.";
 const TOOL_RESULT_PLAN_BLOCKED: &str = "ignored: present_plan ends the turn";
 const TOOL_RESULT_IGNORED_SESSION_ENDED: &str = "ignored: session ended";
 const TOOL_RESULT_IGNORED_CHECKPOINT: &str = "ignored: execution interrupted at the checkpoint";
 const TOOL_RESULT_IGNORED_USER_ABORT: &str = "ignored: interrupted by the user";
 
-/// Whether a user turn ran to completion, proposed a plan for approval, or the user ended the session
-/// at a prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnOutcome {
     Completed,
-    /// A plan-mode turn called `present_plan`: the carried text is the finished plan, surfaced for the
-    /// user's approval before anything is executed.
+    /// The carried text is the finished plan, surfaced for approval before anything is executed.
     PlanProposed(String),
     Aborted,
 }
 
-/// Run a tool execution to completion, returning its outcome alongside how long only the execution
-/// took (so the reported duration excludes any time the user spent at an approval prompt). Async so
-/// tools that spawn processes can await them; the wall clock still measures only the await span.
+/// The reported duration covers only the execution, never the time the user spent at an approval prompt.
 async fn timed<Fut: std::future::Future<Output = ToolOutcome>>(
     run: Fut,
 ) -> (ToolOutcome, Duration) {
@@ -50,18 +44,16 @@ async fn timed<Fut: std::future::Future<Output = ToolOutcome>>(
     (outcome, start.elapsed())
 }
 
-/// Push a tool result for every call in `calls`, so a round that ends early (user abort or a declined
-/// runaway checkpoint) still leaves the assistant `tool_calls` message fully answered — a valid,
-/// persistable OpenAI tool exchange that `/resume` can replay without the provider rejecting it (400).
+/// A round that ends early must still leave the assistant `tool_calls` message fully answered, or the
+/// exchange is invalid and `/resume` replays it into a provider 400.
 fn answer_unanswered(conversation: &mut Conversation, calls: &[ToolCall], message: &str) {
     for call in calls {
         conversation.push(Message::tool_result(call.id.as_str(), message.to_string()));
     }
 }
 
-/// The agent loop. For one user turn: stream the assistant, then while it requests tools, confirm each
-/// call through the UI, execute approved ones against the sandbox, feed the results back, and repeat
-/// until the model stops requesting tools — guarded by a wall-clock checkpoint against runaways.
+/// For one user turn: stream the assistant, then while it requests tools, confirm each call through the
+/// UI, execute the approved ones, and feed the results back — guarded by a checkpoint against runaways.
 pub struct AgentLoop {
     provider: Arc<dyn CompletionProvider>,
     registry: ToolRegistry,
@@ -87,36 +79,30 @@ impl AgentLoop {
         }
     }
 
-    /// Swap the provider adapter mid-session (a live `/provider` or `/effort` change rebuilds the Arc,
-    /// since effort is captured at provider construction). Called only between turns; `run` borrows
-    /// `&self`, so a swap cannot race an in-flight turn.
+    /// A live `/provider` or `/effort` change rebuilds the Arc, since effort is captured at construction.
+    /// Called only between turns; `run` borrows `&self`, so a swap cannot race an in-flight turn.
     pub fn set_provider(&mut self, provider: Arc<dyn CompletionProvider>) {
         self.provider = provider;
     }
 
-    /// Swap the active model id mid-session (a live `/models` change). The model is read per turn from
-    /// `self.model`, so this alone takes effect on the next turn — no provider rebuild needed.
+    /// Read per turn, so this takes effect on the next one with no provider rebuild.
     pub fn set_model(&mut self, model: String) {
         self.model = model;
     }
 
-    /// The current provider adapter, for an out-of-turn call like the end-of-session distillation. Clones
-    /// the `Arc` so the caller drives `complete` without borrowing the loop, and always sees the latest
-    /// adapter after a live `/provider`/`/effort` swap.
+    /// For an out-of-turn call like the end-of-session distillation. Clones the `Arc` so the caller drives
+    /// `complete` without borrowing the loop, always seeing the latest adapter after a swap.
     pub fn provider(&self) -> Arc<dyn CompletionProvider> {
         self.provider.clone()
     }
 
-    /// The active model id (for the same out-of-turn calls).
     pub fn model(&self) -> &str {
         &self.model
     }
 
-    /// Drive one user turn to completion. The conversation must already hold the user message. On a
-    /// provider failure the error is returned (the caller renders it and rolls back a dangling user
-    /// message); `Aborted` means the user ended the session at a prompt. `io` is the engine's single UI
-    /// surface — the `EventSink`/`Presenter`/`ApprovalPolicy` ports, all satisfied by the `Bridge`
-    /// adapter in production.
+    /// The conversation must already hold the user message. On a provider failure the caller renders the
+    /// error and rolls back the dangling user message; `Aborted` means the user ended the session at a
+    /// prompt. `io` is the engine's single UI surface, satisfied by the `Bridge` adapter in production.
     pub async fn run<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
         &self,
         conversation: &mut Conversation,
@@ -124,26 +110,22 @@ impl AgentLoop {
         mode: ApprovalMode,
         io: &mut IO,
     ) -> Result<TurnOutcome, AgentError> {
-        // The advertised tool set is fixed for the turn; in plan mode it excludes destructive tools.
-        // `mode` may still tighten to `Auto` mid-turn if the user approves a call with "don't ask again".
-        // Deliberately keep the plan-restricted schema for the whole turn; never recompute it on a
-        // mid-turn `ApprovedAuto` switch, or a Plan->Auto turn would gain the destructive tools that
-        // plan mode withheld from the model.
         let mut mode = mode;
-        // Sticky to the turn's ORIGIN, never the live `mode`: a checkpoint's "keep going, don't ask
-        // again" can flip `mode` to `Auto` mid-turn (`checkpoint_transition`), but a turn that started in
-        // Plan must keep refusing a plan_check-blacklisted run_command (rm, mv, git commit, installs) —
-        // not merely fall back to Auto's live-confirmation gate, which would silently downgrade "refused"
-        // to "confirm-prompted" the moment the checkpoint fires (issue #28).
+        // The turn's ORIGIN mode, and the authority for every plan-mode restriction below. A checkpoint's
+        // "keep going, don't ask again" can flip the live `mode` to `Auto` mid-turn, but a turn that began
+        // in Plan must keep refusing a plan_check-blacklisted run_command (rm, git commit, installs)
+        // outright — never downgrade to Auto's live-confirmation gate (issue #28). The schema, the
+        // plan-mode reminder, and the `present_plan` interception are all sticky to this, not to `mode`.
         let started_in_plan = mode == ApprovalMode::Plan;
+        // Computed once from the ORIGIN mode: recomputing on a mid-turn `ApprovedAuto` would hand the turn
+        // the destructive tools plan mode withheld.
         let schemas = self.registry.schemas_for(mode);
         let mut checkpoint = Instant::now();
         let mut calls_since_checkpoint: usize = 0;
         loop {
             io.begin_round();
-            // Sticky to the turn's origin like the schema and the run_command blacklist (issue #28):
-            // a checkpoint's ApprovedAuto must not make the model stop seeing the plan-mode reminder
-            // mid-turn, or it silently stops calling `present_plan` at all.
+            // Sticky (see `started_in_plan`): losing the reminder mid-turn makes the model silently stop
+            // calling `present_plan`.
             let turn_messages = if started_in_plan {
                 let mut msgs = conversation.messages().to_vec();
                 msgs.push(Message::system(
@@ -167,15 +149,12 @@ impl AgentLoop {
                     io,
                 )
                 .await;
-            // Finish rendering (erase the spinner, reset the terminal) before `?` can propagate a
-            // provider error: the cleanup must run on the failure path too, so its Result is dropped.
-            // A failed finish send means the runtime's receiver is gone (the app is tearing down) —
-            // benign, and nothing useful could be done with the error here.
+            // Render cleanup must run before `?` propagates a provider error, so its Result is dropped: a
+            // failed send means the runtime's receiver is already gone (the app is tearing down).
             let _ = io.finish_round();
             let turn = result?;
 
             if turn.tool_calls.is_empty() {
-                // Plain text turn (also covers a degenerate tool-call finish with no parsed calls).
                 let mut message = Message::assistant_text(turn.content);
                 if let Some(thinking) = turn.thinking {
                     message = message.with_thinking(thinking);
@@ -193,16 +172,10 @@ impl AgentLoop {
             }
             conversation.push(assistant_message);
 
-            // Plan mode: a `present_plan` call is the explicit "plan is ready" signal — surface the
-            // plan for approval and end the planning turn without executing anything. Every call in the
-            // turn gets a tool result so the round stays a valid OpenAI tool exchange (each `tool_call`
-            // must be answered before the next message).
-            //
-            // Gated on `started_in_plan`, not the live `mode` (issue #28): a checkpoint's ApprovedAuto
-            // flips `mode` to `Auto` mid-turn, but `present_plan` is still advertised (the schema is
-            // sticky too) and still plannable, so without this it would fall through to `decide_and_run`'s
-            // `Auto if started_in_plan` arm and execute as an ordinary tool — echoing the plan back
-            // instead of ending the turn with `TurnOutcome::PlanProposed`.
+            // `present_plan` is the explicit "plan is ready" signal: surface it and end the turn without
+            // executing anything. Every call still gets a tool result, or the round is not a valid tool
+            // exchange. Gated on `started_in_plan`, not `mode` — otherwise it would fall through to
+            // `decide_and_run` and execute as an ordinary tool, echoing the plan back.
             if started_in_plan
                 && let Some(plan_call) =
                     calls.iter().find(|call| call.function.name == PRESENT_PLAN)
@@ -223,10 +196,8 @@ impl AgentLoop {
             }
 
             for (index, call) in calls.iter().enumerate() {
-                // Runaway call-cap checkpoint, enforced WITHIN the round. A single assistant message can
-                // carry an unbounded number of tool calls; checking only between rounds would let one
-                // round run them all (unattended in auto — e.g. a prompt-injected burst of write_file)
-                // before any pause. When the cap is reached, confirm before executing the next call.
+                // Enforced WITHIN the round: one assistant message can carry unboundedly many tool calls,
+                // so checking only between rounds would let a prompt-injected burst run unattended.
                 if calls_since_checkpoint >= self.max_tool_calls {
                     let decision = io
                         .confirm_continue(CheckpointReason::CallCount {
@@ -259,8 +230,7 @@ impl AgentLoop {
                     }
                 }
 
-                // The display command for this call, shown in every mode so the user sees each action
-                // even under auto. Falls back to the tool name if the args do not parse.
+                // Shown in every mode, so the user sees each action even under auto.
                 let command = self
                     .registry
                     .command_line(sandbox, call)
@@ -271,8 +241,7 @@ impl AgentLoop {
                     .await;
 
                 let Some((outcome, elapsed)) = result else {
-                    // The user aborted at this call: answer it and every remaining call so the assistant
-                    // `tool_calls` message stays a fully-answered (valid, persistable) exchange, then end.
+                    // Answer this call and every remaining one, or the exchange is invalid and unpersistable.
                     answer_unanswered(
                         conversation,
                         &calls[index..],
@@ -289,9 +258,7 @@ impl AgentLoop {
                 calls_since_checkpoint += 1;
             }
 
-            // After the round, fire on either guard: a long wall-clock turn, or the tool-call count
-            // since the last check-in. The call-cap leg here catches accumulation ACROSS rounds; the
-            // same cap is also enforced WITHIN the loop above so one oversized round cannot bypass it.
+            // The call-cap leg here catches accumulation ACROSS rounds; the loop above catches it within one.
             if checkpoint.elapsed() >= self.checkpoint_budget
                 || calls_since_checkpoint >= self.max_tool_calls
             {
@@ -318,11 +285,9 @@ impl AgentLoop {
         }
     }
 
-    /// The per-call decision tree for one tool call, factored out of `run` to collapse its deepest
-    /// nesting. Emits `tool_started` just before running (paired with `tool_finished` in `run`) so the
-    /// transcript records every attempt — including declined and plan-blocked calls. Switches `mode` to
-    /// `Auto` when the user approves with "don't ask again" in `Default`. Returns `None` when the user
-    /// aborts at this call, signalling `run` to answer the remaining calls and end the turn.
+    /// Emits `tool_started` just before running, so the transcript records every attempt — including
+    /// declined and plan-blocked calls. `None` means the user aborted here, signalling `run` to answer the
+    /// remaining calls and end the turn.
     async fn decide_and_run<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
         &self,
         sandbox: &dyn Sandbox,
@@ -333,27 +298,19 @@ impl AgentLoop {
         io: &mut IO,
     ) -> Option<(ToolOutcome, Duration)> {
         match *mode {
-            // Auto: run calls without asking — EXCEPT high-blast-radius tools (run_command,
-            // delete_*, move_path) and any out-of-root target, which still require a live
-            // confirmation. This is what keeps an unattended turn — including a prompt-injected
-            // one — from silently destroying data or reaching outside the workspace, and it is
-            // the only such guard on platforms without an OS sandbox.
-            //
-            // A turn that STARTED in Plan and later escalated to Auto via a checkpoint's "keep going,
-            // don't ask again" (`checkpoint_transition`) still has the plan-mode blacklist applied first
-            // (issue #28): the destructive-tool schema freeze (see `run`, above) already keeps such a
-            // turn from ever gaining write_file/edit_file/delete_file/etc., but run_command is advertised
-            // in Plan mode too, and without this check a blacklisted command (rm, mv, git commit,
-            // installs) would silently downgrade from "refused outright" to "just needs a live
-            // confirmation" — the same as any other Auto-mode run_command call — the instant the
-            // checkpoint fires, even though the model was never told the rules changed mid-turn.
+            // An Auto turn that STARTED in Plan keeps the plan-mode blacklist (see `started_in_plan`).
+            // The schema freeze already withholds write_file/delete_file, but run_command is advertised in
+            // Plan too, so without this a blacklisted command would silently downgrade from "refused" to
+            // "confirm-prompted" the instant the checkpoint fires.
             ApprovalMode::Auto if started_in_plan => {
                 self.plan_checked_run(sandbox, call, command, io).await
             }
+            // Runs without asking, EXCEPT high-blast-radius tools and out-of-root targets. On platforms
+            // with no OS sandbox this is the only thing stopping an unattended — or prompt-injected — turn
+            // from destroying data or reaching outside the workspace.
             ApprovalMode::Auto => self.run_gated(sandbox, call, command, io).await,
-            // Plan: non-plannable tools are withheld from the schema; if the model still names
-            // one, refuse it without touching the filesystem. Plannable tools (read-only +
-            // run_command) run while drafting the plan.
+            // Non-plannable tools are withheld from the schema; if the model names one anyway, refuse it
+            // without touching the filesystem.
             ApprovalMode::Plan if !self.registry.is_plannable(&call.function.name) => {
                 io.tool_started(call, command);
                 Some((
@@ -364,21 +321,16 @@ impl AgentLoop {
                     Duration::ZERO,
                 ))
             }
-            // SEC-01: a plannable tool is not a free pass. `plan_checked_run` applies the SAME
-            // confirmation gate auto enforces — run_command (`confirm_in_auto`) and any out-of-root
-            // target (`!default_accept`) still require a live confirmation — so a prompt-injected plan
-            // turn cannot read an out-of-root file (`~/.ssh/id_rsa`, `/etc/passwd`) back to the model or
-            // run an arbitrary command unattended. In-root reads/searches still run free.
+            // SEC-01: a plannable tool is not a free pass. The same gate Auto enforces applies here, so a
+            // prompt-injected plan turn cannot read `~/.ssh/id_rsa` back to the model or run an arbitrary
+            // command unattended. In-root reads and searches still run free.
             ApprovalMode::Plan => self.plan_checked_run(sandbox, call, command, io).await,
-            // Default: confirm each call through the UI before running it.
             ApprovalMode::Default => match self.registry.confirm(sandbox, call) {
                 Some(confirmation) => match io.decide(&confirmation).await {
                     Approval::Approved => {
                         io.tool_started(call, command);
                         Some(timed(self.registry.execute(sandbox, call)).await)
                     }
-                    // "Approve and don't ask again": run this call, then switch the rest of the
-                    // turn to auto so the following calls no longer prompt.
                     Approval::ApprovedAuto => {
                         *mode = ApprovalMode::Auto;
                         io.tool_started(call, command);
@@ -398,12 +350,10 @@ impl AgentLoop {
         }
     }
 
-    /// Run a call under the auto-mode confirmation gate: a high-blast-radius tool (`confirm_in_auto`) or
-    /// an out-of-root target (`!default_accept`) still requires a live confirmation; everything else runs
-    /// directly. Shared by `Auto` and (after `plan_check`) `Plan`, so plan mode never executes an
-    /// out-of-root read or an arbitrary command without the same confirmation auto enforces (SEC-01).
-    /// `ApprovedAuto` is treated as `Approved` here (no mode switch) — the caller owns any transition.
-    /// `None` means the user aborted at this call.
+    /// The auto-mode confirmation gate: a high-blast-radius tool or an out-of-root target still requires a
+    /// live confirmation. Shared by `Auto` and (after `plan_check`) `Plan`, so plan mode never executes an
+    /// out-of-root read without the same gate (SEC-01). `ApprovedAuto` is treated as `Approved` — the
+    /// caller owns any mode transition. `None` means the user aborted at this call.
     async fn run_gated<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
         &self,
         sandbox: &dyn Sandbox,
@@ -435,10 +385,8 @@ impl AgentLoop {
         }
     }
 
-    /// Apply the plan-mode `plan_check` gate, then fall through to [`run_gated`](Self::run_gated) when
-    /// the call is allowed. Shared by `Plan` and by `Auto` for a turn that started in `Plan` (issue #28):
-    /// both states must refuse a `plan_check`-blocked call outright — no filesystem touch, no confirmation
-    /// prompt — never merely fall back to Auto's ordinary live-confirmation gate.
+    /// Shared by `Plan` and by `Auto` for a turn that started in `Plan`: both must refuse a blocked call
+    /// outright — no filesystem touch, no confirmation prompt — never fall back to Auto's ordinary gate.
     async fn plan_checked_run<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
         &self,
         sandbox: &dyn Sandbox,
@@ -454,11 +402,8 @@ impl AgentLoop {
         }
     }
 
-    /// The shared approval arms of a runaway checkpoint, used by both the within-round and post-round
-    /// guards. `None` means continue the turn: `Approved` resets the checkpoint clock and call counter,
-    /// `ApprovedAuto` additionally switches the turn to `Auto`. `Some(outcome)` ends the turn with that
-    /// outcome (`Declined`/`Aborted`) — the caller adds its own end-of-turn bookkeeping (the within-round
-    /// case answers the remaining calls first).
+    /// `None` continues the turn: `Approved` resets the checkpoint clock and counter, `ApprovedAuto` also
+    /// switches to `Auto`. `Some(outcome)` ends the turn, and the caller adds its own bookkeeping.
     fn checkpoint_transition(
         &self,
         decision: Approval,

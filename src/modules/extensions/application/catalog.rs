@@ -5,42 +5,35 @@ use crate::modules::extensions::domain::resource::{
 };
 use crate::shared::kernel::error::AgentResult;
 
-/// The assembled extension catalogs, agnostic of the filesystem source. The loader builds it; the
-/// composition root (`app::wire`) owns the loader adapter, calls `load`, and injects the result.
+/// The assembled extension catalogs, agnostic of the filesystem source.
 #[derive(Debug, Clone, Default)]
 pub struct ExtensionCatalog {
     // ponytail: kept for future `/extensions` debug display (raw resources, both types, one place);
     // nothing reads it yet — `/rules`/`/commands`/`/agents`/`/skills` each already display their own kind.
     #[allow(dead_code)]
     pub resources: HashMap<String, Resource>,
-    /// Rules, keyed by id. Always-on rules (`Rule::always == true`) are injected into the system prompt;
-    /// on-demand rules are addressable by skills/commands (future).
+    /// Always-on rules are injected into the system prompt.
     pub rules: Vec<Rule>,
-    /// Custom slash commands, keyed by their slash-prefixed name (e.g. `/test`). An alias entry is
-    /// resolved to the owning command via an auxiliary map (built at integration time).
+    /// Keyed by slash-prefixed name, e.g. `/test`.
     pub commands: HashMap<String, ExtCommandSpec>,
-    /// One alias → owning command name map, built alongside `commands`.
+    /// Alias → owning command name, built alongside `commands`.
     pub command_aliases: HashMap<String, String>,
-    /// Agent profiles, keyed by id. A command's `agent:` field binds it to one.
+    /// Keyed by id. A command's `agent:` field binds it to one.
     pub agents: HashMap<String, AgentProfile>,
-    /// Skills, keyed by id. Their descriptions render into the system prompt's skill index; bodies are
-    /// fetched on demand by the `use_skill` tool.
+    /// Keyed by id. Only descriptions reach the system prompt; bodies are fetched by `use_skill`.
     pub skills: HashMap<String, Skill>,
-    /// Hooks, keyed by id. Global hooks auto-approve; project ones need the trust gate.
+    /// Keyed by id. Global hooks auto-approve; project ones need the trust gate.
     pub hooks: HashMap<String, Hook>,
-    /// MCP servers, keyed by id. Global auto-approve; project ones need the trust gate.
+    /// Keyed by id. Global servers auto-approve; project ones need the trust gate.
     pub mcp_servers: HashMap<String, McpServer>,
 }
 
 impl ExtensionCatalog {
-    /// The merged text of every always-on rule, in layer order (global > project > bundled, ties by id),
-    /// for injection into the system prompt. `self.rules` is built from a `HashMap`, so it must be sorted
-    /// here — otherwise the injected order (and thus the prompt) would vary between boots. An empty string
-    /// when there are no always-on rules.
+    /// Sorted here because the rules are HashMap-sourced upstream: without it the injected prompt order —
+    /// and thus the prompt itself — would vary between boots.
     pub fn render_rules(&self) -> String {
         let mut always_on: Vec<&Rule> = self.rules.iter().filter(|rule| rule.always).collect();
         always_on.sort_by(|a, b| (a.layer.precedence(), &a.id).cmp(&(b.layer.precedence(), &b.id)));
-        // The bodies are already trimmed at load time; join with a newline separator (empty when none).
         always_on
             .iter()
             .map(|rule| rule.body.as_str())
@@ -48,8 +41,7 @@ impl ExtensionCatalog {
             .join("\n\n")
     }
 
-    /// The `/rules` display text: one line per loaded rule (id, layer, always-on marker, source path),
-    /// sorted by id for a stable listing. `None` when no rules were loaded.
+    /// The `/rules` display text, sorted by id. `None` when none were loaded.
     pub fn rules_display(&self) -> Option<String> {
         if self.rules.is_empty() {
             return None;
@@ -76,8 +68,7 @@ impl ExtensionCatalog {
         Some(lines.join("\n"))
     }
 
-    /// The `/commands` display text: one line per loaded custom command (name, aliases, layer, source
-    /// path), sorted by name for a stable listing. `None` when no commands were loaded.
+    /// The `/commands` display text, sorted by name. `None` when none were loaded.
     pub fn commands_display(&self) -> Option<String> {
         if self.commands.is_empty() {
             return None;
@@ -104,10 +95,8 @@ impl ExtensionCatalog {
         Some(lines.join("\n"))
     }
 
-    /// Every command token (canonical name + aliases) mapped straight to its expanded prompt body — the
-    /// command's own body, with its bound agent's system-prompt prepended when it has one (`agent:`
-    /// names an unknown id is treated as unbound). Submit-time lookup is a single hit regardless of which
-    /// alias the user typed.
+    /// Every command token (canonical name + aliases) mapped straight to its expanded body, so submit-time
+    /// lookup is one hit whichever alias the user typed. An `agent:` naming an unknown id is unbound.
     pub fn command_bodies(&self) -> HashMap<String, String> {
         let mut bodies = HashMap::with_capacity(self.commands.len());
         for command in self.commands.values() {
@@ -128,8 +117,7 @@ impl ExtensionCatalog {
         }
     }
 
-    /// The `/agents` display text: one line per loaded agent profile (id, name, description, layer,
-    /// source path), sorted by id. `None` when no agents were loaded.
+    /// The `/agents` display text, sorted by id. `None` when none were loaded.
     pub fn agents_display(&self) -> Option<String> {
         if self.agents.is_empty() {
             return None;
@@ -155,9 +143,8 @@ impl ExtensionCatalog {
         Some(lines.join("\n"))
     }
 
-    /// The always-on agent index for the system prompt: one `id — description` line per agent, sorted by
-    /// id, mirroring `skills_index` — so the model can pick a `task` dispatch target (by id) without
-    /// guessing (ADR 0029). `None` when no agents were loaded.
+    /// The always-on `# Agents` index, so the model can pick a `task` target by id rather than guess one
+    /// (ADR 0029). Mirrors `skills_index`.
     pub fn agents_index(&self) -> Option<String> {
         if self.agents.is_empty() {
             return None;
@@ -171,8 +158,7 @@ impl ExtensionCatalog {
         Some(lines.join("\n"))
     }
 
-    /// The `/skills` display text: one line per loaded skill (id, layer, tags, source path), sorted by
-    /// id. `None` when no skills were loaded.
+    /// The `/skills` display text, sorted by id. `None` when none were loaded.
     pub fn skills_display(&self) -> Option<String> {
         if self.skills.is_empty() {
             return None;
@@ -200,10 +186,8 @@ impl ExtensionCatalog {
         Some(lines.join("\n"))
     }
 
-    /// The always-on skill index for the system prompt: one `id — description` line per skill (keyed by
-    /// `id`, the exact string `use_skill` expects — never `name`, which is display-only and may differ),
-    /// sorted by id, so the model knows what `use_skill` can fetch without carrying every body up front.
-    /// `None` when no skills were loaded.
+    /// The always-on skill index, so the model knows what `use_skill` can fetch without carrying every
+    /// body up front. Keyed by `id` — never `name`, which is display-only and may differ.
     pub fn skills_index(&self) -> Option<String> {
         if self.skills.is_empty() {
             return None;
@@ -224,8 +208,7 @@ impl ExtensionCatalog {
         hooks
     }
 
-    /// The `/hooks` display text: one line per loaded hook (id, event, layer, source path), sorted by id.
-    /// `None` when no hooks were loaded.
+    /// The `/hooks` display text, sorted by id. `None` when none were loaded.
     pub fn hooks_display(&self) -> Option<String> {
         if self.hooks.is_empty() {
             return None;
@@ -247,8 +230,7 @@ impl ExtensionCatalog {
         Some(lines.join("\n"))
     }
 
-    /// The `/mcp` display text: one line per loaded MCP server (id, command + args, layer, source path),
-    /// sorted by id. `None` when no servers were loaded.
+    /// The `/mcp` display text, sorted by id. `None` when none were loaded.
     pub fn mcp_display(&self) -> Option<String> {
         if self.mcp_servers.is_empty() {
             return None;
@@ -271,16 +253,12 @@ impl ExtensionCatalog {
     }
 }
 
-/// The capability port: discover and load extension resources (including MCP server *specs* — command +
-/// args, not a live connection) from global and project layers. Async so the filesystem walk never blocks
-/// the runtime; the actual MCP handshake is a separate step (`mcp::infrastructure::rmcp_client`, run by
-/// `app::wire` only for gate-approved servers).
+/// Loads extension resources — MCP entries are *specs*, not live connections; the handshake is a separate
+/// step run only for gate-approved servers. Async so the filesystem walk never blocks the runtime.
 #[async_trait::async_trait]
 pub trait ExtensionsLoader: Send + Sync {
-    /// Discover and load all extension resources, returning an assembled catalog. The loader scans
-    /// `~/.kiri/{rules,commands,...}` (global, trusted) then `<workspace>/.kiri/{rules,commands,...}`
-    /// (project, untrusted), merging by id. Global rules/commands load first; a project entry with the
-    /// same id extends (passive) or is held behind the gate (active capability).
+    /// Scans global (trusted) then project (untrusted), merging by id. A project entry of the same id
+    /// extends a passive resource, or is held behind the gate for an active capability.
     async fn load(&self) -> AgentResult<ExtensionCatalog>;
 }
 
@@ -330,15 +308,12 @@ mod tests {
         assert!(rendered.contains("Always use Rust."));
         assert!(rendered.contains("Write senior-level code."));
         assert!(!rendered.contains("On demand only."));
-        // Two always-on bodies are joined by `\n\n`.
         assert!(rendered.contains("\n\n"));
     }
 
     #[test]
     fn render_rules_orders_by_layer_then_id_regardless_of_vec_order() {
-        // `self.rules` is HashMap-sourced, so insertion order is arbitrary. The injected system-prompt
-        // text must still be deterministic: global > project > bundled, ties broken by id. Insert in
-        // reverse-precedence order to prove the sort — not the Vec order — decides the output.
+        // Inserted in reverse-precedence order, so the sort — not the Vec order — must decide the output.
         let catalog = ExtensionCatalog {
             rules: vec![
                 Rule {

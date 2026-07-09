@@ -2,30 +2,23 @@ use std::borrow::Cow;
 
 use crate::modules::provider::infrastructure::tool_args;
 
-/// ASCII space — the first printable character. Every byte below it (newline, tab, NUL, ...) is a
-/// control character that strict JSON forbids unescaped inside a string value. Naming the boundary
-/// keeps the intent of every comparison explicit instead of a bare `0x20`.
+/// Every byte below it is a control character strict JSON forbids unescaped inside a string value.
 const FIRST_PRINTABLE_ASCII: u8 = 0x20;
 
 fn is_json_control(byte: u8) -> bool {
     byte < FIRST_PRINTABLE_ASCII
 }
 
-/// Escape raw control characters that appear INSIDE a JSON string value, leaving control characters
-/// BETWEEN tokens (structural whitespace) untouched.
+/// Escapes control characters INSIDE a JSON string value, leaving the structural whitespace BETWEEN
+/// tokens untouched.
 ///
-/// The model sometimes emits a literal newline/tab inside a string value (e.g. a file's `content`)
-/// instead of the JSON escape `\n`/`\t` — that is invalid JSON. The provider re-parses
-/// `function.arguments` as nested JSON in strict mode and rejects such a body with "Invalid control
-/// character", which then poisons every later request (the malformed turn is re-sent verbatim).
-/// Escaping only the control chars inside string values keeps the JSON structure intact and the
-/// content faithful (a real newline becomes `\n`).
+/// The model sometimes emits a literal newline inside a string value instead of `\n`. The provider
+/// re-parses `function.arguments` in strict mode, rejects that body, and — since the malformed turn is
+/// re-sent verbatim — every later request is poisoned too.
 ///
-/// Fast path: returns the input borrowed and untouched when it holds no control character.
-/// A raw-byte scan is correct because control bytes are pure ASCII and never appear as a UTF-8
-/// continuation byte (those are always >= 0x80). The result is built by copying verbatim runs of the
-/// original `&str` (always valid UTF-8) and splicing in ASCII escape sequences, so the output is
-/// valid UTF-8 by construction — no fallible reassembly is needed.
+/// The raw-byte scan is sound because control bytes are pure ASCII and never appear as a UTF-8
+/// continuation byte (those are always >= 0x80), so splicing ASCII escapes into verbatim runs of the
+/// original `&str` yields valid UTF-8 by construction.
 pub(crate) fn escape_control_chars_in_strings(args: &str) -> Cow<'_, str> {
     if !args.bytes().any(is_json_control) {
         return Cow::Borrowed(args);
@@ -37,9 +30,8 @@ pub(crate) fn escape_control_chars_in_strings(args: &str) -> Cow<'_, str> {
     let mut escaped = false;
     for (index, &byte) in args.as_bytes().iter().enumerate() {
         if escaped {
-            // Previous byte was a backslash inside a string. A raw control char here is still illegal
-            // JSON and must be escaped; anything else is a legitimate escape body (`\"`, `\n`, ...)
-            // that stays in the verbatim run.
+            // A raw control char after a backslash is still illegal JSON; any other byte is a legitimate
+            // escape body (`\"`, `\n`, …) and stays in the verbatim run.
             escaped = false;
             if is_json_control(byte) {
                 out.push_str(&args[run_start..index]);
@@ -75,15 +67,12 @@ fn push_escaped_control(out: &mut String, byte: u8) {
     }
 }
 
-/// Normalize a tool call's `arguments` so the stored value is always valid JSON. Applies OpenAI's
-/// distinct control-char escaping first, then delegates the validate-or-`{}` decision to the shared
-/// tool-args rule — so the escaping stays local while the fallback policy is single-sourced.
+/// OpenAI's control-char escaping stays local here; the validate-or-`{}` fallback is single-sourced.
 pub(crate) fn normalize_arguments(args: String) -> String {
     let escaped = escape_to_owned(args);
     tool_args::sanitized_string(&escaped)
 }
 
-/// Apply the escaper without cloning on the clean (borrowed) path.
 fn escape_to_owned(args: String) -> String {
     if let Cow::Owned(owned) = escape_control_chars_in_strings(&args) {
         return owned;
@@ -147,7 +136,7 @@ mod tests {
 
     #[test]
     fn normalize_falls_back_to_empty_object_when_unrecoverable() {
-        // Control char forces the slow path, but the JSON is truncated (unterminated string).
+        // The control char forces the slow path, but the string is left unterminated.
         let truncated = "{\"path\":\"a.rs\",\"content\":\"oops\nno close".to_string();
         assert_eq!(normalize_arguments(truncated), "{}");
     }

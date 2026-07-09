@@ -9,22 +9,16 @@ use crate::modules::sync::application::memory_exchange::{MemoryExchange, MergeRe
 use crate::modules::sync::domain::merge::incoming_wins;
 use crate::shared::kernel::error::{AgentError, AgentResult};
 
-/// Upper bound on entries exported in one pass — a personal cross-project memory stays well under this.
+/// A personal cross-project memory stays well under this.
 const EXPORT_CAP: usize = 100_000;
 
-/// Upper bound on entries imported in one pass (mirrors `EXPORT_CAP`), so a large or hostile remote
-/// `memory.ndjson` cannot drive an unbounded number of per-entry DB round-trips.
+/// Bounds the per-entry DB round-trips a hostile remote `memory.ndjson` can drive.
 const IMPORT_CAP: usize = EXPORT_CAP;
 
-/// Hard byte ceiling on an imported `memory.ndjson`, far above any real personal memory. Untrusted
-/// remote content is streamed line-by-line, but a multi-gigabyte file (or one giant unterminated line)
-/// must be rejected by a cheap `stat` up front rather than read at all — the byte cap fails fast, the
-/// entry cap (`IMPORT_CAP`) bounds the work done within it.
+/// A multi-gigabyte file (or one giant unterminated line) must be rejected by a cheap `stat` up front
+/// rather than read at all; `IMPORT_CAP` then bounds the work done within it.
 const MAX_IMPORT_BYTES: u64 = 512 * 1024 * 1024;
 
-/// The NDJSON adapter behind the [`MemoryExchange`] port, bound to the shared store it serializes. The
-/// composition root injects one into `SyncService`; the free `export`/`import` functions below hold the
-/// actual logic and are exercised directly by this module's tests.
 pub struct NdjsonMemoryExchange<'a> {
     memory: &'a dyn SharedMemory,
 }
@@ -46,10 +40,24 @@ impl MemoryExchange for NdjsonMemoryExchange<'_> {
     }
 }
 
-/// Export the shared memory to deterministic NDJSON (one entry per line, sorted by id) so the synced repo
-/// diffs cleanly and merges by line. Embedding vectors are NOT exported — they are machine-local derived
-/// data, re-derivable from content on each machine.
+/// For sync the store is the operand, not an auxiliary, so a degraded fallback must fail fast rather than
+/// silently produce an empty export or a merge that vanishes at process exit.
+fn require_available(memory: &dyn SharedMemory, verb: &str) -> AgentResult<()> {
+    if memory.is_available() {
+        Ok(())
+    } else {
+        Err(AgentError::Memory(format!(
+            "shared memory unavailable; refusing to {verb} an inert/empty store"
+        )))
+    }
+}
+
+/// Sorted by id so the synced repo diffs cleanly and merges by line. Embedding vectors are machine-local
+/// derived data, re-derivable from content, so they are not exported.
 pub async fn export(memory: &dyn SharedMemory, path: &Path) -> AgentResult<usize> {
+    // Issue #33: for sync, the store is the operand, not an auxiliary — an unavailable (never `init`'d)
+    // store must fail fast here rather than silently write an empty snapshot over the remote.
+    require_available(memory, "export")?;
     let mut entries = memory.list(0, EXPORT_CAP).await?;
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     let mut body = String::new();
@@ -57,25 +65,19 @@ pub async fn export(memory: &dyn SharedMemory, path: &Path) -> AgentResult<usize
         body.push_str(&serde_json::to_string(entry).map_err(AgentError::memory)?);
         body.push('\n');
     }
-    // The exported memory is personal/preference content: create it owner-only up front (`0600` on Unix)
-    // so there is no transient world-readable window before a chmod, mirroring `secrets/file_store.rs`.
+    // Personal content: owner-only at create, so there is no transient world-readable window.
     write_owner_only(path, body.as_bytes()).await?;
     Ok(entries.len())
 }
 
-/// Import NDJSON into the shared memory, last-write-wins by `updated_at` per entry id. A missing file is
-/// an empty merge (nothing pulled yet). Untrusted remote content (materialized by `git reset --hard` from
-/// the profile repo) is hardened three ways: a `symlink_metadata` `stat` that does NOT follow symlinks
-/// rejects a symlink or any non-regular file (a committed `-> /dev/zero` or `-> <fifo>`) before it is
-/// opened; a byte ceiling (`MAX_IMPORT_BYTES`) rejects an oversized regular file; and the file is then
-/// **streamed line-by-line** (never slurped whole) under the entry cap (`IMPORT_CAP`), with the streamed
-/// bytes bounded too. A malformed line aborts with a clear error rather than silently dropping knowledge.
+/// Last-write-wins by `updated_at` per entry id. A missing file is an empty merge. A malformed line
+/// aborts with a clear error rather than silently dropping knowledge.
 pub async fn import(memory: &dyn SharedMemory, path: &Path) -> AgentResult<MergeReport> {
-    // `symlink_metadata` does NOT follow symlinks: reject a symlink or any non-regular file before it is
-    // opened. The work-tree file is materialized by `git reset --hard` from an attacker-controlled remote,
-    // so a committed `memory.ndjson -> /dev/zero` (infinite read → OOM) or `-> <fifo>` (blocking read, no
-    // timeout) must never reach `File::open`, which would follow it. `len()` is advisory, so the streaming
-    // loop below bounds the bytes actually read as well.
+    // An unavailable store would report a successful merge into entries that vanish at process exit.
+    require_available(memory, "import into")?;
+    // The file is materialized by `git reset --hard` from an attacker-controlled remote, so a committed
+    // `-> /dev/zero` (OOM) or `-> <fifo>` (blocking read) must never reach `File::open`, which follows
+    // links. `symlink_metadata` does not.
     let metadata = match fs::symlink_metadata(path).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -105,18 +107,17 @@ pub async fn import(memory: &dyn SharedMemory, path: &Path) -> AgentResult<Merge
         )));
     }
 
-    // `len()` is advisory, so bound the bytes actually read with `take`: a hard ceiling that even a single
-    // unterminated line cannot allocate past, no matter what the stat reported.
+    // The stat's `len()` is advisory, so `take` bounds what a single unterminated line can allocate.
     let file = fs::File::open(path).await?;
     let mut lines = BufReader::new(file.take(MAX_IMPORT_BYTES)).lines();
     let mut report = MergeReport {
         merged: 0,
         skipped: 0,
     };
-    // Belt-and-suspenders over the `take` ceiling: surface a clear over-cap error instead of a silent EOF.
+    // Without this, hitting the `take` ceiling would look like a clean EOF instead of an error.
     let mut bytes_read: u64 = 0;
     while let Some(line) = lines.next_line().await.map_err(AgentError::memory)? {
-        // `next_line` strips the terminator; count it back so the running total tracks the on-disk size.
+        // `next_line` strips the terminator; count it back to track the on-disk size.
         bytes_read = bytes_read.saturating_add(line.len() as u64 + 1);
         if bytes_read > MAX_IMPORT_BYTES {
             return Err(AgentError::Memory(format!(
@@ -147,9 +148,7 @@ pub async fn import(memory: &dyn SharedMemory, path: &Path) -> AgentResult<Merge
     Ok(report)
 }
 
-/// Refuse to follow a symlink/special file at `path`: the sync work-tree is materialized by
-/// `git reset --hard` from an untrusted remote, so a committed symlink here would let a write follow it
-/// out of the tree (arbitrary truncate/overwrite). A missing path is fine — it will be created fresh.
+/// A symlink committed into the work-tree would let a write follow it out of the tree.
 async fn refuse_irregular_target(path: &Path) -> AgentResult<()> {
     match fs::symlink_metadata(path).await {
         Ok(metadata) if !metadata.file_type().is_file() => Err(AgentError::Memory(format!(
@@ -165,22 +164,15 @@ async fn refuse_irregular_target(path: &Path) -> AgentResult<()> {
     }
 }
 
-/// Write `bytes` to `path` readable/writable by the owner only. On Unix this is `0600` set at `open` (no
-/// post-write chmod window) and re-coerced afterwards so a pre-existing wider mode is tightened; on
-/// Windows the file inherits the user-profile DACL (std exposes no ACL control) — the accepted
-/// equivalent. Both branches write via a temp sibling + rename, so a crash mid-write can never leave a
-/// truncated export — this Unix branch previously opened `path` directly with `truncate`, which was NOT
-/// crash-atomic, unlike its own non-Unix fallback below (found during #36's review; ADR 0027). Mirrors
-/// `provider/infrastructure/secrets/file_store.rs`.
+/// `0600` at `open`, so there is no post-write chmod window. On Windows the file inherits the
+/// user-profile DACL — std exposes no ACL control, and that is the accepted equivalent.
 #[cfg(unix)]
 async fn write_owner_only(path: &Path, bytes: &[u8]) -> AgentResult<()> {
     use std::os::unix::fs::PermissionsExt;
     use tokio::io::AsyncWriteExt;
 
     let tmp = crate::shared::infra::fs::temp_sibling(path);
-    // Check both the target AND its temp sibling: a hostile tree could pre-place a symlink at the exact
-    // temp name this function is about to create, not just at the final target (mirrors
-    // `fs_work_tree.rs`'s `write_atomic` guard, which checks the same two paths for the same reason).
+    // A hostile tree could pre-place a symlink at the temp name too, not only at the final target.
     refuse_irregular_target(path).await?;
     refuse_irregular_target(&tmp).await?;
 
@@ -192,8 +184,7 @@ async fn write_owner_only(path: &Path, bytes: &[u8]) -> AgentResult<()> {
         .mode(0o600)
         .open(&tmp)
         .await?;
-    // `mode()` only applies when the file is created; coerce a pre-existing wider mode (e.g. a 0644 temp
-    // left by an interrupted prior export) down to 0600 on every export.
+    // `mode()` only applies at create, so a 0644 temp left by an interrupted export needs tightening.
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .await?;
     file.write_all(bytes).await?;
@@ -206,8 +197,7 @@ async fn write_owner_only(path: &Path, bytes: &[u8]) -> AgentResult<()> {
 
 #[cfg(not(unix))]
 async fn write_owner_only(path: &Path, bytes: &[u8]) -> AgentResult<()> {
-    // The Unix branch's symlink guard applies here too — a hostile tree's committed symlink is a
-    // cross-platform concern, not a Unix-specific one.
+    // A committed symlink is a cross-platform concern, not a Unix-specific one.
     refuse_irregular_target(path).await?;
     refuse_irregular_target(&crate::shared::infra::fs::temp_sibling(path)).await?;
     crate::shared::infra::fs::write_atomic(path, bytes).await?;
@@ -234,6 +224,44 @@ mod tests {
         e
     }
 
+    // Issue #33: an inert (never-`init`'d) store must never be treated as a valid sync operand — export
+    // must refuse rather than silently write an empty `memory.ndjson` over the remote snapshot, and
+    // import must refuse rather than merge into a store that vanishes at process exit.
+    #[tokio::test]
+    async fn export_refuses_an_unavailable_store() {
+        let dir = TempDir::new().unwrap();
+        let inert = SqliteSharedMemory::in_memory().unwrap();
+        let path = dir.path().join("memory.ndjson");
+
+        let error = export(&inert, &path).await.unwrap_err();
+        assert!(
+            matches!(&error, AgentError::Memory(message) if message.contains("unavailable")),
+            "expected an unavailable-store refusal, got {error:?}"
+        );
+        assert!(
+            !path.exists(),
+            "export must not write anything for an unavailable store"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_refuses_an_unavailable_store() {
+        let dir = TempDir::new().unwrap();
+        let src = memory(&dir, "src.db").await;
+        src.save(&entry("a", "alpha", "2026-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+        let path = dir.path().join("memory.ndjson");
+        export(&src, &path).await.unwrap();
+
+        let inert = SqliteSharedMemory::in_memory().unwrap();
+        let error = import(&inert, &path).await.unwrap_err();
+        assert!(
+            matches!(&error, AgentError::Memory(message) if message.contains("unavailable")),
+            "expected an unavailable-store refusal, got {error:?}"
+        );
+    }
+
     #[tokio::test]
     async fn export_then_import_round_trips() {
         let dir = TempDir::new().unwrap();
@@ -258,12 +286,10 @@ mod tests {
     async fn import_keeps_the_newer_entry() {
         let dir = TempDir::new().unwrap();
         let dst = memory(&dir, "dst.db").await;
-        // Local copy is newer.
         dst.save(&entry("a", "local-new", "2026-06-01T00:00:00Z"))
             .await
             .unwrap();
 
-        // Incoming is older → skipped.
         let path = dir.path().join("incoming.ndjson");
         let src = memory(&dir, "src.db").await;
         src.save(&entry("a", "remote-old", "2026-01-01T00:00:00Z"))
@@ -279,10 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn import_rejects_oversized_file() {
-        // A file whose length exceeds the byte cap is rejected by the up-front stat, before any line is
-        // read and before any DB write. A sparse `set_len` reports the large length without allocating it.
-        // The assertion locks the SPECIFIC byte-cap rejection (distinct from a parse error), so reverting
-        // the cap — which would let the all-NUL file be read and then fail to serde-parse — fails here.
+        // A sparse `set_len` reports the large length without allocating it.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("huge.ndjson");
         let file = std::fs::File::create(&path).unwrap();
@@ -304,9 +327,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn import_rejects_symlinked_file() {
-        // A committed symlink at the import path is rejected before any read. The link points at a VALID
-        // regular file, so rejection is proven to come from the file type — not the content — closing the
-        // `memory.ndjson -> /dev/zero` (infinite read / OOM) and `-> <fifo>` (blocking read) vectors.
+        // The link points at a VALID file, so the rejection is proven to come from the type, not content.
         let dir = TempDir::new().unwrap();
         let target = dir.path().join("real.ndjson");
         let a = serde_json::to_string(&entry("a", "alpha", "2026-01-01T00:00:00Z")).unwrap();
@@ -328,8 +349,6 @@ mod tests {
 
     #[tokio::test]
     async fn import_streams_within_caps() {
-        // The streamed reader merges every entry and skips blank lines (regression that bounding the
-        // read did not break the line loop).
         let dir = TempDir::new().unwrap();
         let dst = memory(&dir, "dst.db").await;
         let a = serde_json::to_string(&entry("a", "alpha", "2026-01-01T00:00:00Z")).unwrap();
@@ -368,8 +387,6 @@ mod tests {
             .await
             .unwrap();
 
-        // A pre-existing 0644 export (or one materialized 0644 by `git reset --hard`) must be tightened:
-        // `OpenOptions::mode` only applies at create, so re-export must coerce the mode explicitly.
         let path = dir.path().join("memory.ndjson");
         std::fs::write(&path, b"stale\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -392,8 +409,6 @@ mod tests {
             .await
             .unwrap();
 
-        // A hostile remote can materialize the export path as a symlink to an outside file (e.g. ~/.bashrc)
-        // via `git reset --hard`; export must refuse to follow it rather than truncate/overwrite the target.
         let outside = dir.path().join("victim");
         std::fs::write(&outside, b"do not clobber\n").unwrap();
         let path = dir.path().join("memory.ndjson");
@@ -414,9 +429,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn export_refuses_a_symlinked_temp_sibling() {
-        // A hostile tree could pre-place a symlink at the exact TEMP name export is about to create
-        // (`.memory.ndjson.kiri-tmp`), not just at the final target — the same class of attack
-        // `export_refuses_a_symlinked_target` locks for the target itself.
         let dir = TempDir::new().unwrap();
         let src = memory(&dir, "src.db").await;
         src.save(&entry("a", "alpha", "2026-01-01T00:00:00Z"))
@@ -444,10 +456,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn export_is_crash_atomic_and_leaves_no_temp_sibling() {
-        // Issue #36 review: the Unix export path previously opened the target directly with `truncate`,
-        // not crash-atomic — unlike its own non-Unix fallback. Now both go through a temp sibling + rename;
-        // this locks that no temp artifact survives a successful export (mirroring
-        // `shared/infra/fs.rs`'s own `write_atomic_leaves_no_temp_sibling_on_success`).
         let dir = TempDir::new().unwrap();
         let src = memory(&dir, "src.db").await;
         src.save(&entry("a", "alpha", "2026-01-01T00:00:00Z"))

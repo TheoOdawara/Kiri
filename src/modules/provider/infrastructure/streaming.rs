@@ -1,8 +1,3 @@
-//! The shared provider send/stream/body-read path. The non-success preamble (read the error body,
-//! classify the status) is identical across all three HTTP adapters, and the SSE drain loop is identical
-//! across the two chat adapters; the streamed-byte ceiling must be one number for both. They live here
-//! once so a change to any of them reaches every adapter.
-
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -13,32 +8,20 @@ use tokio_stream::StreamExt;
 use crate::modules::provider::infrastructure::http_error::{bounded_preview, error_from_status};
 use crate::shared::kernel::error::AgentError;
 
-/// Cap on the bytes a single streamed turn may accumulate (streamed content + reasoning + tool-call
-/// arguments), enforced on the DECODED SSE payload by [`enforce_stream_budget`]. Provider responses are
-/// untrusted input, and `read_timeout` only bounds idle time between chunks (it resets on each chunk), so
-/// a misbehaving provider streaming continuously could otherwise grow memory without bound. The single
-/// source both chat accumulators enforce. Generous — far above any real turn — purely a safety ceiling.
+/// Enforced on the DECODED SSE payload by [`enforce_stream_budget`]. `read_timeout` resets on every
+/// chunk, so it never bounds a provider that streams continuously.
 pub(crate) const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 
-/// Cap on the RAW bytes `drain_sse` reads off the wire (`bytes_stream()`, before `.eventsource()`
-/// framing), enforced independently of [`MAX_STREAM_BYTES`]. Necessary because [`enforce_stream_budget`]
-/// only ever sees a COMPLETE decoded event's `data` payload — a provider streaming an endless line with no
-/// terminating blank line (never forming a complete SSE event) would have raw bytes accumulate
-/// unboundedly while the decoded-content check never fires at all (issue #31). Same value as
-/// `MAX_STREAM_BYTES`: SSE framing overhead (a `data: ` prefix and blank-line delimiters per event) is
-/// negligible next to real content, so there is no reason to allow more raw bytes through than the
-/// decoded budget already permits.
+/// Enforced on the RAW bytes, before `.eventsource()` framing. [`enforce_stream_budget`] only ever sees a
+/// COMPLETE decoded event, so an endless line with no terminating blank line — never forming an event —
+/// would grow unboundedly while the decoded check never fires (issue #31).
 pub(crate) const MAX_RAW_STREAM_BYTES: usize = MAX_STREAM_BYTES;
 
-/// Ceiling on how long a single streamed turn may run in total, from the first byte to the last.
-/// `read_timeout` on the shared HTTP client only bounds IDLE time between chunks — it resets on every
-/// received byte — so a provider trickling small chunks continuously, forever, would never trip it
-/// (issue #31). Generous, well above any real single-turn generation; purely a safety ceiling, like
-/// `MAX_STREAM_BYTES`.
+/// Total turn deadline. `read_timeout` bounds only IDLE time between chunks and resets on every received
+/// byte, so a provider trickling small chunks forever would never trip it (issue #31).
 pub(crate) const MAX_STREAM_DURATION: Duration = Duration::from_secs(10 * 60);
 
-/// Read a response body for diagnostics. The status drives the error path; the body is only diagnostic,
-/// so if reading it fails the failure stays visible in the message rather than being silently blanked.
+/// A failed body read stays visible in the message rather than silently blanking the error.
 pub(crate) async fn read_error_body(response: reqwest::Response) -> String {
     response
         .text()
@@ -46,8 +29,6 @@ pub(crate) async fn read_error_body(response: reqwest::Response) -> String {
         .unwrap_or_else(|error| format!("<error body unavailable: {error}>"))
 }
 
-/// Return the response unchanged on a 2xx; otherwise classify the status (with a bounded body) into the
-/// matching [`AgentError`]. The one non-success preamble all three HTTP adapters call.
 pub(crate) async fn ensure_success(
     response: reqwest::Response,
 ) -> Result<reqwest::Response, AgentError> {
@@ -58,10 +39,6 @@ pub(crate) async fn ensure_success(
     Ok(response)
 }
 
-/// Drain an SSE response, feeding each event's `data` payload to `on_data`. Owns the
-/// `bytes_stream().eventsource()` framing, the pin, the read loop, and the `error reading stream` mapping,
-/// so the per-provider event handling is all that stays in each adapter. Bounded by [`MAX_STREAM_DURATION`]
-/// (total turn deadline) and [`MAX_RAW_STREAM_BYTES`] (raw pre-framing byte cap) — see [`drain_sse_with_limits`].
 pub(crate) async fn drain_sse(
     response: reqwest::Response,
     on_data: impl FnMut(&str) -> Result<(), AgentError>,
@@ -69,19 +46,17 @@ pub(crate) async fn drain_sse(
     drain_sse_with_limits(response, MAX_STREAM_DURATION, MAX_RAW_STREAM_BYTES, on_data).await
 }
 
-/// The testable core of [`drain_sse`]: `deadline` and `raw_cap` are injected so both ceilings can be
-/// exercised with small, fast values in tests instead of waiting out a real 10-minute deadline or
-/// buffering 8 MiB of raw bytes. Production calls `drain_sse`, which fixes both to their real constants.
+/// `deadline` and `raw_cap` are injected so a test can exercise both ceilings without waiting out a real
+/// 10-minute deadline or buffering 8 MiB.
 async fn drain_sse_with_limits(
     response: reqwest::Response,
     deadline: Duration,
     raw_cap: usize,
     mut on_data: impl FnMut(&str) -> Result<(), AgentError>,
 ) -> Result<(), AgentError> {
-    // A 200 whose body is NOT an SSE stream is not a completion — most often a misconfigured base URL
-    // (LM Studio answers an unknown route with 200 + `{"error":"Unexpected endpoint or method"}` on a
-    // JSON body, so `ensure_success` passes and `.eventsource()` then yields no events, leaving an empty
-    // turn the user only sees as "no content"). Surface the body instead.
+    // A 200 that is not a stream is usually a misconfigured base URL: LM Studio answers an unknown route
+    // with 200 + a JSON error, so `ensure_success` passes and `.eventsource()` yields no events, leaving
+    // an empty turn the user only sees as "no content".
     // ponytail: only fires when the header is present AND clearly not a stream; a stream that omits the
     // Content-Type header (None) still drains normally, so a header-less compliant server is not rejected.
     if let Some(content_type) = response
@@ -99,10 +74,8 @@ async fn drain_sse_with_limits(
         )));
     }
 
-    // Counts raw bytes as they arrive off the wire, BEFORE `.eventsource()` ever assembles them into a
-    // complete event — `take_while` ends the stream (rather than erroring inline) once the cap is passed,
-    // so the raw total is checked again after the drain loop to turn "stream ended early" into a real
-    // error instead of a silent, truncated success.
+    // `take_while` can only end the stream, never error inline, so the total is rechecked after the drain
+    // loop to turn "stream ended early" into a real error instead of a silent truncated success.
     let raw_total = Rc::new(Cell::new(0usize));
     let counter = Rc::clone(&raw_total);
     let raw_stream = response.bytes_stream().take_while(move |chunk| {
@@ -139,9 +112,7 @@ async fn drain_sse_with_limits(
     }
 }
 
-/// Add `delta_bytes` to the running streamed-byte total and fail fast past [`MAX_STREAM_BYTES`].
-/// Saturating so the counter can never wrap. Both chat accumulators call this, so exactly one ceiling
-/// exists for the whole provider layer.
+/// Saturating, so the counter can never wrap past the cap.
 pub(crate) fn enforce_stream_budget(
     running: &mut usize,
     delta_bytes: usize,
@@ -155,9 +126,7 @@ pub(crate) fn enforce_stream_budget(
     Ok(())
 }
 
-/// Whether a turn ended truncated with no usable output: the stop/finish reason was the output-token cap
-/// AND nothing (content or tool calls) was produced. Each adapter passes its own sentinel comparison via
-/// `reason_is_cap`, so the predicate is shared while the protocol string stays per-provider.
+/// `reason_is_cap` is compared per-adapter, so the protocol string stays out of this predicate.
 pub(crate) fn is_empty_truncation(
     reason_is_cap: bool,
     content: &str,
@@ -172,8 +141,6 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    /// Start a loopback server that replies once with a full raw HTTP/1.1 response, then GET it and return
-    /// the `reqwest::Response`. The server drains the request line before replying. Hermetic (loopback).
     async fn serve_once(raw_response: Vec<u8>) -> reqwest::Response {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -233,8 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_error_body_reports_unavailable_when_the_body_read_fails() {
-        // Content-Length claims more bytes than are sent, then the connection closes: the body read fails
-        // (incomplete message), so read_error_body returns its placeholder rather than blanking the error.
+        // Content-Length claims 1000 bytes but 5 are sent, then the connection closes.
         let raw =
             b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 1000\r\nConnection: close\r\n\r\nshort"
                 .to_vec();
@@ -265,10 +231,6 @@ mod tests {
 
     #[tokio::test]
     async fn drain_sse_surfaces_a_non_stream_200_body() {
-        // The LM Studio regression: a base URL missing `/v1` hits an unknown route, which LM Studio
-        // answers with 200 OK + a JSON error body (Content-Type not event-stream). `ensure_success`
-        // passes it, so drain_sse must surface the body instead of draining it into an empty turn the
-        // user only sees as the generic "no content".
         let body = r#"{"error":"Unexpected endpoint or method. (POST /chat/completions)"}"#;
         let response = serve_once(raw_with_body("200 OK", body)).await; // raw_with_body sets text/plain
         let error = drain_sse(response, |_data| Ok(()))
@@ -283,8 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn drain_sse_maps_a_read_error_to_provider() {
-        // A chunked body whose chunk header claims 5 bytes but only 2 arrive before the connection closes:
-        // the underlying stream surfaces a decode error, which drain_sse maps to a Provider error.
+        // The chunk header claims 5 bytes but only 2 arrive before the connection closes.
         let raw =
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nab"
                 .to_vec();
@@ -299,10 +260,8 @@ mod tests {
         );
     }
 
-    /// Start a loopback server that sends only response headers, waits `delay`, then closes without ever
-    /// sending a body. Models a provider that stops trickling mid-stream: `read_timeout` never fires
-    /// (headers count as activity, and no further chunk ever arrives to reset an idle timer against), so
-    /// only a total-turn deadline catches it.
+    /// Headers only, then a stall. `read_timeout` never fires — the headers count as activity and no
+    /// further chunk ever arrives to time out against — so only a total-turn deadline catches this.
     async fn serve_headers_then_stall(delay: Duration) -> reqwest::Response {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -315,7 +274,7 @@ mod tests {
                 let _ = stream.write_all(headers).await;
                 let _ = stream.flush().await;
                 tokio::time::sleep(delay).await;
-                // Task ends here without sending a chunk; the connection drops.
+                // The task ends without a chunk, dropping the connection.
             }
         });
         let client = reqwest::Client::builder()
@@ -327,9 +286,6 @@ mod tests {
 
     #[tokio::test]
     async fn drain_sse_with_limits_times_out_past_the_deadline() {
-        // Issue #31: a provider trickling nothing for longer than the turn deadline must be cut off, even
-        // though `read_timeout` (which only bounds IDLE time between chunks) never fires here — the server
-        // sends headers (activity) then genuinely stalls.
         let response = serve_headers_then_stall(Duration::from_secs(5)).await;
         let error = drain_sse_with_limits(
             response,
@@ -348,9 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn drain_sse_with_limits_errors_past_the_raw_cap_even_with_no_complete_event() {
-        // Issue #31: an endless line with no terminating blank line never forms a complete SSE event, so
-        // `enforce_stream_budget` (which only sees a decoded `data` payload) would never fire — only a
-        // cap on the RAW pre-framing bytes catches this.
+        // No terminating blank line, so no complete SSE event ever forms.
         let payload = format!("data: {}", "a".repeat(200));
         let raw = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\
@@ -396,7 +350,6 @@ mod tests {
     #[test]
     fn enforce_stream_budget_saturates_without_overflow() {
         let mut running = usize::MAX - 1;
-        // The saturating add must not panic on overflow; it errors past the cap instead.
         let error =
             enforce_stream_budget(&mut running, usize::MAX).expect_err("must error, not overflow");
         assert!(error.to_string().contains("maximum response size"));

@@ -1,9 +1,7 @@
-//! The `task` tool (ADR 0029): dispatches a nested `AgentLoop` bound to a loaded `AgentProfile`, so the
-//! model can hand off a read-only sub-task (search, planning) to an isolated context instead of doing
-//! everything itself. A subagent's toolset is the intersection of its profile's `allowed-tools` and
-//! every read-only tool in the parent's registry — v1 supports read-only subagents only, so a dispatched
-//! turn can never write, delete, or run a shell. Structural depth-1: the tool pool it is built from
-//! never includes `task` itself, so a subagent physically cannot dispatch another one.
+//! The `task` tool (ADR 0029): hands a read-only sub-task to a nested `AgentLoop` in an isolated context.
+//! A subagent's toolset intersects its profile's `allowed-tools` with the parent's read-only tools, so a
+//! dispatched turn can never write, delete, or run a shell. Depth is capped at 1 structurally: the pool it
+//! draws from never contains `task` itself.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,14 +38,11 @@ struct TaskArgs {
     prompt: String,
 }
 
-/// A headless engine IO for a dispatched subagent: no live user is watching, so its four ports must
-/// behave safely with nobody at the keyboard. `EventSink`/`Presenter`/`ToolObserver` are no-ops — the
-/// subagent's token stream and per-call notices do not reach the parent transcript in v1, so a nested
-/// stream can never interleave with (and corrupt) the parent's. `ApprovalPolicy` is the security-load-
-/// bearing part: it approves only what the ordinary auto-mode gate would default-accept (an in-root
-/// read), declining everything else outright (SEC-01 — an out-of-root target like `~/.ssh/id_rsa` is
-/// refused, not silently confirmed) and ends the turn at the first runaway checkpoint rather than
-/// running unbounded with no one to ask.
+/// Engine IO for a dispatched subagent, where nobody is at the keyboard. `EventSink`/`Presenter`/
+/// `ToolObserver` are no-ops, so a nested stream can never interleave with the parent's. `ApprovalPolicy`
+/// is the security-load-bearing part: it approves only what auto-mode would default-accept (an in-root
+/// read) and declines everything else outright (SEC-01 — `~/.ssh/id_rsa` is refused, not silently
+/// confirmed), ending the turn at the first checkpoint rather than running unbounded with no one to ask.
 struct HeadlessIo;
 
 impl EventSink for HeadlessIo {
@@ -83,10 +78,8 @@ impl ToolObserver for HeadlessIo {
     fn tool_finished(&mut self, _call: &ToolCall, _outcome: &ToolOutcome, _elapsed: Duration) {}
 }
 
-/// Dispatches a loaded `AgentProfile` as a nested, isolated `AgentLoop` turn. Injected at construction
-/// (the composition root's pattern, mirroring `extensions::infrastructure::tools::use_skill::UseSkill`):
-/// the provider adapter, the pool of tools a subagent may draw from (every other tool in the parent
-/// registry — never `task` itself), and the loaded agent profiles.
+/// Dispatches a loaded `AgentProfile` as a nested, isolated `AgentLoop` turn. The tool pool injected here
+/// is every tool in the parent registry except `task` itself.
 pub struct TaskTool {
     provider: Arc<dyn CompletionProvider>,
     child_tools: Vec<Arc<dyn Tool>>,
@@ -115,10 +108,9 @@ impl TaskTool {
         }
     }
 
-    /// The subagent's toolset: every read-only tool from the parent pool whose name is in the profile's
-    /// `allowed-tools` (an empty list means "every read-only tool"). The `is_read_only` intersection is
-    /// v1's security boundary — even a profile that names `write_file`/`run_command` never gets them,
-    /// since a headless subagent has no live user to confirm an irreversible action.
+    /// An empty `allowed-tools` means every read-only tool. The `is_read_only` intersection is v1's
+    /// security boundary: a profile naming `write_file` never gets it, because a headless subagent has no
+    /// live user to confirm an irreversible action.
     fn tools_for(&self, profile: &AgentProfile) -> Vec<Arc<dyn Tool>> {
         self.child_tools
             .iter()
@@ -134,10 +126,8 @@ impl TaskTool {
     const NAME: &'static str = "task";
 }
 
-/// The last assistant text in a completed conversation — the subagent's answer. `None` if the last
-/// message is not a non-empty assistant text (should not happen after `TurnOutcome::Completed`, since
-/// the loop always pushes `Message::assistant_text` in that case, but this stays defensive rather than
-/// indexing blindly).
+/// The subagent's answer. `None` if the last message is not a non-empty assistant text — unreachable
+/// after `TurnOutcome::Completed`, but defensive rather than indexing blindly.
 fn last_assistant_text(conversation: &Conversation) -> Option<String> {
     let last = conversation.messages().last()?;
     if last.role != Role::Assistant {
@@ -250,8 +240,8 @@ mod tests {
     use crate::shared::kernel::tool_call::FunctionCall;
     use std::sync::Mutex;
 
-    /// A tool double whose read-only-ness is a constructor parameter, so tests can assert the security
-    /// boundary (a `write_file`-like tool never reaches a subagent) without depending on a real fs tool.
+    /// Read-only-ness is a constructor parameter, so the security boundary can be asserted without
+    /// depending on a real fs tool.
     struct FakeTool {
         name: &'static str,
         read_only: bool,
@@ -279,8 +269,7 @@ mod tests {
         }
     }
 
-    /// A provider that replays one pre-canned turn, ignoring the request — drives the nested loop
-    /// without a network. Mirrors `agent_loop::tests::ScriptedProvider`.
+    /// Replays one pre-canned turn, driving the nested loop without a network.
     struct ScriptedProvider {
         turn: Mutex<Option<Result<CompletedTurn, AgentError>>>,
     }
@@ -384,8 +373,8 @@ mod tests {
 
     #[tokio::test]
     async fn read_only_intersection_drops_a_disallowed_write_tool_even_if_named() {
-        // Security boundary: a profile that (mis)lists write_file never gets it — v1 subagents are
-        // read-only regardless of what a malformed/compromised profile requests.
+        // A profile that lists write_file never gets it: v1 subagents are read-only regardless of what a
+        // compromised profile requests.
         let tool = task_tool(
             Arc::new(ScriptedProvider::ok("done")),
             HashMap::from([(

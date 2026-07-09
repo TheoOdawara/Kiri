@@ -7,18 +7,13 @@ use tokio::task::spawn_blocking;
 
 use crate::shared::kernel::error::AgentError;
 
-/// Upper bound for a single blocking database operation, so an op that never returns (a wedged lock or
-/// pathological query) surfaces as a clear error instead of hanging the runtime. Shared by every
-/// SQLite-backed store (memory, session). This is a last-resort safety valve, not a hot path: it wraps
-/// `spawn_blocking`, so it also counts pool-queue wait, and on a contended CI runner (Windows Defender
-/// scanning a freshly-created `.db`, ~1000 tests in parallel) a cold `init()` can spike past a tight
-/// bound and flake. Kept generous — a genuine hang is still caught, just later; a false-positive is not.
+/// A last-resort valve so a wedged lock or pathological query fails loudly instead of hanging the runtime.
+/// Generous on purpose: it also counts `spawn_blocking` queue wait, and a cold `init()` on a contended CI
+/// runner spikes past a tight bound. A genuine hang is still caught, just later; a false positive is not.
 pub const DB_OP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Open (creating its parent directory if needed) a SQLite database. The parent-dir failure flows to
-/// `AgentError::Io` via the kernel `#[from]`; the open failure is classified through `map_err`, so each
-/// store stamps its own variant (`AgentError::memory` / `AgentError::session`). The single source for the
-/// blocking-store open path — per-store pragmas (the session store's `busy_timeout` / WAL) layer on after.
+/// The single source for the blocking-store open path; per-store pragmas layer on after. `map_err` lets
+/// each store stamp its own error variant.
 pub fn open_with_parent(
     db_path: &Path,
     map_err: fn(String) -> AgentError,
@@ -29,9 +24,8 @@ pub fn open_with_parent(
     Connection::open(db_path).map_err(|error| map_err(error.to_string()))
 }
 
-/// Lock the shared connection, mapping a poisoned mutex through `map_err`. A poisoned mutex means a prior
-/// holder panicked mid-operation; surfacing it (rather than recovering the guard) is the conservative
-/// choice for an auxiliary store the harness can degrade without.
+/// A poisoned mutex means a prior holder panicked mid-operation. Surfacing it, rather than recovering the
+/// guard, is the conservative choice for an auxiliary store the harness can degrade without.
 pub fn lock(
     conn: &Mutex<Connection>,
     map_err: fn(String) -> AgentError,
@@ -40,11 +34,7 @@ pub fn lock(
         .map_err(|error| map_err(format!("sqlite mutex poisoned: {error}")))
 }
 
-/// Run a blocking database closure on the blocking pool, bounded by `timeout`. Owns the `spawn_blocking`,
-/// `tokio::time::timeout`, and join/timeout mapping that every query shares; the join-error branch (a
-/// panicked or cancelled blocking task) and the timeout branch both build their `AgentError` through
-/// `map_err`, so each store stamps its own variant. This is the testable seam: a test points here with a
-/// tiny `timeout` to exercise the timeout path without a real multi-second sleep.
+/// The testable seam: a test passes a tiny `timeout` to exercise the timeout path without a real sleep.
 pub async fn run_blocking_with_timeout<T: Send + 'static>(
     op: impl FnOnce() -> Result<T, AgentError> + Send + 'static,
     timeout: Duration,
@@ -56,8 +46,7 @@ pub async fn run_blocking_with_timeout<T: Send + 'static>(
     }
 }
 
-/// Run a blocking database closure bounded by the shared `DB_OP_TIMEOUT`. Production code calls this; it
-/// delegates to `run_blocking_with_timeout` (the testable seam).
+/// What production code calls: [`run_blocking_with_timeout`] bound to the shared [`DB_OP_TIMEOUT`].
 pub async fn run_blocking<T: Send + 'static>(
     op: impl FnOnce() -> Result<T, AgentError> + Send + 'static,
     map_err: fn(String) -> AgentError,

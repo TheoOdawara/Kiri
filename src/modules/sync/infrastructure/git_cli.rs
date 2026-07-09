@@ -7,12 +7,11 @@ use tokio::process::Command;
 use crate::modules::sync::application::git::{Git, GitOutput};
 use crate::shared::kernel::error::{AgentError, AgentResult};
 
-/// Upper bound for a single git invocation. A push/pull reaching a remote can be slow, but must never
-/// hang the CLI forever; the timeout kills the child (kill-on-drop) and surfaces a clear error.
+/// Generous, because a push/pull reaching a remote can be slow — but never unbounded.
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// `Git` adapter that shells out to the system `git`. The user's existing credential helper / SSH agent
-/// authenticates to the remote, so Kiri never handles repo credentials itself.
+/// Shells out to the system `git`, so the user's own credential helper / SSH agent authenticates to
+/// the remote and Kiri never handles repo credentials itself.
 pub struct GitCli;
 
 #[async_trait::async_trait]

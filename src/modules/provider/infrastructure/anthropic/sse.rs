@@ -1,10 +1,5 @@
-//! Assembles one streamed turn from the Messages API SSE events. Each event's `data` payload carries a
-//! `type` discriminator (mirroring the SSE `event:` line), so dispatch is on the payload alone — the
-//! `eventsource-stream` layer handles line framing upstream. Text deltas stream as content and
-//! accumulate; thinking deltas stream as reasoning AND accumulate into the turn's `ThinkingBlock`
-//! (its `signature_delta` alongside it), so it can be replayed on the next turn ahead of any `tool_use`
-//! block; tool-use blocks accumulate their id/name (from `content_block_start`) and JSON input (from
-//! `input_json_delta`), keyed by block index.
+//! Each event's `data` payload carries a `type` discriminator mirroring the SSE `event:` line, so
+//! dispatch happens on the payload alone and the `event:` line is never read.
 
 use std::collections::BTreeMap;
 
@@ -24,9 +19,8 @@ use crate::shared::kernel::tool_call::{FunctionCall, TOOL_CALL_FUNCTION_KIND, To
 /// The Messages API `stop_reason` that means the output token cap truncated the turn.
 const STOP_REASON_MAX_TOKENS: &str = "max_tokens";
 
-/// Feed one parsed SSE event's `data` payload into the accumulator and the live `sink`. A non-JSON
-/// payload (keep-alive comment, blank line) is ignored; an `error` event fails the turn so a mid-stream
-/// provider error is surfaced instead of silently truncating the turn.
+/// A non-JSON payload (keep-alive, blank line) is ignored; an `error` event fails the turn rather than
+/// truncate it silently.
 pub(crate) fn handle_event(
     data: &str,
     accumulator: &mut TurnAccumulator,
@@ -49,8 +43,7 @@ pub(crate) fn handle_event(
                 ContentBlockStart::ToolUse { id, name } => {
                     accumulator.start_tool_use(index, id, name)
                 }
-                // The encrypted blob arrives whole here (no delta stream); it has "no readable summary"
-                // per the docs, so it must not reach the UI sink the way a visible thinking delta does.
+                // The encrypted blob has no readable summary, so it must never reach the UI sink.
                 ContentBlockStart::RedactedThinking { data } => {
                     accumulator.set_redacted_thinking(index, data)
                 }
@@ -86,16 +79,13 @@ fn apply_delta(
             sink.on_event(StreamEvent::Content(text))
         }
         BlockDelta::ThinkingDelta { thinking } if !thinking.is_empty() => {
-            // Reasoning streams to the UI AND accumulates into the turn's ThinkingBlock (so it can be
-            // replayed ahead of any tool_use on the next turn); either way it counts toward the same
-            // ceiling — otherwise a provider streaming thinking forever OOMs.
+            // Thinking counts toward the same ceiling as text, or a provider streaming it forever OOMs.
             enforce_stream_budget(&mut accumulator.streamed_bytes, thinking.len())?;
             accumulator.push_thinking_text(index, &thinking);
             sink.on_event(StreamEvent::Reasoning(thinking))
         }
         BlockDelta::SignatureDelta { signature } if !signature.is_empty() => {
-            // The signature must be replayed byte-for-byte alongside its thinking text; it is not shown
-            // to the user, but still counts toward the stream budget like every other delta kind.
+            // Never shown to the user, but it still counts toward the stream budget.
             enforce_stream_budget(&mut accumulator.streamed_bytes, signature.len())?;
             accumulator.push_thinking_signature(index, &signature);
             Ok(())
@@ -109,19 +99,13 @@ fn apply_delta(
     }
 }
 
-/// Assembles a turn from its streamed blocks. Tool-use and thinking blocks are keyed by their
-/// content-block `index` (a `BTreeMap` keeps them in natural order); a tool-use's `input_json_delta`
-/// slices and a thinking block's text/signature deltas each concatenate in arrival order. Text needs no
-/// slot — it accumulates directly into `content`.
+/// A `BTreeMap` keeps the streamed content-block indices in natural order.
 #[derive(Default)]
 pub(crate) struct TurnAccumulator {
     content: String,
     tool_uses: BTreeMap<u32, PartialToolUse>,
     thinking: BTreeMap<u32, PartialThinking>,
-    /// Running total of streamed text + reasoning + tool-input bytes, bounded by the shared
-    /// `MAX_STREAM_BYTES` via `enforce_stream_budget`.
     streamed_bytes: usize,
-    /// The message's `stop_reason`; `"max_tokens"` means the output cap truncated the turn.
     stop_reason: Option<String>,
 }
 
@@ -132,8 +116,7 @@ struct PartialToolUse {
     input: String,
 }
 
-/// A thinking-family block in progress. `Visible` accumulates text/signature deltas incrementally;
-/// `Redacted` arrives whole from `content_block_start` (see `set_redacted_thinking`) and never changes.
+/// `Visible` accumulates deltas; `Redacted` arrives whole and never changes.
 enum PartialThinking {
     Visible { text: String, signature: String },
     Redacted { data: String },
@@ -149,8 +132,7 @@ impl PartialThinking {
 }
 
 impl TurnAccumulator {
-    /// Whether the output token cap (`stop_reason == "max_tokens"`) truncated the turn before producing
-    /// anything usable. Surfaced by the provider as an error rather than an empty turn.
+    /// The provider surfaces this as an error, rather than return a turn that silently did nothing.
     pub(crate) fn hit_empty_output_limit(&self) -> bool {
         is_empty_truncation(
             self.stop_reason.as_deref() == Some(STOP_REASON_MAX_TOKENS),
@@ -170,17 +152,15 @@ impl TurnAccumulator {
         );
     }
 
-    /// Append a JSON-input slice to the tool-use block at `index`. An index with no started block is
-    /// ignored — `input_json_delta` only follows a `tool_use` `content_block_start`.
+    /// An index with no started block is ignored: `input_json_delta` only follows a `tool_use` start.
     fn push_tool_input(&mut self, index: u32, partial: &str) {
         if let Some(slot) = self.tool_uses.get_mut(&index) {
             slot.input.push_str(partial);
         }
     }
 
-    /// Append a thinking-text slice to the block at `index`, starting it if this is the first delta. A
-    /// delta for an index already recorded as `Redacted` is a no-op — the protocol never streams
-    /// text/signature deltas for a redacted block, but this must not panic/overwrite if it ever did.
+    /// A delta for an index already recorded as `Redacted` is a defensive no-op: the protocol never
+    /// streams one, but it must not panic or overwrite if it ever did.
     fn push_thinking_text(&mut self, index: u32, text: &str) {
         match self
             .thinking
@@ -192,8 +172,7 @@ impl TurnAccumulator {
         }
     }
 
-    /// Append a signature slice to the block at `index`, starting it if this is the first delta. Same
-    /// defensive no-op as `push_thinking_text` for an index already recorded as `Redacted`.
+    /// Same defensive no-op as `push_thinking_text` for an index already recorded as `Redacted`.
     fn push_thinking_signature(&mut self, index: u32, signature: &str) {
         match self
             .thinking
@@ -208,8 +187,7 @@ impl TurnAccumulator {
         }
     }
 
-    /// Record a `redacted_thinking` block at `index`. Unlike a visible block, the encrypted `data`
-    /// arrives whole in `content_block_start` — there is no delta to accumulate.
+    /// The encrypted `data` arrives whole in `content_block_start`; there is no delta to accumulate.
     fn set_redacted_thinking(&mut self, index: u32, data: String) {
         self.thinking
             .insert(index, PartialThinking::Redacted { data });
@@ -221,8 +199,7 @@ impl TurnAccumulator {
             .into_values()
             .map(|partial| ToolCall {
                 id: partial.id,
-                // The domain carries an OpenAI-style `type`; Anthropic tool_use blocks have none, so the
-                // re-sent history uses the canonical kind.
+                // Anthropic `tool_use` blocks carry no `type`, so re-sent history uses the canonical kind.
                 kind: TOOL_CALL_FUNCTION_KIND.to_string(),
                 function: FunctionCall {
                     name: partial.name,
@@ -230,8 +207,8 @@ impl TurnAccumulator {
                 },
             })
             .collect();
-        // Anthropic sends at most one thinking-family block per (non-interleaved) turn; the lowest
-        // content-block index is the one to carry forward if a future response ever streams more than one.
+        // Anthropic sends at most one thinking block per turn; the lowest index is the one to carry
+        // forward should a future response ever stream more.
         let thinking = self
             .thinking
             .into_values()
@@ -256,8 +233,6 @@ mod tests {
     use super::*;
     use crate::modules::provider::infrastructure::test_support::CollectSink;
 
-    /// Run a sequence of event payloads through the accumulator and return the collected live events
-    /// plus the assembled turn.
     fn run(payloads: &[&str]) -> (Vec<StreamEvent>, CompletedTurn) {
         let mut accumulator = TurnAccumulator::default();
         let mut sink = CollectSink::default();
@@ -351,8 +326,7 @@ mod tests {
 
     #[test]
     fn redacted_thinking_ignores_a_stray_delta_for_the_same_index() {
-        // The protocol never streams thinking/signature deltas for a redacted block, but a defensive
-        // no-op must not panic or silently corrupt the recorded data if it ever did.
+        // The protocol never streams this; the guard exists so it cannot panic or corrupt if it did.
         let (_events, turn) = run(&[
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"encrypted-blob"}}"#,
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"stray"}}"#,
@@ -453,8 +427,6 @@ mod tests {
 
     #[test]
     fn in_band_error_message_is_bounded() {
-        // An oversized in-band error message must be capped via `bounded_preview` before it reaches the
-        // transcript, just like an HTTP error body.
         let mut accumulator = TurnAccumulator::default();
         let mut sink = CollectSink::default();
         let data = serde_json::json!({
@@ -472,8 +444,7 @@ mod tests {
 
     #[test]
     fn oversized_error_type_is_bounded() {
-        // PROV-06: bounding only `message` is bypassed if the attacker moves the oversized payload into
-        // the provider-controlled `type`. Every surfaced field must be bounded.
+        // PROV-06: bounding only `message` is bypassed by moving the payload into `type`.
         let mut accumulator = TurnAccumulator::default();
         let mut sink = CollectSink::default();
         let data = serde_json::json!({
@@ -494,8 +465,7 @@ mod tests {
         );
     }
 
-    /// Drive the given event through the accumulator repeatedly until it errors, returning that error.
-    /// Used to cross `MAX_STREAM_BYTES` with a handful of large chunks without allocating the whole cap.
+    /// Crosses `MAX_STREAM_BYTES` with a handful of large chunks, never allocating the whole cap.
     fn accumulate_until_error(payload: &str) -> AgentError {
         let mut accumulator = TurnAccumulator::default();
         let mut sink = CollectSink::default();
@@ -509,8 +479,6 @@ mod tests {
 
     #[test]
     fn anthropic_stream_exceeding_the_cap_fails_fast() {
-        // PROV-01 lock: the Anthropic stream now enforces MAX_STREAM_BYTES through the shared
-        // enforce_stream_budget, so an unbounded text stream fails fast instead of OOMing.
         let chunk = serde_json::json!({
             "type": "content_block_delta",
             "index": 0,
@@ -526,8 +494,6 @@ mod tests {
 
     #[test]
     fn anthropic_reasoning_stream_exceeding_cap_fails() {
-        // PROV-01: reasoning (thinking) deltas must count toward the same ceiling as text/tool-input,
-        // or a provider streaming reasoning forever grows the channel without bound.
         let chunk = serde_json::json!({
             "type": "content_block_delta",
             "index": 0,
@@ -543,8 +509,7 @@ mod tests {
 
     #[test]
     fn anthropic_stream_exceeding_cap_fails_on_tool_input() {
-        // The tool-use block must be started so its input slot exists; then oversized input deltas hit
-        // the same ceiling.
+        // The block must be started first, or its input slot would not exist.
         let mut accumulator = TurnAccumulator::default();
         let mut sink = CollectSink::default();
         handle_event(
@@ -586,9 +551,7 @@ mod tests {
 
     #[test]
     fn unknown_and_non_json_events_are_ignored() {
-        // `signature_delta` used to be the example of an ignored delta kind; it is now handled (see
-        // `thinking_deltas_stream_as_reasoning_and_are_persisted`), so this uses a genuinely unrecognized
-        // delta kind to keep exercising the `#[serde(other)]` fallback.
+        // A genuinely unrecognized kind, since `signature_delta` is now handled.
         let (events, turn) = run(&[
             "",
             ": keep-alive",
@@ -607,8 +570,7 @@ mod tests {
         use eventsource_stream::Eventsource;
         use tokio_stream::StreamExt;
 
-        // A raw multi-event SSE blob (with both `event:` and `data:` lines, as Anthropic sends):
-        // eventsource-stream frames it; we dispatch on the `data` payload's `type`.
+        // Both `event:` and `data:` lines, as Anthropic sends them; only the payload's `type` is read.
         let raw = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
         let stream = tokio_stream::iter(vec![Ok::<_, std::convert::Infallible>(
             raw.as_bytes().to_vec(),

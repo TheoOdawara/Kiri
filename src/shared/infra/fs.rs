@@ -2,12 +2,9 @@ use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
-/// The temp sibling for an atomic write: `.{file_name}.kiri-tmp` in the same directory as `path`. A
-/// sibling (not a temp-dir file) keeps the follow-up rename on the same filesystem and therefore atomic.
-/// Prefixing the original file name — rather than `with_extension("…tmp")` — stays correct for names that
-/// already carry an extension (`config.toml` -> `.config.toml.kiri-tmp`) and for extensionless `.md`
-/// bodies alike. Exposed so a caller that must guard the temp path before it is written (the sync
-/// work-tree's symlink refusal) targets the exact path `write_atomic` will write.
+/// A sibling, not a temp-dir file, so the follow-up rename stays on one filesystem and therefore atomic.
+/// Prefixing the file name (rather than `with_extension`) keeps an existing extension intact. Exposed so
+/// a caller guarding the temp path before it is written targets the exact path `write_atomic` will use.
 pub(crate) fn temp_sibling(path: &Path) -> PathBuf {
     match path.file_name().and_then(|name| name.to_str()) {
         Some(name) => path.with_file_name(format!(".{name}.kiri-tmp")),
@@ -21,12 +18,9 @@ pub(crate) fn temp_sibling(path: &Path) -> PathBuf {
     }
 }
 
-/// Write `content` to `path` atomically: write the temp sibling, then rename it over `path`. The rename is
-/// atomic on a POSIX filesystem, so a crash mid-write leaves either the old bytes or the new ones — never a
-/// truncated or half-written file. The single source for this crash-safety idiom: memory's index/body
-/// writes and the sync work-tree's config write both route through here. Returns the raw `io::Result` so
-/// each caller maps it to its own `AgentError` variant (memory → `Io` via `?`/`#[from]`, sync → `Sync`),
-/// keeping this a pure fs utility with no dependency on the kernel error type.
+/// Rename-over-temp: a crash mid-write leaves the old bytes or the new ones, never a truncated file. The
+/// raw `io::Result` lets each caller pick its own `AgentError` variant, keeping this free of the kernel
+/// error type.
 pub async fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let tmp = temp_sibling(path);
     fs::write(&tmp, content).await?;
@@ -34,10 +28,7 @@ pub async fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Synchronous sibling of `write_atomic`, for the config writers that run outside an async context (the
-/// live `/effort`/`/models`/`/provider` handlers). Same crash-safety: write the temp sibling, then rename
-/// it over `path`, so a crash mid-write can never leave the boot-critical `config.toml` truncated. Returns
-/// the raw `io::Result` so the caller maps it to its own `AgentError` variant.
+/// [`write_atomic`] for the config writers, which run outside an async context.
 pub(crate) fn write_atomic_sync(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let tmp = temp_sibling(path);
     std::fs::write(&tmp, content)?;
@@ -45,11 +36,9 @@ pub(crate) fn write_atomic_sync(path: &Path, content: &[u8]) -> std::io::Result<
     Ok(())
 }
 
-/// Crash-safe, owner-only write for secrets: like [`write_atomic_sync`] but the temp sibling is created
-/// (and coerced) `0600`, so the rename — which inherits the temp's mode — yields a `0600` file from birth.
-/// Plain `write_atomic_sync` would leave the renamed file umask-wide (~`0644`), exposing credentials. The
-/// `sync_all` before rename flushes the bytes so a crash leaves either the old file or the complete new one,
-/// never an empty/partial credentials file.
+/// [`write_atomic_sync`] for secrets. The temp sibling is created `0600` and the rename inherits its mode,
+/// so the file is owner-only from birth; plain `write_atomic_sync` would leave it umask-wide (~`0644`).
+/// The `sync_all` before rename flushes the bytes, so a crash never leaves a partial credentials file.
 #[cfg(unix)]
 pub(crate) fn write_atomic_owner_only(path: &Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;

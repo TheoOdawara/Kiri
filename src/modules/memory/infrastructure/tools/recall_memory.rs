@@ -31,9 +31,8 @@ fn default_limit() -> usize {
     5
 }
 
-/// Hard ceiling on the model-supplied `limit`. The schema's `"minimum": 1` is advisory only (not
-/// enforced by the JSON parser), and the cross-store dedup below is O(project × shared) — an unbounded
-/// limit against a since-grown store would turn one tool call into real CPU cost (ADR 0023).
+/// The schema's `"minimum": 1` is advisory — nothing enforces it. With an O(project × shared) cross-store
+/// dedup, an unbounded model-supplied `limit` would turn one tool call into real CPU cost (ADR 0023).
 const MAX_LIMIT: usize = 50;
 
 /// Read-only tool that recalls relevant memory entries (project, shared, or both) for a query, so the
@@ -100,8 +99,7 @@ impl Tool for RecallMemory {
             Ok(args) => args,
             Err(out) => return out,
         };
-        // A blank query matches everything (substring of "" is always true), letting the model dump the
-        // whole store; reject it, mirroring the guard DocsLibrary already has.
+        // A blank query is a substring of everything, which would let the model dump the whole store.
         if args.query.trim().is_empty() {
             return ToolOutcome::Error("query must not be empty".to_string());
         }
@@ -128,15 +126,10 @@ impl Tool for RecallMemory {
             }
         }
 
-        // Cross-store provenance: project wins (ADR 0023). A fact present in both stores — e.g. the
-        // distiller wrote it to both, or the user entered it twice — surfaces once, from the project
-        // entry, rather than duplicated across both sections. The drop is counted, never silent: the
-        // model is told when a shared entry was withheld, mirroring the distiller's `DistillReport.skipped`.
-        // Exact-normalized equality, not the distiller's Jaccard `is_near_duplicate`: this comparison
-        // crosses a trust boundary (project entries can be written by the model itself via `remember`), so
-        // a token-overlap threshold here would let a crafted project entry suppress a distinct, legitimate
-        // shared entry (issue #55). Jaccard stays for the distiller's own same-scope, same-trust-level
-        // write-time dedup.
+        // Cross-store provenance: project wins (ADR 0023), and the drop is counted so the model is told a
+        // shared entry was withheld. Exact-normalized equality, never the distiller's Jaccard — see
+        // `is_exact_normalized_duplicate` for why a token-overlap threshold is unsafe across this
+        // trust boundary.
         let shared_before = shared_entries.len();
         shared_entries.retain(|shared| {
             !project_entries
@@ -241,9 +234,7 @@ mod tests {
         ))
         .await
         .unwrap();
-        // Same fact, different casing/spacing — normalizes equal to the project entry above. Written to
-        // the shared store, e.g. by the distiller classifying the same fact into both scopes across two
-        // sessions.
+        // Same fact, different casing/spacing — normalizes equal to the project entry above.
         port.remember_shared(MemoryEntry::new(
             MemoryKind::Fact,
             "The API   times out after 30 seconds".into(),
@@ -252,8 +243,7 @@ mod tests {
         ))
         .await
         .unwrap();
-        // An unrelated shared entry must still surface — the dedup only drops what near-duplicates a
-        // project entry, not the whole shared section.
+        // The dedup drops only what duplicates a project entry, never the whole shared section.
         port.remember_shared(MemoryEntry::new(
             MemoryKind::Fact,
             "the api rate limit is 100 requests per minute".into(),
@@ -269,10 +259,8 @@ mod tests {
             .await;
         match out {
             ToolOutcome::Ok(body) => {
-                // Exactly two entries render (project's + the unrelated shared one) — not three. A
-                // literal-substring check on lowercase content would pass whether or not the retain
-                // actually fired (the shared duplicate here differs in case/spacing), so this counts the
-                // rendered `MemoryEntry` markers directly.
+                // Counts rendered markers, not substrings: the shared duplicate differs only in
+                // case/spacing, so a lowercase content check would pass whether or not the retain fired.
                 assert_eq!(
                     body.matches("--- MemoryEntry").count(),
                     2,
@@ -298,11 +286,9 @@ mod tests {
 
     #[tokio::test]
     async fn cross_store_reword_is_no_longer_dropped_as_a_duplicate() {
-        // Issue #55: a shared entry that only *near*-duplicates a project entry (high token overlap, not
-        // exact after normalization) must now survive cross-store dedup. Jaccard would have dropped this
-        // pair (one added token clears the 0.8 threshold); exact-normalized equality does not, closing the
-        // vector where a crafted project-store entry (writable by the model itself via `remember`) could
-        // suppress a distinct, legitimate shared entry.
+        // A shared entry that only *near*-duplicates a project one must survive: Jaccard would drop this
+        // pair (one added token clears 0.8), letting a crafted project entry suppress a legitimate shared
+        // one. Exact-normalized equality does not.
         let dir = TempDir::new().unwrap();
         let port = temp_port(&dir).await;
         port.remember_project(MemoryEntry::new(

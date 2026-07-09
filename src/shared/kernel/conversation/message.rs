@@ -3,12 +3,10 @@ use serde::{Deserialize, Serialize};
 use super::role::Role;
 use crate::shared::kernel::tool_call::ToolCall;
 
-/// An Anthropic extended-thinking block carried by an assistant turn, which the Messages API requires to
-/// be replayed byte-for-byte ahead of any `tool_use` block on a later turn. Two genuinely different shapes,
-/// not two states of one shape: `Visible` is the reasoning text (possibly empty, per `display: "omitted"`)
-/// plus its verification `signature`; `Redacted` is an opaque encrypted blob the safety system substitutes
-/// in its place (no readable text at all). Serde-derived (like `ToolCall`) so it round-trips through
-/// session persistence verbatim (see `tool_call` and ADR 0003).
+/// An Anthropic extended-thinking block, which the Messages API requires to be replayed byte-for-byte
+/// ahead of any later `tool_use` block. Two genuinely different shapes, not two states of one: `Redacted`
+/// is an opaque blob the safety system substitutes, with no readable text at all. Serde-derived so it
+/// round-trips through session persistence verbatim (ADR 0003).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThinkingBlock {
     Visible {
@@ -20,24 +18,20 @@ pub enum ThinkingBlock {
     },
 }
 
-/// A single message in the conversation. Pure domain: no wire/serde concern of its own — the provider
-/// maps it to its request shape via a DTO (see `provider::infrastructure::openai::message_dto`). Its
-/// embedded exceptions are `ToolCall` and `ThinkingBlock`, both serde-derived because they are persisted
-/// verbatim for session history (see `tool_call` and ADR 0003).
+/// Pure domain: no wire/serde concern of its own — the provider maps it to a request shape via a DTO. The
+/// embedded `ToolCall`/`ThinkingBlock` are the exceptions, serde-derived for session history (ADR 0003).
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,
     pub content: Option<String>,
-    /// Image data URLs attached to a user message (base64 PNG, `data:image/png;base64,...`). Empty on
-    /// every other message; when non-empty the provider emits multimodal `content` parts.
+    /// Base64 PNG data URLs, on a user message only. When non-empty the provider emits multimodal parts.
     pub images: Vec<String>,
-    /// Tool calls requested by an assistant turn. Empty on every other message.
+    /// Empty on every message but an assistant turn.
     pub tool_calls: Vec<ToolCall>,
     /// Set only on `Role::Tool`: which assistant tool call this message answers.
     pub tool_call_id: Option<String>,
-    /// An Anthropic extended-thinking block carried by an assistant turn. `None` on every other
-    /// provider/message. Set via [`Message::with_thinking`], never a constructor argument, so the many
-    /// existing `Message` call sites are unaffected.
+    /// Set via [`Message::with_thinking`], never a constructor argument, so existing call sites are
+    /// unaffected. `None` on every other provider/message.
     pub thinking: Option<ThinkingBlock>,
 }
 

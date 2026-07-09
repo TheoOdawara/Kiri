@@ -2,12 +2,10 @@ use crate::modules::memory::application::memory_store::MemoryStore;
 use crate::modules::memory::domain::entry::MemoryEntry;
 use crate::shared::kernel::error::AgentResult;
 
-/// Use cases for shared memory across projects. Extends the base `MemoryStore` (save/search/embeddings)
-/// with the cross-project `list_by_project`. Implemented by `SqliteSharedStore` (adapter over
-/// `SqliteSharedMemory`).
+/// Extends `MemoryStore` with the cross-project `list_by_project`.
 #[async_trait::async_trait]
 pub trait SharedStore: MemoryStore {
-    /// List entries for a specific project. Reserved for the future memory-management UI.
+    /// Reserved for the memory-management UI.
     #[allow(dead_code)]
     async fn list_by_project(
         &self,
@@ -69,7 +67,6 @@ mod tests {
         assert_eq!(proj_a[0].project_id.as_deref(), Some("proj-a"));
 
         let global = store.list_by_project("", 10).await.unwrap();
-        // Empty project_id should not match None
         assert_eq!(global.len(), 0);
     }
 

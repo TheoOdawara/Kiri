@@ -8,10 +8,6 @@ use crate::shared::kernel::message::Message;
 use crate::shared::kernel::role::Role;
 use crate::shared::kernel::tool_call::ToolCall;
 
-/// The OpenAI-compatible wire shape of a chat message, built from a domain `Message`. The provider's
-/// serialization rules (omit empty content / tool_calls / tool_call_id) live here, keeping the domain
-/// `Message` free of any wire concern — so a future provider with a different message shape only adds
-/// its own DTO.
 #[derive(Debug, Serialize)]
 pub(crate) struct WireMessage<'a> {
     #[serde(serialize_with = "serialize_role")]
@@ -48,8 +44,6 @@ impl<'a> From<&'a Message> for WireMessage<'a> {
     }
 }
 
-/// The OpenAI-compatible `content` value: a plain string when there are no images (the common case,
-/// byte-for-byte unchanged), or the multimodal parts array when a user message carries images.
 #[derive(Debug)]
 pub(crate) enum WireContent<'a> {
     Text(&'a str),
@@ -61,8 +55,7 @@ impl Serialize for WireContent<'_> {
         match self {
             WireContent::Text(text) => serializer.serialize_str(text),
             WireContent::Parts { text, images } => {
-                // Omit the text part when the caption is blank (image-only prompt): an empty text part
-                // is wasteful and some vision endpoints reject it.
+                // Some vision endpoints reject an empty text part.
                 let include_text = !text.trim().is_empty();
                 let mut seq =
                     serializer.serialize_seq(Some(usize::from(include_text) + images.len()))?;
@@ -104,10 +97,8 @@ fn serialize_role<S: Serializer>(role: &Role, serializer: S) -> Result<S::Ok, S:
     serializer.serialize_str(role.as_wire_str())
 }
 
-/// Serialize tool calls through the wire DTO, re-applying the control-char escaper to each call's
-/// `arguments`. This is the send-side boundary guard: it guarantees the outgoing body never carries a
-/// raw control char inside an `arguments` value, whatever produced the `ToolCall`. Already-valid
-/// arguments take the escaper's borrowed fast path, so the normal case allocates nothing extra.
+/// The send-side boundary guard: whatever produced the `ToolCall`, the outgoing body never carries a
+/// raw control char inside an `arguments` value.
 fn serialize_tool_calls<S: Serializer>(
     calls: &[ToolCall],
     serializer: S,
@@ -126,8 +117,6 @@ fn serialize_tool_calls<S: Serializer>(
     seq.end()
 }
 
-/// The OpenAI wire shape of a tool call. Mirrors the kernel `ToolCall` but lets the send boundary
-/// normalize `arguments` (kept here, not on the kernel type, since it is a wire concern).
 #[derive(Debug, Serialize)]
 struct WireToolCall<'a> {
     id: &'a str,
@@ -186,8 +175,6 @@ mod tests {
 
     #[test]
     fn tool_call_arguments_with_raw_control_char_serialize_as_valid_json() {
-        // Send-boundary guard: even if a stored ToolCall carries a raw newline inside its arguments,
-        // what goes on the wire must be valid JSON (so the provider's nested re-parse cannot 400).
         let message = Message::assistant_tool_calls(
             None,
             vec![ToolCall {
@@ -214,7 +201,7 @@ mod tests {
     fn user_message_without_images_serializes_content_as_a_plain_string() {
         let value = serde_json::to_value(WireMessage::from(&Message::user("oi"))).unwrap();
         assert_eq!(value["role"], "user");
-        assert_eq!(value["content"], "oi"); // still a string — the common path is unchanged
+        assert_eq!(value["content"], "oi");
     }
 
     #[test]

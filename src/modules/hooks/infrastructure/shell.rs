@@ -1,7 +1,5 @@
-//! The sanctioned site for the `hooks` context's process I/O (ADR 0021): runs a hook's shell command
-//! through the harness's existing confined-exec surface (`tools::infrastructure::exec::run_shell` — the
-//! same one `run_command` uses), so a hook can never bypass the sandbox's OS-level confinement or reach
-//! the network by default.
+//! The sanctioned site for the `hooks` context's process I/O (ADR 0021). Routes through
+//! `tools::infrastructure::exec::run_shell` so a hook cannot bypass the sandbox's OS-level confinement.
 
 use std::time::Duration;
 
@@ -11,13 +9,11 @@ use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::infrastructure::exec::{self, ExecError, capped_combined};
 use crate::shared::kernel::sandbox::NetworkPolicy;
 
-/// Bound on how long a single hook may run before it is killed. Hooks are auxiliary and notice-only, so
-/// there is never a reason to wait as long as a model-driven `run_command` call might.
+/// Hooks are auxiliary and notice-only, so they get a far tighter bound than a model-driven
+/// `run_command` call.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Executes a hook's shell command confined to the workspace, network-denied by default (a hook is a
-/// notification point, not an integration — a hook that genuinely needs network is exactly what MCP is
-/// for, Fase 5).
+/// Network-denied by default: a hook is a notification point, not an integration — that is what MCP is for.
 pub struct ShellHookRunner;
 
 #[async_trait::async_trait(?Send)]
@@ -64,7 +60,6 @@ impl HookRunner for ShellHookRunner {
     }
 }
 
-/// The first non-blank line of `text`, trimmed — a one-line summary for the transcript notice.
 fn first_line(text: &str) -> Option<String> {
     text.lines()
         .map(str::trim)
@@ -125,10 +120,8 @@ mod tests {
         assert_eq!(outcome.summary, "exit 0");
     }
 
-    /// Issue #8a: `run_command`'s TUI rendering gained a `STDERR_MARKER` convention on a SEPARATE
-    /// function (`exec::capped_combined_marking_stderr`), so `ShellHookRunner` — which still calls the
-    /// plain `exec::capped_combined` — must keep reporting a stderr-only command's own text, never the
-    /// literal marker line.
+    /// `STDERR_MARKER` belongs to `exec::capped_combined_marking_stderr`; this runner calls the plain
+    /// `capped_combined` and must report the command's own stderr text, never the marker line.
     #[tokio::test]
     async fn a_command_with_only_stderr_output_reports_the_real_error_not_a_marker() {
         let dir = TempDir::new().unwrap();

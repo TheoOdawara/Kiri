@@ -3,9 +3,6 @@ use serde_json::Value;
 
 use super::message_dto::WireMessage;
 
-/// The OpenAI-compatible chat-completions request body. A pure wire DTO: `messages` are mapped from
-/// domain `Message`s through `WireMessage`, and `tools` are the opaque JSON schemas the tool registry
-/// produced, passed through verbatim.
 #[derive(Debug, Serialize)]
 pub(crate) struct ChatRequest<'a> {
     pub model: &'a str,
@@ -21,11 +18,8 @@ pub(crate) struct ChatRequest<'a> {
     pub tools: &'a [Value],
 }
 
-/// Provider-specific knob that asks the model to emit reasoning. Reasoning models stream it by
-/// default; sending this makes the intent explicit. NVIDIA hosts families with two different confirmed
-/// keys for the same concept (see `NvidiaFamily`): `thinking` (Nemotron, Kimi) and `enable_thinking`
-/// (Qwen, GLM) — exactly one is ever populated per family; unconfirmed families (DeepSeek, MiniMax,
-/// Gemma, …) send neither.
+/// NVIDIA hosts two confirmed keys for the same concept: `thinking` (Nemotron, Kimi) and
+/// `enable_thinking` (Qwen, GLM). Exactly one is ever populated per family; the rest send neither.
 #[derive(Debug, Serialize)]
 pub(crate) struct ChatTemplateKwargs {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,19 +32,17 @@ pub(crate) struct ChatTemplateKwargs {
 pub(crate) struct ChatStreamChunk {
     #[serde(default)]
     pub choices: Vec<StreamChoice>,
-    /// An OpenAI-compatible provider can deliver an error in-band on an HTTP 200 stream
-    /// (`data: {"error": {...}}`). Captured on the chunk so a single parse handles both the normal and
-    /// error shapes — the streaming hot path no longer parses every token-delta twice.
+    /// A provider can deliver an error in-band on an HTTP 200 stream. Captured on the chunk so the hot
+    /// path parses each delta once, not twice.
     #[serde(default)]
     pub error: Option<StreamError>,
 }
 
-/// An in-band stream error. `code` is kept as a raw `Value` because providers send it as either a
-/// string or a number.
 #[derive(Debug, Deserialize)]
 pub(crate) struct StreamError {
     #[serde(default)]
     pub message: Option<String>,
+    /// A raw `Value`: providers send this as either a string or a number.
     #[serde(default)]
     pub code: Option<Value>,
 }
@@ -58,8 +50,7 @@ pub(crate) struct StreamError {
 #[derive(Debug, Deserialize)]
 pub(crate) struct StreamChoice {
     pub delta: Delta,
-    /// Why the model stopped: `"stop"`, `"tool_calls"`, or `"length"` (the output token cap was hit).
-    /// Used to surface a silent truncation instead of returning a turn that did nothing.
+    /// `"length"` means the output token cap truncated the turn, which must not pass as a silent stop.
     #[serde(default)]
     pub finish_reason: Option<String>,
 }
@@ -67,20 +58,17 @@ pub(crate) struct StreamChoice {
 #[derive(Debug, Deserialize)]
 pub(crate) struct Delta {
     pub content: Option<String>,
-    /// Reasoning text under the standard `reasoning_content` name (vLLM/NVIDIA convention).
     #[serde(default, deserialize_with = "string_or_none")]
     pub reasoning_content: Option<String>,
-    /// Some providers (and NVIDIA Nemotron) also/instead send `reasoning`. Kept as its own field:
-    /// a serde `alias` would make a delta carrying BOTH keys fail as a duplicate field.
+    /// A separate field, not a serde `alias`: a delta carrying BOTH keys would fail as a duplicate.
     #[serde(default, deserialize_with = "string_or_none")]
     pub reasoning: Option<String>,
-    /// Tool-call fragments. Streamed incrementally and keyed by `index`; assembled by the SSE layer.
     #[serde(default)]
     pub tool_calls: Vec<ToolCallFragment>,
 }
 
-/// One streamed slice of a tool call. Every field but `index` is optional: the first fragment for an
-/// index carries `id`/`type`/`function.name`, later fragments carry only `function.arguments` slices.
+/// The first fragment for an `index` carries `id`/`type`/`function.name`; later ones carry only
+/// `function.arguments` slices.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ToolCallFragment {
     pub index: u32,
@@ -96,9 +84,8 @@ pub(crate) struct FunctionFragment {
     pub arguments: Option<String>,
 }
 
-/// Serde adapter: accept a string into `Some`; coerce any other JSON shape (object, list, number,
-/// null) to `None`. Keeps an unexpected reasoning shape from failing the whole delta and dropping
-/// its `content`.
+/// Coerces any non-string shape to `None`, so an unexpected reasoning payload cannot fail the whole
+/// delta and take its `content` down with it.
 fn string_or_none<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
     Ok(match Option::<Value>::deserialize(deserializer)? {
         Some(Value::String(text)) => Some(text),
@@ -204,7 +191,7 @@ mod tests {
 
     #[test]
     fn delta_accepts_both_reasoning_keys_at_once() {
-        // NVIDIA Nemotron streams `reasoning` and `reasoning_content` together; this must not fail.
+        // NVIDIA Nemotron streams both keys together.
         let delta: Delta =
             serde_json::from_str(r#"{"reasoning":"Okay","reasoning_content":"Okay"}"#).unwrap();
         assert_eq!(delta.reasoning.as_deref(), Some("Okay"));

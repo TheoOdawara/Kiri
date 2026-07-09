@@ -30,8 +30,7 @@ mod tests {
     use crate::modules::memory::domain::scope::Scope;
     use crate::shared::kernel::error::AgentResult;
 
-    /// A no-op `Memory` double: the read-only guard only reads each tool's `name()`/`is_read_only()`, so
-    /// no method is ever called — the impl just satisfies the port so `default_memory_tools` can be built.
+    /// The guard only reads each tool's `name()`/`is_read_only()`, so no method here is ever called.
     struct NoopMemory;
 
     #[async_trait::async_trait]
@@ -66,10 +65,9 @@ mod tests {
 
     #[test]
     fn read_only_memory_tools_are_exactly_the_known_safe_set() {
-        // SEC-01 / ADR 0029 guard (see `tools/infrastructure/fs.rs`): lock the read-only surface a
-        // headless subagent can hold. `recall_memory` and `consult_docs` read only harness-owned stores
-        // (the memory DBs and `docs/`), never an agent-supplied fs path; `remember` is a write (default
-        // `is_read_only() == false`) and must stay out. A new read-only memory tool trips this guard.
+        // SEC-01 / ADR 0029: locks the read-only surface a headless subagent can hold. `recall_memory` and
+        // `consult_docs` touch only harness-owned stores, never an agent-supplied path; `remember` writes
+        // and must stay out. A new read-only memory tool trips this guard.
         let tools = default_memory_tools(
             Arc::new(NoopMemory),
             Arc::new(DocsLibrary::new(std::path::PathBuf::from("docs"))),

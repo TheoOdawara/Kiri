@@ -6,14 +6,11 @@ use crate::modules::provider::infrastructure::streaming::{MAX_STREAM_BYTES, ensu
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::Secret;
 
-/// OpenAI-compatible embeddings adapter (`POST {base_url}/embeddings`). NVIDIA and OpenAI expose this
-/// endpoint; Anthropic does not, so the factory refuses to build one for an Anthropic profile. Reuses the
-/// same timed `reqwest::Client` and `error_from_status` classification as the chat adapter.
+/// `POST {base_url}/embeddings`. Anthropic exposes no such endpoint, so the factory refuses to build one
+/// for an Anthropic profile.
 pub struct OpenAiEmbeddingProvider {
     client: reqwest::Client,
     base_url: String,
-    /// Optional API key (`Some` held as a `Secret`: zeroized on drop, redacted in Debug, exposed only at
-    /// the auth-header site). `None` for a keyless local endpoint, in which case `embed` omits the header.
     api_key: Option<Secret>,
     model: String,
 }
@@ -47,15 +44,13 @@ struct EmbeddingsResponse {
 
 #[derive(Deserialize)]
 struct EmbeddingDatum {
-    /// The position of this vector's input in the request. The endpoint may return data out of order,
-    /// so we sort by it rather than trusting arrival order (a misalignment silently corrupts recall).
+    /// The endpoint may return rows out of order, and a misalignment silently corrupts recall.
     #[serde(default)]
     index: usize,
     embedding: Vec<f32>,
 }
 
-/// Reorder the response by `index` and verify there is exactly one vector per input, so a provider
-/// returning rows out of order or with a different count can never silently misalign vectors with texts.
+/// Guarantees exactly one vector per input, in input order.
 fn align_embeddings(
     mut data: Vec<EmbeddingDatum>,
     expected: usize,
@@ -67,9 +62,7 @@ fn align_embeddings(
         )));
     }
     data.sort_by_key(|datum| datum.index);
-    // The count check alone passes a response with duplicate/missing indices (e.g. two rows at index 0),
-    // which would return one input's vector for two texts. After sorting, the indices must be exactly
-    // 0..expected for the position-to-input mapping to hold.
+    // The count check alone passes two rows at index 0, which would hand one input's vector to two texts.
     if !data.iter().enumerate().all(|(i, datum)| datum.index == i) {
         return Err(AgentError::Provider(format!(
             "embeddings response has non-contiguous indices (expected 0..{expected}); a duplicate or missing index would misalign vectors with inputs"
@@ -78,10 +71,8 @@ fn align_embeddings(
     Ok(data.into_iter().map(|datum| datum.embedding).collect())
 }
 
-/// Read the response body with a byte ceiling, mirroring the chat path's `MAX_STREAM_BYTES`, so a hostile
-/// or misbehaving embeddings endpoint cannot exhaust memory through an unbounded JSON body. The advertised
-/// `content-length` is rejected up front; the post-read recheck is the real guard for a chunked body that
-/// advertises no length.
+/// The advertised `content-length` is rejected up front; the post-read recheck is the real guard for a
+/// chunked body that advertises no length.
 /// ponytail: a chunked body without content-length is still fully buffered by `bytes()` before the recheck;
 /// upgrade path = a streamed, budget-bounded reader (like the chat SSE path) if a true cap is needed.
 async fn bounded_body(response: reqwest::Response) -> Result<Vec<u8>, AgentError> {
@@ -171,8 +162,7 @@ mod tests {
 
     #[test]
     fn align_rejects_duplicate_indices() {
-        // The count matches `expected`, so only the contiguity check can catch that input 1 has no
-        // vector while input 0's vector is returned twice — the silent recall corruption PROV-04 guards.
+        // The count matches, so only the contiguity check can reject this.
         let data = vec![
             EmbeddingDatum {
                 index: 0,
@@ -188,8 +178,7 @@ mod tests {
 
     #[test]
     fn align_rejects_a_gap() {
-        // Indices {0, 2}: the count matches `expected = 2`, but index 1 is missing, so the contiguity
-        // check (not the count guard) is what must reject it.
+        // The count matches, so only the contiguity check can reject this.
         let data = vec![
             EmbeddingDatum {
                 index: 0,
@@ -203,8 +192,6 @@ mod tests {
         assert!(align_embeddings(data, 2).is_err());
     }
 
-    /// An embeddings endpoint advertising a body past `MAX_STREAM_BYTES` is rejected by the content-length
-    /// pre-check before the body is read, so a hostile endpoint fails fast instead of exhausting memory.
     #[tokio::test]
     async fn oversized_embeddings_response_is_rejected() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -216,7 +203,7 @@ mod tests {
             if let Ok((mut stream, _)) = listener.accept().await {
                 let mut buf = vec![0u8; 4096];
                 let _ = stream.read(&mut buf).await;
-                // Advertise a length past the cap; the pre-check fires before any body is consumed.
+                // A length past the cap, with no body: the pre-check must fire before any read.
                 let huge = super::MAX_STREAM_BYTES + 1;
                 let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {huge}\r\nConnection: close\r\n\r\n"
@@ -238,8 +225,6 @@ mod tests {
         }
     }
 
-    /// A keyless embeddings endpoint (local LM Studio / Ollama) must omit the `Authorization` header,
-    /// mirroring the chat adapter — `None` key sends no header at all.
     #[tokio::test]
     async fn keyless_embeddings_omits_authorization_header() {
         let captured = test_support::capture_request(|base_url| async move {

@@ -22,19 +22,15 @@ use super::resolve::{
 };
 use super::writers::{default_provider, ensure_private_dir, write_starter_config};
 
-/// The kiri global config/state directory (`~/.kiri`). Houses `config.toml`, the credentials fallback
-/// file, and the shared-memory database. Private: only `Settings::resolve` (this file) derives it; every
-/// consumer reads the resolved `Settings::global_dir` field, the single harness-home source (ADR 0015).
+/// Private: only `Settings::resolve` derives it. Every consumer reads the resolved `Settings::global_dir`,
+/// the single harness-home source (ADR 0015).
 fn kiri_global_dir() -> PathBuf {
     expand_home("~/.kiri")
 }
 
-/// Load the optional `~/.kiri/.env` into process env before config resolution, so a user can keep API
-/// keys (and other trusted overrides) in one owner-only file that seeds `credentials.json`. Read ONLY
-/// from the trusted global dir, never the cwd — a hostile project repo must not be able to inject env
-/// and thereby redirect a credential or weaken the sandbox (ADR 0020; the "project layer is untrusted"
-/// invariant). Best-effort: an absent or malformed `.env` just means no vars are set, never a boot
-/// failure, and `dotenvy` never overrides an already-exported var.
+/// Seeds process env from `~/.kiri/.env` before config resolution. Read ONLY from the trusted global dir,
+/// never the cwd: a hostile project repo must not inject env and thereby redirect a credential or weaken
+/// the sandbox (ADR 0020). `dotenvy` never overrides an already-exported var.
 pub fn load_global_env() {
     let env_path = kiri_global_dir().join(".env");
     // Deliberately ignored: `.env` is an optional convenience. A missing file, or a malformed line that
@@ -42,9 +38,8 @@ pub fn load_global_env() {
     let _ = dotenvy::from_path(&env_path);
 }
 
-/// The resolved configuration the composition root needs to wire the harness. Provider endpoints and
-/// the active model come from the configured [`ProviderProfile`] catalog; the matching secret is
-/// fetched from the credential store at wire time (never stored here).
+/// The resolved configuration the composition root needs to wire the harness. The matching secret is
+/// fetched from the credential store at wire time, never stored here.
 pub struct Settings {
     pub path: PathBuf,
     pub seed: Option<String>,
@@ -61,65 +56,52 @@ pub struct Settings {
     /// Extra paths a confined command may read / write beyond the workspace (toolchain dirs, config).
     pub extra_ro: Arc<[PathBuf]>,
     pub extra_rw: Arc<[PathBuf]>,
-    /// HTTP client timeouts for the provider: `connect_timeout` caps connection setup, `read_timeout`
-    /// caps idle time between received bytes (streaming-safe). Bound a hung provider so a turn fails
-    /// fast with a clear error instead of hanging silently.
+    /// `read_timeout` caps idle time between received bytes, so it is streaming-safe. Both bound a hung
+    /// provider so a turn fails fast instead of hanging silently.
     pub connect_timeout: Duration,
     pub read_timeout: Duration,
-    /// Ask the model to stream reasoning. On by default; disable for a model that rejects/stalls on it.
+    /// Disable for a model that rejects or stalls on streamed reasoning.
     pub thinking: bool,
-    /// Whether the memory contexts (project + shared) and the docs/memory tools are wired.
     pub memory_enabled: bool,
-    /// The project's documentation root that `consult_docs` searches. Defaults to `<path>/docs`.
+    /// What `consult_docs` searches. Defaults to `<path>/docs`.
     pub docs_path: PathBuf,
-    /// The cross-project shared memory database. Defaults to `~/.kiri/memory/shared.db`.
+    /// Defaults to `~/.kiri/memory/shared.db`.
     pub shared_memory_db: PathBuf,
-    /// The persisted-conversations database. Defaults to `~/.kiri/sessions.db`. Gated by `memory_enabled`.
+    /// Defaults to `~/.kiri/sessions.db`. Gated by `memory_enabled`.
     pub sessions_db: PathBuf,
-    /// The credential-store file. `~/.kiri/credentials.json`.
     pub credentials_file: PathBuf,
-    /// The harness home (`~/.kiri`). The single source every consumer reads instead of re-deriving it
-    /// from `config_path.parent()`; the sync work-tree lives at `<global_dir>/sync`.
+    /// The harness home. Every consumer reads this instead of re-deriving `config_path.parent()`.
     pub global_dir: PathBuf,
-    /// The global config file (`~/.kiri/config.toml`). The runtime writes live `/models`/`/effort`
-    /// changes back here (the trusted layer only).
+    /// The trusted layer, and the only one the runtime writes live `/models`/`/effort` changes back to.
     pub config_path: PathBuf,
-    /// The configured provider catalog (non-secret). The user selects among these via `/provider`.
     pub providers: Vec<ProviderProfile>,
-    /// The id of the active provider — must name one of `providers`.
+    /// Must name one of `providers`.
     pub active_provider: String,
-    /// The reasoning/output effort dial, mapped per provider by its adapter.
     pub effort: Effort,
-    /// Optional embeddings config for semantic recall: which configured provider to reuse and the model.
     /// `None` keeps recall keyword-only. Trusted (global) layer only.
     pub embeddings: Option<EmbeddingSettings>,
-    /// Instructions from the trusted global layer (`~/.kiri/`), or the `--instructions` CLI override
-    /// (an explicit user-typed path — trusted the same way). Rendered as authoritative user guidance.
+    /// From `~/.kiri/` or the `--instructions` override — a path the user typed, so trusted alike.
+    /// Rendered as authoritative guidance.
     pub instructions_global: Option<String>,
-    /// Instructions from the untrusted project layer (the workspace root) — a cloned/third-party repo's
-    /// KIRI.md/AGENTS.md/CLAUDE.md may be attacker-authored, so this is rendered as untrusted guidance,
-    /// never as an authoritative directive (S3-1). `None` when a CLI override replaced both layers.
+    /// From the workspace root, which a third-party repo may have authored: rendered as untrusted
+    /// guidance, never an authoritative directive (S3-1).
     pub instructions_project: Option<String>,
-    /// The file paths that contributed to the instructions above, in discovery order, for TUI display.
+    /// In discovery order, for TUI display.
     pub instruction_paths: Vec<PathBuf>,
 }
 
-/// Resolved `[embeddings]` config: an existing provider id whose endpoint/credential to reuse, and the
-/// embeddings model id.
+/// An existing provider id whose endpoint/credential to reuse, plus the embeddings model id.
 #[derive(Debug, Clone)]
 pub struct EmbeddingSettings {
     pub provider_id: String,
     pub model: String,
 }
 
-/// Largest instructions file read into memory, mirroring `docs_library`'s `MAX_FILE_BYTES` /
-/// `file_project_memory`'s `MAX_ENTRY_BYTES` — bounds a single read so an oversized committed file, or a
-/// symlink to an endless device that slipped past `find_instructions`'s guard (the explicit
-/// `--instructions` override does not go through that guard, by design — it names a path the user typed
-/// themselves), cannot hang or exhaust memory during config resolve.
+/// Bounds a single read so an oversized file — or a symlink to an endless device reached via the explicit
+/// `--instructions` override, which bypasses `find_instructions`'s guard by design — cannot hang or
+/// exhaust memory during config resolve.
 const MAX_INSTRUCTIONS_BYTES: u64 = 256 * 1024;
 
-/// Read at most `MAX_INSTRUCTIONS_BYTES` of `path` as lossy UTF-8.
 fn read_capped(path: &std::path::Path) -> std::io::Result<String> {
     let file = std::fs::File::open(path)?;
     let mut buf = Vec::new();
@@ -127,18 +109,16 @@ fn read_capped(path: &std::path::Path) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// True only for a regular file, never a symlink — mirrors `docs_library`'s directory-walk guard. A
-/// hostile committed symlink named e.g. `CLAUDE.md` must not redirect this harness-internal, pre-sandbox
-/// read to a file outside the project (`~/.ssh/id_rsa`, another project's `.env`, …): unlike the model's
-/// own `read_file` tool, this read never passes through `FsSandbox`'s sensitive-path denylist.
+/// Never a symlink: a hostile committed `CLAUDE.md` symlink must not redirect this read to `~/.ssh/id_rsa`
+/// or another project's `.env`. Unlike the model's `read_file` tool, this pre-sandbox read never passes
+/// through `FsSandbox`'s sensitive-path denylist.
 fn is_regular_file(path: &std::path::Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|m| m.is_file())
         .unwrap_or(false)
 }
 
-/// Return the first instructions file found in `dir` by the discovery order `KIRI.md` → `AGENTS.md` →
-/// `CLAUDE.md`. Returns `None` if none of the candidates exist (or exist only as a symlink).
+/// Discovery order: `KIRI.md` → `AGENTS.md` → `CLAUDE.md`.
 pub(super) fn find_instructions(dir: &std::path::Path) -> Option<PathBuf> {
     ["KIRI.md", "AGENTS.md", "CLAUDE.md"]
         .iter()
@@ -146,11 +126,9 @@ pub(super) fn find_instructions(dir: &std::path::Path) -> Option<PathBuf> {
         .find(|p| is_regular_file(p))
 }
 
-/// Discover and load instructions, keeping the global (`~/.kiri/`, trusted) and project (workspace root,
-/// untrusted — S3-1) layers separate so each can be framed by its own trust level in the system prompt.
-/// A CLI override (`--instructions`) replaces both layers and is treated as global-tier: the user typed
-/// the path themselves, so it carries the same trust as `~/.kiri`, not the workspace. Returns
-/// `(global_text, project_text, contributing_paths)`.
+/// Keeps the global (trusted) and project (untrusted, S3-1) layers separate so the system prompt can frame
+/// each by its own trust level. A `--instructions` override replaces both and is global-tier: the user
+/// typed that path, so it carries `~/.kiri`'s trust, not the workspace's.
 fn load_instructions(
     workspace: &std::path::Path,
     global_dir: &std::path::Path,
@@ -178,11 +156,9 @@ fn load_instructions(
 }
 
 impl Settings {
-    /// Resolve the runtime settings from the already-parsed CLI path/prompt: load the layered TOML
-    /// config (`~/.kiri` global ← `<workspace>/.kiri` project) and reduce it to `Settings`. `main` owns
-    /// CLI parsing — so it can dispatch the headless `kiri sync` route before reaching the TUI — and
-    /// hands the values here. The harness owns its config (TOML) and secrets (the 0600 credentials file); a
-    /// first run with no config seeds a default NVIDIA provider and writes a starter `~/.kiri/config.toml`.
+    /// Reduce the layered TOML config (`~/.kiri` global ← `<workspace>/.kiri` project) to `Settings`.
+    /// `main` owns CLI parsing, so it can dispatch the headless `kiri sync` route before reaching the TUI.
+    /// A first run with no config seeds a default NVIDIA provider and writes a starter `config.toml`.
     pub fn resolve(
         cli_path: Option<PathBuf>,
         cli_prompt: Option<String>,

@@ -1,14 +1,11 @@
-//! Crate-level structural guards for the modular-hexagonal domain-purity invariants (ADR 0003). These
-//! walk the source tree and fail the build if a `domain` layer re-breaches its purity — coupling to a
-//! UI crate (ADR 0017) or doing fs/net/db I/O — so those rules cannot silently rot. The inward
-//! import-direction rule (application/domain must not import infrastructure) is a convention these guards
-//! do NOT yet enforce; do not claim it here until a guard backs it.
+//! Structural guards for the domain-purity invariants (ADR 0003), walking the source tree so those rules
+//! cannot silently rot. The inward import-direction rule (application/domain must not import
+//! infrastructure) is a convention these guards do NOT yet enforce; do not claim it here until one does.
 
 #![cfg(test)]
 
 use std::path::{Path, PathBuf};
 
-/// Collect every `*.rs` file under `dir`, recursively.
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("read directory") {
         let path = entry.expect("directory entry").path();
@@ -20,8 +17,7 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every `*.rs` under each `src/modules/*/domain/`, recursively — so a future nested
-/// `domain/<sub>/foo.rs` cannot silently escape either domain-purity guard.
+/// Recursive, so a future nested `domain/<sub>/foo.rs` cannot silently escape either purity guard.
 fn domain_files() -> Vec<PathBuf> {
     let modules = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
@@ -40,19 +36,14 @@ fn domain_files() -> Vec<PathBuf> {
     files
 }
 
-/// ADR 0017: `InputBuffer` (its home is `tui/domain/input_buffer.rs`) is the *only* sanctioned
-/// `domain → UI-crate` coupling. Walk every `*.rs` under each `src/modules/*/domain/` recursively — so a
-/// future nested `domain/<sub>/foo.rs` cannot silently re-breach — and assert none except that one file
-/// imports `ratatui`/`tui_textarea`.
+/// ADR 0017: `InputBuffer` is the *only* sanctioned `domain → UI-crate` coupling.
 #[test]
 fn only_input_buffer_couples_domain_to_ui_crates() {
-    // The single sanctioned exception (ADR 0017): `InputBuffer`'s home, `tui/domain/input_buffer.rs`.
     let allowed = Path::new("tui").join("domain").join("input_buffer.rs");
     for file in &domain_files() {
         let source = std::fs::read_to_string(file).expect("read domain file");
-        // Match the bare crate-path tokens, not just the `use` forms, so a fully-qualified
-        // `ratatui::Style` / `tui_textarea::TextArea` cannot re-breach without a `use`. The small
-        // false-positive risk (a comment naming the crate) is fail-loud and easily reworded.
+        // Bare crate-path tokens, not just `use` forms, so a fully-qualified `ratatui::Style` cannot
+        // re-breach. A comment naming the crate false-positives, but fails loud and is easily reworded.
         let couples = source.contains("ratatui::")
             || source.contains("use ratatui")
             || source.contains("tui_textarea::")
@@ -66,11 +57,9 @@ fn only_input_buffer_couples_domain_to_ui_crates() {
     }
 }
 
-/// ADR 0020: the untrusted-project isolation invariant — a `.env` may be loaded ONLY from the trusted
-/// `~/.kiri` dir, never the cwd. The argless `dotenvy::dotenv()` reads a `.env` from the current working
-/// directory (a hostile repo the user `cd`s into), which would let it inject security-relevant env
-/// (`KIRI_SANDBOX*`, `KIRI_PATH`, `*_API_KEY`, …). Fail the build if that cwd variant reappears anywhere
-/// under `src/`; the sanctioned path is `dotenvy::from_path(~/.kiri/.env)` in `config::load_global_env`.
+/// ADR 0020: a `.env` may be loaded ONLY from the trusted `~/.kiri`. The argless `dotenvy::dotenv()`
+/// reads the cwd — a hostile repo the user `cd`s into, injecting `KIRI_SANDBOX*` / `*_API_KEY`. The
+/// sanctioned path is `dotenvy::from_path` in `config::load_global_env`.
 #[test]
 fn no_cwd_dotenv_load() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -91,13 +80,10 @@ fn no_cwd_dotenv_load() {
     }
 }
 
-/// Recursively flatten a `use` tree into every concrete import path it names, as segment lists (e.g.
-/// `use tokio::{process::Command as Cmd, time};` yields `[["tokio","process","Command"], ["tokio","time"]]`).
-/// Deliberately keeps the PRE-rename identifier for `UseTree::Rename` (`as` only changes the local
-/// binding, never what the import actually points at), so `use std::process::Command as Cmd;` is recorded
-/// as `std::process::Command`, not `std::process::Cmd` — an alias cannot hide the real path from the
-/// banned-prefix check below. A glob (`use tokio::process::*;`) records the globbed-into prefix itself,
-/// since the import of the module is the violation regardless of which items are pulled in.
+/// Flatten a `use` tree into every concrete import path it names, as segment lists. Keeps the PRE-rename
+/// identifier (`as` rebinds locally, it does not change what the import points at), so an alias cannot
+/// hide the real path from the banned-prefix check. A glob records the globbed-into prefix: importing the
+/// module is the violation, whichever items are pulled in.
 fn flatten_use_tree(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
     match tree {
         syn::UseTree::Path(p) => {
@@ -124,36 +110,23 @@ fn flatten_use_tree(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut Vec
     }
 }
 
-/// Walks a parsed file's `use` imports (via [`flatten_use_tree`]) AND every `syn::Path` occurring anywhere
-/// else (function calls, types, …), recording every one whose leading segments match a banned prefix.
-/// Two independent checks are needed because a boundary can be crossed two ways: an imported item used
-/// under a local (possibly renamed) binding — caught by the flattened `use` check — or a fully-qualified
-/// reference with no `use` at all, e.g. `tokio::process::Command::new(...)` inline — caught by `visit_path`,
-/// which `syn`'s default recursion reaches for every path in the file, included nested `mod` blocks.
-/// Operates on the real AST, so whitespace/formatting inside a path, or a literal appearing only in a
-/// comment or string, cannot produce a match — closing the two concrete false-positive/false-negative
-/// modes a plain substring grep had (issue #50).
+/// Records every path whose leading segments match a banned prefix. Checks `use` imports AND every other
+/// `syn::Path`, because a boundary can be crossed either through a (possibly renamed) local binding or
+/// through an inline fully-qualified call with no `use` at all. Walking the real AST means a banned
+/// literal inside a comment or string cannot match (issue #50).
 ///
-/// Two residual, undefeated gaps (documented, not silently claimed as closed):
+/// Two residual gaps, documented rather than silently claimed as closed — both theoretical today, since
+/// this codebase contains neither construct:
 ///
-/// - **Macro expansion.** `syn::parse_file` does not expand macros. A `macro_rules!` DEFINITION's body is
-///   arbitrary token soup, not necessarily valid Rust syntax on its own, so this cannot see a banned path
-///   hidden inside one; the same is true of any invocation of an external macro that itself expands to a
-///   banned call. Full resistance would need actual macro expansion (e.g. `cargo expand`), a materially
-///   larger undertaking than this guard warrants — no file in this codebase currently defines a hooks/mcp-
-///   context macro, so this is theoretical, not a live gap.
-/// - **Cross-file re-export.** This walks one file at a time, per `assert_process_io_confined`'s loop,
-///   skipping only `infrastructure/`. If an `infrastructure/` file re-exported a banned path under an
-///   innocuous local name (`pub use tokio::process::Command as SafeName;`), an `application/`-layer file
-///   importing THAT re-export (`use crate::modules::hooks::infrastructure::x::SafeName;`) would flatten to
-///   local module segments only — never `tokio`/`std`/`rmcp` — and would not be flagged, even though the
-///   boundary is genuinely crossed. Closing this needs cross-file symbol resolution (effectively a mini
-///   name-resolution pass), disproportionate for this guard; no such re-export exists in this codebase
-///   today, so this is also theoretical, not a live gap.
+/// - **Macro expansion.** `syn::parse_file` does not expand macros, so a banned path inside a
+///   `macro_rules!` body is invisible. Closing it needs real expansion (`cargo expand`).
+/// - **Cross-file re-export.** This walks one file at a time. An `infrastructure/` file re-exporting
+///   `tokio::process::Command as SafeName` would let an `application/` importer flatten to local segments
+///   only. Closing it needs cross-file name resolution.
 struct BannedPathVisitor {
-    /// Two-segment prefixes, e.g. `("tokio", "process")`.
+    /// e.g. `("tokio", "process")`.
     banned_pairs: &'static [(&'static str, &'static str)],
-    /// One-segment prefixes, e.g. `"rmcp"`.
+    /// e.g. `"rmcp"`.
     banned_roots: &'static [&'static str],
     findings: Vec<String>,
 }

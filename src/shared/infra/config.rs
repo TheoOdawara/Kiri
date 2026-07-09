@@ -1,7 +1,3 @@
-//! Layered TOML configuration. A re-exporting facade over the `config/` submodules: the public surface
-//! (`Settings`, the `Cli`, the live-write helpers) is re-exported here so every external `config::X`
-//! call site is unchanged. Cross-submodule visibility is `pub(super)`.
-
 mod cli;
 mod defaults;
 mod raw;

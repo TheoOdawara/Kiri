@@ -8,13 +8,8 @@ use crate::shared::kernel::provider::{Effort, ProviderProfile};
 
 use super::defaults::DEFAULT_PROVIDER_ID;
 
-// ---- TOML config model --------------------------------------------------------------------------
-//
-// Two layers merge into the resolved config: a global `~/.kiri/config.toml` and a per-project
-// `<workspace>/.kiri/config.toml`. The project layer overrides the global field-by-field; for the
-// `providers` table, project entries override or add by id. Secrets are NOT stored here — they live in
-// the 0600 credentials file, keyed by provider id.
-
+/// A single TOML layer. Project overrides global field-by-field; `providers` entries override or add by
+/// id. Secrets never live here — they are in the 0600 credentials file, keyed by provider id.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub(super) struct RawConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,20 +83,17 @@ impl RawEmbeddings {
     }
 }
 
-/// Combine the two config layers and resolve the effort. **SECURITY:** the project layer lives inside
-/// the (untrusted) workspace a coding agent operates on, so only the innocuous `effort` preference is
-/// honored from it. Provider definitions, the active selection, and the `sandbox`/`http`/`behavior`/
-/// `paths` policy come from the **trusted global layer only** — a malicious repo must not be able to
-/// redirect a stored credential to its own endpoint (by reusing a provider id with a different
-/// `base_url`) or weaken the command sandbox by shipping a `.kiri/config.toml`. Broader, trust-gated
-/// per-project config is deliberate future work (recorded as an ADR). Pure, so it is unit-testable.
+/// **SECURITY:** the project layer lives inside the untrusted workspace, so only the innocuous `effort`
+/// is honored from it. Providers, the active selection, and the `sandbox`/`http`/`behavior`/`paths` policy
+/// come from the trusted global layer alone — otherwise a malicious repo could redirect a stored credential
+/// to its own endpoint, or weaken the sandbox, by shipping a `.kiri/config.toml`.
 pub(super) fn resolve_layers(global: RawConfig, project: RawConfig) -> (RawConfig, Effort) {
     let effort = project.effort.or(global.effort).unwrap_or_default();
     (global, effort)
 }
 
-/// Read and parse a TOML config file. Absent → an empty config (not an error). A present-but-malformed
-/// file fails fast with a clear, located error rather than silently ignoring the user's settings.
+/// Absent is an empty config, not an error. A malformed one fails fast rather than silently ignoring the
+/// user's settings.
 pub(super) fn read_config_file(path: &Path) -> Result<RawConfig> {
     match std::fs::read_to_string(path) {
         Ok(raw) => toml::from_str(&raw)
@@ -111,10 +103,8 @@ pub(super) fn read_config_file(path: &Path) -> Result<RawConfig> {
     }
 }
 
-/// Read the UNTRUSTED project layer (`<workspace>/.kiri/config.toml`) leniently: a malformed file must
-/// not abort the boot, or a cloned repo could ship a broken config as an availability DoS in that
-/// directory. Only `effort` is taken from this layer anyway, so on a parse error we warn and fall back
-/// to defaults. The trusted global config keeps `read_config_file`'s fail-fast.
+/// Lenient, unlike the trusted global layer: a malformed file must not abort the boot, or a cloned repo
+/// could ship a broken config as an availability DoS. Only `effort` comes from this layer anyway.
 pub(super) fn read_project_config_lenient(path: &Path) -> RawConfig {
     match read_config_file(path) {
         Ok(config) => config,
@@ -128,25 +118,22 @@ pub(super) fn read_project_config_lenient(path: &Path) -> RawConfig {
     }
 }
 
-/// Validate a config string against the real `RawConfig` schema (not just "is it TOML"). Used by
-/// `sync pull` to refuse an incoming config that is valid TOML but invalid against the schema (e.g.
-/// `effort = "bogus"`), which would otherwise be written and brick the next boot when it fails to
-/// deserialize.
+/// Against the real schema, not just "is it TOML": `sync pull` must refuse an `effort = "bogus"` that
+/// would be written and brick the next boot.
 pub(crate) fn validate_config_str(raw: &str) -> Result<()> {
     toml::from_str::<RawConfig>(raw)
         .map(|_| ())
         .map_err(|e| anyhow!("incoming config does not match the schema: {e}"))
 }
 
-/// Turn the deserialized `providers` table into an ordered catalog (setting each profile's id from its
-/// map key) and pick the active id: the configured `active_provider` if it exists, else the default
-/// provider if present, else the first entry.
+/// Picks the active id: the configured `active_provider` if it exists, else the default provider, else the
+/// first entry.
 pub(super) fn resolve_providers(
     table: BTreeMap<String, ProviderProfile>,
     requested_active: Option<String>,
 ) -> (Vec<ProviderProfile>, String) {
-    // `table` is a `BTreeMap` keyed by provider id, and `profile.id` is set from that key, so
-    // `into_iter` already yields the providers sorted by id — no explicit re-sort needed.
+    // A `BTreeMap` keyed by provider id, and `profile.id` comes from that key, so `into_iter` already
+    // yields them sorted — no explicit re-sort needed.
     let providers: Vec<ProviderProfile> = table
         .into_iter()
         .map(|(id, mut profile)| {

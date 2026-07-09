@@ -10,14 +10,11 @@ use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 
-/// Largest entry body read into memory, mirroring `docs_library`'s `MAX_FILE_BYTES`. Caps a single read
-/// so a symlinked `/dev/zero` or an over-sized committed `.md` cannot exhaust memory.
+/// Caps a single read, so a symlinked `/dev/zero` or an over-sized committed `.md` cannot exhaust memory.
 const MAX_ENTRY_BYTES: u64 = 256 * 1024;
 
-/// Lexically join `rel` onto `root`, returning `None` if `rel` is absolute or contains a `..` component.
-/// A corrupted or merged `index.json` could carry a path that escapes the memory dir. This is only the
-/// lexical first stage (mirrors the sandbox's `join_checked`); `resolve_contained` adds the canonicalize
-/// backstop that also defeats a symlink escape. Total — it never touches the filesystem and never panics.
+/// `None` if `rel` is absolute or carries a `..` — a corrupted or merged `index.json` could escape the
+/// memory dir. Only the lexical stage; `resolve_contained` adds the canonicalize backstop for symlinks.
 fn contained_join(root: &Path, rel: &str) -> Option<PathBuf> {
     for component in Path::new(rel).components() {
         match component {
@@ -29,26 +26,22 @@ fn contained_join(root: &Path, rel: &str) -> Option<PathBuf> {
     Some(root.join(rel))
 }
 
-/// Resolve a stored index path to a real, symlink-resolved path asserted to stay inside the memory root,
-/// returning `None` when it is absent or escapes. `contained_join` rejects the lexical `..`/absolute case;
-/// canonicalizing both sides then closes the symlink hole — an `index.json` entry of all-`Normal`
-/// components plus a hostile committed symlink to `~/.ssh/id_rsa` would otherwise be followed by the read.
-/// Mirrors the sandbox's `resolve_existing` (lexical join → canonicalize → assert within root).
+/// `None` when the path is absent or escapes the memory root. Canonicalizing both sides closes the symlink
+/// hole `contained_join` cannot see: an all-`Normal` index entry pointing at a hostile committed symlink
+/// to `~/.ssh/id_rsa` would otherwise be followed by the read.
 async fn resolve_contained(root: &Path, rel: &str) -> Option<PathBuf> {
     let real_root = fs::canonicalize(root).await.ok()?;
     resolve_within(&real_root, root, rel).await
 }
 
-/// The inner resolve against an already-canonicalized `real_root`, so a caller iterating many entries
-/// (`search`) canonicalizes the root once for the whole loop instead of per entry.
+/// Takes an already-canonicalized `real_root`, so a caller looping over many entries resolves it once.
 async fn resolve_within(real_root: &Path, root: &Path, rel: &str) -> Option<PathBuf> {
     let candidate = contained_join(root, rel)?;
     let real = fs::canonicalize(&candidate).await.ok()?;
     real.starts_with(real_root).then_some(real)
 }
 
-/// Read at most `MAX_ENTRY_BYTES` of `path` as lossy UTF-8. The bounded read — not a post-hoc slice — is
-/// what caps memory even for an endless source such as `/dev/zero`.
+/// The bounded read — not a post-hoc slice — is what caps memory for an endless source like `/dev/zero`.
 async fn read_capped(path: &Path) -> AgentResult<String> {
     let file = fs::File::open(path).await?;
     let mut buf = Vec::new();
@@ -83,8 +76,8 @@ struct IndexEntry {
     updated_at: String,
 }
 
-/// A stored embedding in the sidecar (`embeddings.json`), keyed by entry id. Kept out of `index.json`
-/// so the human-readable index stays small; the sidecar is a derived cache (re-derivable from content).
+/// Kept out of `index.json` so the human-readable index stays small. A derived cache — re-derivable from
+/// the entry content.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredEmbedding {
     model: String,
@@ -134,7 +127,6 @@ impl FileProjectMemory {
         serde_json::from_str(&content).map_err(AgentError::memory)
     }
 
-    /// Persist (or replace) the embedding vector for an entry in the sidecar cache.
     pub async fn save_embedding(
         &self,
         entry_id: &str,
@@ -154,9 +146,8 @@ impl FileProjectMemory {
         Ok(())
     }
 
-    /// The most recently updated entries embedded under `model`, paired with their vector. Reads file
-    /// bodies only for the (bounded) candidates, ranked by the in-memory index's `updated_at`. Scoping
-    /// to `model` keeps cross-model vectors out of the ranking when the active embedder changes.
+    /// Reads bodies only for the bounded candidate set. Scoped to `model`, so a changed embedder never
+    /// ranks cross-model vectors against each other.
     pub async fn embedded_candidates(
         &self,
         model: &str,
@@ -183,16 +174,14 @@ impl FileProjectMemory {
         candidates.sort_by(|a, b| b.2.cmp(&a.2));
         candidates.truncate(limit);
 
-        // PERF-02: canonicalize the root ONCE for the whole loop (mirroring `search`), instead of
-        // re-canonicalizing it — and re-locking the index — per candidate via `self.load`.
+        // Canonicalize the root once for the whole loop, not per candidate via `self.load`.
         let Ok(real_root) = fs::canonicalize(&self.root).await else {
             return Ok(Vec::new());
         };
 
         let mut out = Vec::new();
         for (id, rel, _) in candidates {
-            // Skip a missing/corrupt/escaping candidate rather than failing the whole semantic set,
-            // matching search()'s per-file resilience (one bad entry must not disable semantic recall).
+            // One bad entry must not disable semantic recall for the rest.
             let Some(path) = resolve_within(&real_root, &self.root, &rel).await else {
                 continue;
             };
@@ -207,9 +196,8 @@ impl FileProjectMemory {
     }
 
     fn entry_path(&self, kind: MemoryKind, id: &str) -> PathBuf {
-        // Use the full id: a UUID v7 prefix is a millisecond timestamp, so two entries of the same kind
-        // saved in the same millisecond share their leading chars — a truncated name would collide and
-        // one would silently overwrite the other (data loss).
+        // The full id, never a prefix: a UUID v7 leads with a millisecond timestamp, so two same-kind
+        // entries saved in the same millisecond would collide and one would silently overwrite the other.
         let filename = format!("{}-{}.md", kind.as_wire(), id);
         match kind {
             MemoryKind::Decision => self.root.join("decisions").join(filename),
@@ -224,12 +212,8 @@ impl FileProjectMemory {
     }
 }
 
-/// Parse a memory entry from its Markdown file body: TOML front-matter between leading `+++` fences,
-/// or — with no front-matter — the whole body as a `Fact`. TOML (not YAML) removes a YAML parser from
-/// the attack surface of attacker-influenceable memory files, reusing the `toml` crate the config layer
-/// already depends on. A file without `+++` fences — including a legacy `---` YAML file from before the
-/// switch — has no parseable front-matter and falls through to the `Fact` body case (graceful, never a
-/// parse error). Pure: it reads neither `self` nor the path.
+/// TOML front-matter between `+++` fences, or the whole body as a `Fact` when there is none. TOML, not
+/// YAML: memory files are attacker-influenceable, and this keeps a YAML parser off that attack surface.
 // ponytail: no on-disk migration of pre-existing `---` files — pre-launch, there are no released users,
 // so legacy dev files simply re-distill via the Fact fallback. Upgrade path: write a one-time `---`→`+++`
 // converter here if a TOML-format change ships after there is an installed base.
@@ -241,14 +225,12 @@ fn parse_markdown_file(content: &str) -> AgentResult<MemoryEntry> {
     let entry = if let Some(fm) = front_matter {
         toml::from_str(fm).map_err(AgentError::memory)?
     } else {
-        // Fallback for a file without `+++` front-matter: treat the whole body as a Fact.
         MemoryEntry::new(MemoryKind::Fact, content.to_string(), HashSet::new(), None)
     };
 
     Ok(entry)
 }
 
-/// Render a memory entry as a Markdown file: TOML front-matter between `+++` fences, then the content body.
 fn render_markdown_file(entry: &MemoryEntry) -> AgentResult<String> {
     let front_matter = toml::to_string(entry).map_err(AgentError::memory)?;
     Ok(format!("+++\n{}+++\n\n{}", front_matter, entry.content))
@@ -267,18 +249,16 @@ impl ProjectMemory for FileProjectMemory {
         let path = self.entry_path(entry.kind, &entry.id);
         let content = render_markdown_file(entry)?;
 
-        // Ensure the parent directory exists.
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
         }
 
-        // Write the body atomically, then update the index. The body-before-index ordering is the
-        // recovery contract: a crash after the body but before the index leaves an orphan file that
-        // `search` simply never reaches (it walks the index), never a truncated/half-written entry.
+        // Body before index is the recovery contract: a crash between the two leaves an orphan file that
+        // `search` never reaches, never a truncated entry.
         write_atomic(&path, content.as_bytes()).await?;
 
-        // Update the index. The path is built by joining `root`, so stripping it back cannot fail; the
-        // fallback to the full path keeps this total without an `unwrap`.
+        // The path was built by joining `root`, so stripping it back cannot fail; the fallback keeps this
+        // total without an `unwrap`.
         let rel = path.strip_prefix(&self.root).unwrap_or(path.as_path());
         let mut index = self.index.write().await;
         index.entries.insert(
@@ -304,9 +284,7 @@ impl ProjectMemory for FileProjectMemory {
             index_entry.path.clone()
         };
 
-        // Re-validate the stored path resolves to a real file under `root`; an escaping or symlinked path
-        // (corrupt/merged index, or a hostile committed symlink) is treated as absent rather than read
-        // from outside the memory dir.
+        // An escaping or symlinked path is treated as absent, never read from outside the memory dir.
         let Some(path) = resolve_contained(&self.root, &rel).await else {
             return Ok(None);
         };
@@ -317,15 +295,12 @@ impl ProjectMemory for FileProjectMemory {
     }
 
     async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
-        // Snapshot the candidate paths under the lock, then release it before any file I/O so a long
-        // read can never block a concurrent writer (matches `list`/`list_by_kind`).
+        // Release the lock before any file I/O, so a long read can never block a concurrent writer.
         let rels: Vec<String> = {
             let index = self.index.read().await;
             index.entries.values().map(|e| e.path.clone()).collect()
         };
 
-        // Canonicalize the root once for the whole loop; if the memory dir is unresolvable there is
-        // nothing to read.
         let Ok(real_root) = fs::canonicalize(&self.root).await else {
             return Ok(Vec::new());
         };
@@ -335,13 +310,11 @@ impl ProjectMemory for FileProjectMemory {
             if results.len() >= limit {
                 break;
             }
-            // Skip an entry whose stored path escapes the memory root (corrupt/merged index or a hostile
-            // symlink) rather than reading outside the dir; one bad entry must not blank out other matches.
+            // An escaping path is skipped, never read; one bad entry must not blank out other matches.
             let Some(path) = resolve_within(&real_root, &self.root, &rel).await else {
                 continue;
             };
-            // Deliberately skip an unreadable entry rather than fail the whole search: one corrupt or
-            // racing file must not blank out every other match.
+            // Deliberately skipped: one corrupt or racing file must not fail the whole search.
             if let Ok(content) = read_capped(&path).await
                 && let Ok(entry) = parse_markdown_file(&content)
                 && entry.matches_query(query)
@@ -360,8 +333,7 @@ impl ProjectMemory for FileProjectMemory {
             .map(|(id, e)| (id.clone(), e.updated_at.clone()))
             .collect();
         drop(index);
-        // Newest-first, mirroring `embedded_candidates`'s sort and the SQLite adapter's
-        // `ORDER BY updated_at DESC` — the boot digest documents this list as "most recent".
+        // Newest-first: the boot digest documents this list as "most recent".
         ids.sort_by(|a, b| b.1.cmp(&a.1));
 
         let mut results = Vec::new();
@@ -484,7 +456,7 @@ mod tests {
 
     #[test]
     fn front_matter_round_trips_as_toml() {
-        // BUILD-05: front-matter is TOML between `+++` fences; render→parse must round-trip the entry.
+        // render → parse must round-trip the entry.
         let entry = MemoryEntry::new(
             MemoryKind::Pattern,
             "Prefer guard clauses".into(),
@@ -503,8 +475,7 @@ mod tests {
 
     #[test]
     fn legacy_yaml_front_matter_falls_back_to_fact() {
-        // A pre-switch `---` YAML file has no `+++` front-matter, so it must parse as a Fact body rather
-        // than erroring — the graceful, no-migration path for pre-launch dev files.
+        // A `---` YAML file has no `+++` front-matter, so it must parse as a Fact body, never error.
         let legacy = "---\nid: x\nkind: pattern\n---\n\nold body";
         let parsed = parse_markdown_file(legacy).unwrap();
         assert_eq!(parsed.kind, MemoryKind::Fact);
@@ -603,9 +574,8 @@ mod tests {
         assert!(rust[0].content.contains("rust"));
     }
 
-    /// Regression for issue #38: `list` must return entries newest-`updated_at`-first, not in
-    /// `HashMap` iteration order, so the boot digest (`app.rs`'s `list(0, DIGEST_PROJECT_CAP)`)
-    /// is deterministic and actually the most recent knowledge.
+    /// `list` must order newest-`updated_at`-first, not by `HashMap` iteration, or the boot digest is
+    /// neither deterministic nor actually the most recent knowledge.
     #[tokio::test]
     async fn list_returns_most_recent_first() {
         let dir = TempDir::new().unwrap();
@@ -748,8 +718,8 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_candidates_skips_escaping_path() {
-        // The PERF-02 refactor must keep search()'s containment resilience: an escaping index path is
-        // skipped, never read from outside the memory root, even when it carries an embedding.
+        // An escaping index path is skipped, never read from outside the memory root, even when it
+        // carries an embedding.
         let dir = TempDir::new().unwrap();
         let root = dir.path().join(".kiri").join("memory");
         seed_escaping_index(&dir, &root, "leaked secret").await;
@@ -833,9 +803,8 @@ mod tests {
         assert_eq!(loaded.content, entry.content);
     }
 
-    /// Hand-write an index whose stored path is a plain in-root name that is actually a symlink pointing
-    /// OUTSIDE the memory root, with a real secret at the link target. The path passes the lexical guard;
-    /// only the canonicalize backstop keeps the read inside `root`.
+    /// An in-root name that is actually a symlink out of the root, with a real secret at the target: it
+    /// passes the lexical guard, so only the canonicalize backstop keeps the read inside `root`.
     #[cfg(unix)]
     async fn seed_symlinked_index(dir: &TempDir, root: &Path, secret_body: &str) {
         FileProjectMemory::new(root.to_path_buf())

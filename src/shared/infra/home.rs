@@ -1,22 +1,17 @@
-//! Cross-platform home-directory resolution — the single source read by both the config/global-dir
-//! resolver (`shared/infra/config/resolve.rs`, for `~/.kiri` and the docs/memory extra-path lists) and
-//! the agent tool-path tilde expander (`tools/application/path.rs`). One source keeps the two readers
-//! from drifting onto different home directories.
+//! One home-directory source, read by both the config global-dir resolver and the agent tool-path tilde
+//! expander, so the two cannot drift onto different homes.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-/// Resolve the current user's home directory: `$HOME` first (always set on Unix; also set on Windows
-/// under Git Bash and similar POSIX-ish shells), falling back on Windows to `%USERPROFILE%`, then the
-/// pre-Vista `%HOMEDRIVE%%HOMEPATH%` pair (still the only one set in some restricted/service contexts).
-/// `None` only when none of these are set.
+/// `$HOME` first (always set on Unix, and on Windows under Git Bash), then `%USERPROFILE%`, then the
+/// pre-Vista `%HOMEDRIVE%%HOMEPATH%` pair — still the only one set in some service contexts.
 pub fn home_dir() -> Option<PathBuf> {
     resolve_home(|key| std::env::var_os(key))
 }
 
-/// Pure fallback chain over an injectable env lookup, so the precedence is unit-testable without
-/// mutating the real process environment (env vars are process-global state, unsafe to fight over under
-/// edition-2024's parallel test execution).
+/// The env lookup is injected so precedence is unit-testable without mutating process-global state, which
+/// is unsafe to fight over under edition-2024's parallel test execution.
 fn resolve_home(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     if let Some(home) = var("HOME") {
         return Some(PathBuf::from(home));

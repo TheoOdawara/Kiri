@@ -27,9 +27,8 @@ pub async fn temp_port(dir: &TempDir) -> Arc<dyn Memory> {
     Arc::new(LayeredMemory::new(project, shared))
 }
 
-/// A single in-memory store double covering both the base `MemoryStore` surface and the `SharedStore`
-/// extension, replacing the per-module hand-rolled doubles. Keeps entries in a `Vec` and reports the
-/// configured availability; embeddings use the trait defaults (no semantic recall in the double).
+/// Covers both `MemoryStore` and the `SharedStore` extension. Embeddings use the trait defaults, so the
+/// double has no semantic recall.
 pub struct InMemoryStore {
     entries: Mutex<Vec<MemoryEntry>>,
     available: bool,
@@ -103,13 +102,11 @@ impl SharedStore for InMemoryStore {
     }
 }
 
-/// An `FsSandbox` rooted at the current directory with an empty sensitive matcher, for the memory tools'
-/// `execute`/`confirmation` tests (which never touch the sandbox path, but the `Tool` API requires one).
+/// The memory tools never touch the sandbox path, but the `Tool` API requires one.
 pub(crate) fn sandbox() -> FsSandbox {
     FsSandbox::new(std::path::PathBuf::from("."), SensitiveMatcher::empty()).unwrap()
 }
 
-/// A `ToolCall` carrying the given JSON arguments.
 pub fn call(arguments: &str) -> ToolCall {
     ToolCall {
         id: "c1".to_string(),

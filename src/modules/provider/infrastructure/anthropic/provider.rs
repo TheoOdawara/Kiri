@@ -13,33 +13,20 @@ use crate::shared::kernel::provider::{Effort, Secret};
 /// The Messages API version pin (the only value Anthropic currently accepts).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// Per-turn output cap. `max_tokens` is required by the Messages API (unlike chat-completions). Set
-/// generously for an agent that may emit large tool inputs (file writes) while staying within the
-/// flagship models' output limits; a model with a smaller cap surfaces a visible `ProviderRejected`.
+/// Required by the Messages API, unlike chat-completions. A model with a smaller cap surfaces a visible
+/// `ProviderRejected` rather than silently truncating.
 const MAX_OUTPUT_TOKENS: u32 = 16_000;
 
-/// Which `thinking` wire shape a model accepts. Confirmed against Anthropic's current docs: manual
-/// `type: "enabled"` + `budget_tokens` is rejected with a 400 on Claude Sonnet 5 and Opus 4.8/4.7, which
-/// require `type: "adaptive"` (+ a top-level `output_config.effort`) instead — Opus 4.8/4.7 default
-/// thinking OFF (omitting `thinking` suffices to disable), Sonnet 5 defaults it ON (disabling requires an
-/// explicit `type: "disabled"`, not omission). Only Claude Haiku 4.5 and older Claude 4 models still use
-/// the manual budget shape. Classified by model id substring, not `ProviderKind` alone, since Kiri lets a
-/// user type any Anthropic model id (no fixed catalog) and the wire shape genuinely differs per model.
-///
-/// Out of scope: Claude Fable 5 / "Claude Mythos" models are adaptive-only/always-on per the docs, but
-/// are not part of Kiri's confirmed lineup (Sonnet 5 / Haiku 4.5 / Opus 4.8) — a hand-typed model id from
-/// that family falls through to `Budget` and 400s until a future pass confirms and adds it, mirroring the
-/// same "don't guess, extend once confirmed" rule `NvidiaFamily` follows.
+/// The manual `budget_tokens` shape 400s on the adaptive models, and vice versa, so the wire shape is
+/// classified per model id — Kiri accepts any hand-typed Anthropic model, with no fixed catalog. An
+/// unrecognized id falls through to `Budget` rather than guess.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AnthropicThinkingMode {
-    /// `thinking: {type: "enabled", budget_tokens, display: "summarized"}`. Omitting `thinking` disables
-    /// reasoning (unchanged from before this classifier existed).
+    /// `thinking: {type: "enabled", budget_tokens, display: "summarized"}`; omission disables reasoning.
     Budget,
-    /// `thinking: {type: "adaptive"}` + `output_config: {effort}`. Thinking defaults OFF; omitting
-    /// `thinking` already disables it.
+    /// `thinking: {type: "adaptive"}` + `output_config: {effort}`; omission disables reasoning.
     AdaptiveOptIn,
-    /// Same wire shape as `AdaptiveOptIn`, but thinking defaults ON: disabling it requires explicitly
-    /// sending `thinking: {type: "disabled"}` rather than omitting the field.
+    /// The `AdaptiveOptIn` shape, but thinking defaults ON: disabling it needs an explicit `"disabled"`.
     AdaptiveDefaultOn,
 }
 
@@ -56,31 +43,14 @@ impl AnthropicThinkingMode {
     }
 }
 
-/// Anthropic Messages API provider (API key). Holds the HTTP client, endpoint and key; translates a
-/// domain `TurnRequest` into the Messages wire shape, streams the response forwarding deltas to `sink`,
-/// and assembles the turn. Subscription OAuth is intentionally unsupported (see the provider-auth ADR);
-/// this adapter authenticates only with `x-api-key`.
-///
-/// `base_url` is the host root (default `https://api.anthropic.com`) — the adapter owns the full
-/// `/v1/messages` path, unlike the OpenAI adapter where the `/v1` segment lives in the base URL. Do not
-/// include `/v1` in an Anthropic base URL or it becomes `/v1/v1/messages`.
-///
-/// Extended thinking: when `thinking` is enabled and `effort` is not `Off`, the request carries whichever
-/// shape `AnthropicThinkingMode::classify` picks for the turn's model (manual `budget_tokens` or adaptive
-/// `effort`). The returned `thinking`/`redacted_thinking` block (and its `signature`, streamed via
-/// `signature_delta`) is preserved on the domain `Message`/`CompletedTurn` (see `ThinkingBlock`) and
-/// resent ahead of the `tool_use` block on the following turn — the Messages API round-trip requirement
-/// this adapter used to defer entirely (see `docs/decisions/0011-provider-agnostic-by-api-key.md`).
+/// Authenticates only with `x-api-key`: subscription OAuth is intentionally unsupported (ADR 0011).
 pub struct AnthropicProvider {
     client: reqwest::Client,
+    /// The host root. This adapter owns the whole `/v1/messages` path, unlike the OpenAI one whose base
+    /// URL carries the `/v1` segment — including it here yields `/v1/v1/messages`.
     base_url: String,
-    /// Held as a `Secret` (zeroized on drop, redacted in Debug) rather than a plain `String`, exposed
-    /// only at the `x-api-key` header call site.
     api_key: Secret,
-    /// Whether extended thinking is enabled for this provider. Gated further by `effort` — `Off`
-    /// suppresses it even when this is true (mirrors `OpenAiProvider::reasoning_enabled`).
     thinking: bool,
-    /// The reasoning effort dial, mapped to a `budget_tokens` value via `Effort::anthropic_budget_tokens`.
     effort: Effort,
 }
 
@@ -101,14 +71,11 @@ impl AnthropicProvider {
         }
     }
 
-    /// Whether to ask the model to reason this turn: thinking must be enabled and effort must not be
-    /// `Off` (mirrors `OpenAiProvider::reasoning_enabled`).
     fn reasoning_enabled(&self) -> bool {
         self.thinking && self.effort != Effort::Off
     }
 
-    /// Build the request body for a turn. Kept separate from `complete` so the wire shape (system
-    /// lifting, tool translation) is unit-testable without a network call.
+    /// Separate from `complete` so the wire shape is unit-testable without a network call.
     fn build_body<'a>(&self, request: &TurnRequest<'a>) -> MessagesRequest<'a> {
         let (system, messages) = build_messages(request.messages);
         let (thinking, output_config) = self.thinking_and_output_config(request.model);
@@ -124,9 +91,8 @@ impl AnthropicProvider {
         }
     }
 
-    /// The `thinking`/`output_config` pair for this turn's model, per `AnthropicThinkingMode`. See the
-    /// mode enum's doc comment for why the wire shape and the "how do I turn it off" rule both depend on
-    /// the model, not just whether reasoning is enabled.
+    /// Both the wire shape and the how-to-disable rule depend on the model, not only on whether
+    /// reasoning is enabled — see [`AnthropicThinkingMode`].
     fn thinking_and_output_config(
         &self,
         model: &str,
@@ -186,8 +152,6 @@ impl CompletionProvider for AnthropicProvider {
         let mut accumulator = TurnAccumulator::default();
         drain_sse(response, |data| handle_event(data, &mut accumulator, sink)).await?;
 
-        // The output cap (max_tokens) truncated the turn before any content or tool call: surface it
-        // rather than returning an empty turn with no feedback.
         if accumulator.hit_empty_output_limit() {
             return Err(AgentError::Provider(format!(
                 "the model hit the {MAX_OUTPUT_TOKENS}-token output cap before producing a response; \
@@ -240,8 +204,7 @@ mod tests {
         serde_json::to_value(provider.build_body(&request)).unwrap()
     }
 
-    /// `claude-opus-4-8` is `AdaptiveOptIn` (see `AnthropicThinkingMode`); used as the default model for
-    /// tests that don't care about the thinking wire shape.
+    /// `AdaptiveOptIn` mode; the default for tests that do not care about the thinking wire shape.
     fn body_value(provider: &AnthropicProvider, messages: &[Message], tools: &[Value]) -> Value {
         body_value_for_model(provider, messages, tools, "claude-opus-4-8")
     }
@@ -258,7 +221,7 @@ mod tests {
         assert_eq!(value["messages"][0]["content"][0]["text"], "hi");
     }
 
-    // claude-haiku-4-5 is `Budget` mode: the manual `type:"enabled"`+`budget_tokens` shape.
+    // claude-haiku-4-5 is `Budget` mode.
 
     #[test]
     fn budget_mode_omits_thinking_when_disabled() {
@@ -269,7 +232,6 @@ mod tests {
 
     #[test]
     fn budget_mode_omits_thinking_when_effort_is_off_even_with_thinking_enabled() {
-        // Mirrors OpenAiProvider::reasoning_enabled: thinking=true is gated by effort != Off.
         let value = body_value_for_model(
             &provider_with_thinking(Effort::Off),
             &[Message::user("hi")],
@@ -296,7 +258,7 @@ mod tests {
         assert!(value.get("output_config").is_none());
     }
 
-    // claude-opus-4-8 is `AdaptiveOptIn`: thinking defaults off, omitting `thinking` suffices to disable.
+    // claude-opus-4-8 is `AdaptiveOptIn`.
 
     #[test]
     fn adaptive_opt_in_omits_thinking_when_disabled() {
@@ -319,8 +281,7 @@ mod tests {
         assert_eq!(value["output_config"]["effort"], "medium");
     }
 
-    // claude-sonnet-5 is `AdaptiveDefaultOn`: thinking defaults ON, so disabling it requires an explicit
-    // `{type:"disabled"}` — omitting the field would leave adaptive thinking running.
+    // claude-sonnet-5 is `AdaptiveDefaultOn`: omitting the field would leave thinking running.
 
     #[test]
     fn adaptive_default_on_sends_explicit_disabled_when_thinking_flag_is_off() {
@@ -369,8 +330,6 @@ mod tests {
         assert_eq!(with_tools["tools"][0]["input_schema"]["type"], "object");
     }
 
-    /// A 4xx from the Messages API (e.g. an unknown model, an over-cap `max_tokens`) must surface as
-    /// `ProviderRejected` carrying the status and body so the frontend can drop the offending turn.
     #[tokio::test]
     async fn complete_surfaces_a_client_error_as_provider_rejected() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -423,8 +382,7 @@ mod tests {
         }
     }
 
-    /// Run-to-verify of the shared read-timeout: a listener that accepts but never responds must make
-    /// `complete()` fail fast rather than hang.
+    /// A listener that accepts but never responds models a provider hanging after connect.
     #[tokio::test]
     async fn complete_fails_fast_when_the_provider_never_responds() {
         use tokio::net::TcpListener;

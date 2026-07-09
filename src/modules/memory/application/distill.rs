@@ -24,10 +24,9 @@ struct DistilledEntry {
     scope: String,
 }
 
-/// What a distillation pass wrote, skipped, and failed to write, for a user-facing summary. `failed`
-/// counts entries whose durable write itself errored (DB locked, disk full) — kept distinct from
-/// `skipped` (a legitimate dedup/validation/unavailable skip) so a real persistence failure is surfaced,
-/// not silently swallowed (ERR-01).
+/// `failed` counts entries whose durable write errored (DB locked, disk full), kept distinct from a
+/// legitimate `skipped` dedup/validation — a real persistence failure must surface, not be swallowed
+/// (ERR-01).
 pub struct DistillReport {
     pub written: usize,
     pub skipped: usize,
@@ -48,8 +47,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_ENTRIES: usize = 12;
 const DEFAULT_MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
 
-/// The first N words of a candidate's content used as the keyword recall query when checking for a
-/// duplicate — enough to find an equivalent entry without over-narrowing the search.
+/// Enough of a candidate's content to find an equivalent entry, without over-narrowing the search.
 const DEDUP_QUERY_WORDS: usize = 6;
 /// How many existing entries to recall as duplicate candidates per write.
 const DEDUP_RECALL_LIMIT: usize = 5;
@@ -71,9 +69,8 @@ const DISTILL_SYSTEM_PROMPT: &str = concat!(
     "support. Output the JSON array and nothing else."
 );
 
-/// The end-of-session learning pass: feed the conversation to the model, ask it to extract durable
-/// knowledge, and persist what it returns to memory. Depends on the `Memory` capability (to write) and is
-/// handed a `CompletionProvider` at call time (so it always uses the live adapter after a `/provider` swap).
+/// The end-of-session learning pass. Takes its `CompletionProvider` at call time, so it always uses the
+/// live adapter after a `/provider` swap.
 pub struct Distiller {
     memory: Arc<dyn Memory>,
     project_id: String,
@@ -93,10 +90,8 @@ impl Distiller {
         }
     }
 
-    /// Distill `conversation` and write the extracted entries. Bounded by an internal timeout so a slow
-    /// provider never hangs the caller; a provider failure, a timeout, or invalid model output all return
-    /// `Err` (the caller surfaces it as a Notice). The conversation is read-only and persisted
-    /// independently, so a failed distillation never loses data.
+    /// Bounded by an internal timeout, so a slow provider never hangs the caller. The conversation is
+    /// read-only and persisted independently, so a failed distillation never loses data.
     pub async fn distill(
         &self,
         provider: &dyn CompletionProvider,
@@ -125,8 +120,7 @@ impl Distiller {
         let entries = parse_entries(&completed.content)?;
         let mut report = DistillReport::empty();
 
-        // 1. Validate each proposal into a ready-to-write candidate; an invalid kind/scope or an
-        //    unavailable scope is a legitimate skip.
+        // 1. Validate; an invalid kind/scope or an unavailable scope is a legitimate skip.
         let mut candidates = Vec::new();
         for raw in entries.into_iter().take(self.max_entries) {
             match self.validate(raw) {
@@ -135,9 +129,8 @@ impl Distiller {
             }
         }
 
-        // 2. Intra-batch dedup (no I/O): drop a candidate that near-duplicates an earlier accepted one in
-        //    the same scope. Replaces the old persist-order dependency, where entry N only saw entries
-        //    1..N-1 because each was written before the next was checked.
+        // 2. Intra-batch dedup, no I/O: the store is recalled once below, so a candidate never sees an
+        //    earlier one from this same pass through it.
         let mut accepted: Vec<Candidate> = Vec::new();
         for candidate in candidates {
             let duplicate = accepted.iter().any(|prior| {
@@ -151,8 +144,8 @@ impl Distiller {
             }
         }
 
-        // 3. Dedup against the existing store and persist, per scope, batching the embed: one
-        //    `recall_batch` covers every candidate's dedup query in a single embed round-trip.
+        // 3. Dedup against the store and persist. One `recall_batch` covers every candidate's dedup query
+        //    in a single embed round-trip.
         let (project, shared) = accepted
             .into_iter()
             .partition::<Vec<_>, _>(|c| c.scope == Scope::Project);
@@ -162,8 +155,7 @@ impl Distiller {
         Ok(report)
     }
 
-    /// Validate a proposal into a writable candidate. `None` for an invalid kind/scope or a scope whose
-    /// store is unavailable — all legitimate skips.
+    /// `None` for an invalid kind/scope or an unavailable store — all legitimate skips.
     fn validate(&self, raw: DistilledEntry) -> Option<Candidate> {
         let kind = raw.kind.parse::<MemoryKind>().ok()?;
         let scope = Scope::from_wire(&raw.scope)?;
@@ -179,10 +171,9 @@ impl Distiller {
         })
     }
 
-    /// Dedup `items` (all in `scope`) against the existing store with a single batched recall, then persist
-    /// the survivors. A recall failure degrades to "not a duplicate" so a transient store error never
-    /// blocks learning (worst case one redundant entry, never lost knowledge); a durable-write failure is
-    /// counted as `failed` (ERR-01), distinct from a dedup skip, and the pass continues.
+    /// A recall failure degrades to "not a duplicate", so a transient store error costs one redundant
+    /// entry rather than lost knowledge. A durable-write failure counts as `failed` (ERR-01), never a
+    /// dedup skip, and the pass continues.
     async fn persist_scope(&self, scope: Scope, items: Vec<Candidate>, report: &mut DistillReport) {
         if items.is_empty() {
             return;
@@ -233,8 +224,8 @@ struct Candidate {
     scope: Scope,
 }
 
-/// Render a bounded transcript: user and assistant text only (system and tool noise dropped), keeping the
-/// most recent tail within `max_bytes` so a long session still fits the distiller's context.
+/// User and assistant text only, keeping the most recent tail within `max_bytes` so a long session still
+/// fits the distiller's context.
 fn render_transcript(messages: &[Message], max_bytes: usize) -> String {
     let mut lines = Vec::new();
     for message in messages {
@@ -258,8 +249,8 @@ fn render_transcript(messages: &[Message], max_bytes: usize) -> String {
     format!("…{}", &joined[start..])
 }
 
-/// Extract the JSON array from the model's output (tolerating code fences or stray prose around it) and
-/// parse it. No array at all means "nothing to learn" (an empty result); a malformed array is an error.
+/// Tolerates code fences and stray prose around the array. No array means "nothing to learn"; a malformed
+/// one is an error.
 fn parse_entries(content: &str) -> AgentResult<Vec<DistilledEntry>> {
     let (Some(start), Some(end)) = (content.find('['), content.rfind(']')) else {
         return Ok(Vec::new());
@@ -456,9 +447,8 @@ mod tests {
 
     #[tokio::test]
     async fn dedups_near_duplicates_within_one_pass() {
-        // Two near-identical entries in the SAME pass: the intra-batch dedup keeps the first and skips the
-        // second, without relying on persist order (the batched flow recalls the store once, so the second
-        // would not see the first via the store — the local self-dedup is what catches it).
+        // The store is recalled once, so the second entry cannot see the first through it — only the
+        // intra-batch self-dedup catches this.
         let dir = TempDir::new().unwrap();
         let memory = temp_port(&dir).await;
         let distiller = Distiller::new(memory.clone(), "proj-a".into());

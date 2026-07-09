@@ -1,10 +1,6 @@
-//! Default extension resources shipped inside the binary (ADR 0028): rules, skills, and agent profiles
-//! that make Kiri useful from the first prompt, with no filesystem setup required. Content lives as plain
-//! Markdown files under `bundled/`, compiled in via `include_str!` — the same pattern already used for the
-//! config source characterization test (`shared/infra/config.rs`). Parsing reuses `Frontmatter::parse` and
-//! the exact id-resolution rule `file_loader::load_one` uses for a disk file, so a bundled `Resource` is
-//! indistinguishable in shape from one loaded off disk; every downstream consumer (`skills_index`,
-//! `agents_index`, `command_bodies`, the `/rules`/`/skills`/`/agents` displays) treats it uniformly.
+//! Default extension resources shipped inside the binary (ADR 0028), so Kiri is useful from the first
+//! prompt with no filesystem setup. Parsing reuses `file_loader::load_one`'s exact id-resolution rule, so a
+//! bundled `Resource` is indistinguishable in shape from one loaded off disk.
 //!
 //! The `ponytail` rule and the `ponytail`/`ponytail-review`/`ponytail-audit`/`ponytail-debt`/`ponytail-gain`
 //! skills are third-party content, MIT-licensed, from <https://github.com/DietrichGebert/ponytail> by
@@ -20,8 +16,7 @@ use crate::modules::extensions::domain::frontmatter::Frontmatter;
 use crate::modules::extensions::domain::resource::Resource;
 use crate::modules::extensions::domain::scope::Layer;
 
-/// One bundled resource: its resource-type subdirectory name (matching `file_loader::RESOURCE_TYPES`),
-/// its file stem (the id fallback, same rule as a disk file), and its Markdown content.
+/// One bundled resource: its type subdirectory, its file stem (the id fallback), and its content.
 const BUNDLED: &[(&str, &str, &str)] = &[
     (
         "rules",
@@ -64,10 +59,7 @@ const BUNDLED: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Parse one bundled entry into a `Resource`, mirroring `file_loader::load_one` minus the I/O: the id
-/// comes from frontmatter `id:`, falling back to the file stem; the body is trimmed; the layer is
-/// `Bundled`; the display path is a synthetic `<bundled>/{type}/{stem}.md` (there is no real filesystem
-/// path to show).
+/// Mirrors `file_loader::load_one` minus the I/O. The display path is synthetic — nothing on disk to show.
 fn parse_bundled(type_name: &str, stem: &str, content: &str) -> Resource {
     let (frontmatter, body) = Frontmatter::parse(content);
     let id = frontmatter
@@ -111,8 +103,7 @@ mod tests {
 
     #[test]
     fn bundled_skills_have_a_nonempty_description() {
-        // `skills_index` injects `id — description` into the system prompt; an empty description would
-        // ship a broken index line.
+        // An empty description ships a broken `id — description` line into the system-prompt index.
         for res in bundled_for("skills") {
             let description = res.frontmatter.get("description").unwrap_or_default();
             assert!(
@@ -145,8 +136,7 @@ mod tests {
 
     #[test]
     fn bundled_agents_have_a_nonempty_description() {
-        // `agents_index` injects `id — description` into the `# Agents` system-prompt block; an empty
-        // description would ship a broken index line and leave the agent undiscoverable (ADR 0029).
+        // An empty description leaves the agent undiscoverable in the `# Agents` block (ADR 0029).
         for res in bundled_for("agents") {
             let description = res.frontmatter.get("description").unwrap_or_default();
             assert!(

@@ -1,6 +1,5 @@
-//! Bridges one discovered MCP tool into Kiri's own `Tool` trait, so it registers into the
-//! `ToolRegistry` exactly like a built-in file tool — the model calls it the same way, through the same
-//! approval gate.
+//! A discovered MCP tool registers into the `ToolRegistry` exactly like a built-in file tool, so it
+//! passes through the same approval gate.
 
 use std::sync::Arc;
 
@@ -13,13 +12,11 @@ use crate::modules::tools::application::tool::{
 };
 use crate::shared::kernel::tool_call::ToolCall;
 
-/// One remote MCP tool, callable through Kiri's `ToolRegistry` like any built-in tool. `qualified_name`
-/// is leaked once at boot to satisfy `Tool::name`'s `&'static str` — MCP tools are discovered once per
-/// session, so this is a bounded, one-time cost (a handful of small strings, never repeated).
+/// `qualified_name` is leaked once at boot to satisfy `Tool::name`'s `&'static str`. Tools are discovered
+/// once per session, so the leak is bounded.
 pub struct McpToolProxy {
     qualified_name: &'static str,
-    /// The tool's own name, as the MCP server knows it — distinct from `qualified_name` (which is
-    /// namespaced by server id to avoid collisions across servers), and what `call_tool` must send back.
+    /// The name the server knows, which `call_tool` must send back — `qualified_name` is namespaced.
     remote_name: String,
     description: String,
     input_schema: Value,
@@ -27,8 +24,7 @@ pub struct McpToolProxy {
 }
 
 impl McpToolProxy {
-    /// Build a proxy for one tool discovered on `server_id`. The advertised name is namespaced
-    /// (`mcp__<server_id>__<tool_name>`) so two servers can never collide on a shared tool name.
+    /// Namespaces the advertised name so two servers can never collide on a shared tool name.
     pub fn new(server_id: &str, spec: McpToolSpec, connection: Arc<dyn McpConnection>) -> Self {
         let qualified = format!("mcp__{server_id}__{}", spec.name);
         let qualified_name: &'static str = Box::leak(qualified.into_boxed_str());

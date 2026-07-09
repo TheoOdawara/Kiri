@@ -1,7 +1,5 @@
-/// Generate a deterministic project ID from the workspace path.
-/// Uses blake3 to produce a short, stable hash. Pure (no filesystem access): callers canonicalize the
-/// path first when they want symlinks resolved, so the same project hashes to the same id regardless of
-/// how its path is spelled.
+/// A deterministic blake3 hash of the workspace path. Pure — callers canonicalize first when they want
+/// symlinks resolved, so one project hashes to one id however its path is spelled.
 pub fn project_id_from_path(path: &std::path::Path) -> String {
     use blake3::Hasher;
     let path_str = path.to_string_lossy();

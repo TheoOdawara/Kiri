@@ -1,8 +1,5 @@
-/// The layer an extension resource was discovered in, mirroring the two-layer model used for instructions
-/// (ADR 0019) and config (ADR 0012), plus the binary-shipped `Bundled` layer (ADR 0028). `Global` is the
-/// trusted `~/.kiri/` layer; `Project` is the untrusted `<workspace>/.kiri/` layer; `Bundled` is compiled
-/// into the binary, trusted like `Global`, and sits at the lowest precedence — any user file of the same
-/// id overrides it. Pure data only — no path knowledge, no I/O.
+/// Where an extension resource was discovered (ADRs 0019/0012/0028). `Global` (`~/.kiri/`) and `Bundled`
+/// (compiled in) are trusted; `Project` (`<workspace>/.kiri/`) is untrusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layer {
     Global,
@@ -11,7 +8,6 @@ pub enum Layer {
 }
 
 impl Layer {
-    /// The short label used in the `/rules` display and boot notices.
     pub fn label(self) -> &'static str {
         match self {
             Layer::Global => "global",
@@ -20,9 +16,8 @@ impl Layer {
         }
     }
 
-    /// Precedence rank, lowest-value = highest-precedence: global > project > bundled. The single
-    /// source for any layer-order sort (e.g. `render_rules` joining always-on rules deterministically),
-    /// so a HashMap-sourced resource list renders in a stable order rather than an arbitrary one.
+    /// Lowest value = highest precedence. The single source for every layer-order sort, so a
+    /// HashMap-sourced resource list renders in a stable order.
     pub fn precedence(self) -> u8 {
         match self {
             Layer::Global => 0,

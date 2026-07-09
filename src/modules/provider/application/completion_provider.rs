@@ -5,22 +5,19 @@ use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::message::Message;
 use crate::shared::kernel::stream_event::StreamEvent;
 
-/// What a provider needs to stream one assistant turn: the conversation so far (domain messages), the
-/// model id, and the tool schemas to advertise (opaque JSON the registry produced, passed verbatim).
 pub struct TurnRequest<'a> {
     pub messages: &'a [Message],
     pub model: &'a str,
+    /// Opaque JSON the registry produced, passed to the provider verbatim.
     pub tools: &'a [Value],
 }
 
-/// Live sink for streamed deltas. A trait object (not a generic closure) so `complete` stays
-/// dyn-compatible; the terminal UI implements it to render reasoning/content as it arrives.
+/// A trait object rather than a generic closure, so `complete` stays dyn-compatible.
 pub trait EventSink {
     fn on_event(&mut self, event: StreamEvent) -> Result<(), AgentError>;
 }
 
-/// An [`EventSink`] that discards every streamed delta. For headless completions (the distiller, which
-/// only needs the assembled turn) and for tests that assert the final turn, not the live event sequence.
+/// Discards every delta, for headless completions that only need the assembled turn.
 pub struct NullSink;
 
 impl EventSink for NullSink {
@@ -29,12 +26,9 @@ impl EventSink for NullSink {
     }
 }
 
-/// The agent loop's driven port to a chat provider. One adapter per provider (OpenAI-compatible
-/// today); runtime-swappable behind `Arc<dyn CompletionProvider>`.
 #[async_trait::async_trait(?Send)]
 pub trait CompletionProvider: Send + Sync {
-    /// Stream one assistant turn, firing `sink` for each reasoning/content delta, and return the
-    /// assembled turn (answer text + any tool calls).
+    /// Fires `sink` for each reasoning/content delta and returns the assembled turn.
     async fn complete(
         &self,
         request: TurnRequest<'_>,
