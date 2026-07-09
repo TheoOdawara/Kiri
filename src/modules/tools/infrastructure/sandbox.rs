@@ -372,7 +372,7 @@ impl FsSandbox {
         real: &Path,
         display: &str,
     ) -> Result<(), AgentError> {
-        if path_is_under_home_join(real, home().as_deref(), &[HARNESS_PRIVATE_DIR]) {
+        if is_under_harness_private(real) {
             return Err(AgentError::Sandbox(format!(
                 "path is inside the harness private directory '{HARNESS_PRIVATE_DIR}': {display}"
             )));
@@ -387,6 +387,10 @@ impl FsSandbox {
         real: &Path,
         display: &str,
     ) -> Result<(), AgentError> {
+        if !is_under_home_secret_subpath(real) {
+            return Ok(());
+        }
+        // Prefer a stable label for the error (first matching subpath).
         let Some(home_dir) = home() else {
             return Ok(());
         };
@@ -400,6 +404,22 @@ impl FsSandbox {
         }
         Ok(())
     }
+}
+
+/// Whether `real` lies under the global harness private tree (`~/.kiri`). Used by resolve_* and by
+/// recursive tools (`search`) so a home-rooted workspace cannot walk harness state.
+pub(crate) fn is_under_harness_private(real: &Path) -> bool {
+    path_is_under_home_join(real, home().as_deref(), &[HARNESS_PRIVATE_DIR])
+}
+
+/// Whether `real` lies under a multi-component home secret store (e.g. `~/.config/gh`).
+pub(crate) fn is_under_home_secret_subpath(real: &Path) -> bool {
+    let Some(home_dir) = home() else {
+        return false;
+    };
+    HOME_SECRET_SUBPATHS
+        .iter()
+        .any(|components| path_is_under_home_join(real, Some(home_dir.as_path()), components))
 }
 
 /// Whether `real` equals or is a descendant of `home.join(components…)`.

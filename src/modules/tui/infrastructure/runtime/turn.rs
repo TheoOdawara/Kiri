@@ -42,6 +42,25 @@ enum Step {
     Idle,
 }
 
+/// How the biased event-stream arm must classify a poll result (F-BUG-001 / #80).
+/// Closed stream / I/O error must never become [`Step::Idle`] — that arm stays Ready and starves the turn.
+#[derive(Debug, PartialEq, Eq)]
+enum EventStreamPoll {
+    /// A real crossterm event arrived; map it via `input::to_msg` (or Idle if it has no Msg).
+    Live,
+    /// Stream ended or I/O failed — abort the turn and quit, matching the main event loop.
+    Ended,
+}
+
+/// Pure classifier for the turn loop's event arm. Extracted so the hang regression is unit-testable
+/// without driving a full TUI `select!`.
+fn classify_event_stream_poll<T, E>(maybe: &Option<Result<T, E>>) -> EventStreamPoll {
+    match maybe {
+        Some(Ok(_)) => EventStreamPoll::Live,
+        _ => EventStreamPoll::Ended,
+    }
+}
+
 /// Whether applying `msg` must force an immediate redraw. Stream deltas and the periodic tick are
 /// throttled to at most one draw per `FRAME_INTERVAL`, so a burst of tokens coalesces into a single
 /// re-render; every structural change (tool lines, approvals, turn boundaries, user input) draws at
@@ -236,15 +255,15 @@ impl RunLoop {
             loop {
                 let step = tokio::select! {
                     biased;
-                    maybe = ui.events.next() => match maybe {
-                        Some(Ok(event)) => {
+                    maybe = ui.events.next() => match (classify_event_stream_poll(&maybe), maybe) {
+                        (EventStreamPoll::Live, Some(Ok(event))) => {
                             self.model.timeline.last_event_at = Some(Instant::now());
                             input::to_msg(event).map(Step::Apply).unwrap_or(Step::Idle)
                         }
                         // Stream closed or I/O error: mirror the main event loop. Mapping these to
                         // Idle under `biased` keeps this arm always-ready and starves the turn future
                         // (hang / CPU spin). Quit and abort instead (F-BUG-001 / #80).
-                        _ => {
+                        (EventStreamPoll::Ended, _) | (EventStreamPoll::Live, _) => {
                             self.model.should_quit = true;
                             engine.cancel.cancel();
                             Step::Done(Ok(TurnOutcome::Aborted))
@@ -377,5 +396,55 @@ impl RunLoop {
         engine.cancel.reset();
         *engine.pending_reply = None;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod event_stream_poll_tests {
+    use super::{EventStreamPoll, classify_event_stream_poll};
+
+    /// Contract: `Ended` always aborts the turn; only `Live` may yield Idle (after `to_msg` is None).
+    #[derive(Debug, PartialEq, Eq)]
+    enum EventArmContract {
+        MayBecomeIdleAfterToMsg,
+        MustAbortTurn,
+    }
+
+    fn event_arm_contract(poll: EventStreamPoll) -> EventArmContract {
+        match poll {
+            EventStreamPoll::Live => EventArmContract::MayBecomeIdleAfterToMsg,
+            EventStreamPoll::Ended => EventArmContract::MustAbortTurn,
+        }
+    }
+
+    #[test]
+    fn live_event_is_not_treated_as_stream_end() {
+        assert_eq!(
+            classify_event_stream_poll::<(), ()>(&Some(Ok(()))),
+            EventStreamPoll::Live
+        );
+        assert_eq!(
+            event_arm_contract(EventStreamPoll::Live),
+            EventArmContract::MayBecomeIdleAfterToMsg
+        );
+    }
+
+    #[test]
+    fn closed_stream_must_abort_turn_never_idle() {
+        // F-BUG-001: `None` under biased select must abort, never Idle.
+        let poll = classify_event_stream_poll::<(), ()>(&None);
+        assert_eq!(poll, EventStreamPoll::Ended);
+        assert_eq!(
+            event_arm_contract(poll),
+            EventArmContract::MustAbortTurn,
+            "regression: Ended mapped to Idle reintroduces the hang"
+        );
+    }
+
+    #[test]
+    fn io_error_must_abort_turn_never_idle() {
+        let poll = classify_event_stream_poll::<(), ()>(&Some(Err(())));
+        assert_eq!(poll, EventStreamPoll::Ended);
+        assert_eq!(event_arm_contract(poll), EventArmContract::MustAbortTurn);
     }
 }

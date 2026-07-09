@@ -6,7 +6,9 @@ use crate::modules::tools::application::tool::{
 };
 use crate::modules::tools::infrastructure::args::{SearchArgs, parse, parse_args};
 use crate::modules::tools::infrastructure::exec;
-use crate::modules::tools::infrastructure::sandbox::SECRET_DIRS;
+use crate::modules::tools::infrastructure::sandbox::{
+    SECRET_DIRS, is_under_harness_private, is_under_home_secret_subpath,
+};
 use crate::modules::tools::infrastructure::support::SEARCH_MAX_MATCHES;
 use crate::modules::tools::infrastructure::support::search_file;
 use crate::shared::kernel::tool_call::ToolCall;
@@ -110,6 +112,13 @@ impl Tool for Search {
                             }) {
                                 continue;
                             }
+                            // Prefix-deny harness private + multi-component home secrets (F-SEC-001 /
+                            // #79). Name-only `.kiri` would wrongly skip project-local `.kiri/`.
+                            if is_under_harness_private(&path)
+                                || is_under_home_secret_subpath(&path)
+                            {
+                                continue;
+                            }
                             stack.push(path);
                         } else if file_type.is_file() {
                             if entry
@@ -209,6 +218,62 @@ mod tests {
                 );
             }
             other => panic!("expected matches, got {other:?}"),
+        }
+    }
+
+    /// F-SEC-001 / #79: when the workspace is the user's home, recursive search must not open
+    /// `~/.kiri` (project-local `.kiri` under a non-home root remains searchable).
+    #[tokio::test]
+    async fn search_does_not_descend_into_harness_private_under_home() {
+        use crate::modules::tools::application::path::home;
+        use crate::modules::tools::infrastructure::secret_paths::HARNESS_PRIVATE_DIR;
+
+        let Some(home_dir) = home() else {
+            return;
+        };
+        let Ok(sb) = FsSandbox::new(&home_dir, SensitiveMatcher::empty()) else {
+            return;
+        };
+        let harness = home_dir.join(HARNESS_PRIVATE_DIR);
+        let _ = fs::create_dir_all(&harness);
+        let needle = format!("KIRI_P0_SEARCH_NEEDLE_{}", std::process::id());
+        let probe = harness.join("p0_search_probe.txt");
+        fs::write(&probe, needle.as_bytes()).unwrap();
+
+        let project = TempDir::new().unwrap();
+        fs::create_dir_all(project.path().join(".kiri")).unwrap();
+        fs::write(
+            project.path().join(".kiri").join("project_ok.txt"),
+            b"project local kiri is fine",
+        )
+        .unwrap();
+        let project_sb = FsSandbox::new(project.path(), SensitiveMatcher::empty()).unwrap();
+        let project_hit = Search
+            .execute(
+                &project_sb,
+                &call(serde_json::json!({"query": "project local kiri is fine"})),
+            )
+            .await;
+        match project_hit {
+            ToolOutcome::Ok(text) => assert!(
+                text.contains("project_ok") || text.contains("project local"),
+                "project .kiri must still be searchable: {text}"
+            ),
+            other => panic!("expected project hit, got {other:?}"),
+        }
+
+        let outcome = Search
+            .execute(&sb, &call(serde_json::json!({"query": needle})))
+            .await;
+        // Best-effort cleanup so we do not leave a probe under the real home harness dir.
+        let _ = fs::remove_file(&probe);
+        match outcome {
+            ToolOutcome::Ok(text) => assert!(
+                !text.contains(&needle) && !text.contains("p0_search_probe"),
+                "harness ~/.kiri must not be searched: {text}"
+            ),
+            ToolOutcome::Error(_) => {} // also fine — empty/no match paths vary
+            other => panic!("unexpected outcome: {other:?}"),
         }
     }
 

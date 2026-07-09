@@ -659,6 +659,46 @@ mod tests {
         assert_eq!(cooling_fg(Duration::from_secs(1)), theme::STEEL);
     }
 
+    /// F-PERF-001 / #83: oversized edit sides must skip `TextDiff` LCS (would freeze the render thread).
+    #[test]
+    fn render_diff_omits_lcs_when_either_side_exceeds_byte_cap() {
+        let huge = "x".repeat(MAX_DIFF_BYTES_PER_SIDE + 1);
+        let small = "y".to_string();
+        for (old, new) in [(huge.clone(), small.clone()), (small, huge)] {
+            let mut out = Vec::new();
+            render_diff(&ToolDiff { old, new }, 80, false, &mut out);
+            assert_eq!(out.len(), 1, "oversized sides emit a single notice line");
+            let text: String = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                text.contains("diff omitido"),
+                "expected omit notice, got: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_diff_still_computes_small_edits() {
+        let mut out = Vec::new();
+        render_diff(
+            &ToolDiff {
+                old: "hello\n".into(),
+                new: "hello world\n".into(),
+            },
+            80,
+            false,
+            &mut out,
+        );
+        assert!(!out.is_empty(), "small diffs must still produce hunk lines");
+        let joined: String = out
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            !joined.contains("diff omitido"),
+            "small diffs must not use the omit path"
+        );
+    }
+
     #[test]
     fn line_fg_freezes_to_steel_under_reduced_motion() {
         let landings = [Instant::now()];

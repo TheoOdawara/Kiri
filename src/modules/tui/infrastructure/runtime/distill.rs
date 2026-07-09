@@ -51,6 +51,21 @@ enum DistillStep {
     Tick,
 }
 
+/// How the biased event-stream arm classifies a poll during distillation (F-BUG-001 / #80).
+/// Closed stream / I/O error must not become an infinite Tick under `biased` select.
+#[derive(Debug, PartialEq, Eq)]
+enum DistillEventPoll {
+    Event,
+    Ended,
+}
+
+fn classify_distill_event_poll<T, E>(maybe: &Option<Result<T, E>>) -> DistillEventPoll {
+    match maybe {
+        Some(Ok(_)) => DistillEventPoll::Event,
+        _ => DistillEventPoll::Ended,
+    }
+}
+
 impl RunLoop {
     /// Run the end-of-session distillation while keeping the UI responsive: a spinner ticks and Ctrl+C
     /// skips. Best-effort and bounded — the distiller's own timeout caps the wait, a skip or failure
@@ -85,13 +100,17 @@ impl RunLoop {
             loop {
                 let step = tokio::select! {
                     biased;
-                    maybe = ui.events.next() => match maybe {
-                        Some(Ok(event)) if is_ctrl_c(&event) => DistillStep::Skip,
+                    maybe = ui.events.next() => match (classify_distill_event_poll(&maybe), maybe) {
+                        (DistillEventPoll::Event, Some(Ok(event))) if is_ctrl_c(&event) => {
+                            DistillStep::Skip
+                        }
                         // Other input is ignored during the (brief) distillation.
-                        Some(Ok(_)) => DistillStep::Tick,
+                        (DistillEventPoll::Event, Some(Ok(_))) => DistillStep::Tick,
                         // Stream closed or I/O error: do not map to Tick under `biased` (would spin
                         // and starve the distill future — F-BUG-001 / #80). End best-effort distill.
-                        _ => DistillStep::Skip,
+                        (DistillEventPoll::Ended, _) | (DistillEventPoll::Event, _) => {
+                            DistillStep::Skip
+                        }
                     },
                     _ = ui.ticker.tick() => DistillStep::Tick,
                     done = &mut distillation => DistillStep::Done(done),
@@ -129,5 +148,53 @@ impl RunLoop {
                 .model
                 .notify_info(format!("destilação não concluída: {error}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod distill_event_poll_tests {
+    use super::{DistillEventPoll, classify_distill_event_poll};
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum DistillArmContract {
+        MayTick,
+        MustSkip,
+    }
+
+    fn distill_arm_contract(poll: DistillEventPoll) -> DistillArmContract {
+        match poll {
+            DistillEventPoll::Event => DistillArmContract::MayTick,
+            DistillEventPoll::Ended => DistillArmContract::MustSkip,
+        }
+    }
+
+    #[test]
+    fn live_event_is_not_stream_end() {
+        assert_eq!(
+            classify_distill_event_poll::<(), ()>(&Some(Ok(()))),
+            DistillEventPoll::Event
+        );
+        assert_eq!(
+            distill_arm_contract(DistillEventPoll::Event),
+            DistillArmContract::MayTick
+        );
+    }
+
+    #[test]
+    fn closed_stream_must_skip_not_tick() {
+        let poll = classify_distill_event_poll::<(), ()>(&None);
+        assert_eq!(poll, DistillEventPoll::Ended);
+        assert_eq!(
+            distill_arm_contract(poll),
+            DistillArmContract::MustSkip,
+            "regression: Ended mapped to Tick reintroduces the spin"
+        );
+    }
+
+    #[test]
+    fn io_error_must_skip_not_tick() {
+        let poll = classify_distill_event_poll::<(), ()>(&Some(Err(())));
+        assert_eq!(poll, DistillEventPoll::Ended);
+        assert_eq!(distill_arm_contract(poll), DistillArmContract::MustSkip);
     }
 }
