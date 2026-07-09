@@ -9,10 +9,9 @@ use crate::shared::kernel::provider::{AuthMethod, Effort, ProviderKind, Provider
 use super::defaults::DEFAULT_PROVIDER_ID;
 use super::raw::{RawConfig, read_config_file};
 
-/// Create `path` (recursively) and keep it owner-only (`0700` on Unix), so the non-secret files under
-/// the kiri dir are not world-readable. On Windows the user-profile DACL is the equivalent. The single
-/// private-`~/.kiri`-dir creator — every such dir creation (config here, credentials in the secret store)
-/// routes through this `0700` helper, never a plain `0755` `create_dir_all`.
+/// The single private-`~/.kiri`-dir creator: every such creation routes through this `0700` helper, never
+/// a plain `0755` `create_dir_all`, so the non-secret files there are not world-readable. On Windows the
+/// inherited user-profile DACL is the equivalent.
 #[cfg(unix)]
 pub(crate) fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -29,10 +28,9 @@ pub(crate) fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> 
     std::fs::create_dir_all(path)
 }
 
-/// Apply `mutate` to the GLOBAL config (read-modify-write), preserving every other section. Backs the
-/// live `/models`/`/effort` swaps. Only the trusted global `~/.kiri/config.toml` is written — never the
-/// untrusted project layer (which would let a workspace change provider routing; see `resolve_layers`).
-/// Note: TOML comments in a hand-edited file are dropped on rewrite — the values are preserved.
+/// Read-modify-write, preserving every other section. Only the trusted global config is written, never the
+/// untrusted project layer, which would let a workspace change provider routing (see `resolve_layers`).
+/// TOML comments in a hand-edited file are dropped on rewrite; the values survive.
 fn update_global_config(
     config_path: &Path,
     mutate: impl FnOnce(&mut RawConfig),
@@ -43,15 +41,12 @@ fn update_global_config(
     let body = toml::to_string_pretty(&config)
         .map_err(|e| AgentError::Config(format!("failed to encode config: {e}")))?;
     if let Some(parent) = config_path.parent() {
-        // Route every `~/.kiri` creation through `ensure_private_dir` so the dir holding the config (and
-        // the co-located `credentials.json`) is owner-only, never a plain `0755` from `create_dir_all`.
         ensure_private_dir(parent).map_err(|e| {
             AgentError::Config(format!("failed to create {}: {e}", parent.display()))
         })?;
     }
-    // DATA-01: write atomically (temp sibling + rename). A plain truncate-then-write could leave the
-    // boot-critical `~/.kiri/config.toml` truncated on a crash mid-write, and the fail-fast global loader
-    // would then abort the next boot. The sync path already writes this file atomically — match it here.
+    // DATA-01: a plain truncate-then-write could leave the boot-critical `config.toml` truncated on a
+    // crash, and the fail-fast global loader would then abort the next boot.
     crate::shared::infra::fs::write_atomic_sync(config_path, body.as_bytes()).map_err(|e| {
         AgentError::Config(format!(
             "failed to write config at {}: {e}",

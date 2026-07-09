@@ -1,7 +1,5 @@
-//! The conversation cluster: the shared data the `agent` engine and the `provider` adapters exchange.
-//! `conversation.rs` owns the `Conversation` type and groups its siblings (`message`, `role`,
-//! `completed_turn`, `stream_event`) under `conversation/`; the kernel root re-exports them so the
-//! pre-grouping `shared::kernel::{message,role,…}` paths still resolve.
+//! The kernel root re-exports these siblings, so the pre-grouping `shared::kernel::{message,role,…}`
+//! paths still resolve.
 
 pub mod completed_turn;
 pub mod message;
@@ -39,10 +37,8 @@ impl Conversation {
         }
     }
 
-    /// Drop the last assistant turn — the assistant message and any tool results that answered it —
-    /// so the conversation can recover after the provider rejected the request body (HTTP 4xx). That
-    /// offending turn would otherwise be re-sent unchanged and fail identically on every later
-    /// request. A no-op when no assistant turn trails the conversation.
+    /// Drop the last assistant turn (its message plus any tool results) after the provider rejected the
+    /// request body (HTTP 4xx): re-sent unchanged, that turn fails identically on every later request.
     pub fn rollback_last_assistant_turn(&mut self) {
         while matches!(self.messages.last(), Some(message) if message.role == Role::Tool) {
             self.messages.pop();
@@ -62,7 +58,7 @@ mod tests {
         let mut conversation = Conversation::new("sys");
         conversation.push(Message::user("hi"));
         conversation.rollback_dangling_user();
-        assert_eq!(conversation.messages().len(), 1); // system only
+        assert_eq!(conversation.messages().len(), 1);
 
         conversation.push(Message::user("again"));
         conversation.push(Message::tool_result("id", "out"));

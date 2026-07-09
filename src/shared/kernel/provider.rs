@@ -8,24 +8,19 @@ use zeroize::Zeroizing;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderKind {
-    /// NVIDIA's hosted OpenAI-compatible chat-completions endpoint (the default).
     Nvidia,
-    /// Any other OpenAI-compatible chat-completions endpoint. The canonical token is the kebab-case
-    /// `open-ai-compatible`; the intuitive `openai-compatible` / `openaicompatible` spellings are accepted
-    /// as aliases on read, so a hand-edited config does not fail to parse (serialization stays canonical).
+    /// The intuitive spellings are read as aliases so a hand-edited config still parses; serialization
+    /// stays canonical.
     #[serde(alias = "openai-compatible", alias = "openaicompatible")]
     OpenAiCompatible,
-    /// OpenAI proper: chat-completions at `api.openai.com` with an API key.
     Openai,
-    /// Anthropic Messages API, authenticated with `x-api-key`.
     Anthropic,
     /// A user-defined OpenAI-compatible endpoint (arbitrary base URL).
     Custom,
 }
 
 impl ProviderKind {
-    /// The default base URL for this kind, used to seed a new profile in the `/provider` wizard. Empty
-    /// for kinds whose endpoint the user must supply.
+    /// Seeds a new profile in the `/provider` wizard. Empty for kinds whose endpoint the user supplies.
     pub fn default_base_url(self) -> &'static str {
         match self {
             ProviderKind::Nvidia => "https://integrate.api.nvidia.com/v1",
@@ -35,10 +30,8 @@ impl ProviderKind {
         }
     }
 
-    /// Whether this kind mandates an API key. Vendor endpoints (NVIDIA / OpenAI / Anthropic) always do;
-    /// generic OpenAI-compatible and custom endpoints may be keyless (Ollama / LM Studio), so the key is
-    /// optional there and its presence decides the auth method. Shared by the `/provider` wizard and the
-    /// factory so the rule lives in one place.
+    /// Vendor endpoints always mandate a key; generic/custom ones may be keyless (Ollama / LM Studio), so
+    /// the key's presence decides their auth method. Shared by the wizard and the factory.
     pub fn requires_api_key(self) -> bool {
         match self {
             ProviderKind::Nvidia | ProviderKind::Openai | ProviderKind::Anthropic => true,
@@ -46,16 +39,13 @@ impl ProviderKind {
         }
     }
 
-    /// Whether this kind sends a thinking/reasoning parameter by default. NVIDIA uses
-    /// `chat_template_kwargs.thinking`; OpenAI proper uses `reasoning_effort`. Other kinds send nothing.
+    /// NVIDIA uses `chat_template_kwargs.thinking`; OpenAI proper uses `reasoning_effort`.
     pub fn thinking_default(self) -> bool {
         matches!(self, ProviderKind::Nvidia | ProviderKind::Openai)
     }
 
-    /// The reasoning/thinking capability this kind (and, for NVIDIA, this specific model) exposes. No
-    /// vendor API exposes this as discoverable metadata (confirmed for OpenAI, Anthropic, and NVIDIA
-    /// NIM) — it is a maintained, static table, same as [`thinking_default`](Self::thinking_default).
-    /// Drives whether the `/provider` wizard's `Thinking` step is shown at all.
+    /// A maintained static table: no vendor API exposes this as discoverable metadata. Drives whether the
+    /// `/provider` wizard shows its `Thinking` step at all.
     pub fn thinking_capability(self, model: &str) -> ThinkingCapability {
         match self {
             ProviderKind::Openai => ThinkingCapability::Discrete,
@@ -72,42 +62,34 @@ impl ProviderKind {
 /// [`ProviderKind::thinking_capability`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingCapability {
-    /// No reasoning control exists for this kind/model (e.g. Gemma, or an unrecognized endpoint) — the
-    /// wizard skips asking about it.
+    /// The wizard skips asking about reasoning entirely.
     Unsupported,
-    /// A single on/off switch, no granularity (an NVIDIA family using a boolean chat-template kwarg).
+    /// On/off, no granularity (an NVIDIA family using a boolean chat-template kwarg).
     Toggle,
-    /// A discrete low/medium/high-style dial (OpenAI's `reasoning_effort`).
+    /// A discrete low/medium/high dial (OpenAI's `reasoning_effort`).
     Discrete,
     /// A token-budget dial (Anthropic's `thinking.budget_tokens`).
     Budget,
 }
 
-/// An NVIDIA-hosted open-weight model family, classified by a substring match on the model id. NVIDIA's
-/// NIM catalog hosts many families (DeepSeek, Qwen3, Kimi, MiniMax, GLM, Nemotron, Gemma, …) under one
-/// OpenAI-compatible endpoint, each with a different (or absent) reasoning-toggle convention.
-/// Unrecognized/unverified families default to `Unsupported` rather than guessing a wire shape that might
-/// silently no-op or 400 — extend `capability`/the wire construction only once a family's convention is
-/// confirmed against a real deployment (an official NVIDIA reference page, not a guess).
+/// An NVIDIA-hosted model family, matched on the model id. One NIM endpoint fronts many families, each
+/// with a different (or absent) reasoning-toggle convention. Never guess a wire shape — a wrong one
+/// silently no-ops or 400s. Extend this only once a family's convention is confirmed against an official
+/// NVIDIA reference page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NvidiaFamily {
-    /// `chat_template_kwargs.thinking: bool` — the convention Kiri already sends.
+    /// `chat_template_kwargs.thinking: bool`.
     Nemotron,
-    /// `chat_template_kwargs.thinking: bool` (same key as Nemotron) — confirmed by NVIDIA's own
-    /// Kimi-K2.5 API reference page for third-party (vLLM/SGLang) deployments, the stack NIM runs on.
+    /// `chat_template_kwargs.thinking: bool`, same key as Nemotron.
     Kimi,
-    /// `chat_template_kwargs.enable_thinking: bool` — confirmed by NVIDIA's own Qwen3.5/3.6 API
-    /// reference pages; matches Qwen3's well-documented public chat-template convention.
+    /// `chat_template_kwargs.enable_thinking: bool`.
     Qwen,
-    /// `chat_template_kwargs.enable_thinking: bool` — confirmed by NVIDIA's own `z-ai-glm4-7`/
-    /// `z-ai-glm5.1` reference pages (the vLLM/SGLang convention NIM proxies; Zhipu's own hosted API
-    /// uses a different, top-level `thinking: {type: "enabled"}` shape that does not apply here).
+    /// `chat_template_kwargs.enable_thinking: bool` — the vLLM/SGLang convention NIM proxies, not
+    /// Zhipu's own top-level `thinking: {type: "enabled"}` shape.
     Glm,
-    /// DeepSeek, MiniMax, Gemma, and anything unrecognized: no reliable toggle convention. DeepSeek in
-    /// particular is not just unverified — a reported bug shows NIM hanging on DeepSeek V4 reasoning
-    /// models when `chat_template_kwargs` is absent, and a separate vLLM issue shows the toggle not
-    /// being honored on `deepseek-r1-0528`; shipping a guessed shape here risks reintroducing that
-    /// instability rather than fixing it.
+    /// No reliable toggle. DeepSeek is worse than unverified: NIM is reported to hang on V4 reasoning
+    /// models when `chat_template_kwargs` is absent, and vLLM ignores the toggle on `deepseek-r1-0528`.
+    /// A guessed shape would reintroduce that instability.
     Other,
 }
 
@@ -138,31 +120,22 @@ impl NvidiaFamily {
     }
 }
 
-/// How a provider authenticates, selecting which credential the adapter sends.
-///
-/// - `ApiKey` — the primary wired method (`Bearer` for OpenAI-compatible, `x-api-key` for Anthropic).
-/// - `None` — no authentication: keyless OpenAI-compatible endpoints (Ollama / LM Studio) that need no
-///   key. The adapter omits the `Authorization` header entirely. The presence of a key at save time
-///   decides the method per provider (see [`ProviderKind::requires_api_key`]).
-/// - `Oauth` — a modeled extension point, not implemented: subscription OAuth (Claude Pro/Max, ChatGPT
-///   Plus/Pro) is intentionally unsupported because the vendors restrict those tokens to their own
-///   clients (see the provider-auth ADR); kept so a future sanctioned flow can slot in.
-/// - `Unknown(String)` — an auth value this build does not recognize (e.g. written by a newer Kiri).
-///   It carries the original text so reading a forward-version config never aborts the boot and
-///   rewriting it never corrupts the value; the factory leaves such a provider inert.
-///
-/// Serde is hand-written (not derived) so an unrecognized value maps to `Unknown` instead of failing —
-/// the forward-compatibility guarantee. Known values use kebab-case (`api-key` / `none` / `oauth`).
+/// How a provider authenticates, selecting which credential the adapter sends. Serde is hand-written so
+/// an unrecognized value maps to `Unknown` instead of failing — the forward-compatibility guarantee.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthMethod {
     ApiKey,
+    /// Keyless endpoints (Ollama / LM Studio): the adapter omits the `Authorization` header entirely.
     None,
+    /// Modeled, never wired: subscription OAuth is unsupported because the vendors restrict those tokens
+    /// to their own clients. Kept so a future sanctioned flow can slot in.
     Oauth,
+    /// Written by a newer Kiri. Carries the original text, so reading a forward-version config never
+    /// aborts the boot and rewriting it never corrupts the value; the factory leaves it inert.
     Unknown(String),
 }
 
 impl AuthMethod {
-    /// The wire token for the known variants; `Unknown` carries its original (unrecognized) text.
     pub fn as_wire(&self) -> &str {
         match self {
             AuthMethod::ApiKey => "api-key",
@@ -196,7 +169,6 @@ impl<'de> Deserialize<'de> for AuthMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
-    /// No extended reasoning.
     Off,
     Low,
     Medium,
@@ -207,8 +179,7 @@ pub enum Effort {
 }
 
 impl Effort {
-    /// Every level in ascending order — the catalog the `/effort` picker offers (its row index maps
-    /// back to the chosen level, so no string round-trip is needed).
+    /// Ascending, so the `/effort` picker's row index maps back to the level with no string round-trip.
     pub const ALL: [Effort; 6] = [
         Effort::Off,
         Effort::Low,
@@ -218,7 +189,7 @@ impl Effort {
         Effort::Max,
     ];
 
-    /// The lowercase label (matching the serde form), shown in the picker and the status line.
+    /// Matches the serde form. Shown in the picker and the status line.
     pub fn label(self) -> &'static str {
         match self {
             Effort::Off => "off",
@@ -230,8 +201,7 @@ impl Effort {
         }
     }
 
-    /// The `reasoning_effort` value OpenAI proper (o3/o4) accepts, or `None` when effort is `Off`
-    /// (reasoning disabled). Only meaningful for `ProviderKind::Openai`.
+    /// `None` when effort is `Off`. Only meaningful for `ProviderKind::Openai`.
     pub fn as_openai_reasoning_effort(self) -> Option<&'static str> {
         match self {
             Effort::Off => None,
@@ -241,10 +211,8 @@ impl Effort {
         }
     }
 
-    /// The Anthropic `thinking.budget_tokens` value for this level, or `None` when effort is `Off`
-    /// (thinking disabled). Kept under the Anthropic adapter's `MAX_OUTPUT_TOKENS` (16_000) with
-    /// headroom for the actual answer, since the Messages API requires `budget_tokens < max_tokens` (and
-    /// at least 1024). Only meaningful for `ProviderKind::Anthropic`.
+    /// Kept under the adapter's `MAX_OUTPUT_TOKENS` (16_000) with headroom for the answer: the Messages
+    /// API requires `1024 <= budget_tokens < max_tokens`. `None` when effort is `Off`.
     pub fn anthropic_budget_tokens(self) -> Option<u32> {
         match self {
             Effort::Off => None,
@@ -256,55 +224,45 @@ impl Effort {
         }
     }
 
-    /// The Anthropic `output_config.effort` value for adaptive thinking (`thinking: {type: "adaptive"}`),
-    /// or `None` when effort is `Off`. Reuses the same lowercase labels as [`Self::label`]. Only
-    /// meaningful for a model whose `AnthropicThinkingMode` is `AdaptiveOptIn`/`AdaptiveDefaultOn`.
+    /// For adaptive thinking only (`AnthropicThinkingMode::AdaptiveOptIn`/`AdaptiveDefaultOn`).
     pub fn as_anthropic_output_effort(self) -> Option<&'static str> {
         (self != Effort::Off).then(|| self.label())
     }
 }
 
-/// A configured provider — everything non-secret needed to talk to it. The catalog the user selects
-/// among; persisted in the TOML config. The secret material lives separately in a [`Credential`]
-/// (a 0600 file), keyed by [`ProviderProfile::id`].
+/// Everything non-secret needed to talk to a provider; persisted in the TOML config. The secret material
+/// lives separately in a [`Credential`] (a 0600 file), keyed by [`ProviderProfile::id`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderProfile {
-    /// Stable id; the map key in `[providers.<id>]`. Not serialized in the table body.
+    /// The map key in `[providers.<id>]`, so not serialized in the table body.
     #[serde(skip)]
     pub id: String,
     pub kind: ProviderKind,
     pub base_url: String,
     /// The active model id sent on each turn.
     pub model: String,
-    /// The catalog the `/models` picker offers (includes `model`); may be empty.
+    /// What the `/models` picker offers (includes `model`); may be empty.
     #[serde(default)]
     pub models: Vec<String>,
     pub auth: AuthMethod,
-    /// Per-provider thinking override. `None` uses `kind.thinking_default()`; `Some(false)` disables
-    /// it explicitly even for kinds that enable it by default.
+    /// `None` uses `kind.thinking_default()`; `Some(false)` disables it even for kinds enabling it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
 }
 
-/// The secret material for a provider, stored in the 0600 credentials file as JSON.
-/// Never written to the TOML config and never logged. Refresh tokens persist here; short-lived access
-/// tokens are also persisted so a restarted session can refresh without re-login.
+/// Stored as JSON in the 0600 credentials file. Never written to the TOML config and never logged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Credential {
     ApiKey {
         key: Secret,
     },
-    /// No credential: a keyless provider (`auth = "none"`). The composition root synthesizes this to
-    /// build an adapter that omits the `Authorization` header; it is not normally persisted, since a
-    /// keyless provider stores nothing.
+    /// Synthesized by the composition root for a keyless provider; not normally persisted.
     None,
     Oauth(OauthTokens),
 }
 
-/// An OAuth token set for the modeled-but-inert OAuth auth method (see [`AuthMethod::Oauth`]).
-/// `expires_at_ms` is epoch milliseconds; a future sanctioned flow would refresh before it lapses.
-/// `account_id` is an optional provider-specific field, persisted verbatim only when present.
+/// For the modeled-but-inert OAuth method (see [`AuthMethod::Oauth`]). `expires_at_ms` is epoch millis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OauthTokens {
     pub access: Secret,
@@ -314,8 +272,8 @@ pub struct OauthTokens {
     pub account_id: Option<String>,
 }
 
-/// A secret string: zeroized on drop and redacted in `Debug`, so it never lands in a log or transcript.
-/// It serializes its inner value because the only sink is the 0600 credentials file.
+/// Zeroized on drop and redacted in `Debug`, so it never lands in a log or transcript. It serializes its
+/// inner value because the only sink is the 0600 credentials file.
 #[derive(Clone)]
 pub struct Secret(Zeroizing<String>);
 
@@ -324,8 +282,8 @@ impl Secret {
         Self(Zeroizing::new(value.into()))
     }
 
-    /// Borrow the underlying secret. Callers must only pass it to an auth header or token endpoint —
-    /// never to a logger, the transcript, or an error message.
+    /// Only ever pass this to an auth header or token endpoint — never to a logger, the transcript, or
+    /// an error message.
     pub fn expose(&self) -> &str {
         &self.0
     }

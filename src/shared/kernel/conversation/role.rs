@@ -1,7 +1,6 @@
-/// The author of a message. Pure domain and serde-free — like the rest of the kernel except the
-/// persisted `ToolCall` (see ADR 0003): the single source of each variant's wire spelling is
-/// [`Role::as_wire_str`]/[`Role::from_wire_str`], shared by the provider wire DTO (on the network) and
-/// the session store (in SQLite) so the two can never drift.
+/// The author of a message. Serde-free (ADR 0003): [`Role::as_wire_str`]/[`Role::from_wire_str`] are the
+/// single source of each wire spelling, shared by the provider DTO and the SQLite session store so the two
+/// can never drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     System,
@@ -11,8 +10,7 @@ pub enum Role {
 }
 
 impl Role {
-    /// The canonical lowercase wire string for this role — the one place a `Role` becomes its protocol
-    /// spelling. `const` and serde-free so the domain enum carries no serialization concern.
+    /// The one place a `Role` becomes its protocol spelling.
     pub const fn as_wire_str(self) -> &'static str {
         match self {
             Role::System => "system",
@@ -22,8 +20,8 @@ impl Role {
         }
     }
 
-    /// The inverse of [`Role::as_wire_str`]. An unknown string maps to `None` so a corrupted stored row is
-    /// skipped defensively rather than panicking (the DB may have been touched by an external tool).
+    /// An unknown string maps to `None`, so a stored row corrupted by an external tool is skipped rather
+    /// than panicking.
     pub fn from_wire_str(s: &str) -> Option<Role> {
         match s {
             "system" => Some(Role::System),

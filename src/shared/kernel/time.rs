@@ -1,11 +1,11 @@
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-/// RFC3339 timestamp for "now", in UTC. The single source for the harness's "now as a string": the memory
-/// domain and the session store both call this instead of each re-deriving it. Lives in `shared/kernel`
-/// (not `shared/infra`) so the memory **domain** caller gains no domain→infra edge — reading an ambient
-/// clock here is an accepted kernel primitive. Formatting a valid UTC instant cannot fail in practice; the
-/// empty fallback keeps this runtime path total without an `unwrap` (forbidden outside tests).
+/// The single source for the harness's "now as a string". It lives in `kernel`, not `infra`, so its
+/// memory-**domain** caller gains no domain→infra edge; an ambient clock is an accepted kernel primitive.
+///
+/// Deliberately ignored: formatting a valid UTC instant cannot fail, and the empty fallback keeps this
+/// path total without an `unwrap` (forbidden outside tests).
 pub fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)

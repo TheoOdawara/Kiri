@@ -1,21 +1,16 @@
 use std::time::Duration;
 
-/// Wall-clock budget for a single user turn's tool loop before pausing to ask the user whether to keep
-/// going. There is no fixed iteration cap — the loop runs until the model stops requesting tools — so
-/// this time checkpoint is the only guard against an unattended runaway.
+/// Wall-clock budget for one turn's tool loop before pausing to ask whether to keep going. The loop has
+/// no iteration cap, so this is a guard against an unattended runaway.
 pub(super) const TOOL_CHECKPOINT: Duration = Duration::from_secs(30 * 60);
 
-/// Maximum tool calls in a single user turn before the runaway checkpoint fires (alongside the
-/// wall-clock budget). Bounds an unattended (auto-mode) runaway to a finite number of actions
-/// between check-ins, even when each call is fast enough that the time budget never trips.
+/// The other runaway guard: bounds an auto-mode turn even when every call is fast enough that
+/// [`TOOL_CHECKPOINT`] never trips.
 pub(super) const MAX_TOOL_CALLS_PER_CHECKPOINT: usize = 100;
 
-/// HTTP client timeouts for the provider. `connect` caps establishing the TCP/TLS connection; `read`
-/// caps idle time waiting for the next chunk (response headers or an SSE chunk) — streaming-safe, since
-/// it resets on each received chunk, so a legitimately long but active stream is never killed. A hung
-/// provider thus fails fast with a clear error instead of hanging forever. `read` is generous (5 min)
-/// because it also bounds the wait for the FIRST chunk: a reasoning model can take a while to emit its
-/// first token. Overridable via `[http]` in config or `KIRI_HTTP_*_TIMEOUT_MS`.
+/// `read` resets on each chunk (streaming-safe) and is generous because it also bounds the wait for the
+/// FIRST chunk — a reasoning model takes a while to emit its first token. Override via `[http]` or
+/// `KIRI_HTTP_*_TIMEOUT_MS`.
 pub(super) const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 pub(super) const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -23,16 +18,11 @@ pub(super) const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(300);
 /// (and the no-regression target). See docs/decisions/0001-openai-compatible-provider.md.
 pub(super) const DEFAULT_PROVIDER_ID: &str = "nvidia";
 
-/// Leading programs `run_command` may invoke in plan mode — an **allow-list** of safe
-/// inspection/build/test binaries, replacing the former best-effort denylist (a denylist let any
-/// unlisted command through and was trivially bypassable; an allow-list defaults to *deny*). Matched
-/// against the command's leading program only, and a command that chains a second program is rejected
-/// outright (see `run_command::plan_check`), so `cargo test && rm -rf x` never qualifies. Build/test
-/// tools (`cargo`, `npm`, …) are included so plan-mode investigation stays fluid; a mutating
-/// subcommand of an allowed binary (`git commit`, `cargo install`) still hits the per-call confirmation
-/// gate before it runs. Override via `KIRI_PLAN_ALLOW` (newline-separated regexes, replaces this default).
+/// Leading programs `run_command` may invoke in plan mode. An allow-list, not a denylist: it defaults to
+/// *deny*. Matched against the leading program only, and a chained command is rejected outright (see
+/// `run_command::plan_check`), so `cargo test && rm -rf x` never qualifies. Override via
+/// `KIRI_PLAN_ALLOW` (newline-separated regexes, replaces this default).
 pub(super) const DEFAULT_PLAN_ALLOW: &[&str] = &[
-    // Pure inspection.
     r"\bls\b",
     r"\bcat\b",
     r"\bhead\b",
@@ -50,13 +40,11 @@ pub(super) const DEFAULT_PLAN_ALLOW: &[&str] = &[
     r"\brg\b",
     r"\bfind\b",
     r"\bfd\b",
-    // Version control (read use; mutating subcommands still hit the confirmation gate).
+    // Read use; a mutating subcommand (`git commit`, `cargo install`) still hits the confirmation gate.
     r"\bgit\b",
-    // Rust toolchain.
     r"\bcargo\b",
     r"\brustc\b",
     r"\brustup\b",
-    // JS toolchain.
     r"\bnode\b",
     r"\bnpm\b",
     r"\bnpx\b",
@@ -64,11 +52,9 @@ pub(super) const DEFAULT_PLAN_ALLOW: &[&str] = &[
     r"\byarn\b",
     r"\bdeno\b",
     r"\bbun\b",
-    // Python toolchain.
     r"\bpython3?\b",
     r"\bpip3?\b",
     r"\buv\b",
-    // Other build runners.
     r"\bmake\b",
     r"\bgo\b",
 ];

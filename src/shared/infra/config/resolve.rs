@@ -44,10 +44,8 @@ pub(super) fn resolve_bool(config: Option<bool>, env_key: &str, default: bool) -
     config.unwrap_or_else(|| parse_bool(std::env::var(env_key).ok().as_deref(), default))
 }
 
-/// The warning for a present-but-unrecognized sandbox value, else `None` (recognized token, empty, or
-/// absent). Pure so it is unit-testable; the resolvers print the returned message to stderr. `recognized`
-/// mirrors the matching `from_config`'s exact token set, so a typo (e.g. `KIRI_SANDBOX=of`) is surfaced
-/// rather than silently collapsing to the safe default — a no-silent-no-op on a security-relevant knob.
+/// `recognized` mirrors the matching `from_config`'s token set, so a typo (`KIRI_SANDBOX=of`) is surfaced
+/// rather than silently collapsing to the safe default — no silent no-op on a security knob.
 fn unrecognized_sandbox_warning(
     key: &str,
     raw: Option<&str>,
@@ -63,10 +61,8 @@ fn unrecognized_sandbox_warning(
     ))
 }
 
-/// `KIRI_SANDBOX` / `[sandbox].mode`: `os` (default) uses the platform adapter where available; `off`
-/// disables OS confinement; `require` refuses `run_command` when no OS sandbox is available. Returns
-/// `(enabled, require)`. The parse lives in the kernel [`SandboxMode`] so the loader and the sync trust
-/// gate read it one way; this resolver only owns the config-then-env precedence and the runtime mapping.
+/// Returns `(enabled, require)`. The parse itself lives in the kernel [`SandboxMode`], so the loader and
+/// the sync trust gate read it one way; this owns only the config-then-env precedence.
 pub(super) fn resolve_sandbox_mode(config: Option<&str>) -> (bool, bool) {
     let raw = config
         .map(str::to_string)
@@ -86,9 +82,7 @@ pub(super) fn resolve_sandbox_mode(config: Option<&str>) -> (bool, bool) {
     }
 }
 
-/// `KIRI_SANDBOX_NETWORK` / `[sandbox].network`: the base network stance for `run_command`. `deny`
-/// default. The parse lives in the kernel [`NetworkStance`]; this resolver maps it to the tools-layer
-/// [`NetworkPolicy`] runtime enum.
+/// Maps the kernel [`NetworkStance`] to the tools-layer [`NetworkPolicy`]. `deny` by default.
 pub(super) fn resolve_sandbox_network(config: Option<&str>) -> NetworkPolicy {
     let raw = config
         .map(str::to_string)
@@ -107,22 +101,19 @@ pub(super) fn resolve_sandbox_network(config: Option<&str>) -> NetworkPolicy {
     }
 }
 
-/// The separator between entries in a list env var (the extra docs/memory/sandbox paths) — `:` on Unix,
-/// `;` on Windows, matching each platform's own `PATH` convention.
+/// Matches each platform's own `PATH` convention.
 #[cfg(not(windows))]
 const PATH_LIST_SEPARATOR: char = ':';
 #[cfg(windows)]
 const PATH_LIST_SEPARATOR: char = ';';
 
-/// Expand a leading `~`/`~/…` to the home dir; any other path is taken as given. Home resolution lives in
-/// [`crate::shared::infra::home`] — the single cross-platform source also used by the agent tool-path
-/// tilde expander (`tools/application/path.rs::home()`), so both readers agree on one home directory.
+/// Home resolution lives in [`crate::shared::infra::home`], the single source the agent tool-path tilde
+/// expander also reads, so both agree on one home directory.
 pub(super) fn expand_home(path: &str) -> PathBuf {
     expand_home_with(path, home::home_dir().as_deref())
 }
 
-/// Pure tilde expansion against an explicit `home`: `~` and `~/…` expand when `home` is `Some`, else
-/// (and for any non-tilde path) the input is taken verbatim. The env read lives in `expand_home`.
+/// Split out from `expand_home` so the expansion is testable without the env read.
 fn expand_home_with(path: &str, home: Option<&Path>) -> PathBuf {
     if path == "~" {
         if let Some(home) = home {
@@ -159,10 +150,8 @@ fn usable_pattern_lines(value: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Select the effective pattern list from a raw override value: a non-empty override's usable lines,
-/// else the `defaults`. Pure (the env read lives in `compile_patterns`) so it is unit-testable. A
-/// non-empty override that filters to zero usable lines (e.g. only comments) falls back to `defaults`
-/// rather than silently disabling a safety list (a blacklist that would then block nothing).
+/// An override that filters to zero usable lines (only comments, say) falls back to `defaults` rather than
+/// silently disabling a safety list that would then block nothing.
 fn select_patterns<'a>(raw: Option<&'a str>, defaults: &[&'a str]) -> Vec<&'a str> {
     match raw {
         Some(value) if !value.is_empty() => {

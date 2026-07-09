@@ -1,15 +1,13 @@
-/// How tool calls are gated for a turn. The user cycles modes with Shift+Tab and the active mode is read
-/// at the start of each turn. `Default` confirms every call; `Auto` runs them without asking; `Plan`
-/// withholds destructive tools so the agent can only read and propose a plan to approve.
-///
-/// Lives in the kernel because it is a cross-cutting primitive shared by the agent, tools, and tui
-/// contexts — keeping it here lets the tui domain reference it without depending on another module's
-/// application layer.
+/// How tool calls are gated for a turn, read once at the turn's start. It lives in the kernel so the tui
+/// domain can reference it without depending on another module's application layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApprovalMode {
+    /// Confirms every call.
     #[default]
     Default,
+    /// Runs every call without asking.
     Auto,
+    /// Withholds destructive tools; the agent can only read and propose a plan.
     Plan,
 }
 
