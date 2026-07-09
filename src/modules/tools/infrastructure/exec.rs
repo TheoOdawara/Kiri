@@ -1,14 +1,20 @@
 //! The single place the tools layer spawns a child process — `run_command` runs an arbitrary model
 //! command through the platform shell (the file tools operate the filesystem natively, via `std::fs`,
 //! and never reach this module). Centralizes the process plumbing — piped stdio, a timeout that kills
-//! the child, and the 64 KiB output cap — so `run_command` does not reimplement it.
+//! the **whole process tree** (Windows Job Object / Unix process group via `process-wrap`), and the
+//! 64 KiB streaming output cap — so `run_command` does not reimplement it.
 
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use tokio::io::AsyncReadExt;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 
 use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
 
@@ -178,33 +184,42 @@ fn truncate_tool_output_bytes(bytes: &[u8]) -> String {
 }
 
 /// Spawn, capture stdout/stderr with a **streaming** byte cap, and bound the whole thing by `timeout`.
-/// `kill_on_drop` ensures a timed-out child is killed when the future is dropped; on Unix the child is
-/// also placed in its own process group so timeout can signal the whole tree (F-BUG-002 / #42).
+///
+/// Process-tree kill (F-BUG-002 / #42): after OS confine decorates the command, the spawn is wrapped
+/// with `process-wrap` so timeout / drop kills the **whole tree**:
+/// - **Windows:** Job Object (`TerminateJobObject` on kill) — grandchildren of `pwsh` die too.
+/// - **Unix:** process group leader — `killpg` on the group.
+///
 /// Stdin is always `null` — `run_command` is the sole caller and never feeds input, so a command that
 /// would otherwise prompt (e.g. on a write-protected target) sees EOF instead of hanging.
 async fn run(mut cmd: Command, timeout: Duration) -> Result<ExecResult, ExecError> {
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(true);
-    // Own process group so grandchildren (e.g. `sh -c 'sleep 100 &'`) die with the shell on timeout.
-    // Windows residual: only the direct child is killed (Job Object needs deps/`unsafe` — tracked on #42).
+
+    // KillOnDrop must be the process-wrap shim (not Command::kill_on_drop alone) so JobObject can
+    // read the flag and enable KILL_ON_JOB_CLOSE.
+    let mut wrap = CommandWrap::from(cmd);
+    wrap.wrap(KillOnDrop);
+    #[cfg(windows)]
+    wrap.wrap(JobObject);
     #[cfg(unix)]
-    {
-        cmd.process_group(0);
-    }
+    wrap.wrap(ProcessGroup::leader());
 
     let ms = timeout.as_millis() as u64;
-    let mut child = cmd
+    let mut child = wrap
         .spawn()
         .map_err(|error| ExecError::Spawn(error.to_string()))?;
-    let child_id = child.id();
 
-    let collect = collect_output(&mut child);
+    let collect = collect_output(child.as_mut());
     match tokio::time::timeout(timeout, collect).await {
         Ok(result) => result,
         Err(_) => {
-            kill_child_tree(&mut child, child_id).await;
+            // Job Object / process group kill — best-effort; Timeout is returned either way.
+            // `start_kill` is the tree-wide signal (TerminateJobObject / killpg); `wait` reaps.
+            // (ChildWrapper::kill returns an unpinned `Box<dyn Future>`, so call the pieces here.)
+            let _ = child.start_kill();
+            let _ = child.wait().await;
             Err(ExecError::Timeout(ms))
         }
     }
@@ -213,13 +228,13 @@ async fn run(mut cmd: Command, timeout: Duration) -> Result<ExecResult, ExecErro
 /// Drain stdout/stderr with a hard per-stream cap of [`EXEC_MAX_BYTES`], discarding the remainder so the
 /// child never blocks on a full pipe. Bounds harness RSS even when the model-facing combined cap is
 /// applied later via [`capped_combined`].
-async fn collect_output(child: &mut Child) -> Result<ExecResult, ExecError> {
+async fn collect_output(child: &mut dyn ChildWrapper) -> Result<ExecResult, ExecError> {
     let mut stdout_pipe = child
-        .stdout
+        .stdout()
         .take()
         .ok_or_else(|| ExecError::Spawn("child stdout pipe missing".to_string()))?;
     let mut stderr_pipe = child
-        .stderr
+        .stderr()
         .take()
         .ok_or_else(|| ExecError::Spawn("child stderr pipe missing".to_string()))?;
 
@@ -266,21 +281,6 @@ async fn read_capped_stream(
         }
     }
     Ok(())
-}
-
-/// Kill the direct child and, on Unix, its process group (negative pgid). Best-effort — timeout already
-/// means the tool result is `Timeout` regardless of kill success.
-async fn kill_child_tree(child: &mut Child, child_id: Option<u32>) {
-    #[cfg(unix)]
-    if let Some(pid) = child_id {
-        // `process_group(0)` makes the child's pgid equal its pid; `kill -KILL -pid` hits the whole group.
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
-            .status();
-    }
-    #[cfg(not(unix))]
-    let _ = child_id;
-    let _ = child.kill().await;
 }
 
 #[cfg(test)]
@@ -449,6 +449,69 @@ mod tests {
             result.stdout.len() <= EXEC_MAX_BYTES,
             "stdout buffer must be capped during drain, got {}",
             result.stdout.len()
+        );
+    }
+
+    /// F-BUG-002 / #42: timeout must kill the **whole process tree**, not only the direct shell.
+    /// A nested long-running grandchild holds an exclusive lock on a marker file; after Timeout the
+    /// harness must be able to open that file (proving the grandchild is dead).
+    #[tokio::test]
+    async fn timeout_kills_grandchild_process() {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let lock_path = dir.path().join("tree_kill.lock");
+        // Pre-create so the path is stable for both platforms' shell quoting.
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&lock_path)
+            .unwrap()
+            .write_all(b"init")
+            .unwrap();
+        let lock = lock_path.to_string_lossy().replace('\\', "\\\\");
+
+        // Nested process so the lock-holder is a grandchild of the job/group root (our outer shell).
+        let cmd = if cfg!(windows) {
+            // Inner pwsh holds ShareMode.None on the marker; outer sleeps until we kill the job.
+            format!(
+                "Start-Process -FilePath pwsh -ArgumentList '-NoProfile','-Command', \
+                 \"$f=[IO.File]::Open('{lock}','Open','ReadWrite','None'); \
+                 Start-Sleep -Seconds 120; $f.Close()\" \
+                 -WindowStyle Hidden | Out-Null; Start-Sleep -Seconds 120"
+            )
+        } else {
+            // Inner python holds an exclusive flock; outer sleeps.
+            format!(
+                "python3 -c \"import fcntl,time;f=open(r'{lock}','a+');fcntl.flock(f,fcntl.LOCK_EX);time.sleep(120)\" & sleep 120"
+            )
+        };
+
+        let error = run_shell(
+            &cmd,
+            None,
+            Duration::from_millis(400),
+            &NoConfinement,
+            &policy(),
+        )
+        .await
+        .err()
+        .expect("expected a timeout");
+        assert!(matches!(error, ExecError::Timeout(_)));
+
+        // Give the OS a moment to reap; then exclusive open must succeed if the tree died.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let reopened = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&lock_path);
+        assert!(
+            reopened.is_ok(),
+            "grandchild still holds the lock after timeout — process tree was not killed: {reopened:?}"
         );
     }
 

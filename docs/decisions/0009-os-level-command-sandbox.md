@@ -5,6 +5,12 @@
 - **Amended by ADR 0022** (2026-07-05): the "Network is dev-friendly" section below describes the
   original per-command allow-list, since replaced by network deny-by-default (issue #5). Read that
   paragraph as historical context, not the current behavior.
+- **Amended (2026-07-09, issue #42):** process **lifetime** at the same `exec::run` chokepoint — after
+  `CommandSandbox::confine`, the spawn is wrapped with [`process-wrap`](https://crates.io/crates/process-wrap):
+  **Windows Job Object** (tree kill via `TerminateJobObject`) and **Unix process group** (tree kill via
+  the group leader). Orthogonal to Seatbelt/bwrap path policy: confine restricts *what* the tree may
+  touch; the job/group ensures a timeout/drop reaps the *entire* tree (shell + grandchildren), not only
+  the direct child. Streaming stdout/stderr caps remain in `exec` (unchanged).
 
 ## Context
 

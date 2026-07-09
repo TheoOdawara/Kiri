@@ -43,7 +43,22 @@ zeroize = "1"
 dotenvy = "0.15.7"
 rmcp = { version = "2.1.0", default-features = false, features = ["client", "transport-child-process"] }
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+# Tree-kill for run_command timeouts (F-BUG-002 / #42): Job Object on Windows, process group on Unix.
+# Features are target-split so the `windows` crate is not pulled on Unix CI.
+[target.'cfg(windows)'.dependencies]
+process-wrap = { version = "9.1.0", default-features = false, features = [
+    "tokio1",
+    "job-object",
+    "kill-on-drop",
+    "creation-flags",
+] }
 
+[target.'cfg(unix)'.dependencies]
+process-wrap = { version = "9.1.0", default-features = false, features = [
+    "tokio1",
+    "process-group",
+    "kill-on-drop",
+] }
 
 [dev-dependencies]
 tempfile = "3"
