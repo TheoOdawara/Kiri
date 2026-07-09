@@ -3,18 +3,14 @@ use std::collections::HashSet;
 use crate::modules::extensions::domain::frontmatter::Frontmatter;
 use crate::modules::extensions::domain::scope::Layer;
 
-/// A discovered extension resource: its parsed frontmatter, its Markdown body, the layer it came from,
-/// and the filesystem path it was loaded from (carried for display, like `instruction_paths`). Pure
-/// data — the loader (infrastructure) constructs it; the domain never reads files.
+/// A discovered extension resource. Pure data — the loader constructs it; the domain never reads files.
 #[derive(Debug, Clone)]
 pub struct Resource {
-    /// Stable id from frontmatter (`id:`), falling back to the file stem when absent.
+    /// From frontmatter `id:`, falling back to the file stem.
     pub id: String,
     pub frontmatter: Frontmatter,
-    /// The Markdown body after the frontmatter block, trimmed.
     pub body: String,
     pub layer: Layer,
-    /// The file path it was loaded from, for the `/rules` display and boot diagnostics.
     pub path: String,
 }
 
@@ -37,12 +33,11 @@ impl Resource {
 }
 
 /// A behavioural **rule**: always-on text injected into the system prompt, or on-demand text addressable
-/// by skills/commands. Built from a `Resource`; the frontmatter's `always:` decides injection.
+/// by skills/commands.
 #[derive(Debug, Clone)]
 pub struct Rule {
     pub id: String,
-    /// Whether this rule's body is injected into every turn's system prompt (`always: true`)
-    /// or stays indexed for on-demand recall (`false`/absent).
+    /// Injected into every turn's system prompt, versus indexed for on-demand recall.
     pub always: bool,
     pub body: String,
     pub layer: Layer,
@@ -55,8 +50,7 @@ pub struct Rule {
 }
 
 impl Rule {
-    /// Build a rule from a frontmatter-parsed resource. `always` reads the `always` scalar as a
-    /// truthy string (`true`/`on`/`yes`/`1`), defaulting to `false` on absence.
+    /// `always` reads as a truthy string (`true`/`on`/`yes`/`1`), defaulting to `false` on absence.
     pub fn from_resource(res: &Resource) -> Self {
         let always = res
             .frontmatter
@@ -80,19 +74,17 @@ impl Rule {
 }
 
 /// A custom slash **command**: a Markdown template expanded into a prompt on invocation, optionally bound
-/// to an agent profile, a model override, and a tool allow-list. Built from a `Resource`.
+/// to an agent profile, a model override, and a tool allow-list.
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
-    /// The invocation token with leading slash, e.g. `/test`. From frontmatter `name:` (the loader
-    /// prepends the slash), falling back to the file stem.
+    /// The invocation token, with its leading slash — e.g. `/test`.
     pub name: String,
     pub aliases: Vec<String>,
     pub description: String,
     pub body: String,
     pub layer: Layer,
     pub path: String,
-    /// An agent profile id to run the command under: its system-prompt is prepended to the expanded body
-    /// (`ExtensionCatalog::command_bodies`).
+    /// An agent profile whose system-prompt is prepended to the expanded body.
     pub agent: Option<String>,
     // ponytail: model/tool-scoping per turn has no engine mechanism yet (AgentLoop/ToolRegistry are
     // session-wide, not per-turn) — upgrade path: thread an optional override through AgentLoop::run.
@@ -103,8 +95,6 @@ pub struct CommandSpec {
 }
 
 impl CommandSpec {
-    /// Build a command spec from a frontmatter-parsed resource. The `name` scalar is the bare token
-    /// (the loader ensures the leading `/`); aliases are read as a list and normalized the same way.
     pub fn from_resource(res: &Resource) -> Self {
         let bare_name = res
             .frontmatter
@@ -151,38 +141,28 @@ impl CommandSpec {
     }
 }
 
-/// An **agent** profile (ADR 0021): a named system-prompt. Built from a `Resource`. Consumed two ways:
-/// a custom command can bind to it via its `agent:` field, prepending the system-prompt to the command's
-/// expanded body (`ExtensionCatalog::command_bodies`) — a same-loop prompt overlay, not a spawn. Or the
-/// model can dispatch it directly as an isolated subagent via the `task` tool (ADR 0029), which runs a
-/// nested `AgentLoop` scoped to `model`/`allowed_tools` and returns only the final text to the parent.
+/// An **agent** profile (ADR 0021): a named system-prompt, consumed two ways. A command's `agent:` field
+/// binds it as a same-loop prompt overlay, not a spawn. The `task` tool (ADR 0029) instead dispatches it
+/// as an isolated nested `AgentLoop`, returning only the final text to the parent.
 #[derive(Debug, Clone)]
 pub struct AgentProfile {
     pub id: String,
-    /// A human-readable display name (frontmatter `name:`), falling back to `id` when absent. Display
-    /// only — `task`/command `agent:` bindings always address the agent by `id`.
+    /// Display only — `task` and command `agent:` bindings always address the agent by `id`.
     pub name: String,
-    /// One-line purpose statement (frontmatter `description:`), rendered into the `# Agents` system-prompt
-    /// index (`ExtensionCatalog::agents_index`, ADR 0029) so the model can pick a `task` target without
-    /// guessing an id. Empty when absent — the catalog fold does not fail on a missing description, but a
-    /// bundled agent must always carry one (locked by `bundled.rs`'s guard test).
+    /// Rendered into the `# Agents` system-prompt index so the model can pick a `task` target without
+    /// guessing an id. Empty when absent; a bundled agent must carry one (locked by `bundled.rs`).
     pub description: String,
-    /// The agent's system-prompt text (the resource body), prepended to a bound command's expanded body,
-    /// or seeded as the nested conversation's system prompt when dispatched via `task`.
     pub system_prompt: String,
     pub layer: Layer,
     pub path: String,
-    /// The model id a dispatched subagent runs with (ADR 0029); falls back to the session's active model
-    /// when absent. Unused by the command-binding path (that stays on the parent's model/turn).
+    /// A dispatched subagent's model; falls back to the session's. Unused by the command-binding path.
     pub model: Option<String>,
-    /// The tool names a dispatched subagent may draw from (ADR 0029), intersected with "read-only" — v1
-    /// supports read-only subagents only. Empty means every read-only tool. Unused by the command-binding
-    /// path (that keeps the parent's full toolset).
+    /// Intersected with "read-only" — v1 supports read-only subagents only. Empty means every read-only
+    /// tool. Unused by the command-binding path.
     pub allowed_tools: Vec<String>,
 }
 
 impl AgentProfile {
-    /// Build an agent profile from a frontmatter-parsed resource.
     pub fn from_resource(res: &Resource) -> Self {
         let name = res
             .frontmatter
@@ -219,13 +199,11 @@ impl AgentProfile {
 }
 
 /// A **skill**: on-demand instructions the model pulls via the `use_skill(name)` tool rather than always
-/// carrying the full body in the system prompt. `description` is the one-line entry shown in the always-on
-/// skill index; `body` is returned only when invoked. Built from a `Resource`.
+/// carrying the full body in the system prompt. Only `description` sits in the always-on skill index.
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub id: String,
-    /// A human-readable display name (frontmatter `name:`), falling back to `id` when absent. Display
-    /// only — `use_skill` always addresses the skill by `id`.
+    /// Display only — `use_skill` always addresses the skill by `id`.
     pub name: String,
     pub description: String,
     pub body: String,
@@ -239,7 +217,6 @@ pub struct Skill {
 }
 
 impl Skill {
-    /// Build a skill from a frontmatter-parsed resource.
     pub fn from_resource(res: &Resource) -> Self {
         let name = res
             .frontmatter
@@ -275,8 +252,7 @@ impl Skill {
     }
 }
 
-/// The lifecycle point a hook fires on. `SessionStart`/`SessionEnd`/`TurnEnd` dispatch from existing
-/// async funnels (`app::wire`/`Tui::run` boot and teardown, `on_turn_end`).
+/// The lifecycle point a hook fires on.
 // ponytail: PreToolUse/PostToolUse parse and gate correctly but have no dispatcher yet — ToolObserver's
 // callbacks (`tool_started`/`tool_finished`) are synchronous, so firing a hook there needs new
 // spawn+channel plumbing into Bridge, a follow-up rather than folded into this pass.
@@ -305,9 +281,7 @@ impl HookEvent {
 }
 
 /// A **hook** (ADR 0021): a shell command run at a lifecycle event — an active capability, gated by
-/// `domain::gate` for project-layer hooks (global ones auto-approve). Built from a `Resource`; the
-/// command is the resource body (like `AgentProfile::system_prompt`/`Skill::body`), the event and
-/// optional tool-name matcher (`PreToolUse`/`PostToolUse` only) come from frontmatter.
+/// `domain::gate` for project-layer hooks. The command is the resource body.
 #[derive(Debug, Clone)]
 pub struct Hook {
     pub id: String,
@@ -320,8 +294,8 @@ pub struct Hook {
 }
 
 impl Hook {
-    /// Build a hook from a frontmatter-parsed resource. `None` when `event:` is missing/unrecognized or
-    /// the body (the command to run) is blank — a malformed hook file is dropped, never aborts boot.
+    /// `None` on a missing/unrecognized `event:` or a blank body: a malformed hook is dropped, never
+    /// aborts boot.
     pub fn from_resource(res: &Resource) -> Option<Self> {
         let event = res.frontmatter.get("event").and_then(HookEvent::from_str)?;
         if res.body.is_empty() {
@@ -342,10 +316,8 @@ impl Hook {
         })
     }
 
-    /// The TOFU content-hash input (`domain::gate::content_hash`): `event`, `matcher`, and `command`
-    /// NUL-separated. Folding in `event`/`matcher` (not just `command`) means changing what a hook fires
-    /// on — e.g. `SessionEnd` (once, at teardown) to `TurnEnd` (every turn) — invalidates its approval
-    /// exactly like editing the command body does; hashing only `command` would let that slip through.
+    /// The TOFU content-hash input. `event`/`matcher` are folded in, not just `command`: changing what a
+    /// hook fires on (e.g. `SessionEnd` → `TurnEnd`, every turn) must invalidate its approval too.
     pub fn hash_key(&self) -> String {
         format!(
             "{:?}\0{}\0{}",
@@ -356,10 +328,8 @@ impl Hook {
     }
 }
 
-/// An **MCP server** (ADR 0021): a subprocess speaking the Model Context Protocol over stdio, whose
-/// tools extend the model's toolset — an active capability, gated like hooks. Built from a `Resource`;
-/// `command`/`args` come from frontmatter (no shell involved — spawned as `command` with `args` directly,
-/// like `hooks` shells its command, but MCP servers are long-lived processes, not one-shot scripts).
+/// An **MCP server** (ADR 0021): a long-lived subprocess whose tools extend the model's toolset — an
+/// active capability, gated like hooks. Spawned as `command` with `args` directly, never through a shell.
 // ponytail: stdio transport only — HTTP/SSE MCP servers are unstarted (ADR 0021's `Http(url)` variant).
 // Upgrade path: a second `McpTransport` variant + the matching rmcp streamable-http client feature.
 #[derive(Debug, Clone)]
@@ -372,8 +342,7 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    /// Build an MCP server spec from a frontmatter-parsed resource. `None` when `command:` is missing or
-    /// blank — a malformed server file is dropped rather than aborting boot.
+    /// `None` on a missing or blank `command:`: a malformed server file is dropped, never aborts boot.
     pub fn from_resource(res: &Resource) -> Option<Self> {
         let command = res
             .frontmatter
@@ -394,9 +363,8 @@ impl McpServer {
         })
     }
 
-    /// The effective command line (`command` plus any `args`, space-joined) for **display** only
-    /// (`ExtensionCatalog::mcp_display`) — human-readable, but ambiguous as a hash input (`args: ["bar",
-    /// "baz"]` and `args: ["bar baz"]` both render `"bar baz"`). Use `hash_key` for the TOFU content hash.
+    /// **Display only.** Ambiguous as a hash input: `args: ["bar", "baz"]` and `args: ["bar baz"]` both
+    /// render `"bar baz"`. Use `hash_key` for the TOFU content hash.
     pub fn command_line(&self) -> String {
         if self.args.is_empty() {
             self.command.clone()
@@ -405,9 +373,8 @@ impl McpServer {
         }
     }
 
-    /// The TOFU content-hash input (`domain::gate::content_hash`): `command` and each arg NUL-separated,
-    /// preserving argv boundaries so two different `(command, args)` shapes can never collide the way the
-    /// space-joined `command_line()` display string can.
+    /// The TOFU content-hash input: NUL-separated, preserving the argv boundaries that the space-joined
+    /// `command_line()` collapses — two different `(command, args)` shapes must never collide.
     pub fn hash_key(&self) -> String {
         let mut key = self.command.clone();
         for arg in &self.args {
@@ -426,8 +393,7 @@ fn is_truthy(value: &str) -> bool {
     )
 }
 
-/// Ensure a command token starts with a single leading `/`. A token already so-prefixed is unchanged;
-/// one prefixed with multiple slashes is normalized to one.
+/// Normalizes a command token to exactly one leading `/`.
 fn ensure_slash(name: &str) -> String {
     let trimmed = name.trim();
     match trimmed.strip_prefix('/') {
@@ -695,9 +661,8 @@ mod tests {
 
     #[test]
     fn mcp_server_hash_key_does_not_collide_across_argv_splits() {
-        // `command_line()` (display) space-joins command+args, so `(foo, ["bar", "baz"])` and
-        // `(foo, ["bar baz"])` would render identically and hash identically if hashed directly —
-        // `hash_key` must disambiguate the argv boundary that `command_line` collapses.
+        // `command_line()` renders `(foo, ["bar", "baz"])` and `(foo, ["bar baz"])` identically, so
+        // `hash_key` must disambiguate the argv boundary it collapses.
         let two_args = McpServer {
             id: "x".to_string(),
             command: "foo".to_string(),

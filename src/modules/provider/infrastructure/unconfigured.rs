@@ -1,11 +1,9 @@
-//! The null-object [`CompletionProvider`]: a placeholder the composition root injects when the harness
-//! boots with no usable credential (first run, no env key). It performs no network I/O and fails every
-//! turn with a clear, actionable error, so the TUI can come up in onboarding and the user can configure a
-//! provider via the wizard — which swaps in a real adapter through `AgentLoop::set_provider`.
+//! The null [`CompletionProvider`] injected when the harness boots with no usable credential, so the TUI
+//! can still come up in onboarding instead of aborting.
 //!
-//! It is deliberately NOT reachable from [`super::factory::build_provider`]'s `(kind, auth)` match, so no
-//! profile can ever select it; only `app::wire` constructs it. The submit gate in the TUI normally keeps
-//! a turn from reaching it at all — this is the defense-in-depth backstop behind that gate.
+//! It is deliberately unreachable from [`super::factory::build_provider`]'s `(kind, auth)` match — only
+//! `app::wire` constructs it — and the TUI's submit gate normally stops a turn before it arrives here.
+//! This is the backstop behind that gate.
 
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,

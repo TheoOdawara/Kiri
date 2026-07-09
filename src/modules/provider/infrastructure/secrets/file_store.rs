@@ -1,6 +1,5 @@
-//! [`SecretStore`] backed by a 0600 JSON file under the kiri config dir. The only credential-store
-//! backend (ADR 0020). The whole map is read-modify-written per call — fine for
-//! the handful of providers a user configures.
+//! The whole credential map is read-modify-written per call — fine for the handful of providers a user
+//! configures, and the reason there is no caching layer here (ADR 0020).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -35,8 +34,7 @@ impl FileSecretStore {
 
     fn write_all(&self, map: &BTreeMap<String, Credential>) -> Result<(), AgentError> {
         if let Some(parent) = self.path.parent() {
-            // Route the credential dir (`~/.kiri`) through the single 0700 private-dir creator so the
-            // directory holding `credentials.json` is owner-only, never a plain 0755 `create_dir_all`.
+            // Never a plain `create_dir_all`: the dir holding `credentials.json` must be 0700.
             ensure_private_dir(parent)
                 .map_err(|e| AgentError::Secret(format!("create {}: {e}", parent.display())))?;
         }
@@ -66,11 +64,8 @@ impl SecretStore for FileSecretStore {
     }
 }
 
-/// Write `bytes` to `path` readable/writable by the owner only. On Unix this is an atomic `0600` write
-/// (temp sibling created `0600`, then renamed over `path`) so a crash mid-write can never leave the
-/// credentials file empty or partial — losing every stored key. On Windows std exposes no ACL control, so
-/// the file inherits the user-profile DACL (owner + SYSTEM/Administrators) — the accepted equivalent; the
-/// write is still crash-atomic (temp sibling + rename) via the same portable helper `write_atomic` uses.
+/// Both branches are crash-atomic: a partial write here would lose every stored key. On Windows std
+/// exposes no ACL control, so the file inherits the user-profile DACL — the accepted equivalent of 0600.
 #[cfg(unix)]
 fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), AgentError> {
     crate::shared::infra::fs::write_atomic_owner_only(path, bytes)
@@ -151,10 +146,8 @@ mod tests {
                 },
             )
             .unwrap();
-        // The second write preserved the first key (atomic rename never truncated the file to empty)...
         assert!(store.get("a").unwrap().is_some());
         assert!(store.get("b").unwrap().is_some());
-        // ...and the temp sibling was consumed by the rename.
         assert!(
             !dir.path().join(".credentials.json.kiri-tmp").exists(),
             "the atomic write must leave no temp sibling"
@@ -166,7 +159,7 @@ mod tests {
     fn write_all_creates_parent_dir_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
-        // The parent (a `~/.kiri` analogue) must not pre-exist, so write_all has to create it.
+        // Must not pre-exist, so `write_all` has to create it.
         let kiri_dir = dir.path().join("kiri");
         let store = FileSecretStore::new(kiri_dir.join("credentials.json"));
         store

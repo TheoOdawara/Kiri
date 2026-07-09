@@ -42,10 +42,8 @@ impl CompletionProvider for ScriptedProvider {
     }
 }
 
-/// One configurable UI double for every agent-loop test. It answers each confirmation from an optional
-/// `decisions` queue (consumed in order, then falling back to a fixed `default_decision`) and records
-/// what it was shown: the per-call `tool_started` commands, the `tool_finished` outcomes, the
-/// checkpoint reasons, and the `decide`/`finish_round` counts. Each test reads only the axis it needs.
+/// One configurable UI double for every agent-loop test. Answers each confirmation from the `decisions`
+/// queue in order, then falls back to `default_decision`, recording everything it was shown.
 struct TestIo {
     decisions: VecDeque<Approval>,
     default_decision: Approval,
@@ -129,9 +127,8 @@ fn tool_call_id(name: &str, args: &str, id: &str) -> ToolCall {
 
 /// The full fs tool set with no sensitive-path matchers, the single construction every test shares.
 fn registry_for_tests() -> ToolRegistry {
-    // Plan-mode allow-list with `echo` so the SEC-01 "run_command is still confirmed in plan mode"
-    // test reaches the confirmation gate; destructive tools (write_file) are blocked by being
-    // non-plannable, independent of this list.
+    // `echo` is allow-listed so the SEC-01 test reaches the confirmation gate; destructive tools are
+    // blocked by being non-plannable, independent of this list.
     ToolRegistry::new(default_fs_tools(
         Arc::from(vec![Regex::new(r"\becho\b").unwrap()]),
         false,
@@ -257,7 +254,7 @@ async fn thinking_attaches_to_the_pushed_message_on_a_tool_call_turn() {
         .await
         .unwrap();
 
-    // messages: System, User, Assistant(tool call + thinking), Tool, Assistant(text, no thinking)
+    // System, User, Assistant(tool call + thinking), Tool, Assistant(text, no thinking)
     let tool_call_message = &conversation.messages()[2];
     match tool_call_message
         .thinking
@@ -455,8 +452,8 @@ async fn plan_mode_allows_read_only_tools() {
 
 #[tokio::test]
 async fn plan_mode_confirms_run_command() {
-    // SEC-01: run_command is plannable, but plan mode must still confirm it (confirm_in_auto) — a
-    // prompt-injected plan turn cannot run an arbitrary command unattended. Declined → not executed.
+    // SEC-01: run_command is plannable, but plan mode must still confirm it — a prompt-injected plan turn
+    // cannot run an arbitrary command unattended.
     let dir = TempDir::new().unwrap();
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
     let agent_loop = agent_loop_with(vec![
@@ -490,10 +487,9 @@ async fn plan_mode_confirms_run_command() {
 
 #[tokio::test]
 async fn checkpoint_approved_auto_does_not_reopen_the_plan_blacklist() {
-    // Issue #28: a turn that STARTS in Plan and escalates to Auto mid-turn via a checkpoint's "keep
-    // going, don't ask again" (ApprovedAuto) must still refuse a plan_check-blacklisted run_command —
-    // not silently downgrade from "refused outright" to "just needs a live confirmation" the instant the
-    // checkpoint fires. max_tool_calls=1 forces the checkpoint after round 1's single allowed call.
+    // A turn that starts in Plan and escalates to Auto mid-turn must still refuse a plan_check-blacklisted
+    // run_command, never downgrade it to "needs a live confirmation". max_tool_calls=1 forces the
+    // checkpoint after round 1's single allowed call.
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("marker.txt"), b"still here").unwrap();
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
@@ -563,25 +559,19 @@ async fn checkpoint_approved_auto_does_not_reopen_the_plan_blacklist() {
 
 #[tokio::test]
 async fn checkpoint_approved_auto_does_not_defeat_present_plan_interception() {
-    // Issue #28 (second gap, found by adversarial re-verification): the sibling test above locks
-    // run_command's plan_check blacklist surviving a mid-turn ApprovedAuto escalation, but the
-    // present_plan interception itself (`AgentLoop::run`) used to gate on the live `mode` instead of
-    // `started_in_plan` — so after the same escalation, a `present_plan` call fell through to
-    // `decide_and_run`'s `Auto if started_in_plan` arm and executed as an ordinary tool (echoing the
-    // plan) instead of ending the turn with `TurnOutcome::PlanProposed`. max_tool_calls=1 forces the
-    // checkpoint after round 1's single allowed call, exactly like the sibling test.
+    // The sibling test above locks run_command's blacklist across a mid-turn ApprovedAuto escalation; this
+    // one locks the `present_plan` interception across the same escalation. Gating it on the live `mode`
+    // instead of `started_in_plan` makes `present_plan` execute as an ordinary tool, echoing the plan back
+    // instead of ending the turn with `TurnOutcome::PlanProposed`.
     let dir = TempDir::new().unwrap();
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
     let agent_loop = AgentLoop::new(
         Arc::new(ScriptedProvider {
             turns: Mutex::new(VecDeque::from(vec![
-                // Round 1: an allow-listed command (echo), confirmed — the call cap then trips. Mirrors
-                // the sibling test above: run_command is the call that actually consumes a `decide`
-                // confirmation, so the post-round checkpoint consumes the SECOND queued decision
-                // (ApprovedAuto) and genuinely flips `mode` to Auto before round 2 — a plannable
-                // read-only call here (e.g. list_dir) needs no confirmation and would let the
-                // checkpoint consume the wrong decision, leaving `mode` at Plan and making this test
-                // pass vacuously regardless of the fix.
+                // run_command, not a read-only call: it consumes a `decide` confirmation, so the
+                // post-round checkpoint consumes the SECOND queued decision (ApprovedAuto) and genuinely
+                // flips `mode` to Auto. A plannable read-only call needs no confirmation, would let the
+                // checkpoint consume the wrong decision, and would make this test pass vacuously.
                 CompletedTurn {
                     content: "investigating".to_string(),
                     tool_calls: vec![tool_call("run_command", r#"{"command":"echo hi"}"#)],
@@ -621,8 +611,8 @@ async fn checkpoint_approved_auto_does_not_defeat_present_plan_interception() {
 
 #[tokio::test]
 async fn plan_mode_confirms_out_of_root_read() {
-    // SEC-01: an out-of-root read while planning must be confirmed (not default-accepted), so a
-    // prompt-injected plan turn cannot exfiltrate `~/.ssh/id_rsa` / `/etc/passwd` back to the model.
+    // SEC-01: an out-of-root read while planning must be confirmed, so a prompt-injected plan turn cannot
+    // exfiltrate `~/.ssh/id_rsa` back to the model.
     let outside = TempDir::new().unwrap();
     let secret = outside.path().join("secret.txt");
     std::fs::write(&secret, b"top secret").unwrap();
@@ -673,9 +663,8 @@ async fn plan_mode_confirms_out_of_root_read() {
 
 #[tokio::test]
 async fn plan_mode_present_plan_proposes_the_plan_and_keeps_the_wire_valid() {
-    // The explicit plan signal: a `present_plan` call in plan mode ends the turn as `PlanProposed`
-    // (no execution), and the conversation stays a valid tool round (assistant tool_call answered
-    // by a tool result) so the next turn after approval is accepted by the provider.
+    // `present_plan` ends the turn as `PlanProposed` with no execution, and the conversation stays a valid
+    // tool round so the provider accepts the next turn after approval.
     let dir = TempDir::new().unwrap();
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
     let agent_loop = agent_loop_with(vec![CompletedTurn {
@@ -1010,18 +999,14 @@ async fn iteration_cap_fires_the_checkpoint() {
 
 #[tokio::test]
 async fn a_tool_timeout_is_never_auto_retried_within_the_turn() {
-    // Issue #53: tokio::fs/spawn_blocking-based mutating tools can't cancel their underlying syscall
-    // once dispatched, so a reported timeout doesn't guarantee the write actually stopped — an automatic
-    // retry could race a second attempt against the still-running first one and land unpredictably. The
-    // harness's invariant this residual risk depends on: a timed-out call produces exactly ONE execution
-    // attempt and one tool_result; only the model's own NEXT turn can decide to try again. run_command's
-    // real, exercisable timeout stands in for the same "the harness never re-issues a timed-out call by
-    // itself" behavior every tool relies on — the harness has no tool-specific retry logic anywhere.
+    // A mutating tool cannot cancel its underlying syscall once dispatched, so a reported timeout does not
+    // prove the write stopped; an automatic retry could race the still-running first attempt. The
+    // invariant that makes this safe: a timed-out call produces exactly ONE execution attempt and one
+    // tool_result, and only the model's next turn can retry. run_command stands in for every tool here.
     let dir = TempDir::new().unwrap();
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
-    // `timeout_ms` is clamped to a 1000ms floor (`RUN_COMMAND_MIN_TIMEOUT_MS`), so the requested 100ms
-    // below actually races a ~1s timeout — a slow command comfortably longer than that keeps the timeout
-    // deterministic rather than a close call.
+    // `timeout_ms` is clamped to a 1000ms floor, so the 100ms requested below actually races a ~1s
+    // timeout; a comfortably slower command keeps this deterministic.
     let slow = if cfg!(windows) {
         "ping -n 6 127.0.0.1 > nul"
     } else {
@@ -1080,9 +1065,8 @@ async fn a_tool_timeout_is_never_auto_retried_within_the_turn() {
 
 #[tokio::test]
 async fn the_call_cap_pauses_within_a_single_oversized_round() {
-    // One assistant message carrying three write_file calls, cap 2, in auto. The cap must trip
-    // WITHIN the round: the first two write, the third is paused-and-declined before executing —
-    // the regression where a single round could run an unbounded burst before any checkpoint.
+    // Three write_file calls in one assistant message, cap 2, in auto. The cap must trip WITHIN the round:
+    // the first two write, the third is paused-and-declined before executing.
     let dir = TempDir::new().unwrap();
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
     let provider = Arc::new(ScriptedProvider {
@@ -1130,8 +1114,8 @@ async fn the_call_cap_pauses_within_a_single_oversized_round() {
 
 #[tokio::test]
 async fn aborting_mid_round_answers_every_tool_call() {
-    // The user aborts at the first of two calls; both must still receive a tool_result so the
-    // assistant tool_calls message is a fully-answered (valid, persistable) exchange.
+    // The user aborts at the first of two calls; both must still receive a tool_result, or the exchange
+    // is invalid and unpersistable.
     let dir = TempDir::new().unwrap();
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
     let provider = Arc::new(ScriptedProvider {
@@ -1187,9 +1171,8 @@ impl CompletionProvider for FailingProvider {
 
 #[tokio::test]
 async fn provider_failure_propagates_after_finishing_the_render() {
-    // The contract requires render cleanup (spinner erase / terminal reset) on the failure path too,
-    // and the error to propagate. A refactor moving finish_round after `?` would pass every other
-    // test but break this.
+    // Render cleanup must run on the failure path too. Moving `finish_round` after the `?` would pass
+    // every other test but break this.
     let dir = TempDir::new().unwrap();
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
     let agent_loop = AgentLoop::new(
@@ -1219,8 +1202,7 @@ async fn provider_failure_propagates_after_finishing_the_render() {
 
 #[tokio::test]
 async fn wall_clock_checkpoint_fires_with_an_elapsed_reason() {
-    // A zero wall-clock budget trips the time leg after the first round; the cap is large so it is
-    // NOT the call-count leg — the reason shown must be Elapsed, not CallCount.
+    // A zero wall-clock budget trips the time leg; the cap is large, so the reason must be Elapsed.
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("a.txt"), b"hi").unwrap();
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
@@ -1256,9 +1238,8 @@ async fn wall_clock_checkpoint_fires_with_an_elapsed_reason() {
     );
 }
 
-/// The production seam the other tests skip: drive a turn through the REAL `Bridge` adapter (not the
-/// scripted IO double) and assert the engine emits `Began` first — the message that flips the
-/// spinner / streaming on. A regression here is exactly "first message does nothing, no spinner".
+/// The production seam the other tests skip: a turn through the REAL `Bridge` adapter, asserting the
+/// engine emits `Began` first. A regression here is exactly "first message does nothing, no spinner".
 #[tokio::test]
 async fn run_through_the_real_bridge_emits_began_first_then_content() {
     use crate::modules::tui::infrastructure::runtime::bridge::{Bridge, CancelToken, EngineMsg};
@@ -1330,9 +1311,8 @@ async fn run_through_the_real_bridge_emits_began_first_then_content() {
 
 #[test]
 fn tool_results_are_english() {
-    // The model-facing tool-result consts are protocol text and must stay English (the contract:
-    // code/protocol in English). The user-facing pt-BR confirmation prompts live in the Bridge adapter
-    // and are deliberately untouched. Guard against a pt-BR regression sneaking back into the consts.
+    // The tool-result consts are model-facing protocol text and must stay English; the user-facing pt-BR
+    // prompts live in the Bridge adapter.
     let messages = [
         TOOL_RESULT_PLAN_PRESENTED,
         TOOL_RESULT_PLAN_BLOCKED,

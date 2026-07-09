@@ -4,9 +4,7 @@ use crate::shared::kernel::message::{Message, ThinkingBlock};
 use crate::shared::kernel::role::Role;
 use crate::shared::kernel::tool_call::ToolCall;
 
-/// Serde mirror of the agent-domain `Message`, owned by this infrastructure layer so the domain stays
-/// serde-free (ADR 0003). The `images`, `tool_calls`, and `thinking` columns are stored as JSON; this
-/// type centralizes that mapping for the SQLite session store.
+/// Serde mirror of the kernel `Message`, so the domain stays serde-free (ADR 0003).
 #[derive(Serialize, Deserialize)]
 pub struct StoredMessage {
     pub role: String,
@@ -35,8 +33,7 @@ impl From<&Message> for StoredMessage {
 }
 
 impl StoredMessage {
-    /// Reconstruct a domain `Message`, consuming the DTO. Returns `None` for an unknown role, so the
-    /// loader can skip a corrupted row rather than fabricating a wrong one.
+    /// `None` on an unknown role, so the loader skips a corrupt row rather than fabricating one.
     pub fn into_domain(self) -> Option<Message> {
         let role = Role::from_wire_str(&self.role)?;
         Some(Message {

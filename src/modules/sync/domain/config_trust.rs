@@ -5,9 +5,8 @@ use serde::Deserialize;
 use crate::shared::kernel::provider::AuthMethod;
 use crate::shared::kernel::sandbox::{NetworkStance, SandboxMode};
 
-/// The security-relevant fields of a config, parsed against the real shape (extra fields ignored).
-/// Deliberately a small typed view rather than `toml::Value` poking, so the trust gate reasons over the
-/// same schema the loader uses and cannot be fooled by an unexpected layout.
+/// A typed view rather than `toml::Value` poking, so the gate reasons over the same schema the loader
+/// uses and cannot be fooled by an unexpected layout.
 #[derive(Deserialize, Default)]
 struct TrustView {
     #[serde(default)]
@@ -28,16 +27,14 @@ struct TrustView {
 struct TrustProvider {
     #[serde(default)]
     base_url: Option<String>,
-    /// Typed against the kernel [`AuthMethod`] (forward-compat `Deserialize`) so the gate reasons over
-    /// the same enum the loader uses, not a hand-typed `"none"` literal. Absent = the historical default.
+    /// Absent means the historical default, which is *not* `Some(AuthMethod::None)`.
     #[serde(default)]
     auth: Option<AuthMethod>,
 }
 
 #[derive(Deserialize, Default)]
 struct TrustSandbox {
-    /// Typed against the kernel sandbox primitives; an unknown value maps to the safe variant, so a
-    /// forward-version config is never read as a downgrade. Absent = the resolver's baseline.
+    /// An unknown value maps to the safe variant, so a forward-version config never reads as a downgrade.
     #[serde(default)]
     mode: Option<SandboxMode>,
     #[serde(default)]
@@ -50,18 +47,14 @@ struct TrustEmbeddings {
     provider: Option<String>,
 }
 
-/// `[paths].docs`: redirects `consult_docs`'s search root. Issue #30/S4-1: an incoming synced config
-/// changing this to an arbitrary directory (e.g. the user's home) let `DocsLibrary::search` surface
-/// excerpts of any `.md` file there to the model — a read-amplification the trust gate exists to prevent.
+/// `docs` redirects `consult_docs`'s search root: pointed at the user's home, it would surface excerpts
+/// of any `.md` file there to the model (issue #30/S4-1).
 #[derive(Deserialize, Default)]
 struct TrustPaths {
     #[serde(default)]
     docs: Option<String>,
 }
 
-/// `[http]` timeouts. Issue #30/S4-1: flagged on any change (not just widened) — the simplest, most
-/// conservative rule, matching how `embeddings.provider` is already flagged on any change rather than
-/// only a directional one.
 #[derive(Deserialize, Default, PartialEq)]
 struct TrustHttp {
     #[serde(default)]
@@ -70,28 +63,17 @@ struct TrustHttp {
     read_timeout_ms: Option<u64>,
 }
 
-/// Identify risky differences in an incoming config that, applied as the trusted global layer, could
-/// redirect a credential or weaken the sandbox. Flags: a newly added provider; an existing provider's
-/// `base_url` added or changed; an existing provider's auth disabled; the active provider switching to a
-/// different endpoint; the embeddings provider changing; `[paths].docs` changing (issue #30/S4-1 —
-/// redirects `consult_docs`'s search root); `[http]` timeout settings changing; the sandbox confinement
-/// *weakened* by rank (`require → os`, `require → off`, `os → off`); the sandbox network widened to
-/// allow. Reasons over the typed kernel [`AuthMethod`]/[`SandboxMode`]/[`NetworkStance`] (no magic
-/// strings). Returns a human-readable list (empty = safe to apply).
+/// Risky differences in an incoming config that, applied as the trusted global layer, could redirect a
+/// credential or weaken the sandbox. An empty list is safe to apply.
 ///
-/// Standalone entry point: it re-parses both configs and owns its own incoming-TOML-validity guard (the
-/// `not valid TOML` arm below), so it stays correct when called directly — from its unit tests, or any
-/// future caller that has not pre-validated. On the `pull` path the incoming config is validated first,
-/// which makes that arm redundant *there*; the self-contained parse is deliberate defense-in-depth, not
-/// dead code. (Reusing the already-parsed config would mean returning the parsed `RawConfig` from
-/// `validate_config_str` and threading it here — a wider config-API change deferred as not worth it.)
+/// The re-parse and the invalid-TOML arm are redundant on the `pull` path, which validates first; they
+/// are kept so a direct caller that has not pre-validated is still gated.
 pub(crate) fn risky_config_changes(current: &str, incoming: &str) -> Vec<String> {
     let incoming: TrustView = match toml::from_str(incoming) {
         Ok(value) => value,
         Err(error) => return vec![format!("incoming config is not valid TOML: {error}")],
     };
-    // A current config we cannot parse is not a baseline we can compare against — we cannot prove the
-    // change is non-risky, so treat it as requiring an explicit `--force`.
+    // An unparseable baseline cannot prove the change non-risky, so it demands an explicit `--force`.
     let current: TrustView = match toml::from_str(current) {
         Ok(value) => value,
         Err(_) => {
@@ -103,10 +85,8 @@ pub(crate) fn risky_config_changes(current: &str, incoming: &str) -> Vec<String>
 
     let mut risks = Vec::new();
 
-    // A new provider, or a base_url added/changed on an existing one, can redirect where a credential
-    // (stored or env-imported) is sent — the core credential-exfiltration vector. Turning off an existing
-    // provider's authentication (api-key/oauth -> none) silently disables its credential, and for a vendor
-    // endpoint the next boot then fails to build it (a DoS-via-sync); both require an explicit `--force`.
+    // A new provider or a changed base_url redirects where a credential is sent — the core exfiltration
+    // vector. Disabling auth silently strands the credential and can brick the next boot.
     for (id, inc) in &incoming.providers {
         match current.providers.get(id) {
             None => risks.push(format!("new provider '{id}' added")),
@@ -114,9 +94,7 @@ pub(crate) fn risky_config_changes(current: &str, incoming: &str) -> Vec<String>
                 if cur.base_url != inc.base_url {
                     risks.push(format!("provider '{id}' base_url changes"));
                 }
-                // Anything not explicitly `None` (api-key/oauth, or absent = the historical default,
-                // since `None != Some(AuthMethod::None)`) is treated as keyed, so dropping authentication
-                // is always flagged.
+                // Anything other than an explicit `None` counts as keyed, absent included.
                 if cur.auth != Some(AuthMethod::None) && inc.auth == Some(AuthMethod::None) {
                     risks.push(format!("provider '{id}' auth disabled"));
                 }
@@ -124,7 +102,7 @@ pub(crate) fn risky_config_changes(current: &str, incoming: &str) -> Vec<String>
         }
     }
 
-    // The active provider switching to one with a different base_url redirects the active credential.
+    // Switching to a provider with a different base_url redirects the active credential.
     let active_url = |view: &TrustView| -> Option<String> {
         view.active_provider
             .as_ref()
@@ -137,29 +115,22 @@ pub(crate) fn risky_config_changes(current: &str, incoming: &str) -> Vec<String>
         risks.push("active_provider changes to a different endpoint".to_string());
     }
 
-    // Redirecting the embeddings provider sends the embedded text (and that provider's key) elsewhere.
+    // A redirected embeddings provider receives the embedded text and that provider's key.
     if incoming.embeddings.provider != current.embeddings.provider {
         risks.push("embeddings provider changes".to_string());
     }
 
-    // Redirecting the docs search root lets a synced config point `consult_docs` at an arbitrary
-    // directory (e.g. the user's home), surfacing excerpts of any `.md` file there to the model —
-    // a read-amplification the trust gate exists to prevent (issue #30/S4-1).
     if incoming.paths.docs != current.paths.docs {
         risks.push("paths.docs changes".to_string());
     }
 
-    // An http timeout change is a lower-impact (availability, not confidentiality) knob, but flagged on
-    // any change for the same reason `embeddings.provider` is: simplest and most conservative rule
-    // (issue #30/S4-1).
+    // Availability-only, but flagged on any change rather than only a widening — the conservative rule.
     if incoming.http != current.http {
         risks.push("http timeout settings change".to_string());
     }
 
-    // Sandbox confinement must not weaken. Rank the modes (`Require > Os > Off`) so any strictly-lower
-    // incoming rank is flagged — not only `→ off`. An absent mode is the resolver's `Os` baseline, so
-    // `absent → os` (and `os → require`) does not flag. Debug-format the modes so the message carries no
-    // bare `"off"`/`"require"` literal the gate could be mistaken for comparing against.
+    // Ranking (`Require > Os > Off`) catches every weakening, not only `→ off`. An absent mode is the
+    // resolver's `Os` baseline, so `absent → os` is a no-op.
     let current_mode = current.sandbox.mode.unwrap_or(SandboxMode::Os);
     let incoming_mode = incoming.sandbox.mode.unwrap_or(SandboxMode::Os);
     if incoming_mode.rank() < current_mode.rank() {
@@ -168,7 +139,7 @@ pub(crate) fn risky_config_changes(current: &str, incoming: &str) -> Vec<String>
         ));
     }
 
-    // Base network stance must not widen from deny to allow (an absent stance is the `Deny` baseline).
+    // An absent stance is the `Deny` baseline.
     let current_net = current.sandbox.network.unwrap_or(NetworkStance::Deny);
     let incoming_net = incoming.sandbox.network.unwrap_or(NetworkStance::Deny);
     if incoming_net == NetworkStance::Allow && current_net != NetworkStance::Allow {
@@ -184,8 +155,6 @@ pub(crate) fn risky_config_changes(current: &str, incoming: &str) -> Vec<String>
 mod tests {
     use super::*;
 
-    /// A complete, schema-valid provider profile (the loader requires kind/base_url/model/auth;
-    /// `ProviderKind::OpenAiCompatible` serializes kebab-case as `open-ai-compatible`).
     fn provider_toml(id: &str, base_url: &str) -> String {
         format!(
             "[providers.{id}]\nkind = \"open-ai-compatible\"\nbase_url = \"{base_url}\"\nmodel = \"m\"\nauth = \"api-key\"\n"
@@ -215,8 +184,7 @@ base_url = "https://evil.example/v1"
 
     #[test]
     fn detects_sandbox_require_to_os_downgrade() {
-        // The audited hole: `require → os` is a genuine weakening on a platform with no OS sandbox, yet
-        // the old gate only flagged `→ off`. Ranking catches it.
+        // On a platform with no OS sandbox this is a genuine weakening; the old gate only flagged `→ off`.
         let risks = risky_config_changes(
             "[sandbox]\nmode = \"require\"\n",
             "[sandbox]\nmode = \"os\"\n",
@@ -242,7 +210,6 @@ base_url = "https://evil.example/v1"
 
     #[test]
     fn sandbox_os_to_require_is_safe() {
-        // Strengthening confinement (lower → higher rank) is never risky.
         let risks = risky_config_changes(
             "[sandbox]\nmode = \"os\"\n",
             "[sandbox]\nmode = \"require\"\n",
@@ -255,7 +222,6 @@ base_url = "https://evil.example/v1"
 
     #[test]
     fn sandbox_absent_to_os_is_safe() {
-        // An absent mode is the `Os` baseline, so `absent → os` is a no-op, not a downgrade.
         let risks = risky_config_changes("", "[sandbox]\nmode = \"os\"\n");
         assert!(
             !risks.iter().any(|r| r.contains("sandbox")),
@@ -265,8 +231,6 @@ base_url = "https://evil.example/v1"
 
     #[test]
     fn auth_gate_uses_typed_authmethod() {
-        // The auth-disabled check reasons over the typed `Some(AuthMethod::None)`, not a `"none"` string:
-        // an `api-key → none` change on the same endpoint is flagged.
         let current = provider_toml("nvidia", "https://x/v1"); // auth = "api-key"
         let incoming = "[providers.nvidia]\nkind = \"open-ai-compatible\"\n\
                         base_url = \"https://x/v1\"\nmodel = \"m\"\nauth = \"none\"\n";
@@ -294,8 +258,6 @@ base_url = "https://evil.example/v1"
 
     #[test]
     fn detects_auth_downgrade_to_none() {
-        // Turning off authentication on an existing provider (same base_url) must require --force, so a
-        // synced config cannot silently disable a credential — and, for a vendor endpoint, brick the boot.
         let current = provider_toml("nvidia", "https://x/v1"); // auth = "api-key"
         let incoming = "[providers.nvidia]\nkind = \"open-ai-compatible\"\n\
                         base_url = \"https://x/v1\"\nmodel = \"m\"\nauth = \"none\"\n";
@@ -308,7 +270,6 @@ base_url = "https://evil.example/v1"
 
     #[test]
     fn already_keyless_provider_unchanged_is_safe() {
-        // A provider that was already keyless (none -> none) is not flagged as a downgrade.
         let config = "[providers.lmstudio]\nkind = \"open-ai-compatible\"\n\
                       base_url = \"http://localhost:1234/v1\"\nmodel = \"m\"\nauth = \"none\"\n";
         assert!(risky_config_changes(config, config).is_empty());
@@ -347,8 +308,6 @@ base_url = "https://evil.example/v1"
 
     #[test]
     fn detects_docs_path_redirect() {
-        // Issue #30/S4-1: the exact reported hole — a synced config redirecting [paths].docs to an
-        // arbitrary directory (e.g. the victim's home) must require --force, not apply silently.
         let risks = risky_config_changes(
             "[paths]\ndocs = \"docs\"\n",
             "[paths]\ndocs = \"/home/victim\"\n",
@@ -373,7 +332,6 @@ base_url = "https://evil.example/v1"
 
     #[test]
     fn detects_http_timeout_change() {
-        // Issue #30/S4-1: an [http] change must also require --force.
         let risks = risky_config_changes(
             "[http]\nconnect_timeout_ms = 5000\n",
             "[http]\nconnect_timeout_ms = 600000\n",

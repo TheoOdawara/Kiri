@@ -13,39 +13,26 @@ use crate::shared::kernel::error::{AgentError, AgentResult};
 use crate::shared::kernel::message::Message;
 use crate::shared::kernel::time::now_rfc3339;
 
-/// `busy_timeout` for cross-process write contention on the global sessions DB. Kept STRICTLY BELOW
-/// `DB_OP_TIMEOUT` so a persistent lock surfaces as a deterministic `SQLITE_BUSY` error *before* the
-/// op-level `tokio::time` timeout fires. If they were equal, the timeout could win the race and cancel
-/// the awaiting future while the detached blocking commit is still in flight: `flush_session` would
-/// return early without advancing `persisted_len`, and the next flush would re-append the same delta
-/// with fresh ordinals, duplicating messages on resume (BUG-01).
+/// Must stay STRICTLY BELOW `DB_OP_TIMEOUT`: a persistent cross-process lock has to surface as
+/// `SQLITE_BUSY` before the op-level `tokio::time` timeout can cancel an in-flight commit — that
+/// cancellation would leave `flush_session` re-appending the same delta and duplicating messages on
+/// resume (BUG-01).
 const SESSION_BUSY_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Conversation persistence in a single SQLite database (`~/.kiri/sessions.db`). Mirrors
-/// `SqliteSharedMemory`: the blocking `rusqlite` connection lives behind `Arc<Mutex<_>>` and every query
-/// runs on a blocking thread bounded by `DB_OP_TIMEOUT`, so a slow disk never stalls the TUI runtime.
 pub struct SqliteSessionStore {
     conn: Arc<Mutex<Connection>>,
-    /// Whether `new` (not `in_memory_inert`) backed this store. Surfaced via `is_available()`, the
-    /// canonical inert-store signal this tree converges on — the sibling memory store adopts the same
-    /// model once its SQLite harness is unified.
     available: bool,
 }
 
 impl SqliteSessionStore {
-    /// Open (creating it and its parent directory if needed) the sessions database. Call `init` for the
-    /// schema. A store opened this way reports available. An open/IO-class failure here (missing parent,
-    /// permissions, a locked file) surfaces as `AgentError::session` — that constructor deliberately also
-    /// carries SQLite-open failures, not only the non-IO query errors, rather than add a separate IO class.
+    /// Opens the database (and its parent dir); the schema comes from `init`.
     pub fn new(db_path: PathBuf) -> AgentResult<Self> {
         let conn = open_with_parent(&db_path, AgentError::session)?;
-        // ~/.kiri/sessions.db is global across every workspace and terminal, so a second running Kiri
-        // can contend for a write. SQLITE_BUSY returns instantly (the op timeout cannot wait it out), so
-        // a busy_timeout lets brief cross-process contention be waited out instead of failing — kept below
-        // DB_OP_TIMEOUT (see SESSION_BUSY_TIMEOUT) so a persistent lock fails deterministically before the
-        // op timeout fires. WAL is a best-effort throughput win that also reduces reader/writer contention.
+        // `~/.kiri/sessions.db` is shared across every workspace and terminal, and SQLITE_BUSY returns
+        // instantly, so a second running Kiri needs a busy_timeout to wait out brief write contention.
         conn.busy_timeout(SESSION_BUSY_TIMEOUT)
             .map_err(AgentError::session)?;
+        // WAL is a best-effort throughput win; the rollback journal is correct too, so a refusal is safe.
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -53,9 +40,8 @@ impl SqliteSessionStore {
         })
     }
 
-    /// An ephemeral, inert in-memory store used as the degraded fallback when the on-disk database
-    /// cannot be opened or initialized — the harness still wires a (unavailable) store instead of
-    /// failing to start. Reports `is_available() == false`.
+    /// Degraded fallback when the on-disk database cannot be opened: the harness wires an unavailable
+    /// store rather than failing to start.
     pub fn in_memory_inert() -> AgentResult<Self> {
         let conn = Connection::open_in_memory().map_err(AgentError::session)?;
         Ok(Self {
@@ -65,11 +51,8 @@ impl SqliteSessionStore {
     }
 }
 
-/// Add the `thinking` column to `messages` if it is missing. No migration framework exists in this
-/// codebase; `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists, so a database created
-/// before this column was introduced needs it added in place. Idempotent (checked on every `init()`,
-/// altered at most once) — mirrors the existing `DROP INDEX IF EXISTS` + recreate precedent for evolving
-/// this same table.
+/// There is no migration framework, and `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table,
+/// so a database created before this column needs it added in place.
 fn add_thinking_column_if_missing(conn: &Connection) -> AgentResult<()> {
     let has_column: bool = conn
         .prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'thinking'")
@@ -80,10 +63,8 @@ fn add_thinking_column_if_missing(conn: &Connection) -> AgentResult<()> {
     }
     match conn.execute("ALTER TABLE messages ADD COLUMN thinking TEXT", []) {
         Ok(_) => Ok(()),
-        // Two Kiri processes can race this exact check-then-ALTER window on a shared, not-yet-migrated
-        // `~/.kiri/sessions.db` (e.g. simultaneous first launch after upgrading). SQLite has no distinct
-        // error code for this, only the message text, so the loser recognizes and tolerates it instead of
-        // degrading its whole session store to the in-memory inert fallback over a column that now exists.
+        // Two processes can race the check-then-ALTER window; the loser tolerates it rather than degrade
+        // to the inert fallback over a column that now exists.
         Err(error) if is_duplicate_column_error(&error) => Ok(()),
         Err(error) => Err(AgentError::session(error)),
     }
@@ -99,7 +80,7 @@ impl SessionStore for SqliteSessionStore {
         let conn = self.conn.clone();
         run_blocking(move || -> AgentResult<()> {
             let conn = lock(&conn, AgentError::session)?;
-            // foreign_keys is per-connection; set it so the messages cascade on session delete.
+            // foreign_keys is per-connection, not per-database.
             conn.execute_batch(
                 "PRAGMA foreign_keys = ON;
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -120,11 +101,8 @@ impl SessionStore for SqliteSessionStore {
                     tool_call_id TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, updated_at DESC);
-                -- Drop the prior non-unique index and replace it with a UNIQUE one on the same columns:
-                -- it doubles as the lookup index and the belt-and-suspenders that fails an insert if a
-                -- cross-process race ever produced a duplicate ordinal. Pre-1.0 caveat: a legacy DB that
-                -- already holds duplicate (session_id, ordinal) rows would fail this creation; no migration
-                -- is shipped (no released versions to upgrade from).
+                -- UNIQUE replaces the prior non-unique index: it is both the lookup index and the guard
+                -- that fails an insert if a cross-process race ever produced a duplicate ordinal.
                 DROP INDEX IF EXISTS idx_messages_session;
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_ordinal
                     ON messages(session_id, ordinal);",
@@ -168,7 +146,7 @@ impl SessionStore for SqliteSessionStore {
         }
         let conn = self.conn.clone();
         let session_id = session_id.to_string();
-        // Serialize off the lock: turn each domain message into its stored columns up front.
+        // Serialize before taking the lock, not under it.
         #[allow(clippy::type_complexity)]
         let rows: Vec<(
             String,
@@ -204,9 +182,8 @@ impl SessionStore for SqliteSessionStore {
             move || -> AgentResult<()> {
                 let now = now_rfc3339();
                 let mut guard = lock(&conn, AgentError::session)?;
-                // IMMEDIATE takes the write lock before the MAX(ordinal) read, so a second process cannot read
-                // the same MAX and assign a duplicate ordinal. The RAII transaction rolls back on any `?`
-                // early-return (no stranded transaction on the shared connection).
+                // IMMEDIATE takes the write lock before the MAX(ordinal) read, so a second process cannot
+                // read the same MAX and assign a duplicate ordinal.
                 let tx = guard
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(AgentError::session)?;
@@ -363,8 +340,8 @@ impl SessionStore for SqliteSessionStore {
                     |row| row.get::<_, String>(0),
                 ) {
                     Ok(title) => title,
-                    // Absent session is `Ok(None)`; a real DB error (locked/corrupt/IO) must surface, not be
-                    // reported to the user as "session not found".
+                    // Only an absent session is `Ok(None)`; a locked/corrupt/IO error must not be reported
+                    // to the user as "session not found".
                     Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
                     Err(error) => return Err(AgentError::session(error)),
                 };
@@ -379,10 +356,9 @@ impl SessionStore for SqliteSessionStore {
                         let images_raw: String = row.get(2)?;
                         let tool_calls_raw: String = row.get(3)?;
                         let thinking_raw: Option<String> = row.get(5)?;
-                        // A corrupt images/tool_calls/thinking column makes the row unsafe to keep: silently
-                        // emptying tool_calls would leave an assistant message whose calls vanished while its
-                        // answers (Role::Tool rows) still reference them — an orphaned exchange the provider
-                        // rejects. Skip the whole message instead (returned as None, dropped below).
+                        // Skip the whole row rather than default a corrupt column: an emptied `tool_calls`
+                        // leaves the `Role::Tool` answers referencing calls that vanished, and the provider
+                        // rejects that orphaned exchange.
                         let images = match serde_json::from_str(&images_raw) {
                             Ok(value) => value,
                             Err(_) => return Ok(None),
@@ -411,9 +387,6 @@ impl SessionStore for SqliteSessionStore {
                 let mut messages = Vec::new();
                 let mut skipped = 0usize;
                 for row in rows {
-                    // Skip a corrupt row (unparseable images/tool_calls) or one with an unrecognized role
-                    // rather than abort the load; count the drops so the resume path can surface that the
-                    // conversation was silently shortened instead of losing turns invisibly.
                     match row
                         .map_err(AgentError::session)?
                         .and_then(StoredMessage::into_domain)
@@ -453,9 +426,6 @@ mod tests {
 
     #[test]
     fn busy_timeout_is_strictly_below_the_op_timeout() {
-        // BUG-01: if busy_timeout == DB_OP_TIMEOUT, the op-level tokio timeout can cancel an in-flight
-        // commit on a persistent cross-process lock, leaving flush_session to re-append the same delta
-        // and duplicate messages on resume. The busy_timeout must resolve SQLITE_BUSY first.
         assert!(
             SESSION_BUSY_TIMEOUT < crate::shared::infra::sqlite::DB_OP_TIMEOUT,
             "SESSION_BUSY_TIMEOUT {SESSION_BUSY_TIMEOUT:?} must be < DB_OP_TIMEOUT to fail deterministically first"
@@ -578,10 +548,8 @@ mod tests {
             .await
             .unwrap();
 
-        // `append_messages` never self-collides (MAX(ordinal)+1 is always free), so the rollback path
-        // is forced here by driving the same IMMEDIATE RAII transaction: a valid insert followed by a
-        // duplicate-ordinal insert that violates the unique index. Dropping the uncommitted transaction
-        // must discard the valid insert too (atomicity) and leave the shared connection usable.
+        // `append_messages` never self-collides (MAX(ordinal)+1 is always free), so the rollback path is
+        // forced by driving the same IMMEDIATE transaction by hand.
         {
             let mut guard = lock(&store.conn, AgentError::session).unwrap();
             let tx = guard
@@ -600,7 +568,7 @@ mod tests {
                 duplicate.is_err(),
                 "the colliding insert must fail mid-batch"
             );
-            // `tx` drops here without commit -> rollback discards the ordinal-2 insert.
+            // `tx` drops uncommitted here: the rollback discards the ordinal-2 insert too.
         }
 
         let loaded = store.load(&session.id).await.unwrap().unwrap();
@@ -610,7 +578,6 @@ mod tests {
             "the rolled-back insert must not persist"
         );
 
-        // The connection must not be stranded in an open transaction: the next append still works.
         store
             .append_messages(&session.id, &[Message::user("c")])
             .await
@@ -642,7 +609,6 @@ mod tests {
 
         let list = store.list_for_project("proj-a", 10).await.unwrap();
         assert_eq!(list.len(), 2);
-        // Newest first: s2 was updated last.
         assert_eq!(list[0].id, s2.id);
         assert_eq!(list[0].message_count, 1);
 
@@ -686,8 +652,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Plant a corrupt row: `tool_calls` is not valid JSON, so load must drop it (never abort) and
-        // report the drop instead of silently shortening the conversation.
+        // `tool_calls` is deliberately not valid JSON.
         {
             let guard = lock(&store.conn, AgentError::session).unwrap();
             guard
@@ -749,10 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_messages_table_gets_the_thinking_column_and_old_rows_load_as_none() {
-        // Simulate a `~/.kiri/sessions.db` created before the `thinking` column existed: a `messages`
-        // table matching the pre-migration schema exactly, with a row already in it. `init()` must add
-        // the column in place (not just on a brand-new table) and the pre-existing row must load with
-        // `thinking: None` rather than being dropped as corrupt.
+        // The schema below is the pre-migration one, verbatim.
         let dir = TempDir::new().unwrap();
         let db = dir.path().join("sessions.db");
         let store = SqliteSessionStore::new(db).unwrap();
@@ -812,9 +774,7 @@ mod tests {
 
     #[test]
     fn duplicate_column_alter_is_recognized_as_a_benign_race() {
-        // Deterministically reproduces the exact error SQLite returns when a second process wins the
-        // check-then-ALTER race: the column already exists, so a raw ALTER against it fails with
-        // "duplicate column name", not a distinct error code.
+        // SQLite signals this only in the message text, never a distinct error code.
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE messages (id INTEGER PRIMARY KEY, thinking TEXT)")
             .unwrap();

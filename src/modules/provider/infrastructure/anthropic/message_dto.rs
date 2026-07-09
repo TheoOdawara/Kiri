@@ -1,8 +1,6 @@
-//! Domain → Anthropic Messages translation. The Messages API differs from chat-completions in three
-//! ways this module bridges: `system` is a top-level field (not a `system` message), roles must strictly
-//! alternate user/assistant (so consecutive same-role domain messages — e.g. parallel tool results —
-//! are merged into one), and tool calls/results are content blocks (`tool_use`/`tool_result`) whose
-//! tool schemas use `{name, description, input_schema}` rather than the OpenAI `{type, function}` shape.
+//! The Messages API departs from chat-completions in three ways this module bridges: `system` is a
+//! top-level field, roles must strictly alternate user/assistant (so consecutive same-role messages are
+//! merged), and tool calls/results are content blocks rather than their own message shape.
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -11,16 +9,14 @@ use crate::modules::provider::infrastructure::tool_args;
 use crate::shared::kernel::message::{Message, ThinkingBlock};
 use crate::shared::kernel::role::Role;
 
-/// One Anthropic message: a `user`/`assistant` role and its content blocks. Built owned (rather than
-/// borrowing the domain messages) because translation merges messages and parses tool inputs into JSON
-/// — the request is assembled once per turn, so the allocations are negligible against the network call.
+/// Owned rather than borrowed: translation merges messages and parses tool inputs into JSON, and the
+/// allocations are negligible against the network call this is assembled for.
 #[derive(Debug, Serialize)]
 pub(crate) struct AnthropicMessage {
     pub role: &'static str,
     pub content: Vec<ContentBlock>,
 }
 
-/// A single content block. The internal `type` tag selects the shape, matching the Messages API.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ContentBlock {
@@ -49,7 +45,6 @@ pub(crate) enum ContentBlock {
     },
 }
 
-/// A base64 image source (`data:<media_type>;base64,<data>` parsed out of the domain data URL).
 #[derive(Debug, Serialize)]
 pub(crate) struct ImageSource {
     #[serde(rename = "type")]
@@ -58,9 +53,8 @@ pub(crate) struct ImageSource {
     pub data: String,
 }
 
-/// Split the domain messages into the top-level `system` text and the alternating user/assistant
-/// messages. System messages are concatenated (blank-line separated); every other message is mapped to
-/// its content blocks and merged into the previous message when they share an Anthropic role.
+/// System messages are concatenated into the top-level text; every other message is merged into the
+/// previous one when they share an Anthropic role.
 pub(crate) fn build_messages(messages: &[Message]) -> (Option<String>, Vec<AnthropicMessage>) {
     let mut system = String::new();
     let mut out: Vec<AnthropicMessage> = Vec::new();
@@ -93,8 +87,7 @@ pub(crate) fn build_messages(messages: &[Message]) -> (Option<String>, Vec<Anthr
     (system, out)
 }
 
-/// The Anthropic role for a domain message. `Tool` results are carried in a `user` message (the
-/// Messages API has no tool role); `System` is handled out-of-band by [`build_messages`].
+/// The Messages API has no tool role, so `Tool` results ride in a `user` message.
 fn anthropic_role(role: Role) -> &'static str {
     match role {
         Role::Assistant => "assistant",
@@ -102,7 +95,6 @@ fn anthropic_role(role: Role) -> &'static str {
     }
 }
 
-/// The content blocks for one non-system message.
 fn blocks_for(message: &Message) -> Vec<ContentBlock> {
     match message.role {
         Role::Tool => message
@@ -142,12 +134,9 @@ fn blocks_for(message: &Message) -> Vec<ContentBlock> {
     }
 }
 
-/// Emit a `Thinking`/`RedactedThinking` block first, ahead of any `Text`/`ToolUse` block, when `message`
-/// carries one — the Messages API requires it to lead an assistant turn's content array. This only stays
-/// correct because `build_messages`'s same-role merge never puts a *second* thinking-carrying assistant
-/// message after a first one in the same merged turn (`agent_loop` pushes exactly one assistant message
-/// per turn); a thinking block on the second of two merged assistant messages would land after the
-/// first's content instead of leading the turn.
+/// The Messages API requires a thinking block to LEAD an assistant turn's content array. This stays
+/// correct only because `agent_loop` pushes exactly one assistant message per turn: a thinking block on
+/// the second of two merged assistant messages would land after the first's content.
 fn push_thinking(blocks: &mut Vec<ContentBlock>, message: &Message) {
     match &message.thinking {
         Some(ThinkingBlock::Visible { text, signature }) => blocks.push(ContentBlock::Thinking {
@@ -161,8 +150,7 @@ fn push_thinking(blocks: &mut Vec<ContentBlock>, message: &Message) {
     }
 }
 
-/// User/assistant text, plus any attached images as base64 blocks. A blank caption emits no text block;
-/// an unparseable image data URL is skipped rather than sent malformed.
+/// A blank caption emits no text block; an unparseable image URL is skipped rather than sent malformed.
 fn text_and_images(message: &Message) -> Vec<ContentBlock> {
     let mut blocks = Vec::new();
     if let Some(text) = message.content.as_deref().filter(|t| !t.is_empty()) {
@@ -178,8 +166,7 @@ fn text_and_images(message: &Message) -> Vec<ContentBlock> {
     blocks
 }
 
-/// Parse a `data:<media_type>;base64,<data>` URL into an Anthropic base64 image source. Returns `None`
-/// for any other shape (e.g. a remote URL or a non-base64 data URL), so the caller skips it.
+/// `None` for any shape other than `data:<media_type>;base64,<data>`, so the caller skips it.
 fn parse_data_url(url: &str) -> Option<ImageSource> {
     let rest = url.strip_prefix("data:")?;
     let (meta, data) = rest.split_once(',')?;
@@ -194,10 +181,8 @@ fn parse_data_url(url: &str) -> Option<ImageSource> {
     })
 }
 
-/// Translate the registry's OpenAI-shaped tool schemas (`{type:"function", function:{name, description,
-/// parameters}}`) into Anthropic's (`{name, description, input_schema}`). A schema already in Anthropic
-/// shape (no `function` wrapper) is passed through unchanged; a missing `parameters` defaults to an
-/// empty object schema (the Messages API requires a valid `input_schema`).
+/// A schema already in Anthropic shape (no `function` wrapper) passes through unchanged. A missing
+/// `parameters` becomes an empty object schema, since the API requires a valid `input_schema`.
 pub(crate) fn translate_tools(tools: &[Value]) -> Vec<Value> {
     tools.iter().map(translate_tool).collect()
 }
@@ -289,8 +274,7 @@ mod tests {
 
     #[test]
     fn parallel_tool_results_merge_into_one_user_message() {
-        // Two consecutive tool results (parallel calls) must become ONE user message with two blocks —
-        // the Messages API rejects consecutive user messages / a turn missing a tool_use's result.
+        // The Messages API rejects consecutive user messages, so parallel tool results must merge.
         let messages = vec![
             Message::tool_result("toolu_1", "out 1"),
             Message::tool_result("toolu_2", "out 2"),
@@ -481,8 +465,7 @@ mod tests {
 
     #[test]
     fn thinking_block_stays_first_even_when_a_following_assistant_message_merges_in() {
-        // `build_messages` merges consecutive same-role messages; a misplaced thinking block is a hard
-        // 400 from Anthropic, not a soft failure, so this pins it stays first after the merge.
+        // A misplaced thinking block is a hard 400, not a soft failure.
         let first = Message::assistant_tool_calls(
             None,
             vec![ToolCall {

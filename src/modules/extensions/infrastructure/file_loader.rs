@@ -1,9 +1,5 @@
-//! Loads extension resources from the filesystem: Markdown files with optional YAML frontmatter.
-//! Scans the six resource-type subdirectories (`rules/`, `commands/`, `agents/`, `skills/`, `hooks/`,
-//! `mcp/`) under both `~/.kiri/` (global) and `<workspace>/.kiri/` (project) — merging by id (global
-//! first, project extends), then folding in the binary-shipped defaults (`infrastructure::bundled`,
-//! ADR 0028) as a third, lowest-precedence layer. Follows the same convention as `DocsLibrary`:
-//! depth-first walk, capped, symlink-skipping.
+//! Loads extension resources off disk, merging by id across the global, project, and bundled layers.
+//! Walks like `DocsLibrary`: depth-first, capped, symlink-skipping.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,16 +13,13 @@ use crate::modules::extensions::domain::scope::Layer;
 use crate::modules::extensions::infrastructure::bundled::bundled_for;
 use crate::shared::kernel::error::AgentResult;
 
-/// The six extension resource types this loader scans, in discovery order. Each is a subdirectory name
-/// under both the global and project `.kiri/` roots.
+/// Scanned in discovery order; each is a subdirectory under both `.kiri/` roots.
 const RESOURCE_TYPES: [&str; 6] = ["rules", "commands", "agents", "skills", "hooks", "mcp"];
 
-/// Cap on total files visited during discovery across all extension types, so a huge tree does not hold
-/// boot indefinitely.
+/// Across all extension types, so a huge tree cannot hold boot indefinitely.
 const MAX_FILES_SCANNED: usize = 500;
 
-/// Collect Markdown files under `root`, depth-first, capped at `MAX_FILES_SCANNED`. Skips symlinks
-/// (mirrors `DocsLibrary::collect_markdown_files`).
+/// Skips symlinks, so a resource tree cannot reach outside its root.
 async fn collect_markdown(root: &Path, files: &mut Vec<PathBuf>) -> AgentResult<()> {
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
@@ -62,8 +55,7 @@ fn is_md(path: &Path) -> bool {
     )
 }
 
-/// Load a single Markdown resource from `path` in `layer`. Returns `None` on a read failure, so one
-/// broken file never aborts the whole catalog.
+/// `None` on a read failure, so one broken file never aborts the whole catalog.
 async fn load_one(path: &Path, layer: Layer) -> Option<Resource> {
     let bytes = tokio::fs::read(path).await.ok()?;
     let source = String::from_utf8_lossy(&bytes);
@@ -94,18 +86,14 @@ async fn load_layer(
     collect_markdown(root, &mut files).await?;
     for file in files {
         if let Some(res) = load_one(&file, layer).await {
-            // Project extends or adds; global is the base. Both layers are loaded, neither overwrites
-            // the other silently without the caller knowing (both items are kept in `resources`).
+            // Both layers stay in `resources`: neither silently overwrites the other.
             map.entry(res.id.clone()).or_insert(res);
         }
     }
     Ok(())
 }
 
-/// The filesystem adapter: scans `~/.kiri/{rules,commands,agents,skills,hooks,mcp}/` and their
-/// `<workspace>/.kiri/` project-layer equivalents, loading Markdown files with frontmatter. Reads the
-/// home directory from `shared/infra::home` — the single cross-platform source also read by
-/// `config::expand_home`.
+/// Reads the home directory from `shared/infra::home`, the single cross-platform source `config` uses too.
 pub struct FileExtensionsLoader {
     global_dir: PathBuf,
     project_dir: PathBuf,
@@ -120,13 +108,9 @@ impl FileExtensionsLoader {
         }
     }
 
-    /// Discover and fold one resource type into `catalog`: scans the global then project `type_name/`
-    /// subdirectory (a fresh resources map per type, so ids never collide across types), then folds in the
-    /// binary-shipped defaults (ADR 0028) as a third, lowest-precedence layer, then builds the typed
-    /// entries into the matching catalog field. Precedence is global > project > bundled — the map is
-    /// `or_insert` (first wins), so a user file of the same id always overrides a bundled default. Takes
-    /// `&mut ExtensionCatalog` rather than one mutable ref per field — the catalog already groups every
-    /// accumulator this needs, so this stays under the argument-count lint as new resource types are added.
+    /// A fresh resources map per type, so ids never collide across types. Precedence is
+    /// global > project > bundled, enforced by `or_insert` (first wins): a user file always overrides a
+    /// bundled default of the same id.
     async fn load_type(&self, type_name: &str, catalog: &mut ExtensionCatalog) -> AgentResult<()> {
         let mut resources: HashMap<String, Resource> = HashMap::new();
         let global_root = self.global_dir.join(type_name);
@@ -162,14 +146,13 @@ impl FileExtensionsLoader {
                     catalog.skills.insert(skill.id.clone(), skill);
                 }
                 "hooks" => {
-                    // A malformed hook (missing/unrecognized event, or a blank command) is dropped
-                    // rather than aborting the whole catalog load.
+                    // Dropped rather than aborting the whole catalog load.
                     if let Some(hook) = Hook::from_resource(res) {
                         catalog.hooks.insert(hook.id.clone(), hook);
                     }
                 }
                 "mcp" => {
-                    // A malformed server (missing/blank command:) is dropped rather than aborting.
+                    // Dropped rather than aborting the whole catalog load.
                     if let Some(server) = McpServer::from_resource(res) {
                         catalog.mcp_servers.insert(server.id.clone(), server);
                     }
@@ -228,8 +211,7 @@ mod tests {
         let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
         let catalog = loader.load().await.unwrap();
 
-        // 3, not 2: the bundled `ponytail` rule (ADR 0028) always folds in as a third, lowest-precedence
-        // rule alongside the two user-authored ones.
+        // 3, not 2: the bundled `ponytail` rule folds in alongside the two user-authored ones.
         assert_eq!(catalog.rules.len(), 3);
         let style = catalog.rules.iter().find(|r| r.id == "style").unwrap();
         assert!(style.always);
@@ -241,8 +223,8 @@ mod tests {
 
     #[tokio::test]
     async fn empty_dirs_yield_only_the_bundled_ponytail_rule() {
-        // No user rule files at all: the bundled `ponytail` rule (ADR 0028, always-on) is still present —
-        // rules are never truly empty by default. Commands have no bundled default, so they stay empty.
+        // Rules are never empty by default — the bundled `ponytail` rule is always on. Commands have no
+        // bundled default, so they stay empty.
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
         let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
@@ -299,13 +281,11 @@ mod tests {
         let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());
         let catalog = loader.load().await.unwrap();
 
-        // Global loads first, retains its entry; project is present but its extension did not overwrite.
+        // Global loads first and retains its entry; the project extension does not overwrite it.
         let cmd = catalog.commands.get("/x").unwrap();
         assert_eq!(cmd.body, "Global.");
         assert_eq!(cmd.layer, Layer::Global);
-        // Exactly one raw resource is kept for id "x" (global wins, project never adds a second entry).
-        // `resources` also holds the unrelated bundled agents/skills (ADR 0028), so its total length is
-        // not asserted here.
+        // `resources` also holds the bundled agents/skills, so its total length is not asserted here.
         assert_eq!(
             catalog.resources.get("x").map(|r| r.layer),
             Some(Layer::Global)
@@ -346,9 +326,8 @@ mod tests {
 
     #[tokio::test]
     async fn empty_dirs_yield_only_the_bundled_defaults() {
-        // No user files at all: agents/skills are exactly the binary-shipped defaults (ADR 0028) — the
-        // catalog is never truly empty for these two types, which is the point (efficient from the first
-        // prompt). `resources.len()` for agents+skills is asserted precisely to lock the exact count.
+        // With no user files, agents/skills are exactly the binary-shipped defaults — never empty, which
+        // is the point of ADR 0028.
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
         let loader = FileExtensionsLoader::new(global.path().to_path_buf(), workspace.path());

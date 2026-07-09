@@ -26,7 +26,7 @@ pub enum MemoryKind {
 }
 
 impl MemoryKind {
-    /// All kinds, for enumeration (e.g. a kind picker in the planned memory-management UI).
+    /// Reserved for the memory-management UI's kind picker.
     #[cfg(test)]
     pub fn all() -> &'static [MemoryKind] {
         &[
@@ -40,8 +40,7 @@ impl MemoryKind {
         ]
     }
 
-    /// The wire string for this kind, used in tool schemas, the SQLite `kind` column, and the Markdown
-    /// filename. Paired with the `FromStr` impl so the enum has one round-trippable wire shape.
+    /// Paired with the `FromStr` impl, so the enum has one round-trippable wire shape.
     pub fn as_wire(&self) -> &'static str {
         match self {
             MemoryKind::Decision => "decision",
@@ -78,31 +77,25 @@ impl std::fmt::Display for MemoryKind {
     }
 }
 
-/// A single memory entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntry {
-    /// Unique identifier (UUID v7 for time ordering).
+    /// UUID v7, so the id sorts by creation time.
     pub id: String,
-    /// The entry kind.
     pub kind: MemoryKind,
-    /// Main content (Markdown supported).
     pub content: String,
-    /// Tags for search and organization.
     #[serde(default)]
     pub tags: HashSet<String>,
-    /// Project identifier (hash of the path) — None = global shared memory.
+    /// A hash of the workspace path; `None` means global shared memory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
-    /// Creation timestamp (ISO 8601).
+    /// ISO 8601.
     pub created_at: String,
-    /// Last-update timestamp (ISO 8601).
+    /// ISO 8601.
     pub updated_at: String,
 }
 
 impl MemoryEntry {
-    /// Create a new entry with current timestamps and a UUID v7. Reading the wall clock and the RNG here
-    /// is the ADR-0010-sanctioned domain exception (injecting a `Clock`/`IdGen` for one constructor is
-    /// speculative per YAGNI).
+    /// Reading the wall clock and the RNG here is the ADR-0010-sanctioned domain exception.
     pub fn new(
         kind: MemoryKind,
         content: String,
@@ -122,15 +115,12 @@ impl MemoryEntry {
         }
     }
 
-    /// Update the content and the last-update timestamp. Exercised by the store tests; reserved for the
-    /// future memory-editing UI.
     #[cfg(test)]
     pub fn update_content(&mut self, content: String) {
         self.content = content;
         self.updated_at = now_rfc3339();
     }
 
-    /// Whether the entry matches a simple text query.
     pub fn matches_query(&self, query: &str) -> bool {
         let q = query.to_lowercase();
         self.content.to_lowercase().contains(&q)
@@ -138,7 +128,6 @@ impl MemoryEntry {
             || self.kind.as_wire().contains(&q)
     }
 
-    /// Format for display in the agent's context.
     pub fn format_for_context(&self) -> String {
         let tags = if self.tags.is_empty() {
             String::new()

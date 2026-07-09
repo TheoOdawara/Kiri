@@ -1,20 +1,14 @@
 use crate::shared::kernel::message::Message;
 
-/// A persisted conversation: the ordered messages of one chat, scoped to a project. Reuses the agent
-/// domain's `Message` directly (the session context depends on `agent`, one-directionally); the system
-/// message is never stored — it is regenerated per session from the current memory digest.
+/// The system message is never stored — it is regenerated per session from the memory digest.
 pub struct Session {
     pub id: String,
-    /// A short human label derived from the first user message; shown in the `/sessions` picker.
     pub title: String,
     pub messages: Vec<Message>,
-    /// How many stored rows `load` dropped as corrupt/unparseable (always 0 for a freshly created
-    /// session). The resume path surfaces a Notice when non-zero so a silently-shortened conversation is
-    /// visible instead of losing turns invisibly.
+    /// Stored rows `load` dropped as corrupt; the resume path surfaces a Notice when non-zero.
     pub skipped_messages: usize,
 }
 
-/// A lightweight view of a session for the `/resume` and `/sessions` listings — no message bodies.
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
@@ -22,12 +16,8 @@ pub struct SessionSummary {
     pub message_count: usize,
 }
 
-/// The fallback label shown for a session with no derivable title (e.g. an image-only first turn). Defined
-/// once here so `derive_title` and the `/sessions` picker render the same blank-session text.
 pub const UNTITLED_SESSION_LABEL: &str = "(sem título)";
 
-/// Derive a session title from the first user message: the first non-empty line, trimmed to a readable
-/// length. Falls back to a generic label when there is no usable text (e.g. an image-only first turn).
 pub fn derive_title(first_user_message: &str) -> String {
     const MAX: usize = 60;
     let line = first_user_message

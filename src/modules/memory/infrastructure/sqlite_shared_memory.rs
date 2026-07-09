@@ -12,17 +12,14 @@ use crate::shared::kernel::error::{AgentError, AgentResult};
 const SELECT_COLUMNS: &str =
     "id, kind, content, tags, project_id, created_at, updated_at FROM entries";
 
-/// Cross-project shared memory persisted in a single SQLite database (`~/.kiri/memory/shared.db`).
-/// The blocking `rusqlite` connection lives behind an `Arc<Mutex<_>>` and every query runs on a
-/// blocking thread (`spawn_blocking`), so a slow disk never stalls the single-threaded TUI runtime.
+/// Every query runs on a blocking thread, so a slow disk never stalls the single-threaded TUI runtime.
 pub struct SqliteSharedMemory {
     conn: Arc<Mutex<Connection>>,
     initialized: Arc<AtomicBool>,
 }
 
 impl SqliteSharedMemory {
-    /// Open (creating it and its parent directory if needed) the shared database. Does not yet create
-    /// the schema — call `init` for that.
+    /// Creates the file and its parent directory if needed. Call `init` for the schema.
     pub fn new(db_path: PathBuf) -> AgentResult<Self> {
         let conn = open_with_parent(&db_path, AgentError::memory)?;
         Ok(Self {
@@ -31,8 +28,7 @@ impl SqliteSharedMemory {
         })
     }
 
-    /// Open an ephemeral in-memory database. Used as an inert fallback when the on-disk store cannot
-    /// be opened, so the harness still wires a (unavailable) store instead of failing to start.
+    /// An inert fallback when the on-disk store cannot be opened, so the harness still boots.
     pub fn in_memory() -> AgentResult<Self> {
         let conn = Connection::open_in_memory().map_err(AgentError::memory)?;
         Ok(Self {
@@ -41,7 +37,7 @@ impl SqliteSharedMemory {
         })
     }
 
-    /// Persist (or replace) the embedding vector for an entry. Stored as little-endian f32 bytes.
+    /// Stored as little-endian f32 bytes.
     pub async fn save_embedding(
         &self,
         entry_id: &str,
@@ -70,9 +66,7 @@ impl SqliteSharedMemory {
         .await
     }
 
-    /// The most recently updated entries embedded under `model`, paired with their vector. Backs the
-    /// semantic recall's candidate set (ranked by cosine in the application layer). Scoping to `model`
-    /// keeps cross-model vectors out of the ranking when the active embedder changes.
+    /// Scoped to `model`, so a changed embedder never ranks cross-model vectors against each other.
     pub async fn embedded_candidates(
         &self,
         model: &str,
@@ -111,20 +105,19 @@ impl SqliteSharedMemory {
     }
 }
 
-/// Encode an f32 vector as little-endian bytes for BLOB storage.
 fn vec_to_blob(vector: &[f32]) -> Vec<u8> {
     vector.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
-/// Decode a little-endian f32 BLOB. A trailing partial chunk (corrupt row) is ignored defensively.
+/// A trailing partial chunk (a corrupt row) is ignored defensively.
 fn blob_to_vec(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
 
-/// Map a SQLite row to a `MemoryEntry`. Unknown kinds fall back to `Fact` and unparseable tags to an
-/// empty set — defensive recovery, never a panic, for a database an external tool may have touched.
+/// Unknown kinds fall back to `Fact`, unparseable tags to an empty set: an external tool may have touched
+/// this database, and a bad row must never panic.
 fn row_to_entry(row: &Row) -> rusqlite::Result<MemoryEntry> {
     let kind: String = row.get("kind")?;
     let tags: String = row.get("tags")?;
@@ -139,7 +132,6 @@ fn row_to_entry(row: &Row) -> rusqlite::Result<MemoryEntry> {
     })
 }
 
-/// Run a parameterless "list" query on a blocking thread, collecting the rows into entries.
 async fn query_entries(
     conn: Arc<Mutex<Connection>>,
     sql: String,

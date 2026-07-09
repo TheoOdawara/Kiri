@@ -4,27 +4,24 @@ use tokio::fs;
 
 use crate::shared::kernel::error::AgentResult;
 
-/// Caps that keep `consult_docs` bounded: how many files to scan, how large a file to read, and how
-/// wide an excerpt to return around a match. The docs tree is a fallback knowledge source, not a
-/// search engine — these bounds protect the context window and the runtime.
+/// The docs tree is a fallback knowledge source, not a search engine — these bounds protect the context
+/// window and the runtime.
 const MAX_FILES_SCANNED: usize = 500;
 const MAX_FILE_BYTES: usize = 256 * 1024;
 const EXCERPT_RADIUS: usize = 200;
 
-/// A relevant slice of a documentation file, surfaced by `DocsLibrary::search`.
+/// A relevant slice of a documentation file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocMatch {
-    /// Path relative to the docs root, for display and re-reading.
+    /// Relative to the docs root, for display and re-reading.
     pub path: String,
-    /// A short excerpt around the first matching term.
     pub excerpt: String,
     /// Total term occurrences in the file — higher ranks first.
     pub score: usize,
 }
 
-/// Read-only access to the project's documentation tree (default `<workspace>/docs`). The agent
-/// consults it as a fallback when memory does not cover a question. It never writes; it scans Markdown
-/// files for the query terms and returns ranked excerpts.
+/// Read-only access to the project's documentation tree, consulted as a fallback when memory does not
+/// cover a question.
 pub struct DocsLibrary {
     root: PathBuf,
 }
@@ -34,13 +31,11 @@ impl DocsLibrary {
         Self { root }
     }
 
-    /// Whether the docs root exists and is a directory.
     pub fn is_available(&self) -> bool {
         self.root.is_dir()
     }
 
-    /// Search the docs tree for the query's terms, returning up to `limit` ranked excerpts. An absent
-    /// or empty docs tree, or a blank query, yields an empty result rather than an error.
+    /// An absent or empty docs tree, or a blank query, yields an empty result rather than an error.
     pub async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<DocMatch>> {
         let terms: Vec<String> = query
             .split_whitespace()
@@ -59,11 +54,8 @@ impl DocsLibrary {
             };
             let content = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_FILE_BYTES)]);
             if let Some(found) = score_content(&content, &terms) {
-                // Forward slashes on every platform: the model re-reads this path via `read_file`,
-                // which resolves the workspace-relative paths it emits as Unix-style regardless of host
-                // OS (`tools::application::path::is_absolute_target`), and a native `\` on Windows would
-                // make the displayed path inconsistent with that convention (though `Path` itself accepts
-                // either separator, so re-reading would still work either way).
+                // Forward slashes on every platform: the model re-reads this path via `read_file`, whose
+                // workspace-relative paths are Unix-style regardless of host OS.
                 let rel = path
                     .strip_prefix(&self.root)
                     .unwrap_or(path.as_path())
@@ -82,8 +74,6 @@ impl DocsLibrary {
         Ok(matches)
     }
 
-    /// Collect Markdown files under the docs root (depth-first via a LIFO stack), capped at
-    /// `MAX_FILES_SCANNED`.
     async fn collect_markdown_files(&self) -> AgentResult<Vec<PathBuf>> {
         let mut files = Vec::new();
         let mut dirs = vec![self.root.clone()];
@@ -97,8 +87,8 @@ impl DocsLibrary {
             };
             while let Some(entry) = reader.next_entry().await? {
                 let path = entry.path();
-                // `file_type` reads the entry's own type without traversing a symlink, so a symlinked
-                // file or dir under `docs/` is skipped — `consult_docs` cannot follow it out of the root.
+                // `file_type` does not traverse a symlink, so `consult_docs` cannot follow one out of the
+                // docs root.
                 let file_type = entry.file_type().await?;
                 if file_type.is_symlink() {
                     continue;
@@ -128,8 +118,7 @@ struct Scored {
     score: usize,
 }
 
-/// Count term occurrences in a file and build an excerpt around the first match. Returns `None` when
-/// no term occurs.
+/// `None` when no term occurs.
 fn score_content(content: &str, terms: &[String]) -> Option<Scored> {
     let lower = content.to_lowercase();
     let mut score = 0;
@@ -150,8 +139,7 @@ fn score_content(content: &str, terms: &[String]) -> Option<Scored> {
     })
 }
 
-/// A trimmed, single-line excerpt of `content` centered on byte offset `at`, snapped to char
-/// boundaries so multi-byte text never panics.
+/// Snapped to char boundaries, so multi-byte text never panics.
 fn excerpt_around(content: &str, at: usize) -> String {
     let start = floor_char_boundary(content, at.saturating_sub(EXCERPT_RADIUS));
     let end = ceil_char_boundary(content, (at + EXCERPT_RADIUS).min(content.len()));

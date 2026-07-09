@@ -8,24 +8,18 @@ use crate::modules::memory::domain::similarity::rank_by_similarity;
 use crate::modules::provider::application::embedding_provider::EmbeddingProvider;
 use crate::shared::kernel::error::AgentResult;
 
-/// How many embedded entries to pull as the semantic candidate set before cosine-ranking. Bounded so the
-/// brute-force ranking stays cheap without a vector index.
+/// Bounded so the brute-force cosine ranking stays cheap without a vector index.
 const SEMANTIC_CANDIDATES: usize = 200;
 
-/// Upper bound on any single embed call — the query embedding for recall and the content embedding on
-/// remember alike — so a slow/unreachable embeddings endpoint degrades to keyword recall (or skips the
-/// write-path embedding) promptly instead of stalling.
+/// A slow or unreachable embeddings endpoint must degrade to keyword recall promptly, never stall.
 const EMBED_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Minimum cosine similarity for a semantic hit to count. Below this a match is treated as noise (a
-/// query that matches nothing semantically yields no semantic hits rather than the most-recent embedded
-/// entries surfaced as if relevant). Cross-model mismatch is no longer the floor's burden: the candidate
-/// fetch is scoped to the active embedder's `model()`, so foreign-model vectors are never ranked.
+/// Below this, a match is noise: a semantically-unmatched query yields nothing, rather than the
+/// most-recent embedded entries posing as relevant.
 const MIN_SIMILARITY: f32 = 0.15;
 
-/// Merge `primary` (semantic hits) with `secondary` (keyword hits), deduplicated by id and capped at
-/// `limit`. Semantic hits come first; keyword fills the remainder, which both covers entries that have
-/// no embedding (so they are never unreachable) and adds keyword matches the semantic floor excluded.
+/// Semantic hits first, keyword filling the remainder — so an entry with no embedding is never unreachable,
+/// and a keyword match the semantic floor excluded can still surface.
 fn merge_dedup(
     primary: Vec<MemoryEntry>,
     secondary: Vec<MemoryEntry>,
@@ -45,19 +39,15 @@ fn merge_dedup(
     out
 }
 
-/// Unified memory capability for the AgentLoop. Combines access to project memory and shared memory.
+/// Unified memory capability for the AgentLoop, over the project and shared stores.
 #[async_trait::async_trait]
 pub trait Memory: Send + Sync {
-    /// Recall project memories relevant to the query.
     async fn recall_project(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
-    /// Recall shared memories relevant to the query.
     async fn recall_shared(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
-    /// Recall hits for many queries in one pass, embedding ALL queries in a single batch round-trip
-    /// instead of one per query. `result[i]` holds the hits for `queries[i]`. Used by the end-of-session
-    /// distiller's dedup so N candidates cost one embed call, not N. The store is read once and not
-    /// mutated here, so the caller must dedup the queries against each other separately.
+    /// Embeds ALL queries in one round-trip, so N distiller candidates cost one embed call, not N. The
+    /// store is read once and not mutated, so the caller must dedup the queries against each other.
     async fn recall_batch(
         &self,
         scope: Scope,
@@ -65,22 +55,17 @@ pub trait Memory: Send + Sync {
         limit: usize,
     ) -> AgentResult<Vec<Vec<MemoryEntry>>>;
 
-    /// Save a memory in the project scope.
     async fn remember_project(&self, entry: MemoryEntry) -> AgentResult<()>;
 
-    /// Save a memory in the shared scope.
     async fn remember_shared(&self, entry: MemoryEntry) -> AgentResult<()>;
 
-    /// Whether project memory is available.
     fn project_memory_available(&self) -> bool;
 
-    /// Whether shared memory is available.
     fn shared_memory_available(&self) -> bool;
 }
 
-/// Layered `Memory` adapter composing a project store, a shared store, and an optional embedder. When an
-/// `EmbeddingProvider` is present, recall is semantic (cosine over stored embeddings) with a transparent
-/// keyword fallback; otherwise it is keyword-only.
+/// With an `EmbeddingProvider` attached, recall is semantic with a transparent keyword fallback;
+/// otherwise keyword-only.
 pub struct LayeredMemory<P, S> {
     project_store: P,
     shared_store: S,
@@ -103,8 +88,7 @@ impl<P, S> LayeredMemory<P, S> {
     }
 }
 
-/// Embed a single query string, bounded by `EMBED_TIMEOUT`. Returns `None` on any failure or timeout so
-/// the caller falls back to keyword recall rather than surfacing an error.
+/// `None` on any failure or timeout, so the caller falls back to keyword recall instead of erroring.
 async fn embed_query(embedder: &dyn EmbeddingProvider, text: &str) -> Option<Vec<f32>> {
     match tokio::time::timeout(EMBED_TIMEOUT, embedder.embed(&[text.to_string()])).await {
         Ok(Ok(mut vectors)) => vectors.drain(..).next(),
@@ -112,9 +96,8 @@ async fn embed_query(embedder: &dyn EmbeddingProvider, text: &str) -> Option<Vec
     }
 }
 
-/// Rank embedded candidates against `query` (cosine, above `MIN_SIMILARITY`) and hydrate the top
-/// entries. Returns an empty vec when there are no candidates, the query embedding failed, or nothing
-/// clears the floor — the caller then fills from keyword search.
+/// Empty when there are no candidates, the query embedding failed, or nothing clears `MIN_SIMILARITY` —
+/// the caller then fills from keyword search.
 async fn semantic_pick(
     embedder: &dyn EmbeddingProvider,
     candidates: Vec<(MemoryEntry, Vec<f32>)>,
@@ -139,9 +122,8 @@ async fn semantic_pick(
         .collect()
 }
 
-/// Batched sibling of `semantic_pick`: embed ALL `queries` in one call, then rank each against the same
-/// candidate set. `result[i]` is the semantic hits for `queries[i]`. Returns per-query empties when there
-/// are no candidates or the batch embed fails/misaligns, so the caller fills from keyword search.
+/// Batched sibling of `semantic_pick`: one embed call for all `queries`, ranked against the same candidate
+/// set. Per-query empties on no candidates or a failed/misaligned batch embed.
 async fn semantic_pick_batch(
     embedder: &dyn EmbeddingProvider,
     candidates: &[(MemoryEntry, Vec<f32>)],
@@ -190,10 +172,8 @@ where
             }
             None => Vec::new(),
         };
-        // Short-circuit: once semantic recall already fills `limit`, skip the keyword pass. The union
-        // below is therefore best-effort — it runs only when the semantic set underfills the budget, so
-        // a keyword-only match (or an entry with no embedding) is surfaced while there is spare room, but
-        // it is not guaranteed a slot once semantic recall has saturated the limit.
+        // The keyword union runs only when semantic recall underfills `limit`, so a keyword-only match is
+        // surfaced when there is room but never guaranteed a slot.
         if semantic.len() >= limit {
             return Ok(semantic);
         }
@@ -214,7 +194,7 @@ where
             }
             None => Vec::new(),
         };
-        // See recall_project: best-effort union, skipped once semantic recall fills the limit.
+        // See `recall_project`.
         if semantic.len() >= limit {
             return Ok(semantic);
         }
@@ -231,8 +211,7 @@ where
         if queries.is_empty() {
             return Ok(Vec::new());
         }
-        // Semantic hits per query in one batched embed; then the keyword union per query (each `search`
-        // is a cheap local read, mirroring `recall_*`'s best-effort union under the same limit).
+        // One batched embed for the semantic hits; the per-query keyword union is a cheap local read.
         let mut semantic = match &self.embedder {
             Some(embedder) => {
                 let model = embedder.model();
@@ -274,8 +253,7 @@ where
         if let Some(embedder) = &self.embedder
             && let Some(vector) = embed_query(embedder.as_ref(), &content).await
         {
-            // Best-effort: a failed embedding only disables semantic recall for this one entry; the
-            // entry is already saved, so keyword recall still finds it.
+            // The entry is already saved; a failed embedding only costs it semantic recall, not keyword.
             let _ = self
                 .project_store
                 .save_embedding(&id, embedder.model(), &vector)
@@ -349,9 +327,7 @@ mod tests {
         assert!(port.shared_memory_available());
     }
 
-    /// Semantic recall over real file+SQLite stores with a deterministic fake embedder. The embedder maps
-    /// a text to a 3-dim presence vector over ["alpha","beta","gamma"], so a query ranks the entry whose
-    /// content shares its keyword first.
+    /// Semantic recall over real file+SQLite stores with a deterministic fake embedder.
     mod semantic {
         use super::*;
         use crate::modules::memory::application::project_memory::ProjectMemory;
@@ -461,8 +437,8 @@ mod tests {
             .await
             .unwrap();
 
-            // The query has no literal substring overlap handled by keyword search would not order these;
-            // semantic ranking puts the alpha entry first.
+            // No literal overlap, so keyword search could not order these; semantic ranking must put the
+            // alpha entry first.
             let hits = port.recall_shared("alpha", 1).await.unwrap();
             assert_eq!(hits.len(), 1);
             assert!(
@@ -514,8 +490,7 @@ mod tests {
             .await
             .unwrap();
 
-            // "delta" is none of the embedder's keywords → an all-zero query vector → cosine 0 with the
-            // stored entry (below the floor) → no semantic hit; "delta" is no keyword match either. The
+            // "delta" is neither an embedder keyword (all-zero vector, cosine 0) nor a keyword match. The
             // floor must keep this empty rather than surfacing the most-recent embedded entry.
             let hits = port.recall_shared("delta", 5).await.unwrap();
             assert!(
@@ -584,9 +559,9 @@ mod tests {
             let dir = TempDir::new().unwrap();
             let shared = shared_store(&dir).await;
 
-            // A body sharing no literal token with the query, embedded under model "a" with the exact
-            // vector the "alpha" query produces. A cross-model rank would surface it on a perfect cosine;
-            // scoping the candidate fetch to the active model must keep it out, degrading to keyword.
+            // Embedded under model "a" with the exact vector the "alpha" query produces, and sharing no
+            // literal token. A cross-model rank would surface it on a perfect cosine; scoping the
+            // candidate fetch to the active model must keep it out.
             let entry = MemoryEntry::new(
                 MemoryKind::Fact,
                 "the first greek letter".into(),

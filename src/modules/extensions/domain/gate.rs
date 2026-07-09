@@ -1,22 +1,16 @@
-//! Pure resolution logic for ADR 0021's trust gate: whether a discovered active capability (hooks, MCP,
-//! future sub-agents) may execute. Global-layer capabilities are always approved — they come from the
-//! trusted `~/.kiri/` tree the user themselves authored. Project-layer ones need an explicit prior
-//! approval recorded for their current content; the caller looks that up in the trust store
-//! (`infrastructure::trust_store`) and passes the boolean in here — this module has no I/O of its own.
+//! ADR 0021's trust gate, resolved as pure data: the caller looks the approval up in the trust store and
+//! passes the boolean in, so this module keeps no I/O of its own.
 
 use crate::modules::extensions::domain::scope::Layer;
 
-/// The resolved state of one active-capability gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateState {
     Approved,
     Pending,
 }
 
-/// Resolve the gate state for a capability discovered at `layer`. Global and Bundled are always
-/// `Approved` — both are trusted (the user's own `~/.kiri/`, or content compiled into the binary); project
-/// is `Approved` only when `previously_approved` (a trust-store hit for the capability's current content
-/// hash) is `true`, else `Pending` — the runtime surfaces a `BootNotice` and asks the user.
+/// Global and Bundled are trusted, so always `Approved`. Project needs a trust-store hit for its current
+/// content hash; otherwise `Pending`, and the runtime asks the user.
 pub fn resolve(layer: Layer, previously_approved: bool) -> GateState {
     match layer {
         Layer::Global | Layer::Bundled => GateState::Approved,

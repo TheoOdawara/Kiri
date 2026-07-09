@@ -1,29 +1,24 @@
 use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
 use crate::shared::kernel::error::AgentResult;
 
-/// Base use-case port for a memory store (project or shared). Implemented by `FileProjectStore` and
-/// `SqliteSharedStore`; `SharedStore` extends it with the cross-project `list_by_project`. The embedding
-/// methods carry a default so a store without embedding support — and the test doubles — need not
-/// implement them.
+/// Base use-case port for a memory store, project or shared. The embedding methods carry a default, so a
+/// store without embedding support falls back transparently to keyword recall.
 #[async_trait::async_trait]
 pub trait MemoryStore: Send + Sync {
-    /// Save an entry (create or update).
+    /// Creates or updates by id.
     async fn save(&self, entry: MemoryEntry) -> AgentResult<()>;
 
-    /// Search entries by text query.
     async fn search(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
-    /// List entries by kind. Part of the store surface the future memory-management UI will consume;
-    /// not yet called by the agent loop.
+    /// Reserved for the memory-management UI.
     #[allow(dead_code)]
     async fn list_by_kind(&self, kind: MemoryKind, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
-    /// List entries by tag. Reserved for the future memory-management UI.
+    /// Reserved for the memory-management UI.
     #[allow(dead_code)]
     async fn list_by_tag(&self, tag: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>>;
 
-    /// Persist the embedding vector for an entry (for semantic recall). Default no-op so a store without
-    /// embedding support — and the test doubles — need not implement it.
+    /// Default no-op: a store without embedding support need not implement it.
     async fn save_embedding(
         &self,
         _entry_id: &str,
@@ -33,9 +28,7 @@ pub trait MemoryStore: Send + Sync {
         Ok(())
     }
 
-    /// Entries embedded under `model`, paired with their vector, up to `limit`. Scoped to the active
-    /// embedder's model so cross-model vectors are never ranked. Default empty so a non-embedding store
-    /// transparently falls back to keyword recall.
+    /// Scoped to the active embedder's model, so cross-model vectors are never ranked against each other.
     async fn embedded_candidates(
         &self,
         _model: &str,
@@ -44,7 +37,7 @@ pub trait MemoryStore: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Whether the store is available (initialized, reachable).
+    /// Whether the store is initialized and reachable.
     fn is_available(&self) -> bool;
 }
 

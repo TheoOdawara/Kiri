@@ -1,11 +1,7 @@
-//! Shared `#[cfg(test)]` helpers for the provider SSE adapters.
-
 use crate::modules::provider::application::completion_provider::EventSink;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::stream_event::StreamEvent;
 
-/// An [`EventSink`] that records every streamed delta, so an SSE test can assert the exact live event
-/// sequence the accumulator emitted. Shared by both chat adapters' test modules.
 #[derive(Default)]
 pub(crate) struct CollectSink(pub Vec<StreamEvent>);
 
@@ -16,12 +12,8 @@ impl EventSink for CollectSink {
     }
 }
 
-/// Start a loopback server that captures the first request's raw bytes (request line + headers + the
-/// start of the body), replies `400` so the client returns promptly, and returns the captured text.
-/// `drive` receives the server's base URL (`http://{addr}/v1`) and must issue exactly one request
-/// against it — the assertion is on what was sent, not the response. Shared by the chat and embeddings
-/// keyless/bearer regressions so the loopback plumbing lives in one place. Hermetic (loopback only),
-/// bounded by an outer 5s guard so a wedged drive future cannot hang the suite.
+/// Captures the first request's raw bytes and returns them; the server replies `400` so the client
+/// returns promptly. `drive` receives the base URL and must issue exactly one request against it.
 pub(crate) async fn capture_request<F, Fut>(drive: F) -> String
 where
     F: FnOnce(String) -> Fut,

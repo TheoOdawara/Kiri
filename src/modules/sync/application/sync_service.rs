@@ -7,29 +7,20 @@ use crate::modules::sync::domain::config_trust::risky_config_changes;
 use crate::shared::infra::config;
 use crate::shared::kernel::error::{AgentError, AgentResult};
 
-/// The files the sync work-tree holds. Secrets (`credentials.json`) are NEVER among them — only
-/// the non-secret `config.toml` and the memory NDJSON are written into the tree.
+/// The only files the work-tree ever holds. `credentials.json` is never among them.
 const MEMORY_FILE: &str = "memory.ndjson";
 const CONFIG_FILE: &str = "config.toml";
 const GITIGNORE: &str = "# Kiri sync — never commit secrets or machine-local binary state\ncredentials.json\n*.db\n*.db-journal\n*.db-wal\nembeddings.json\n";
 
-/// The branch the profile lives on, pinned so push and pull agree across machines.
+/// Pinned so push and pull agree across machines regardless of the host's `init.defaultBranch`.
 const SYNC_BRANCH: &str = "main";
 
-/// Orchestrates the portable-profile sync: it exports the non-secret config and the shared memory into a
-/// dedicated git work-tree (`~/.kiri/sync`), and pushes/pulls it against a user-owned private repo. The
-/// `Git` operations are a port, so this is testable without a real repo.
 pub struct SyncService<'a> {
     git: &'a dyn Git,
-    /// `~/.kiri` — the harness home; the sync work-tree lives at `<global_dir>/sync`.
+    /// `~/.kiri`; the work-tree lives at `<global_dir>/sync`.
     global_dir: PathBuf,
-    /// The live global config file (`~/.kiri/config.toml`).
     config_path: PathBuf,
-    /// Move the shared memory to/from the work-tree's NDJSON, behind a port so this application service
-    /// depends on neither the concrete NDJSON adapter nor the SQLite store (the caller wires both).
     exchange: &'a dyn MemoryExchange,
-    /// Every work-tree/config filesystem touch, behind a port (like `git`/`exchange`) so this use-case
-    /// holds no raw filesystem calls — neither writes/reads nor presence checks.
     work_tree: &'a dyn SyncWorkTree,
 }
 
@@ -54,25 +45,20 @@ impl<'a> SyncService<'a> {
         self.global_dir.join("sync")
     }
 
-    /// Initialize the sync work-tree and point it at `remote_url`. Idempotent: re-running updates the
-    /// remote URL rather than failing. The URL is validated before it reaches `git remote add` (which
-    /// has no `--` end-of-options marker), so a hostile transport cannot smuggle command execution.
+    /// Idempotent: re-running repoints the remote rather than failing.
     pub async fn init(&self, remote_url: &str) -> AgentResult<String> {
         self.validate_remote_url(remote_url).await?;
         let dir = self.sync_dir();
         self.work_tree.ensure_dir(&dir).await?;
         if !self.work_tree.exists(&dir.join(".git")).await? {
             self.git_ok(&["init"], &dir).await?;
-            // Pin the branch name so push/pull agree regardless of the host's init.defaultBranch.
-            // Best-effort: renaming an unborn branch can no-op on some git versions.
+            // Best-effort: renaming an unborn branch no-ops on some git versions, harmlessly.
             let _ = self.git.run(&["branch", "-m", SYNC_BRANCH], &dir).await;
         }
         self.work_tree
             .write(&dir.join(".gitignore"), GITIGNORE)
             .await?;
-        // Set the remote, replacing any existing one so re-init can repoint it. The error is
-        // deliberately discarded: a missing `origin` on first init makes `remote remove` fail, which is
-        // the expected case here (we only want it gone before `remote add`), so discarding it is safe.
+        // A missing `origin` on first init makes this fail, which is exactly the state we want anyway.
         let _ = self.git.run(&["remote", "remove", "origin"], &dir).await;
         self.git_ok(&["remote", "add", "origin", remote_url], &dir)
             .await?;
@@ -82,12 +68,12 @@ impl<'a> SyncService<'a> {
         ))
     }
 
-    /// Export the profile, commit, and push. A no-op commit (nothing changed) is not an error.
+    /// A no-op commit (nothing changed) is not an error.
     pub async fn push(&self) -> AgentResult<String> {
         let dir = self.require_initialized().await?;
         let count = self.export_profile(&dir).await?;
         self.git_ok(&["add", "-A"], &dir).await?;
-        // An empty commit fails; treat "nothing to commit" as success.
+        // An empty commit exits non-zero, so "nothing to commit" has to be read as success.
         let commit = self.git.run(&["commit", "-m", "kiri sync"], &dir).await?;
         if !commit.success
             && !commit.stdout.contains("nothing to commit")
@@ -111,35 +97,28 @@ impl<'a> SyncService<'a> {
         Ok(format!("pushed {count} memory entries + config"))
     }
 
-    /// Pull and merge: fetch the latest, merge memory last-write-wins, and apply config unless the change
-    /// is risky (a provider base_url change or a sandbox downgrade) and `force` is not set.
+    /// A risky config change is refused unless `force`.
     pub async fn pull(&self, force: bool) -> AgentResult<String> {
         let dir = self.require_initialized().await?;
-        // Fetch then hard-reset the work-tree to the remote. The work-tree holds only export artifacts
-        // (NDJSON + a config copy), so resetting is safe: the live memory database is outside the tree and
-        // is merged separately below (last-write-wins), and the live config is applied under a trust
-        // check. This also handles a fresh clone whose local branch is still unborn, where `pull
+        // Hard-resetting is safe because the tree holds only export artifacts — the live memory and config
+        // are outside it. It also handles a fresh clone whose local branch is unborn, where `pull
         // --ff-only` fails.
         self.git_ok(&["fetch", "origin", SYNC_BRANCH], &dir).await?;
         self.git_ok(&["reset", "--hard", "FETCH_HEAD"], &dir)
             .await?;
 
-        // Merge memory (always safe — last-write-wins, never destructive).
         let report = self.exchange.import(&dir.join(MEMORY_FILE)).await?;
 
-        // Apply config under the trust check. `read_to_string` returns `None` for an absent work-tree
-        // config (no config in sync), collapsing the former presence-check + read pair.
         let incoming_config = dir.join(CONFIG_FILE);
         let config_note = match self.work_tree.read_to_string(&incoming_config).await? {
             Some(incoming) => {
-                // Refuse a config that is valid TOML but invalid against the real schema, regardless of
-                // `force` — writing it would brick the next boot when it fails to deserialize.
+                // Valid TOML but invalid schema is refused even under `force`: writing it would brick the
+                // next boot, which `force` cannot consent to.
                 if let Err(error) = config::validate_config_str(&incoming) {
                     format!("config NOT applied ({error})")
                 } else {
-                    // Establish the trusted baseline. A genuinely absent current config is an empty
-                    // baseline (first pull, `Ok(None)`); a present-but-unreadable one cannot be trusted
-                    // (a read error), so we cannot prove the change is safe and require `--force`.
+                    // An absent current config is an empty baseline; an unreadable one is no baseline at
+                    // all, so the change cannot be proven safe.
                     let current = match self.work_tree.read_to_string(&self.config_path).await {
                         Ok(Some(text)) => Some(text),
                         Ok(None) => Some(String::new()),
@@ -178,7 +157,6 @@ impl<'a> SyncService<'a> {
         ))
     }
 
-    /// The git status of the sync work-tree.
     pub async fn status(&self) -> AgentResult<String> {
         let dir = self.require_initialized().await?;
         let output = self
@@ -191,8 +169,7 @@ impl<'a> SyncService<'a> {
                 first_line(&output.stderr, &output.stdout)
             )));
         }
-        // `--branch` always prints a leading `## <branch>...` header line, so emptiness is never the
-        // signal — the tree is clean iff there are no porcelain entries beyond that header.
+        // `--branch` always prints a `## <branch>` header, so empty output is never the clean signal.
         let dirty = output
             .stdout
             .lines()
@@ -204,7 +181,6 @@ impl<'a> SyncService<'a> {
         })
     }
 
-    /// Write the non-secret profile into the work-tree, returning the exported memory-entry count.
     async fn export_profile(&self, dir: &Path) -> AgentResult<usize> {
         self.work_tree
             .write(&dir.join(".gitignore"), GITIGNORE)
@@ -240,13 +216,9 @@ impl<'a> SyncService<'a> {
         }
     }
 
-    /// Validate a `kiri sync init` remote URL before it reaches `git remote add`. `git` treats some
-    /// "URLs" as code-execution transports (`ext::sh -c …`, and any other `<helper>::…` remote helper) or
-    /// as options (a leading `-`, e.g. `-oProxyCommand=…`), either of which turns an attacker-controlled
-    /// URL into a command-injection vector. `git remote add` takes no `--` end-of-options marker, so this
-    /// validation is the defense — a positive ALLOWLIST: accept only the ordinary transports
-    /// (https/http/ssh, the scp-like `user@host:path`, and a local filesystem path) and reject everything
-    /// else, so every `::` remote-helper transport (in any case) and every option-like input is rejected.
+    /// `git` reads some "URLs" as code-execution transports (`ext::sh -c …`, any `<helper>::…`) or as
+    /// options (`-oProxyCommand=…`), and `git remote add` takes no `--` end-of-options marker. A positive
+    /// allowlist is the only defense.
     async fn validate_remote_url(&self, url: &str) -> AgentResult<()> {
         let url = url.trim();
         if url.is_empty() {
@@ -261,36 +233,27 @@ impl<'a> SyncService<'a> {
         }
     }
 
-    /// The positive allowlist behind `validate_remote_url`: an ordinary scheme transport, a scp-like
-    /// `user@host:path`, or a local filesystem path (absolute, or an existing relative one — the only
-    /// branch that touches the filesystem, routed through the work-tree port). Any candidate containing
-    /// `::` is rejected first, so a relative path that exists yet git would parse as a `<helper>::`
-    /// remote-helper transport (e.g. a file literally named `evil::payload`) cannot slip through.
     async fn is_allowed_remote_url(&self, url: &str) -> AgentResult<bool> {
         const SCHEMES: [&str; 3] = ["https://", "http://", "ssh://"];
         if let Some(rest) = SCHEMES.iter().find_map(|scheme| url.strip_prefix(scheme)) {
-            // Reject an authority whose userinfo/host begins with `-`: it would reach `git remote add`
-            // as an option (e.g. `ssh://-oProxyCommand=…@h/x`). The scp-like arm already guards this.
             return Ok(scheme_authority_is_safe(rest));
         }
         if is_scp_like(url) {
             return Ok(true);
         }
-        // `::` would let git dispatch a remote helper; never accept it through the local-path arm.
+        // Checked before the local-path arm, so a real file named `evil::payload` cannot slip through as
+        // a remote helper.
         if url.contains("::") {
             return Ok(false);
         }
         let path = Path::new(url);
-        // A leading `/` is always an absolute local path, even on Windows, where `Path::is_absolute`
-        // requires a drive prefix and would otherwise misclassify a Unix-style path as relative (mirrors
-        // `tools::application::path::is_absolute_target`'s documented rationale for the same gotcha).
+        // On Windows `Path::is_absolute` demands a drive prefix, so a Unix-style path would read as
+        // relative without the explicit leading-`/` test.
         Ok(url.starts_with('/') || path.is_absolute() || self.work_tree.exists(path).await?)
     }
 }
 
-/// scp-like git syntax `user@host:path`: the text before the first `:` is `user@host`, where `user` and
-/// `host` each start with an alphanumeric and otherwise hold only `[A-Za-z0-9._-]`. Requiring an
-/// alphanumeric first char keeps an option (a leading `-`) from masquerading as a `user` segment.
+/// Requiring an alphanumeric first char keeps a leading `-` from masquerading as a `user` segment.
 fn is_scp_like(url: &str) -> bool {
     let Some((authority, _path)) = url.split_once(':') else {
         return false;
@@ -301,9 +264,8 @@ fn is_scp_like(url: &str) -> bool {
     is_host_segment(user) && is_host_segment(host)
 }
 
-/// The authority of a scheme URL (`[userinfo@]host[:port][/path]`) carries no leading-`-` segment, so it
-/// cannot masquerade as a git option. Narrower than [`is_host_segment`] on purpose: it rejects only the
-/// option-injection vector, leaving IPv6 literals and userinfo-with-password (legitimate remotes) alone.
+/// Narrower than [`is_host_segment`] on purpose: it rejects only a leading `-` (the option-injection
+/// vector), leaving IPv6 literals and userinfo-with-password — both legitimate remotes — alone.
 fn scheme_authority_is_safe(rest: &str) -> bool {
     let authority = rest.split('/').next().unwrap_or("");
     if authority.is_empty() {
@@ -330,7 +292,6 @@ fn is_host_segment(segment: &str) -> bool {
     }
 }
 
-/// The first non-empty line of stderr, falling back to stdout, for a compact error message.
 fn first_line(stderr: &str, stdout: &str) -> String {
     let pick = if stderr.is_empty() { stdout } else { stderr };
     pick.lines().next().unwrap_or("").to_string()
@@ -347,13 +308,11 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::TempDir;
 
-    // The sync application layer must orchestrate ports only; its non-test slice holds no raw filesystem
-    // I/O (the `tokio::fs` calls *and* the `.exists()` reads now live behind the `SyncWorkTree` adapter).
     #[test]
     fn sync_service_has_no_inline_fs() {
         let source = include_str!("sync_service.rs");
-        // Scope the guard to the slice before the test module (which legitimately uses std::fs over a
-        // TempDir). Build needles by concatenation so this guard's own literals do not self-match.
+        // The test module legitimately uses std::fs, so only the slice before it is scanned. The needles
+        // are built by concatenation so this guard's own literals do not self-match.
         let head = source
             .split("#[cfg(test)]")
             .next()
@@ -372,9 +331,7 @@ mod tests {
         }
     }
 
-    /// A `Git` double that records the commands it was asked to run and always succeeds. It creates the
-    /// `.git` marker on `init`, and on `reset` (which `pull` runs after `fetch`) it materializes the
-    /// configured fixture files into the work-tree, standing in for the remote's contents.
+    /// Always succeeds. On `reset` it materializes the fixture files, standing in for the remote.
     struct FakeGit {
         calls: Mutex<Vec<String>>,
         config_fixture: Option<String>,
@@ -422,8 +379,6 @@ mod tests {
         }
     }
 
-    /// A complete, schema-valid provider profile (the loader requires kind/base_url/model/auth;
-    /// `ProviderKind::OpenAiCompatible` serializes kebab-case as `open-ai-compatible`).
     fn provider_toml(id: &str, base_url: &str) -> String {
         format!(
             "[providers.{id}]\nkind = \"open-ai-compatible\"\nbase_url = \"{base_url}\"\nmodel = \"m\"\nauth = \"api-key\"\n"
@@ -436,7 +391,6 @@ mod tests {
         let global = dir.path().to_path_buf();
         let config = global.join("config.toml");
         std::fs::write(&config, "[providers.nvidia]\nbase_url = \"https://x/v1\"\n").unwrap();
-        // A real (empty) shared store so export has a valid port to read.
         let mem = SqliteSharedMemory::new(global.join("memory").join("shared.db")).unwrap();
         mem.init().await.unwrap();
         let exchange = NdjsonMemoryExchange::new(&mem);
@@ -451,7 +405,6 @@ mod tests {
         assert!(sync_dir.join("memory.ndjson").exists());
         assert!(sync_dir.join("config.toml").exists());
         assert!(sync_dir.join(".gitignore").exists());
-        // The secret file must never be copied into the work-tree.
         assert!(!sync_dir.join("credentials.json").exists());
         let calls = git.calls.lock().unwrap();
         assert!(calls.iter().any(|c| c.starts_with("push")));
@@ -475,9 +428,6 @@ mod tests {
         assert!(service.push().await.is_err());
     }
 
-    /// Build a minimal service for the URL-validation tests (the validator is now a method that routes
-    /// its local-path existence check through the work-tree port). The paths are placeholders — these
-    /// tests never touch the work-tree beyond the allowlist's existence probe.
     fn url_service<'a>(
         git: &'a FakeGit,
         exchange: &'a dyn MemoryExchange,
@@ -505,7 +455,6 @@ mod tests {
                 .is_err()
         );
         assert!(s.validate_remote_url("fab::evil").await.is_err());
-        // A case variant and any other `<helper>::` transport must fall out of the allowlist too.
         assert!(
             s.validate_remote_url("EXT::sh -c 'rm -rf ~'")
                 .await
@@ -514,8 +463,6 @@ mod tests {
         assert!(s.validate_remote_url("fd::evil").await.is_err());
         assert!(s.validate_remote_url("-oProxyCommand=evil").await.is_err());
         assert!(s.validate_remote_url("file://-evil").await.is_err());
-        // A scheme URL whose host or userinfo begins with `-` reaches `git remote add` as an option;
-        // the allowlist itself must reject it rather than defer to git's downstream parsing.
         assert!(s.validate_remote_url("https://-evil.com/x").await.is_err());
         assert!(s.validate_remote_url("http://-evil/x").await.is_err());
         assert!(
@@ -525,8 +472,6 @@ mod tests {
         );
         assert!(s.validate_remote_url("https:///no-host").await.is_err());
         assert!(s.validate_remote_url("   ").await.is_err());
-        // `::` is rejected even on an otherwise-accepted absolute path, so a name git would dispatch as a
-        // `<helper>::` transport cannot slip through the local-path arm (locks the pre-existence guard).
         assert!(s.validate_remote_url("/tmp/evil::payload").await.is_err());
     }
 
@@ -564,8 +509,6 @@ mod tests {
         );
     }
 
-    // End-to-end pull: FakeGit's `reset` materializes the remote's config + memory into the work-tree,
-    // exercising the apply/refuse decision and the --force override on the security-weighted path.
     fn pull_service<'a>(
         git: &'a FakeGit,
         exchange: &'a dyn MemoryExchange,

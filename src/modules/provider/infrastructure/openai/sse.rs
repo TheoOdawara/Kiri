@@ -14,9 +14,8 @@ use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::stream_event::StreamEvent;
 use crate::shared::kernel::tool_call::{FunctionCall, TOOL_CALL_FUNCTION_KIND, ToolCall};
 
-/// Feed one parsed SSE event's `data` payload into the accumulator (content/tool-calls) and the live
-/// `on_event` callback (reasoning/content). The `[DONE]` sentinel and malformed JSON are ignored. Line
-/// framing (chunk reassembly, the `data:` prefix) is handled upstream by `eventsource-stream`.
+/// The `[DONE]` sentinel and malformed JSON are ignored; line framing is handled upstream by
+/// `eventsource-stream`.
 pub(crate) fn handle_event(
     data: &str,
     accumulator: &mut TurnAccumulator,
@@ -25,15 +24,12 @@ pub(crate) fn handle_event(
     if data.is_empty() || data == SSE_DONE_SENTINEL {
         return Ok(());
     }
-    // Parse the payload ONCE. A non-JSON line (keep-alive, unknown event) is ignored.
+    // A non-JSON line (keep-alive, unknown event) is ignored.
     let Ok(chunk) = serde_json::from_str::<ChatStreamChunk>(data) else {
         return Ok(());
     };
-    // An OpenAI-compatible provider can deliver an error in-band on an HTTP 200 stream
-    // (`data: {"error": {...}}`, then `[DONE]`). Surface it as a turn failure instead of silently
-    // dropping the chunk — a swallowed in-band error left an empty turn with no feedback (a phantom
-    // "plan ready" box in plan mode, the model never appearing to have been contacted). A `null` error
-    // (some providers include it on success) is `None` here and ignored.
+    // An in-band error on a 200 stream must fail the turn: swallowing it left an empty turn with no
+    // feedback — a phantom "plan ready" box, the model never appearing to have been contacted.
     if let Some(error) = &chunk.error {
         return Err(AgentError::Provider(format_stream_error(error)));
     }
@@ -41,9 +37,8 @@ pub(crate) fn handle_event(
         return Ok(());
     };
 
-    // Bound the running total before absorbing, so an unbounded stream fails fast instead of OOMing.
-    // Reasoning (under either field name) flows through the channel/transcript just like content, so it
-    // counts toward the same ceiling — otherwise a provider streaming reasoning forever defeats the cap.
+    // Reasoning counts toward the same ceiling as content, or a provider streaming reasoning forever
+    // would defeat the cap. Checked before absorbing, so an unbounded stream fails fast.
     let delta_bytes = choice.delta.content.as_deref().map_or(0, str::len)
         + choice
             .delta
@@ -73,8 +68,8 @@ pub(crate) fn handle_event(
     Ok(())
 }
 
-/// Render an in-band stream error as a human-readable message. `code` may be a string or a number; the
-/// provider's `message` is untrusted text, so it is bounded before reaching the transcript.
+/// The provider's `message` and `code` are both untrusted text, so both are bounded before reaching the
+/// transcript.
 fn format_stream_error(error: &StreamError) -> String {
     let message = error
         .message
@@ -85,8 +80,6 @@ fn format_stream_error(error: &StreamError) -> String {
         .unwrap_or_else(|| "unknown error".to_string());
     match error.code.as_ref().filter(|code| !code.is_null()) {
         Some(code) => {
-            // `code` is provider-controlled too; bounding only `message` is bypassed if the oversized
-            // payload is moved here, so it is capped the same way.
             let code = bounded_preview(
                 &code
                     .as_str()
@@ -99,14 +92,12 @@ fn format_stream_error(error: &StreamError) -> String {
     }
 }
 
-/// The sentinel payload OpenAI-compatible SSE streams send to mark the end of a completion.
 const SSE_DONE_SENTINEL: &str = "[DONE]";
 
-/// The `finish_reason` the chat-completions API sends when the output token cap truncated the turn.
+/// What the API sends when the output token cap truncated the turn.
 const FINISH_REASON_LENGTH: &str = "length";
 
-/// Parse one event's `data` payload into its first choice. Yields nothing for the `[DONE]` sentinel,
-/// an empty payload, or malformed JSON. (A test seam; the live path uses `handle_event`.)
+/// A test seam; the live path uses `handle_event`.
 #[cfg(test)]
 fn parse_chunk(data: &str) -> Option<StreamChoice> {
     if data.is_empty() || data == SSE_DONE_SENTINEL {
@@ -116,8 +107,7 @@ fn parse_chunk(data: &str) -> Option<StreamChoice> {
     chunk.choices.into_iter().next()
 }
 
-/// Map a parsed delta to its events. Reasoning (under either field name) precedes content; empty
-/// strings are dropped.
+/// Reasoning precedes content; empty strings are dropped.
 fn events_from_delta(delta: Delta) -> Vec<StreamEvent> {
     let mut events = Vec::new();
     let reasoning = delta
@@ -133,16 +123,12 @@ fn events_from_delta(delta: Delta) -> Vec<StreamEvent> {
     events
 }
 
-/// Assembles a turn from its streamed fragments. Tool calls are keyed by `index` (BTreeMap keeps them
-/// in natural order); `function.arguments` slices are concatenated in arrival order.
 #[derive(Default)]
 pub(crate) struct TurnAccumulator {
     content: String,
+    /// A `BTreeMap` so the streamed `index` keys keep the tool calls in natural order.
     tool_calls: BTreeMap<u32, PartialToolCall>,
-    /// Running total of streamed content + reasoning + tool-call argument bytes, bounded by
-    /// `MAX_STREAM_BYTES`.
     streamed_bytes: usize,
-    /// The last `finish_reason` seen; `"length"` means the output token cap was hit (truncation).
     finish_reason: Option<String>,
 }
 
@@ -155,9 +141,7 @@ struct PartialToolCall {
 }
 
 impl TurnAccumulator {
-    /// Whether the stream was cut off by the output token limit (`finish_reason == "length"`) before
-    /// producing anything usable. The provider surfaces this as an error rather than returning a turn
-    /// that silently did nothing (the truncated case the user otherwise gets no feedback on).
+    /// The provider surfaces this as an error, rather than return a turn that silently did nothing.
     pub(crate) fn hit_empty_output_limit(&self) -> bool {
         is_empty_truncation(
             self.finish_reason.as_deref() == Some(FINISH_REASON_LENGTH),
@@ -216,7 +200,6 @@ mod tests {
     use super::*;
     use crate::modules::provider::infrastructure::test_support::CollectSink;
 
-    /// Parse one event payload into events (test seam over `parse_chunk` + `events_from_delta`).
     fn events_from_data(data: &str) -> Vec<StreamEvent> {
         match parse_chunk(data) {
             Some(choice) => events_from_delta(choice.delta),
@@ -224,7 +207,6 @@ mod tests {
         }
     }
 
-    /// Run event payloads through the same path as the provider and return the assembled turn.
     fn accumulate(payloads: &[&str]) -> CompletedTurn {
         let mut accumulator = TurnAccumulator::default();
         let mut sink = CollectSink::default();
@@ -263,7 +245,7 @@ mod tests {
 
     #[test]
     fn duplicate_reasoning_keys_yield_single_event() {
-        // NVIDIA Nemotron sends both keys in one delta; this must not fail to parse nor double up.
+        // NVIDIA Nemotron sends both keys in one delta.
         let line = r#"{"choices":[{"delta":{"reasoning":"Okay","reasoning_content":"Okay"}}]}"#;
         assert_eq!(
             events_from_data(line),
@@ -325,8 +307,6 @@ mod tests {
 
     #[test]
     fn in_band_error_event_is_surfaced_as_an_error() {
-        // Regression: NVIDIA can return HTTP 200 whose stream carries `{"error": {...}}` (a broken
-        // model). This used to be dropped silently, leaving an empty turn; it must now fail the turn.
         let mut accumulator = TurnAccumulator::default();
         let mut sink = CollectSink::default();
         let data = r#"{"error":{"message":"Internal server error","type":"internal_server_error","code":500}}"#;
@@ -345,16 +325,13 @@ mod tests {
 
     #[test]
     fn null_error_field_is_not_treated_as_an_error() {
-        // A normal chunk that carries `"error": null` (some providers include it on success) must not
-        // abort the turn — its content still flows.
+        // Some providers include `"error": null` on success.
         let turn = accumulate(&[r#"{"error":null,"choices":[{"delta":{"content":"Hi"}}]}"#]);
         assert_eq!(turn.content, "Hi");
     }
 
     #[test]
     fn in_band_error_message_is_bounded() {
-        // An oversized in-band error message must be capped via `bounded_preview` before it reaches the
-        // transcript, just like an HTTP error body.
         let mut accumulator = TurnAccumulator::default();
         let mut sink = CollectSink::default();
         let data = serde_json::json!({ "error": { "message": "x".repeat(5_000), "code": 500 } })
@@ -369,8 +346,7 @@ mod tests {
 
     #[test]
     fn oversized_error_code_is_bounded() {
-        // PROV-06: bounding only `message` is bypassed if the attacker moves the oversized payload into
-        // the string-typed `code`. It must be capped the same way.
+        // PROV-06: bounding only `message` is bypassed by moving the payload into the string-typed `code`.
         let mut accumulator = TurnAccumulator::default();
         let mut sink = CollectSink::default();
         let data = serde_json::json!({ "error": { "message": "x", "code": "C".repeat(5_000) } })
@@ -390,8 +366,6 @@ mod tests {
 
     #[test]
     fn reasoning_stream_exceeding_cap_fails() {
-        // PROV-01: reasoning deltas must count toward the same ceiling as content/tool-input, or a
-        // provider streaming reasoning forever grows memory without bound.
         let mut accumulator = TurnAccumulator::default();
         let mut sink = CollectSink::default();
         let chunk = serde_json::json!({
@@ -501,10 +475,8 @@ mod tests {
 
     #[test]
     fn normalizes_raw_control_chars_in_tool_call_arguments() {
-        // The model produced a file `content` with a RAW newline inside the string value instead of
-        // `\n`. Built via `json!` so the SSE chunk is valid wire JSON whose decoded `arguments`
-        // carries the literal 0x0A — exactly what poisons the conversation today. The stored value
-        // must come out as valid JSON with the content preserved.
+        // Built via `json!` so the chunk is valid wire JSON whose DECODED `arguments` carries the raw
+        // 0x0A — the shape that poisons the conversation.
         let bad_args = "{\"path\":\"a.rs\",\"content\":\"line1\nline2\"}";
         let chunk = serde_json::json!({
             "choices": [{"delta": {"tool_calls": [{
@@ -529,8 +501,7 @@ mod tests {
         use eventsource_stream::Eventsource;
         use tokio_stream::StreamExt;
 
-        // Two SSE events delivered as one raw byte blob: eventsource-stream frames them, we map the
-        // first to a content event and the `[DONE]` sentinel to nothing.
+        // Two SSE events in one raw byte blob, so the framing itself is exercised.
         let raw = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n";
         let stream = tokio_stream::iter(vec![Ok::<_, std::convert::Infallible>(
             raw.as_bytes().to_vec(),

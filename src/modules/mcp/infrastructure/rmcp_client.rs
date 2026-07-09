@@ -1,6 +1,5 @@
-//! The sanctioned site for the `mcp` context's process/network I/O (ADR 0021): spawns an MCP server as a
-//! child process (stdio transport) via the official `rmcp` SDK and speaks the protocol over it. One
-//! adapter, `RmcpConnection`, kept alive for the session's lifetime once connected.
+//! The sanctioned site for the `mcp` context's process/network I/O (ADR 0021). Stdio transport only;
+//! the connection is kept alive for the session's lifetime once established.
 
 use std::time::Duration;
 
@@ -16,17 +15,14 @@ use crate::modules::mcp::application::mcp_connection::{McpConnection, McpToolSpe
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::error::AgentResult;
 
-/// Bound on the handshake (spawn + MCP `initialize`); a hung/malicious server's process must not stall
-/// `app::wire` forever — every other boot degradation already turns into a notice, this must too.
+/// A hung or malicious server must not stall `app::wire` forever.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-/// Bound on any single request over an established connection (`list_tools`/`call_tool`); a hung remote
-/// call must not strand a turn's busy state (the project's "all I/O has a timeout" non-negotiable).
+/// A hung remote call must not strand a turn's busy state.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Non-secret env vars a spawned server needs to resolve/run typical CLI tools (node/npx/python/...).
-/// Re-added after `env_clear()` so nothing else — provider API keys, credentials, sandbox flags — leaks
-/// into an approved project-layer server's process; ADR 0021 promises "never receives a harness secret",
-/// and `tokio::process::Command` inherits the *entire* parent env by default, so this must be explicit.
+/// The allow-list re-added after `env_clear()`: `tokio::process::Command` inherits the *entire* parent env
+/// by default, which would leak provider API keys and sandbox flags into an approved project-layer
+/// server's process. ADR 0021 promises a server never receives a harness secret.
 const INHERITED_ENV_VARS: &[&str] = &[
     "PATH",
     "HOME",
@@ -38,18 +34,13 @@ const INHERITED_ENV_VARS: &[&str] = &[
     "TMP",
 ];
 
-/// A live connection to one MCP server, spawned as a child process over stdio. `Send`-bound (rmcp's
-/// service handle is `Send + Sync`), unlike the engine's `?Send` ports — this context has no `&dyn
-/// Sandbox`/`!Send` value crossing an await point.
 pub struct RmcpConnection {
     service: RunningService<RoleClient, ()>,
 }
 
 impl RmcpConnection {
-    /// Spawn `command args...` and complete the MCP handshake over its stdio. A spawn failure, a
-    /// handshake failure, or a handshake that exceeds `CONNECT_TIMEOUT` all surface as
-    /// `AgentError::Extensions` — the caller (`app::wire`) treats a server that fails to connect like any
-    /// other auxiliary degradation: a boot notice, never fatal, never a hang.
+    /// Every failure path surfaces as `AgentError::Extensions`; `app::wire` degrades a server that fails
+    /// to connect into a boot notice, never a fatal error.
     pub async fn connect(command: &str, args: &[String]) -> AgentResult<Self> {
         let mut cmd = Command::new(command);
         cmd.args(args);

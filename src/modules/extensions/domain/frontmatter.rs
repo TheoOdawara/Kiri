@@ -1,9 +1,7 @@
 use std::collections::HashSet;
 
-/// A parsed YAML(ish) frontmatter block — a flat map of `key: value` pairs plus a `lists` map for the
-/// hyphenated-array form. Intentionally a tiny hand-rolled parser: the project forbids adding a YAML
-/// dependency just for optional metadata headers, and the subset we need (flat scalar keys + simple string
-/// lists) is small and well-defined. Pure, so it is unit-testable without touching the filesystem.
+/// A parsed YAML(ish) frontmatter block: flat scalars plus a `lists` map for the hyphenated-array form.
+/// Hand-rolled on purpose — a YAML dependency is not worth an optional metadata header.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Frontmatter {
     scalars: Vec<(String, String)>,
@@ -11,18 +9,15 @@ pub struct Frontmatter {
 }
 
 impl Frontmatter {
-    /// Parse an optional frontmatter block from a Markdown source. A block begins at the very first line
-    /// with `---` and ends at the next line that is exactly `---` (or `...`); everything between is parsed.
-    /// Returns `Ok(parsed, body)` — the body is the Markdown that remains after the block (or the whole
-    /// source when there is none). A malformed block surfaces as an empty `Frontmatter` rather than an
-    /// error, so a bad header never aborts boot (it degrades: the resource loads with no metadata).
+    /// A malformed block yields an empty `Frontmatter` rather than an error, so a bad header degrades the
+    /// resource to "no metadata" instead of aborting boot.
     pub fn parse(source: &str) -> (Self, &str) {
         let (block, body) = split_block(source);
         let front = Self::parse_block(block);
         (front, body)
     }
 
-    /// The scalar value for `key`, if present. A `--`-duplicated key is the same key.
+    /// A `--`-duplicated key is the same key.
     pub fn get(&self, key: &str) -> Option<&str> {
         self.scalars
             .iter()
@@ -30,7 +25,7 @@ impl Frontmatter {
             .map(|(_, v)| v.as_str())
     }
 
-    /// The list value for `key`, if present (an empty slice maps to `None` only when the key is absent).
+    /// An empty slice maps to `None` only when the key is absent.
     pub fn list(&self, key: &str) -> Option<&[String]> {
         self.lists
             .iter()
@@ -61,21 +56,18 @@ impl Frontmatter {
             if line.is_empty() {
                 continue;
             }
-            // A list item: a line starting with `- ` while we are mid-list OR a bare `- x` continuation.
             if let Some(rest) = line.strip_prefix("- ") {
                 let item = rest.trim().trim_matches(|c: char| c == '"' || c == '\'');
                 if !item.is_empty() {
                     if let Some((_, items)) = current_list.as_mut() {
                         items.push(item.to_string());
                     } else {
-                        // A list item with no preceding key: tolerate it as a one-entry list under an
-                        // empty key so a malformed header still parses without aborting.
+                        // Tolerated under an empty key, so a malformed header still parses.
                         current_list = Some((String::new(), vec![item.to_string()]));
                     }
                 }
                 continue;
             }
-            // Flush any open list before starting a new scalar key.
             if let Some(list) = current_list.take() {
                 lists.push(list);
             }
@@ -100,17 +92,14 @@ impl Frontmatter {
     }
 }
 
-/// Split an optional frontmatter block from a Markdown source, returning `(block, body)`. The block is
-/// the text between the opening and closing `---` lines; the body is everything after the closing line.
-/// When the source does not start with a `---` fence, the block is empty and the body is the whole source.
+/// Splits `(block, body)` around the `---` fences. No opening fence: an empty block, the whole source.
 fn split_block(source: &str) -> (&str, &str) {
     let first_line_end = source.find('\n').unwrap_or(source.len());
     let first = source[..first_line_end].trim();
     if first != "---" {
         return ("", source);
     }
-    // Scan lines after the opening fence, tracking absolute byte offsets, until the line that is
-    // exactly `---` (or `...`) closes the block.
+    // Absolute byte offsets, so the body can be sliced without re-joining the scanned lines.
     let mut line_start = first_line_end + 1;
     while line_start <= source.len() {
         let rest = &source[line_start..];

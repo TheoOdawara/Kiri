@@ -17,9 +17,8 @@ struct UseSkillArgs {
     name: String,
 }
 
-/// Read-only tool that fetches a loaded skill's full body by id (ADR 0021). The system prompt carries
-/// only each skill's one-line description (`ExtensionCatalog::skills_index`); the body is fetched here
-/// on demand, so the base prompt stays lean regardless of how many skills are installed.
+/// Fetches a loaded skill's body by id (ADR 0021), so the base prompt stays lean however many skills
+/// are installed — only their one-line descriptions are always-on.
 pub struct UseSkill {
     skills: Arc<HashMap<String, Skill>>,
 }
@@ -97,8 +96,7 @@ mod tests {
     use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
     use crate::shared::kernel::tool_call::FunctionCall;
 
-    /// `use_skill` never touches the sandbox path — it only reads its own in-memory skills map — so a
-    /// bare root is enough to satisfy the `Tool` API's `execute`/`confirmation` signatures.
+    /// `use_skill` only reads its in-memory skills map, so a bare root satisfies the `Tool` signatures.
     fn sandbox() -> FsSandbox {
         FsSandbox::new(std::path::PathBuf::from("."), SensitiveMatcher::empty()).unwrap()
     }

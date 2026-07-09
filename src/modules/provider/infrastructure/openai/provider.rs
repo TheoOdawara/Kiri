@@ -10,23 +10,14 @@ use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::provider::{Effort, NvidiaFamily, ProviderKind, Secret};
 
-/// OpenAI-compatible chat provider (NVIDIA / OpenAI / compatible / custom / keyless local). Holds the
-/// HTTP client and endpoint/credentials; translates a domain `TurnRequest` into the wire `ChatRequest`,
-/// streams the response forwarding deltas to `sink`, and assembles the turn.
 pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
-    /// Optional API key. `Some` for an authenticated endpoint (held as a `Secret`: zeroized on drop,
-    /// redacted in Debug, exposed only at the auth-header site). `None` for a keyless local endpoint
-    /// (Ollama / LM Studio), in which case `complete` omits the `Authorization` header entirely.
+    /// `None` for a keyless local endpoint (Ollama / LM Studio).
     api_key: Option<Secret>,
-    /// The provider kind selects which thinking/reasoning parameter to send: NVIDIA uses
-    /// `chat_template_kwargs`, OpenAI proper uses `reasoning_effort`, others send nothing.
+    /// Selects the reasoning parameter: NVIDIA takes `chat_template_kwargs`, OpenAI `reasoning_effort`.
     kind: ProviderKind,
-    /// Whether thinking/reasoning is enabled for this provider. Gated further by `effort` — `Off`
-    /// suppresses reasoning even when this is true.
     thinking: bool,
-    /// The reasoning effort dial, mapped to vendor-specific parameters by `kind`.
     effort: Effort,
 }
 
@@ -49,15 +40,13 @@ impl OpenAiProvider {
         }
     }
 
-    /// Whether to ask the model to reason this turn: thinking must be enabled and effort must not be `Off`.
     fn reasoning_enabled(&self) -> bool {
         self.thinking && self.effort != Effort::Off
     }
 }
 
-/// The `chat_template_kwargs` NVIDIA's hosted model zoo expects for `model`'s family, or `None` for a
-/// family with no confirmed reasoning-toggle convention (see `NvidiaFamily`). Keyed on the live turn's
-/// model id (not a fixed profile field) so a mid-session `/models` switch is honored immediately.
+/// `None` for a family with no confirmed reasoning-toggle convention. Keyed on the live turn's model id,
+/// not a profile field, so a mid-session `/models` switch is honored immediately.
 fn nvidia_chat_template_kwargs(model: &str) -> Option<ChatTemplateKwargs> {
     match NvidiaFamily::classify(model) {
         NvidiaFamily::Nemotron | NvidiaFamily::Kimi => Some(ChatTemplateKwargs {
@@ -111,8 +100,6 @@ impl CompletionProvider for OpenAiProvider {
         let mut accumulator = TurnAccumulator::default();
         drain_sse(response, |data| handle_event(data, &mut accumulator, sink)).await?;
 
-        // A turn the output token cap truncated before any content or tool call: surface it instead of
-        // returning an empty turn the user gets no feedback on.
         if accumulator.hit_empty_output_limit() {
             return Err(AgentError::Provider(
                 "the provider hit the output token limit before producing a response; \
@@ -137,10 +124,8 @@ mod tests {
     use crate::shared::kernel::provider::{Effort, ProviderKind, Secret};
     use std::time::Duration;
 
-    /// Run-to-verify of the timeout fix: a local listener that ACCEPTS the connection but never sends a
-    /// byte models a provider that hangs after connect — the reported "first message does nothing, no
-    /// error". `read_timeout` must make `complete()` fail fast instead of hanging forever. Hermetic
-    /// (loopback only), bounded well under the outer guard.
+    /// A listener that accepts but never answers models a provider hanging after connect: the regression
+    /// where the first message did nothing, forever, with no error.
     #[tokio::test]
     async fn complete_fails_fast_when_the_provider_accepts_but_never_responds() {
         use tokio::net::TcpListener;
@@ -148,7 +133,6 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            // Hold every accepted connection open without ever responding.
             let mut held = Vec::new();
             while let Ok((stream, _)) = listener.accept().await {
                 held.push(stream);
@@ -188,8 +172,6 @@ mod tests {
         }
     }
 
-    /// A 4xx means the body we sent is unacceptable; it must surface as `ProviderRejected` carrying the
-    /// status and body so the frontend can drop the offending turn instead of resending it forever.
     #[tokio::test]
     async fn complete_surfaces_a_client_error_as_provider_rejected() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -200,7 +182,7 @@ mod tests {
         tokio::spawn(async move {
             if let Ok((mut stream, _)) = listener.accept().await {
                 let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf).await; // drain the request before replying
+                let _ = stream.read(&mut buf).await;
                 let body = "invalid model: nope";
                 let response = format!(
                     "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -244,8 +226,6 @@ mod tests {
         }
     }
 
-    /// Drive one `complete` (keyed or keyless) against the shared loopback capture server and return the
-    /// raw request bytes it sent — the assertion is on what was sent, not the response.
     async fn capture_request(api_key: Option<Secret>) -> String {
         test_support::capture_request(|base_url| async move {
             let client = reqwest::Client::builder().build().unwrap();
@@ -269,8 +249,6 @@ mod tests {
         .await
     }
 
-    /// Regression lock for the LM Studio / Ollama fix: a keyless adapter must send NO `Authorization`
-    /// header — not even `Bearer ` (empty), which some local servers reject.
     #[tokio::test]
     async fn keyless_provider_omits_authorization_header() {
         let captured = capture_request(None).await;
@@ -280,7 +258,6 @@ mod tests {
         );
     }
 
-    /// The dual: a keyed adapter must send `Authorization: Bearer <key>`.
     #[tokio::test]
     async fn keyed_provider_sends_bearer_authorization() {
         let captured = capture_request(Some(Secret::new("k"))).await;
@@ -342,8 +319,6 @@ mod tests {
         }
     }
 
-    /// End-to-end: a promoted family (Qwen) now sends its confirmed `enable_thinking` kwarg over the
-    /// real request path (not just the unit-level helper above).
     #[tokio::test]
     async fn qwen_model_sends_enable_thinking_over_the_wire() {
         let captured = test_support::capture_request(|base_url| async move {
@@ -376,8 +351,6 @@ mod tests {
         );
     }
 
-    /// End-to-end: DeepSeek stays unsupported (see `NvidiaFamily::Other`'s doc comment for why) and must
-    /// send no `chat_template_kwargs` at all over the real request path.
     #[tokio::test]
     async fn deepseek_model_sends_no_chat_template_kwargs_over_the_wire() {
         let captured = test_support::capture_request(|base_url| async move {

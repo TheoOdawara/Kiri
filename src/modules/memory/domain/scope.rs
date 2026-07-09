@@ -1,6 +1,5 @@
-/// Where a memory entry is stored. A shared entry is global (no project id); a project entry is stamped
-/// with the current project. Parsing and the project-id rule live here so the `remember` tool and the
-/// distiller share one source instead of each re-deriving the `"shared" => global` rule.
+/// Where a memory entry is stored. Parsing and the project-id rule live here so the `remember` tool and
+/// the distiller share one source rather than each re-deriving `"shared" => global`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     Project,
@@ -17,8 +16,7 @@ impl Scope {
         }
     }
 
-    /// The `project_id` to stamp on an entry saved in this scope: `None` for shared (global by
-    /// definition, so it is reachable from every project), the current project for project scope.
+    /// `None` for shared: a global entry is reachable from every project.
     pub fn project_id_for(self, current: &str) -> Option<String> {
         match self {
             Scope::Project => Some(current.to_string()),

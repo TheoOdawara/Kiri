@@ -1,8 +1,6 @@
-//! Persists project-layer active-capability approvals (ADR 0021's TOFU trust model): the user approves a
-//! capability once, and it stays approved as long as its content hash matches — a changed file (a hostile
-//! repo editing a hook after approval) reverts it to pending. Global-layer capabilities never consult this
-//! store — `domain::gate::resolve` always approves them. Stored at `~/.kiri/extensions_trust.json`,
-//! `0600`, mirroring the credentials file (`provider::infrastructure::secrets::FileSecretStore`).
+//! Project-layer approvals under ADR 0021's TOFU model: a capability stays approved only while its content
+//! hash matches, so a hostile repo editing a hook after approval reverts it to pending. Stored `0600` at
+//! `~/.kiri/extensions_trust.json`. Global-layer capabilities never consult this store.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -14,16 +12,13 @@ use crate::shared::kernel::error::AgentError;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct TrustFile {
-    /// `(workspace, kind, id)` composite key (see `ExtensionsTrustStore::key`) -> the content hash last
-    /// approved for it.
+    /// `(workspace, kind, id)` -> the content hash last approved for it.
     approved: BTreeMap<String, String>,
 }
 
-/// The on-disk trust store: one approved content-hash per project-layer capability, scoped to the
-/// workspace it was discovered in. The file itself is shared across every project (`~/.kiri/` is
-/// per-user, not per-workspace), so the key folds in `workspace_id` and `kind` — without them, a hook and
-/// an MCP server that happen to render the same content string (or the same id/content reused across two
-/// different projects) would share one approval, letting one capability's consent silently cover another.
+/// One approved content-hash per project-layer capability. The file is per-user, not per-workspace, so the
+/// key folds in `workspace_id` and `kind`: without them, one capability's consent could silently cover
+/// another — across kinds, or across a trusted and a hostile project.
 pub struct ExtensionsTrustStore {
     path: PathBuf,
     workspace_id: String,
@@ -34,9 +29,7 @@ impl ExtensionsTrustStore {
         Self { path, workspace_id }
     }
 
-    /// Whether `id` (of capability `kind`, e.g. `"hook"`/`"mcp"`) is currently approved for exactly
-    /// `hash`, in this store's workspace. A prior approval under a different hash (the file changed
-    /// since) reports `false` — the caller re-gates it as pending.
+    /// A prior approval under a different hash reports `false`; the caller re-gates it as pending.
     pub fn is_approved(&self, kind: &str, id: &str, hash: &str) -> Result<bool, AgentError> {
         let file = self.read()?;
         Ok(file
@@ -45,8 +38,7 @@ impl ExtensionsTrustStore {
             .is_some_and(|approved| approved == hash))
     }
 
-    /// Record `id` (of capability `kind`) as approved for `hash` in this store's workspace, persisting
-    /// immediately.
+    /// Persists immediately.
     pub fn approve(&self, kind: &str, id: &str, hash: &str) -> Result<(), AgentError> {
         let mut file = self.read()?;
         file.approved.insert(self.key(kind, id), hash.to_string());
@@ -82,8 +74,7 @@ impl ExtensionsTrustStore {
     }
 }
 
-/// Write `bytes` to `path` readable/writable by the owner only, mirroring `FileSecretStore`'s adapter
-/// (crash-atomic on every platform; `0600` on Unix, the profile DACL on Windows — see its doc comment).
+/// Owner-only and crash-atomic, mirroring `FileSecretStore`: `0600` on Unix, the profile DACL on Windows.
 #[cfg(unix)]
 fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), AgentError> {
     crate::shared::infra::fs::write_atomic_owner_only(path, bytes)
@@ -138,8 +129,7 @@ mod tests {
 
     #[test]
     fn approvals_do_not_cross_capability_kinds() {
-        // A hook and an MCP server sharing the same id+hash (e.g. their content renders to the same
-        // string) must not share an approval — a hook's consent must never silently cover an MCP server.
+        // A hook's consent must never silently cover an MCP server that renders the same content.
         let dir = TempDir::new().unwrap();
         let store = store(&dir);
         store.approve("hook", "build", "hash1").unwrap();
@@ -148,8 +138,7 @@ mod tests {
 
     #[test]
     fn approvals_do_not_cross_workspaces() {
-        // Two different projects using the same conventional id+content must not share an approval —
-        // approving in a trusted project must not silently pre-approve a hostile one.
+        // Approving in a trusted project must not silently pre-approve a hostile one.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("trust.json");
         let store_a = ExtensionsTrustStore::new(path.clone(), "workspace-a".to_string());
