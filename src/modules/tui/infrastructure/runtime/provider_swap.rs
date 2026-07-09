@@ -31,6 +31,9 @@ pub struct ProviderSwap {
     providers: Vec<ProviderProfile>,
     pub(super) active: String,
     credential: Option<Credential>,
+    /// When true, the cached `credential` came from `KIRI_NO_KEY_IMPORT` (SEC-07 session-only) and must
+    /// not be written to the secret store on a blank-key edit (#60).
+    credential_session_only: bool,
     thinking: bool,
     pub(super) effort: Effort,
 }
@@ -60,9 +63,18 @@ impl ProviderSwap {
             providers,
             active,
             credential,
+            // Boot path sets this correctly via `with_session_only_credential` when needed; default
+            // false is safe (persist is the common path).
+            credential_session_only: false,
             thinking,
             effort,
         }
+    }
+
+    /// Mark the cached credential as SEC-07 session-only (must not be written on blank-key edit).
+    pub fn with_session_only_credential(mut self, session_only: bool) -> Self {
+        self.credential_session_only = session_only;
+        self
     }
 
     pub(super) fn active_profile(&self) -> Option<&ProviderProfile> {
@@ -97,6 +109,7 @@ impl ProviderSwap {
                 .map(|p| p.id.clone())
                 .unwrap_or_default();
             self.credential = None;
+            self.credential_session_only = false;
         }
     }
 
@@ -118,22 +131,25 @@ impl ProviderSwap {
     }
 
     /// Resolve a provider's credential via the single shared resolver (the same keyless → stored →
-    /// env-import policy as boot), returning the credential plus any env-import persist warning — `Some`
-    /// when a one-time env key failed to save — so the caller can surface it instead of swallowing it.
+    /// env-import policy as boot), returning the credential, whether it is SEC-07 session-only (must not
+    /// be written to the store), and any env-import persist warning — `Some` when a one-time env key
+    /// failed to save — so the caller can surface it instead of swallowing it.
     /// A keyless provider yields `Credential::None`; a provider with nothing configured is a clear error.
     pub(super) fn resolve_credential(
         &self,
         profile: &ProviderProfile,
-    ) -> Result<(Credential, Option<AgentError>), AgentError> {
+    ) -> Result<(Credential, bool, Option<AgentError>), AgentError> {
         match resolve_credential_policy(profile, self.secrets.as_ref())? {
-            CredentialResolution::Keyless => Ok((Credential::None, None)),
-            CredentialResolution::Stored(credential) => Ok((credential, None)),
+            CredentialResolution::Keyless => Ok((Credential::None, false, None)),
+            CredentialResolution::Stored(credential) => Ok((credential, false, None)),
             CredentialResolution::Imported {
                 credential,
                 persisted,
-            } => Ok((credential, persisted.err())),
+            } => Ok((credential, false, persisted.err())),
             // SEC-07 opt-out: env key used for this session only, never persisted — no persist warning.
-            CredentialResolution::ImportedSessionOnly { credential } => Ok((credential, None)),
+            CredentialResolution::ImportedSessionOnly { credential } => {
+                Ok((credential, true, None))
+            }
             CredentialResolution::Absent => Err(AgentError::Provider(format!(
                 "no credential for provider '{}'. Configure it via /provider or set its API-key env var.",
                 profile.id
@@ -142,6 +158,7 @@ impl ProviderSwap {
     }
 
     /// Resolve the credential to reuse when editing `profile` with a blank key ("keep existing key").
+    /// Returns `(credential, persistable)` — `persistable` is false for SEC-07 session-only keys (#60).
     /// Reuses the cached credential ONLY when `profile.id` is the currently ACTIVE provider — `credential`
     /// is cached per-active-provider, not per-`profile.id` (see the struct doc comment). Issue #27a: using
     /// it unconditionally let editing a DIFFERENT, non-active provider with a blank key silently adopt the
@@ -151,14 +168,14 @@ impl ProviderSwap {
     pub(super) fn resolve_credential_for_edit(
         &self,
         profile: &ProviderProfile,
-    ) -> Result<Credential, AgentError> {
+    ) -> Result<(Credential, bool), AgentError> {
         if self.active == profile.id
             && let Some(credential) = self.credential.clone()
         {
-            return Ok(credential);
+            return Ok((credential, !self.credential_session_only));
         }
-        let (credential, _) = self.resolve_credential(profile)?;
-        Ok(credential)
+        let (credential, session_only, _) = self.resolve_credential(profile)?;
+        Ok((credential, !session_only))
     }
 
     /// Rebuild the active provider with a new `effort`, committing the effort only on success. Without a
@@ -192,10 +209,11 @@ impl ProviderSwap {
             .find(|p| p.id == id)
             .ok_or_else(|| AgentError::Provider(format!("provider '{id}' is not configured")))?
             .clone();
-        let (credential, persist_warning) = self.resolve_credential(&profile)?;
+        let (credential, session_only, persist_warning) = self.resolve_credential(&profile)?;
         let provider = self.build(&profile, &credential, self.effort)?;
         self.active = id.to_string();
         self.credential = Some(credential);
+        self.credential_session_only = session_only;
         Ok(ProviderSwitch {
             provider,
             model: profile.model,
@@ -206,10 +224,14 @@ impl ProviderSwap {
     /// Store a new provider's credential, build its adapter, add-or-replace it in the catalog, and make
     /// it active — all committed only if the credential stores and the adapter builds. Returns the new
     /// adapter and its model.
+    ///
+    /// `persist_secret`: when false (SEC-07 session-only keep-existing-key edit, #60), the credential
+    /// stays in memory only and is never written to the secret store.
     pub(super) fn add_and_activate(
         &mut self,
         profile: ProviderProfile,
         credential: Credential,
+        persist_secret: bool,
     ) -> Result<(Arc<dyn CompletionProvider>, String), AgentError> {
         // Build first (validates the profile/credential), then store the secret — so a build failure
         // never leaves an orphaned credential in the store for a provider that was not added.
@@ -219,8 +241,16 @@ impl ProviderSwap {
             // id best-effort (a missing-key delete is a harmless no-op) so no orphaned secret lingers.
             Credential::None => {
                 let _ = self.secrets.delete(&profile.id);
+                self.credential_session_only = false;
             }
-            _ => self.secrets.set(&profile.id, &credential)?,
+            _ if persist_secret => {
+                self.secrets.set(&profile.id, &credential)?;
+                self.credential_session_only = false;
+            }
+            _ => {
+                // Session-only: leave the store untouched (#60).
+                self.credential_session_only = true;
+            }
         }
         let id = profile.id.clone();
         let model = profile.model.clone();
@@ -362,13 +392,13 @@ impl RunLoop {
         profile: ProviderProfile,
         keep_existing_key: bool,
     ) {
-        let credential = match &profile.auth {
+        let (credential, persist_secret) = match &profile.auth {
             AuthMethod::ApiKey if keep_existing_key => {
                 // Editing with a blank key: see `ProviderSwap::resolve_credential_for_edit` (issue #27a)
                 // for why this can't just reuse the cached credential unconditionally.
                 self.model.pending_credential = None;
                 match self.provider_swap.resolve_credential_for_edit(&profile) {
-                    Ok(c) => c,
+                    Ok((c, persistable)) => (c, persistable),
                     Err(error) => {
                         self.model.notify_error(format!(
                             "não foi possível recuperar a chave existente: {error:#}"
@@ -383,11 +413,11 @@ impl RunLoop {
                         .notify_error("chave ausente; provider não foi salvo");
                     return;
                 };
-                Credential::ApiKey { key }
+                (Credential::ApiKey { key }, true)
             }
             AuthMethod::None => {
                 self.model.pending_credential = None;
-                Credential::None
+                (Credential::None, true)
             }
             other => {
                 self.model.pending_credential = None;
@@ -400,7 +430,7 @@ impl RunLoop {
         let id = profile.id.clone();
         match self
             .provider_swap
-            .add_and_activate(profile.clone(), credential)
+            .add_and_activate(profile.clone(), credential, persist_secret)
         {
             Ok((provider, target_model)) => {
                 self.agent_loop.set_provider(provider);

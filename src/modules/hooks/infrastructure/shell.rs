@@ -13,12 +13,36 @@ use crate::shared::kernel::sandbox::NetworkPolicy;
 /// `run_command` call.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Shared refuse copy with `run_command` when `KIRI_SANDBOX=require` and OS confinement is absent.
+const REQUIRE_UNCONFINED_MSG: &str = "OS command sandbox unavailable on this platform; refusing to \
+     run unconfined (KIRI_SANDBOX=require)";
+
 /// Network-denied by default: a hook is a notification point, not an integration — that is what MCP is for.
-pub struct ShellHookRunner;
+pub struct ShellHookRunner {
+    /// When true, refuse to run if the sandbox confiner does not support OS confinement (#89).
+    require_confinement: bool,
+}
+
+impl ShellHookRunner {
+    pub fn new(require_confinement: bool) -> Self {
+        Self {
+            require_confinement,
+        }
+    }
+}
 
 #[async_trait::async_trait(?Send)]
 impl HookRunner for ShellHookRunner {
     async fn run(&self, sandbox: &dyn Sandbox, hook: &Hook) -> HookOutcome {
+        // #89: KIRI_SANDBOX=require must gate hooks the same way it gates run_command.
+        if self.require_confinement && !sandbox.confiner().supports_confinement() {
+            return HookOutcome {
+                hook_id: hook.id.clone(),
+                ok: false,
+                summary: REQUIRE_UNCONFINED_MSG.to_string(),
+            };
+        }
+
         let policy = sandbox.command_policy(NetworkPolicy::Deny, &[], &[]);
         let result = exec::run_shell(
             &hook.command,
@@ -93,7 +117,7 @@ mod tests {
     async fn a_successful_command_reports_ok_with_its_first_output_line() {
         let dir = TempDir::new().unwrap();
         let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
-        let outcome = ShellHookRunner
+        let outcome = ShellHookRunner::new(false)
             .run(&sandbox, &hook("echo hello world"))
             .await;
         assert!(outcome.ok);
@@ -105,7 +129,9 @@ mod tests {
     async fn a_failing_command_reports_not_ok() {
         let dir = TempDir::new().unwrap();
         let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
-        let outcome = ShellHookRunner.run(&sandbox, &hook("exit 1")).await;
+        let outcome = ShellHookRunner::new(false)
+            .run(&sandbox, &hook("exit 1"))
+            .await;
         assert!(!outcome.ok);
     }
 
@@ -115,7 +141,9 @@ mod tests {
     async fn a_command_with_no_output_summarizes_the_exit_code() {
         let dir = TempDir::new().unwrap();
         let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
-        let outcome = ShellHookRunner.run(&sandbox, &hook("true")).await;
+        let outcome = ShellHookRunner::new(false)
+            .run(&sandbox, &hook("true"))
+            .await;
         assert!(outcome.ok);
         assert_eq!(outcome.summary, "exit 0");
     }
@@ -130,12 +158,32 @@ mod tests {
             "echo boom 1>&2; exit 1",
             "[Console]::Error.WriteLine('boom'); exit 1",
         );
-        let outcome = ShellHookRunner.run(&sandbox, &hook(script)).await;
+        let outcome = ShellHookRunner::new(false)
+            .run(&sandbox, &hook(script))
+            .await;
         assert!(!outcome.ok);
         assert_eq!(outcome.summary, "boom");
     }
 
     fn script(unix: &'static str, windows: &'static str) -> &'static str {
         if cfg!(windows) { windows } else { unix }
+    }
+
+    /// #89: require mode refuses hooks when OS confinement is unavailable.
+    /// `FsSandbox::new` always installs `NoConfinement`, so this is host-portable.
+    #[tokio::test]
+    async fn require_confinement_refuses_when_confiner_unsupported() {
+        let dir = TempDir::new().unwrap();
+        let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+        assert!(!sandbox.confiner().supports_confinement());
+        let outcome = ShellHookRunner::new(true)
+            .run(&sandbox, &hook("echo should-not-run"))
+            .await;
+        assert!(!outcome.ok);
+        assert!(
+            outcome.summary.contains("KIRI_SANDBOX=require"),
+            "summary={:?}",
+            outcome.summary
+        );
     }
 }

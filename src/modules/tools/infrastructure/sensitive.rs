@@ -123,19 +123,38 @@ fn glob_to_regex(glob: &str) -> String {
 /// The active sensitive-file globs: `KIRI_SENSITIVE_PATTERNS` (newline-separated, `#` comments, replaces
 /// the default) or the hardcoded default. Owned so the OS sandbox profile can deny the same set the file
 /// tools refuse without re-reading the env or borrowing a local — the single source for both layers.
+///
+/// Fail-closed (#87): a non-empty env value that parses to zero globs (only blanks/comments) must not
+/// disable every name guard — fall back to [`DEFAULT_SENSITIVE_PATTERNS`].
 pub fn sensitive_globs() -> Vec<String> {
     match std::env::var("KIRI_SENSITIVE_PATTERNS") {
-        Ok(value) if !value.is_empty() => value
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(str::to_string)
-            .collect(),
-        _ => DEFAULT_SENSITIVE_PATTERNS
-            .iter()
-            .map(|g| g.to_string())
-            .collect(),
+        Ok(value) if !value.is_empty() => {
+            let parsed = parse_sensitive_pattern_lines(&value);
+            if parsed.is_empty() {
+                default_sensitive_globs()
+            } else {
+                parsed
+            }
+        }
+        _ => default_sensitive_globs(),
     }
+}
+
+fn default_sensitive_globs() -> Vec<String> {
+    DEFAULT_SENSITIVE_PATTERNS
+        .iter()
+        .map(|g| g.to_string())
+        .collect()
+}
+
+/// Parse newline-separated globs: trim, drop blanks and `#` comments.
+fn parse_sensitive_pattern_lines(value: &str) -> Vec<String> {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
 }
 
 /// Load the sensitive-file globs (via [`sensitive_globs`]) and compile them into a matcher, failing fast
@@ -206,6 +225,36 @@ mod tests {
         assert_eq!(m.matches(".ENV"), Some(".env"));
         assert_eq!(m.matches("ID_RSA"), Some("id_rsa"));
         assert_eq!(m.matches("Server.PEM"), Some("*.pem"));
+    }
+
+    #[test]
+    fn parse_drops_blanks_and_comments() {
+        let parsed = parse_sensitive_pattern_lines("\n# only comments\n  \n# .env\n");
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn parse_keeps_real_globs() {
+        let parsed = parse_sensitive_pattern_lines("# header\n.mysecret\n\n*.token\n");
+        assert_eq!(parsed, vec![".mysecret".to_string(), "*.token".to_string()]);
+    }
+
+    /// #87: env value that is non-empty but only comments/blanks must not yield an empty matcher.
+    #[test]
+    fn empty_after_parse_falls_back_to_defaults_via_sensitive_globs_logic() {
+        let value = "\n# only comments\n  \n";
+        let parsed = parse_sensitive_pattern_lines(value);
+        assert!(parsed.is_empty());
+        // Mirror sensitive_globs' fail-closed arm without mutating process env.
+        let globs = if parsed.is_empty() {
+            default_sensitive_globs()
+        } else {
+            parsed
+        };
+        let refs: Vec<&str> = globs.iter().map(String::as_str).collect();
+        let m = SensitiveMatcher::new(&refs).unwrap();
+        assert_eq!(m.matches(".env"), Some(".env"));
+        assert!(!m.globs().is_empty());
     }
 
     #[test]

@@ -102,8 +102,84 @@ pub struct EmbeddingSettings {
 /// exhaust memory during config resolve.
 const MAX_INSTRUCTIONS_BYTES: u64 = 256 * 1024;
 
+/// Open a path for capped read without following a final-component symlink when the OS allows it (#57).
+/// On Unix uses `O_NOFOLLOW`; on Windows re-checks `symlink_metadata` after open (narrow residual race).
+fn open_regular_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Linux 0x20000 / macOS & BSD 0x100 — `libc::O_NOFOLLOW` without a libc dependency.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const O_NOFOLLOW: i32 = 0x20000;
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
+        const O_NOFOLLOW: i32 = 0x0000_0100;
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        )))]
+        const O_NOFOLLOW: i32 = 0;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "instructions path is not a regular file",
+            ));
+        }
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        // Residual: no portable O_NOFOLLOW. Open then re-stat the path; still refuse if it is a symlink.
+        if std::fs::symlink_metadata(path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "instructions path must not be a symlink",
+            ));
+        }
+        let file = std::fs::File::open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "instructions path is not a regular file",
+            ));
+        }
+        // Re-check after open (narrows #57 TOCTOU; not eliminated without nofollow).
+        if std::fs::symlink_metadata(path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "instructions path must not be a symlink",
+            ));
+        }
+        Ok(file)
+    }
+}
+
 fn read_capped(path: &std::path::Path) -> std::io::Result<String> {
-    let file = std::fs::File::open(path)?;
+    let file = open_regular_file(path)?;
     let mut buf = Vec::new();
     file.take(MAX_INSTRUCTIONS_BYTES).read_to_end(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).into_owned())

@@ -33,10 +33,10 @@ pub const STDERR_MARKER: &str = "--- stderr ---";
 /// Non-secret env vars a spawned command needs to resolve/run typical shell scripts and dev/package
 /// tools (cargo, npm, git, …). Re-added after `env_clear()` so nothing else — provider API keys and
 /// other credentials the harness process holds — leaks into a model-supplied command; a compromised or
-/// careless command must not be able to read them back via `env`/`printenv` (issues #25/#49; ADR 0026;
-/// mirrors the same pattern already used for MCP server children, `rmcp_client.rs`). Both `run_command`
-/// and hooks route through this one function, so scrubbing here closes both surfaces at once.
-const INHERITED_ENV_VARS: &[&str] = &[
+/// careless command must not be able to read them back via `env`/`printenv` (issues #25/#49/#59; ADR 0026;
+/// mirrors the same pattern already used for MCP server children, `rmcp_client.rs`). Shared by
+/// `run_command`, hooks, `git_cli`, and the TUI `$EDITOR` spawn.
+pub(crate) const INHERITED_ENV_VARS: &[&str] = &[
     "PATH",
     // Windows: after env scrub, PowerShell/cmd resolve `ping` → `ping.exe` via PATHEXT. Without it,
     // `run_command` timeout tests (and any bare tool name) fail with "not recognized" even when the
@@ -53,6 +53,9 @@ const INHERITED_ENV_VARS: &[&str] = &[
     "TERM",
     "LANG",
     "LC_ALL",
+    // Git over SSH needs the agent socket; never secrets themselves (#59).
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
 ];
 
 /// The bound for a file tool's command. `run_command` overrides it with its own configurable timeout.
@@ -62,7 +65,20 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// lookup is injected (mirroring `provider::factory::resolve_credential_with_env`) so this is unit-testable
 /// without mutating real process env — edition-2024 `std::env::set_var` is `unsafe`, and this crate
 /// forbids `unsafe` code.
-fn scrub_env(cmd: &mut Command, lookup: impl Fn(&str) -> Option<String>) {
+pub(crate) fn scrub_tokio_env(cmd: &mut Command, lookup: impl Fn(&str) -> Option<String>) {
+    cmd.env_clear();
+    for key in INHERITED_ENV_VARS {
+        if let Some(value) = lookup(key) {
+            cmd.env(key, value);
+        }
+    }
+}
+
+/// Same scrub as [`scrub_tokio_env`] for `std::process::Command` (TUI `$EDITOR` spawn, #59).
+pub(crate) fn scrub_std_env(
+    cmd: &mut std::process::Command,
+    lookup: impl Fn(&str) -> Option<String>,
+) {
     cmd.env_clear();
     for key in INHERITED_ENV_VARS {
         if let Some(value) = lookup(key) {
@@ -107,7 +123,7 @@ pub async fn run_shell(
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    scrub_env(&mut cmd, |key| std::env::var(key).ok());
+    scrub_tokio_env(&mut cmd, |key| std::env::var(key).ok());
     let cmd = confiner
         .confine(cmd, policy)
         .map_err(|error| ExecError::Spawn(error.to_string()))?;
@@ -325,7 +341,7 @@ mod tests {
     #[test]
     fn scrub_env_keeps_only_the_allowlist() {
         let mut cmd = Command::new("true");
-        scrub_env(&mut cmd, |key| match key {
+        scrub_tokio_env(&mut cmd, |key| match key {
             "PATH" => Some("/usr/bin".to_string()),
             // Not in INHERITED_ENV_VARS — must be dropped, not carried into the child.
             "NVIDIA_API_KEY" => Some("should-not-leak".to_string()),

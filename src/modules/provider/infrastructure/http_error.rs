@@ -29,6 +29,15 @@ pub(crate) fn error_from_status(status: reqwest::StatusCode, body: String) -> Ag
             truncate_body(body)
         ));
     }
+    // #58: redirects are disabled (credential must not be replayed to Location). Surface that clearly.
+    if status.is_redirection() {
+        return AgentError::Provider(format!(
+            "the provider redirected this request (HTTP {status}); Kiri does not follow redirects \
+             to avoid leaking your API key to an unverified host — point base_url at the final \
+             endpoint directly. body: {}",
+            truncate_body(body)
+        ));
+    }
     if status.is_client_error() {
         AgentError::ProviderRejected {
             status: status.as_u16(),
@@ -82,6 +91,21 @@ mod tests {
             "boom".to_string(),
         );
         assert!(matches!(error, AgentError::Provider(_)));
+    }
+
+    #[test]
+    fn redirect_explains_that_kiri_does_not_follow() {
+        let error = error_from_status(
+            reqwest::StatusCode::TEMPORARY_REDIRECT,
+            "go elsewhere".to_string(),
+        );
+        match error {
+            AgentError::Provider(msg) => {
+                assert!(msg.contains("does not follow redirects"), "{msg}");
+                assert!(msg.contains("base_url"), "{msg}");
+            }
+            other => panic!("expected Provider, got {other:?}"),
+        }
     }
 
     #[test]

@@ -55,20 +55,26 @@ pub fn confirm(action: String, default_accept: bool) -> Confirmation {
 /// backtick-wrapped so the approval box's markdown rendering shows it as inline code — visually set off
 /// from the surrounding prose, the same treatment used everywhere else in the TUI (issue #8c: "highlight
 /// the file path / parse the action for clarity"). One function so every tool's confirmation gets the
-/// highlight identically, instead of each hand-rolling the same literal phrase. `cmd` is a shell command
-/// or path the model supplied, so it may itself contain a backtick (e.g. legacy `` `whoami` `` shell
-/// substitution) — a single-backtick CommonMark span cannot contain an unescaped backtick, so wrapping
-/// would add a mismatched delimiter and mangle the render; this only skips adding that SECOND pair when
-/// one is already present — it does not neutralize a backtick already inside `cmd` (that already-present
-/// backtick was live CommonMark syntax before this function existed, same as today). A newline embedded
-/// in `cmd` is handled separately, unconditionally, by `confirm`, which every caller of this function
-/// also goes through.
+/// highlight identically, instead of each hand-rolling the same literal phrase.
+///
+/// `cmd` is model-supplied (#61): neutralize CommonMark-special characters so they cannot leave the
+/// code span (or, if wrapping fails, still cannot render as emphasis/heading). Newlines are stripped
+/// separately by [`confirm`].
 pub fn confirm_execute_suffix(cmd: &str) -> String {
-    if cmd.contains('`') {
-        format!("Aprova executar: {cmd}?")
-    } else {
-        format!("Aprova executar: `{cmd}`?")
-    }
+    let safe = sanitize_confirm_cmd(cmd);
+    format!("Aprova executar: `{safe}`?")
+}
+
+/// Neutralize markdown-significant characters in attacker/model-influenced confirmation substrings.
+fn sanitize_confirm_cmd(cmd: &str) -> String {
+    cmd.chars()
+        .map(|c| match c {
+            // Keep visual weight close to the original; code-span delimiter must not appear inside.
+            '`' => '\u{2032}', // prime ′
+            '*' | '_' | '[' | ']' | '|' | '#' | '<' | '>' => '·',
+            other => other,
+        })
+        .collect()
 }
 
 /// Build the standard single-path confirmation: `{phrase}. Aprova executar: \`{cmd}\`?`, with the
@@ -224,15 +230,28 @@ mod tests {
     }
 
     #[test]
-    fn confirm_execute_suffix_skips_the_highlight_when_the_command_has_a_backtick() {
-        // A single-backtick CommonMark span cannot contain an unescaped backtick — wrapping this would
-        // mangle the render, so the highlight is skipped rather than risk garbled output.
+    fn confirm_execute_suffix_neutralizes_backticks_inside_the_command() {
+        // #61: embedded backticks must not stay live CommonMark; neutralize then wrap.
         let cmd = "echo `whoami`";
-        assert_eq!(
-            confirm_execute_suffix(cmd),
-            format!("Aprova executar: {cmd}?"),
-            "no extra wrapping backticks must be added around a command that already has one"
+        let out = confirm_execute_suffix(cmd);
+        assert!(out.starts_with("Aprova executar: `"));
+        assert!(out.ends_with("`?"));
+        assert!(
+            !out.contains("echo `whoami`"),
+            "raw backtick must not remain live: {out}"
         );
+        assert!(
+            out.contains('\u{2032}'),
+            "backtick replaced with prime: {out}"
+        );
+    }
+
+    #[test]
+    fn confirm_execute_suffix_neutralizes_emphasis_markers() {
+        let out = confirm_execute_suffix("rm *important* _file_");
+        assert!(!out.contains("*important*"), "{out}");
+        assert!(!out.contains("_file_"), "{out}");
+        assert!(out.contains('·'), "{out}");
     }
 
     #[test]

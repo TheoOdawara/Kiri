@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use crate::modules::sync::application::git::{Git, GitOutput};
+use crate::modules::tools::infrastructure::exec::scrub_tokio_env;
 use crate::shared::kernel::error::{AgentError, AgentResult};
 
 /// Generous, because a push/pull reaching a remote can be slow — but never unbounded.
@@ -25,6 +26,8 @@ impl Git for GitCli {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // #59: same env scrub as run_command/hooks — do not leak harness API keys into git/hooks.
+        scrub_tokio_env(&mut command, |key| std::env::var(key).ok());
 
         let child = command.spawn().map_err(|error| {
             AgentError::Sync(format!(

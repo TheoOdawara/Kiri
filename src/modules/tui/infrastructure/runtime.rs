@@ -121,6 +121,15 @@ fn surface_boot_notices(model: &mut Model, notices: &[BootNotice]) {
     }
 }
 
+/// `$EDITOR` when set; otherwise a platform-sane default (`notepad` on Windows, `nano` elsewhere).
+fn default_editor() -> String {
+    match std::env::var("EDITOR") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ if cfg!(windows) => "notepad".to_string(),
+        _ => "nano".to_string(),
+    }
+}
+
 /// The wire-time inputs to [`Tui::new`], grouped so the constructor takes a single argument (no
 /// argument-count lint). Assembled in `app::wire`, the one place the adapters are chosen.
 pub struct TuiParams {
@@ -509,12 +518,26 @@ impl RunLoop {
             }
             Effect::DeleteProvider(id) => self.apply_delete_provider(id),
             Effect::OpenFile(path) => {
+                // #88: resolve through the sandbox chokepoint (sensitive/secret/harness/escape).
+                let full_path = match self.sandbox.resolve_existing(&path) {
+                    Ok(p) => p,
+                    Err(error) => {
+                        self.model
+                            .notify_error(format!("não foi possível abrir o arquivo: {error}"));
+                        return Ok(());
+                    }
+                };
                 let mut stdout = std::io::stdout();
                 let _ = crossterm::execute!(stdout, crossterm::terminal::LeaveAlternateScreen);
                 let _ = crossterm::terminal::disable_raw_mode();
-                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
-                let full_path = self.sandbox.root().join(&path);
-                let status = std::process::Command::new(&editor).arg(full_path).status();
+                let editor = default_editor();
+                let mut cmd = std::process::Command::new(&editor);
+                cmd.arg(&full_path);
+                // #59: scrub env so editor plugins cannot read harness API keys from the process env.
+                crate::modules::tools::infrastructure::exec::scrub_std_env(&mut cmd, |key| {
+                    std::env::var(key).ok()
+                });
+                let status = cmd.status();
                 if let Err(e) = status {
                     println!(
                         "Failed to run editor {}: {}. Press Enter to continue...",
@@ -615,7 +638,7 @@ mod tests {
     fn empty_hooks() -> HookContext {
         HookContext {
             catalog: std::sync::Arc::new(ExtensionCatalog::default()),
-            runner: std::sync::Arc::new(ShellHookRunner),
+            runner: std::sync::Arc::new(ShellHookRunner::new(false)),
             trust: std::sync::Arc::new(ExtensionsTrustStore::new(
                 std::path::PathBuf::from("/dev/null/kiri-test-trust.json"),
                 "test-workspace".to_string(),
@@ -931,10 +954,11 @@ mod tests {
                 "nvidia",
                 &[("nvidia", api_key_with("active-cached-key"))],
             );
-            let credential = s
+            let (credential, persistable) = s
                 .resolve_credential_for_edit(&profile("nvidia", ProviderKind::Nvidia, "m1"))
                 .unwrap();
             assert_eq!(expose(&credential), "active-cached-key");
+            assert!(persistable, "cached from store is persistable");
         }
 
         #[test]
@@ -954,7 +978,7 @@ mod tests {
                     ("claude", api_key_with("claudes-own-key")),
                 ],
             );
-            let credential = s
+            let (credential, _) = s
                 .resolve_credential_for_edit(&profile(
                     "claude",
                     ProviderKind::Anthropic,
@@ -990,7 +1014,7 @@ mod tests {
                 true,
                 Effort::High,
             );
-            let credential = s
+            let (credential, persistable) = s
                 .resolve_credential_for_edit(&profile(
                     "claude",
                     ProviderKind::Anthropic,
@@ -998,6 +1022,7 @@ mod tests {
                 ))
                 .unwrap();
             assert_eq!(expose(&credential), "claudes-store-key");
+            assert!(persistable);
         }
 
         #[test]
@@ -1011,6 +1036,7 @@ mod tests {
                 .add_and_activate(
                     profile("claude", ProviderKind::Anthropic, "claude-opus-4-8"),
                     api_key(),
+                    true,
                 )
                 .unwrap();
             assert_eq!(model, "claude-opus-4-8");
@@ -1026,9 +1052,37 @@ mod tests {
                 &[("nvidia", api_key())],
             );
             let p = keyless_profile("lmstudio", ProviderKind::OpenAiCompatible, "gemma");
-            let (credential, persist_warning) = s.resolve_credential(&p).unwrap();
+            let (credential, session_only, persist_warning) = s.resolve_credential(&p).unwrap();
             assert!(matches!(credential, Credential::None));
+            assert!(!session_only);
             assert!(persist_warning.is_none(), "keyless needs no env import");
+        }
+
+        /// #60: blank-key edit must not persist a SEC-07 session-only credential.
+        #[test]
+        fn add_and_activate_skips_store_when_persist_secret_is_false() {
+            let mut s = ProviderSwap::new(
+                reqwest::Client::new(),
+                Box::new(FailingSetStore),
+                vec![profile("nvidia", ProviderKind::Nvidia, "m1")],
+                "nvidia".into(),
+                Some(api_key_with("session-only-key")),
+                true,
+                Effort::High,
+            )
+            .with_session_only_credential(true);
+            let (_, _) = s
+                .add_and_activate(
+                    profile("nvidia", ProviderKind::Nvidia, "m2"),
+                    api_key_with("session-only-key"),
+                    false,
+                )
+                .expect("session-only keep must not call secrets.set");
+            assert_eq!(s.active, "nvidia");
+            let (_, persistable) = s
+                .resolve_credential_for_edit(&profile("nvidia", ProviderKind::Nvidia, "m2"))
+                .unwrap();
+            assert!(!persistable, "still session-only after keep-existing save");
         }
 
         #[test]
@@ -1067,6 +1121,7 @@ mod tests {
                 .add_and_activate(
                     keyless_profile("lmstudio", ProviderKind::OpenAiCompatible, "gemma"),
                     Credential::None,
+                    true,
                 )
                 .expect("keyless add must not touch secrets.set");
             assert_eq!(model, "gemma");

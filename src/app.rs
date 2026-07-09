@@ -106,6 +106,19 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     let hooks_display = extensions.hooks_display();
     let mcp_display = extensions.mcp_display();
     let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
+    // #112: honest boot notice when OS confinement is unavailable (Windows residual #90).
+    if !confiner.supports_confinement() {
+        let message = if settings.require_confinement {
+            "OS command sandbox unavailable on this platform; KIRI_SANDBOX=require will refuse \
+             run_command and hooks (path policy + confirmation still apply)."
+                .to_string()
+        } else {
+            "OS command sandbox unavailable on this platform; run_command/hooks use path policy + \
+             confirmation only (no OS jail)."
+                .to_string()
+        };
+        boot_notices.push(BootNotice::new(message));
+    }
     // Built here and injected, so `config` never reaches into the `tools` adapter for it.
     let sensitive = load_sensitive_matcher()?;
     // Render the prompt's tool/limit/sensitive facts from the live sources before `sensitive` moves into
@@ -134,7 +147,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         settings.extra_rw.clone(),
     )?;
     let profile = settings.active_profile()?.clone();
-    let credential = resolve_credential(&profile, secrets.as_ref(), &mut boot_notices)?;
+    let (credential, credential_session_only) =
+        resolve_credential(&profile, secrets.as_ref(), &mut boot_notices)?;
     // Deliberately ignored: a provider hand-edited from api-key to none leaves a stale secret behind.
     // Clearing it is best-effort, and deleting a missing key is a harmless no-op.
     if profile.auth == AuthMethod::None {
@@ -195,7 +209,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         credential,
         settings.thinking,
         settings.effort,
-    );
+    )
+    .with_session_only_credential(credential_session_only);
     let rules_display = extensions.rules_display();
     let commands_display = extensions.commands_display();
     let agents_display = extensions.agents_display();
@@ -214,7 +229,7 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // catalog `Arc` is built last: every other read of `extensions` above happens first.
     let hook_context = HookContext {
         catalog: Arc::new(extensions),
-        runner: Arc::new(ShellHookRunner),
+        runner: Arc::new(ShellHookRunner::new(settings.require_confinement)),
         trust: trust_store,
     };
     Ok(Tui::new(TuiParams {
@@ -506,8 +521,8 @@ fn build_embedder(
         return None;
     };
     let credential = match resolve_credential(profile, secrets, notices) {
-        Ok(Some(credential)) => credential,
-        Ok(None) => {
+        Ok((Some(credential), _)) => credential,
+        Ok((None, _)) => {
             notices.push(BootNotice::new(format!(
                 "no credential for embeddings provider '{}'; semantic recall disabled",
                 config.provider_id
@@ -611,19 +626,21 @@ fn select_initial_provider(
 }
 
 /// The stored credential, else a one-time env-var import, else `None` — a first run with nothing
-/// configured, which the caller routes to onboarding rather than aborting. A genuine store error (a broken
-/// credentials file, as distinct from "not logged in") still propagates. Never logs the secret.
+/// configured, which the caller routes to onboarding rather than aborting. Second return is true when
+/// the credential is SEC-07 session-only (`KIRI_NO_KEY_IMPORT`) and must not be written on blank-key
+/// edit (#60). A genuine store error (a broken credentials file, as distinct from "not logged in") still
+/// propagates. Never logs the secret.
 fn resolve_credential(
     profile: &ProviderProfile,
     secrets: &dyn SecretStore,
     notices: &mut Vec<BootNotice>,
-) -> Result<Option<Credential>> {
+) -> Result<(Option<Credential>, bool)> {
     // The policy lives in the single resolver; this only maps it to the boot shape. Each outcome is a
     // `BootNotice`, not an `eprintln!`, so the SEC-07 persistence disclosure reaches the transcript instead
     // of flashing behind the alternate-screen TUI.
     match resolve_credential_policy(profile, secrets)? {
-        CredentialResolution::Keyless => Ok(Some(Credential::None)),
-        CredentialResolution::Stored(credential) => Ok(Some(credential)),
+        CredentialResolution::Keyless => Ok((Some(Credential::None), false)),
+        CredentialResolution::Stored(credential) => Ok((Some(credential), false)),
         CredentialResolution::Imported {
             credential,
             persisted,
@@ -642,7 +659,7 @@ fn resolve_credential(
                     profile.id
                 ))),
             }
-            Ok(Some(credential))
+            Ok((Some(credential), false))
         }
         CredentialResolution::ImportedSessionOnly { credential } => {
             notices.push(BootNotice::new(format!(
@@ -651,9 +668,9 @@ fn resolve_credential(
                  persist across sessions.",
                 profile.id
             )));
-            Ok(Some(credential))
+            Ok((Some(credential), true))
         }
-        CredentialResolution::Absent => Ok(None),
+        CredentialResolution::Absent => Ok((None, false)),
     }
 }
 
@@ -745,7 +762,7 @@ mod tests {
         let store = FakeStore(Some(api_key()));
         let p = profile("nvidia", ProviderKind::Nvidia, AuthMethod::ApiKey, "m");
         match resolve_credential(&p, &store, &mut Vec::new()).unwrap() {
-            Some(Credential::ApiKey { key }) => assert_eq!(key.expose(), "k"),
+            (Some(Credential::ApiKey { key }), false) => assert_eq!(key.expose(), "k"),
             other => panic!("expected a stored api-key, got {other:?}"),
         }
     }
@@ -760,11 +777,9 @@ mod tests {
             AuthMethod::ApiKey,
             "m",
         );
-        assert!(
-            resolve_credential(&p, &store, &mut Vec::new())
-                .unwrap()
-                .is_none()
-        );
+        let (cred, session_only) = resolve_credential(&p, &store, &mut Vec::new()).unwrap();
+        assert!(cred.is_none());
+        assert!(!session_only);
     }
 
     #[test]
@@ -778,7 +793,7 @@ mod tests {
             "gemma",
         );
         match resolve_credential(&p, &store, &mut Vec::new()).unwrap() {
-            Some(Credential::None) => {}
+            (Some(Credential::None), false) => {}
             other => panic!("expected Credential::None, got {other:?}"),
         }
     }
