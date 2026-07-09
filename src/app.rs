@@ -418,15 +418,27 @@ pub async fn wire_sync(settings: &Settings, action: SyncAction) -> Result<()> {
     Ok(())
 }
 
-/// Open the shared store for sync at `db`, mirroring `build_memory`'s non-fatal init: a failed open or
-/// init degrades to an inert in-memory store rather than aborting (sync then degrades, never crashes). A
-/// second SQLite handle to the same file the memory tools use — safe, exactly what the prior on-demand
-/// open did transiently. Returns the store plus an optional degraded-mode warning for the caller to
-/// surface on its own channel — never swallowed, never printed from here, so it can't corrupt the live
-/// TUI on the lazy `/sync` path.
+/// Open the shared store for sync at `db`, mirroring `build_memory`'s non-fatal init for real: a failed
+/// open or init degrades to an inert in-memory store rather than aborting (sync then degrades, never
+/// crashes). Crucially, `init()` is called ONLY on the successfully opened on-disk store — the in-memory
+/// fallback is left un-init'd, so it honestly reports `is_available() == false` (issue #33; previously
+/// this called `init()` unconditionally on the fallback too, making a degraded store report available and
+/// letting `kiri sync push` publish an empty `memory.ndjson` over the remote snapshot). A second SQLite
+/// handle to the same file the memory tools use — safe, exactly what the prior on-demand open did
+/// transiently. Returns the store plus an optional degraded-mode warning for the caller to surface on its
+/// own channel — never swallowed, never printed from here, so it can't corrupt the live TUI on the lazy
+/// `/sync` path.
 async fn build_sync_memory_at(db: PathBuf) -> AgentResult<(Arc<dyn SharedMemory>, Option<String>)> {
-    let (memory, mut warning) = match SqliteSharedMemory::new(db) {
-        Ok(memory) => (memory, None),
+    let (memory, warning) = match SqliteSharedMemory::new(db) {
+        Ok(memory) => match memory.init().await {
+            Ok(()) => (memory, None),
+            Err(error) => (
+                memory,
+                Some(format!(
+                    "shared memory for sync init failed ({error}); continuing with an inert store"
+                )),
+            ),
+        },
         Err(error) => (
             SqliteSharedMemory::in_memory()?,
             Some(format!(
@@ -434,11 +446,6 @@ async fn build_sync_memory_at(db: PathBuf) -> AgentResult<(Arc<dyn SharedMemory>
             )),
         ),
     };
-    if let Err(error) = memory.init().await {
-        warning = Some(format!(
-            "shared memory for sync init failed ({error}); continuing with an inert store"
-        ));
-    }
     Ok((Arc::new(memory), warning))
 }
 
@@ -721,7 +728,10 @@ fn resolve_credential(
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, build_http_client, resolve_credential, sync_memory_factory, wire_sync};
+    use super::{
+        Settings, build_http_client, build_sync_memory_at, resolve_credential, sync_memory_factory,
+        wire_sync,
+    };
     use crate::modules::provider::application::secret_store::SecretStore;
     use crate::shared::kernel::error::AgentError;
     use crate::shared::kernel::provider::{
@@ -962,6 +972,25 @@ mod tests {
         assert!(
             warning.is_none(),
             "a clean open over a writable path yields no degraded-mode warning"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_sync_memory_at_open_failure_leaves_the_fallback_inert() {
+        // Issue #33: `build_sync_memory_at` must mirror `build_memory`'s honest degrade — `init()` is
+        // called ONLY on a successfully opened on-disk store, never on the in-memory fallback. Force the
+        // open to fail by placing a directory at the exact db path (SQLite cannot open a directory as a
+        // database file), then assert the returned store reports unavailable rather than silently
+        // reporting healthy.
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("shared.db");
+        std::fs::create_dir_all(&db).unwrap();
+
+        let (memory, warning) = build_sync_memory_at(db).await.unwrap();
+        assert!(warning.is_some(), "an open failure must surface a warning");
+        assert!(
+            !memory.is_available(),
+            "the in-memory fallback must stay inert (never init'd) on an open failure"
         );
     }
 }
