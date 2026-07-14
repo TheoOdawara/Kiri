@@ -224,6 +224,7 @@ mod tests {
                 models: vec![],
                 auth: AuthMethod::Oauth,
                 thinking: None,
+                thinking_style: Default::default(),
             },
         );
         let (providers, active) = resolve_providers(table, Some("claude".into()));
@@ -245,6 +246,7 @@ mod tests {
                 models: vec![],
                 auth: AuthMethod::ApiKey,
                 thinking: None,
+                thinking_style: Default::default(),
             },
         );
         let (_, active) = resolve_providers(table, Some("does-not-exist".into()));
@@ -262,6 +264,7 @@ mod tests {
             models: vec![],
             auth: AuthMethod::ApiKey,
             thinking: None,
+            thinking_style: Default::default(),
         };
         let mut table = BTreeMap::new();
         for id in ["gamma", "alpha", "beta"] {

@@ -505,6 +505,14 @@ impl RunLoop {
                 thinking,
                 keep_existing_key,
             } => {
+                // Preserve a hand-edited `thinking_style` from TOML when re-saving via the wizard.
+                let thinking_style = self
+                    .provider_swap
+                    .profiles()
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.thinking_style)
+                    .unwrap_or_default();
                 let profile = ProviderProfile {
                     id,
                     kind,
@@ -513,6 +521,7 @@ impl RunLoop {
                     models,
                     auth,
                     thinking,
+                    thinking_style,
                 };
                 self.apply_save_provider(profile, keep_existing_key);
             }
@@ -800,6 +809,7 @@ mod tests {
                 models: vec![model.into()],
                 auth: AuthMethod::ApiKey,
                 thinking: None,
+                thinking_style: Default::default(),
             }
         }
 
@@ -813,6 +823,7 @@ mod tests {
                 models: vec![model.into()],
                 auth: AuthMethod::None,
                 thinking: None,
+                thinking_style: Default::default(),
             }
         }
 

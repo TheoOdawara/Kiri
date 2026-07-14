@@ -748,6 +748,7 @@ mod tests {
             models: vec![],
             auth,
             thinking: None,
+            thinking_style: Default::default(),
         }
     }
 

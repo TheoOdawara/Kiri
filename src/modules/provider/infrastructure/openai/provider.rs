@@ -8,7 +8,9 @@ use crate::modules::provider::infrastructure::request::{apply_optional_bearer, j
 use crate::modules::provider::infrastructure::streaming::{drain_sse, ensure_success};
 use crate::shared::kernel::completed_turn::CompletedTurn;
 use crate::shared::kernel::error::AgentError;
-use crate::shared::kernel::provider::{Effort, NvidiaFamily, ProviderKind, Secret};
+use crate::shared::kernel::provider::{
+    Effort, NvidiaFamily, ProviderKind, Secret, ThinkingStyle, is_deepseek_model,
+};
 
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -19,6 +21,8 @@ pub struct OpenAiProvider {
     kind: ProviderKind,
     thinking: bool,
     effort: Effort,
+    /// Only meaningful for OpenAI-compatible / custom kinds; natives ignore it.
+    thinking_style: ThinkingStyle,
 }
 
 impl OpenAiProvider {
@@ -29,6 +33,7 @@ impl OpenAiProvider {
         kind: ProviderKind,
         thinking: bool,
         effort: Effort,
+        thinking_style: ThinkingStyle,
     ) -> Self {
         Self {
             client,
@@ -37,27 +42,94 @@ impl OpenAiProvider {
             kind,
             thinking,
             effort,
+            thinking_style,
         }
     }
 
     fn reasoning_enabled(&self) -> bool {
         self.thinking && self.effort != Effort::Off
     }
+
+    /// Resolve thinking-related body fields for the live model id (honors mid-session `/models`).
+    fn thinking_fields(&self, model: &str) -> (Option<ChatTemplateKwargs>, Option<String>) {
+        match self.kind {
+            ProviderKind::Nvidia => {
+                let kwargs = chat_template_kwargs(model, self.reasoning_enabled());
+                (kwargs, None)
+            }
+            ProviderKind::Openai => (
+                None,
+                if self.reasoning_enabled() {
+                    self.effort.as_openai_reasoning_effort().map(str::to_string)
+                } else {
+                    None
+                },
+            ),
+            ProviderKind::OpenAiCompatible | ProviderKind::Custom => generalist_thinking_fields(
+                self.thinking_style,
+                model,
+                self.reasoning_enabled(),
+                self.effort,
+            ),
+            // Anthropic never reaches this adapter.
+            ProviderKind::Anthropic => (None, None),
+        }
+    }
 }
 
-/// `None` for a family with no confirmed reasoning-toggle convention. Keyed on the live turn's model id,
-/// not a profile field, so a mid-session `/models` switch is honored immediately.
-fn nvidia_chat_template_kwargs(model: &str) -> Option<ChatTemplateKwargs> {
+/// Family-keyed template kwargs. When `enabled` is false, still send an explicit `false` for known
+/// families (many default thinking ON). `None` when the family has no confirmed convention.
+fn chat_template_kwargs(model: &str, enabled: bool) -> Option<ChatTemplateKwargs> {
     match NvidiaFamily::classify(model) {
         NvidiaFamily::Nemotron | NvidiaFamily::Kimi => Some(ChatTemplateKwargs {
-            thinking: Some(true),
+            thinking: Some(enabled),
             enable_thinking: None,
         }),
-        NvidiaFamily::Qwen | NvidiaFamily::Glm => Some(ChatTemplateKwargs {
+        NvidiaFamily::Qwen | NvidiaFamily::Glm | NvidiaFamily::Gemma => Some(ChatTemplateKwargs {
             thinking: None,
-            enable_thinking: Some(true),
+            enable_thinking: Some(enabled),
         }),
         NvidiaFamily::Other => None,
+    }
+}
+
+/// Market generalist for OpenAI-compatible / custom endpoints. See
+/// `docs/reference/model-thinking-parameters.md`.
+fn generalist_thinking_fields(
+    style: ThinkingStyle,
+    model: &str,
+    enabled: bool,
+    effort: Effort,
+) -> (Option<ChatTemplateKwargs>, Option<String>) {
+    match style {
+        ThinkingStyle::Off => (None, None),
+        ThinkingStyle::ReasoningEffort => (
+            None,
+            if enabled {
+                effort.as_openai_reasoning_effort().map(str::to_string)
+            } else {
+                None
+            },
+        ),
+        ThinkingStyle::ChatTemplate => (chat_template_kwargs(model, enabled), None),
+        ThinkingStyle::Auto => {
+            if let Some(kwargs) = chat_template_kwargs(model, enabled) {
+                return (Some(kwargs), None);
+            }
+            // DeepSeek: never invent kwargs / effort on auto (NIM hang / unreliable toggles).
+            if is_deepseek_model(model) {
+                return (None, None);
+            }
+            // GPT/Grok-like, or unknown ids when thinking was forced on (TOML) — lingua franca.
+            if enabled {
+                (
+                    None,
+                    effort.as_openai_reasoning_effort().map(str::to_string),
+                )
+            } else {
+                (None, None)
+            }
+        }
     }
 }
 
@@ -68,18 +140,7 @@ impl CompletionProvider for OpenAiProvider {
         request: TurnRequest<'_>,
         sink: &mut dyn EventSink,
     ) -> Result<CompletedTurn, AgentError> {
-        let (chat_template_kwargs, reasoning_effort) = if self.reasoning_enabled() {
-            match self.kind {
-                ProviderKind::Nvidia => (nvidia_chat_template_kwargs(request.model), None),
-                ProviderKind::Openai => (
-                    None,
-                    self.effort.as_openai_reasoning_effort().map(str::to_string),
-                ),
-                _ => (None, None),
-            }
-        } else {
-            (None, None)
-        };
+        let (chat_template_kwargs, reasoning_effort) = self.thinking_fields(request.model);
         let body = ChatRequest {
             model: request.model,
             messages: request.messages.iter().map(WireMessage::from).collect(),
@@ -113,7 +174,7 @@ impl CompletionProvider for OpenAiProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenAiProvider, nvidia_chat_template_kwargs};
+    use super::{OpenAiProvider, chat_template_kwargs, generalist_thinking_fields};
     use crate::modules::provider::application::completion_provider::{
         CompletionProvider, NullSink, TurnRequest,
     };
@@ -121,8 +182,27 @@ mod tests {
     use crate::modules::provider::infrastructure::test_support;
     use crate::shared::kernel::error::AgentError;
     use crate::shared::kernel::message::Message;
-    use crate::shared::kernel::provider::{Effort, ProviderKind, Secret};
+    use crate::shared::kernel::provider::{Effort, ProviderKind, Secret, ThinkingStyle};
     use std::time::Duration;
+
+    fn provider(
+        kind: ProviderKind,
+        thinking: bool,
+        effort: Effort,
+        style: ThinkingStyle,
+        base_url: String,
+        api_key: Option<Secret>,
+    ) -> OpenAiProvider {
+        OpenAiProvider::new(
+            reqwest::Client::builder().build().unwrap(),
+            base_url,
+            api_key,
+            kind,
+            thinking,
+            effort,
+            style,
+        )
+    }
 
     /// A listener that accepts but never answers models a provider hanging after connect: the regression
     /// where the first message did nothing, forever, with no error.
@@ -146,10 +226,11 @@ mod tests {
         let provider = OpenAiProvider::new(
             client,
             format!("http://{addr}/v1"),
-            Some(crate::shared::kernel::provider::Secret::new("k")),
+            Some(Secret::new("k")),
             ProviderKind::Nvidia,
             false,
-            crate::shared::kernel::provider::Effort::Off,
+            Effort::Off,
+            ThinkingStyle::Auto,
         );
 
         let messages = vec![Message::user("hi")];
@@ -194,14 +275,13 @@ mod tests {
             }
         });
 
-        let client = reqwest::Client::builder().build().unwrap();
-        let provider = OpenAiProvider::new(
-            client,
-            format!("http://{addr}/v1"),
-            Some(crate::shared::kernel::provider::Secret::new("k")),
+        let provider = provider(
             ProviderKind::Nvidia,
             false,
-            crate::shared::kernel::provider::Effort::Off,
+            Effort::Off,
+            ThinkingStyle::Auto,
+            format!("http://{addr}/v1"),
+            Some(Secret::new("k")),
         );
         let messages = vec![Message::user("hi")];
         let request = TurnRequest {
@@ -228,14 +308,13 @@ mod tests {
 
     async fn capture_request(api_key: Option<Secret>) -> String {
         test_support::capture_request(|base_url| async move {
-            let client = reqwest::Client::builder().build().unwrap();
-            let provider = OpenAiProvider::new(
-                client,
-                base_url,
-                api_key,
+            let provider = provider(
                 ProviderKind::Nvidia,
                 false,
                 Effort::Off,
+                ThinkingStyle::Auto,
+                base_url,
+                api_key,
             );
             let messages = vec![Message::user("hi")];
             let request = TurnRequest {
@@ -270,14 +349,14 @@ mod tests {
     }
 
     #[test]
-    fn nvidia_chat_template_kwargs_sends_the_thinking_key_for_nemotron_and_kimi() {
+    fn chat_template_kwargs_sends_the_thinking_key_for_nemotron_and_kimi() {
         for model in [
             "nvidia/llama-3.3-nemotron-super-49b-v1",
             "moonshotai/kimi-k2",
         ] {
             assert!(
                 matches!(
-                    nvidia_chat_template_kwargs(model),
+                    chat_template_kwargs(model, true),
                     Some(ChatTemplateKwargs {
                         thinking: Some(true),
                         enable_thinking: None,
@@ -289,11 +368,16 @@ mod tests {
     }
 
     #[test]
-    fn nvidia_chat_template_kwargs_sends_the_enable_thinking_key_for_qwen_and_glm() {
-        for model in ["qwen/qwen3-235b-a22b", "zai-org/glm-4.5"] {
+    fn chat_template_kwargs_sends_the_enable_thinking_key_for_qwen_glm_and_gemma4() {
+        for model in [
+            "qwen/qwen3-235b-a22b",
+            "zai-org/glm-4.5",
+            "google/gemma-4-26b-a4b-it",
+            "gemma4:26b",
+        ] {
             assert!(
                 matches!(
-                    nvidia_chat_template_kwargs(model),
+                    chat_template_kwargs(model, true),
                     Some(ChatTemplateKwargs {
                         thinking: None,
                         enable_thinking: Some(true),
@@ -305,31 +389,104 @@ mod tests {
     }
 
     #[test]
-    fn nvidia_chat_template_kwargs_sends_nothing_for_unconfirmed_families() {
+    fn chat_template_kwargs_sends_nothing_for_unconfirmed_families() {
         for model in [
             "deepseek-ai/deepseek-v4",
             "deepseek-ai/deepseek-r1",
             "minimaxai/minimax-m1",
             "google/gemma-3-27b-it",
+            "gemma",
         ] {
             assert!(
-                nvidia_chat_template_kwargs(model).is_none(),
+                chat_template_kwargs(model, true).is_none(),
                 "expected no chat_template_kwargs for {model}"
             );
         }
     }
 
+    #[test]
+    fn generalist_auto_maps_gemma4_to_enable_thinking() {
+        let (kwargs, effort) = generalist_thinking_fields(
+            ThinkingStyle::Auto,
+            "google/gemma-4-26b-a4b-it",
+            true,
+            Effort::High,
+        );
+        assert!(matches!(
+            kwargs,
+            Some(ChatTemplateKwargs {
+                enable_thinking: Some(true),
+                ..
+            })
+        ));
+        assert!(effort.is_none());
+    }
+
+    #[test]
+    fn chat_template_kwargs_sends_explicit_false_when_disabled() {
+        assert!(matches!(
+            chat_template_kwargs("qwen/qwen3", false),
+            Some(ChatTemplateKwargs {
+                thinking: None,
+                enable_thinking: Some(false),
+            })
+        ));
+    }
+
+    #[test]
+    fn generalist_auto_maps_qwen_to_kwargs_and_gpt_to_effort() {
+        let (kwargs, effort) =
+            generalist_thinking_fields(ThinkingStyle::Auto, "qwen3-32b", true, Effort::High);
+        assert!(matches!(
+            kwargs,
+            Some(ChatTemplateKwargs {
+                enable_thinking: Some(true),
+                ..
+            })
+        ));
+        assert!(effort.is_none());
+
+        let (kwargs, effort) =
+            generalist_thinking_fields(ThinkingStyle::Auto, "openai/gpt-5", true, Effort::Medium);
+        assert!(kwargs.is_none());
+        assert_eq!(effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn generalist_auto_sends_nothing_for_deepseek() {
+        let (kwargs, effort) = generalist_thinking_fields(
+            ThinkingStyle::Auto,
+            "deepseek-ai/deepseek-r1",
+            true,
+            Effort::High,
+        );
+        assert!(kwargs.is_none());
+        assert!(effort.is_none());
+    }
+
+    #[test]
+    fn generalist_style_overrides() {
+        let (kwargs, effort) =
+            generalist_thinking_fields(ThinkingStyle::ReasoningEffort, "qwen3", true, Effort::Low);
+        assert!(kwargs.is_none());
+        assert_eq!(effort.as_deref(), Some("low"));
+
+        let (kwargs, effort) =
+            generalist_thinking_fields(ThinkingStyle::Off, "gpt-5", true, Effort::High);
+        assert!(kwargs.is_none());
+        assert!(effort.is_none());
+    }
+
     #[tokio::test]
     async fn qwen_model_sends_enable_thinking_over_the_wire() {
         let captured = test_support::capture_request(|base_url| async move {
-            let client = reqwest::Client::builder().build().unwrap();
-            let provider = OpenAiProvider::new(
-                client,
-                base_url,
-                Some(Secret::new("k")),
+            let provider = provider(
                 ProviderKind::Nvidia,
                 true,
                 Effort::High,
+                ThinkingStyle::Auto,
+                base_url,
+                Some(Secret::new("k")),
             );
             let messages = vec![Message::user("hi")];
             let request = TurnRequest {
@@ -354,14 +511,13 @@ mod tests {
     #[tokio::test]
     async fn deepseek_model_sends_no_chat_template_kwargs_over_the_wire() {
         let captured = test_support::capture_request(|base_url| async move {
-            let client = reqwest::Client::builder().build().unwrap();
-            let provider = OpenAiProvider::new(
-                client,
-                base_url,
-                Some(Secret::new("k")),
+            let provider = provider(
                 ProviderKind::Nvidia,
                 true,
                 Effort::High,
+                ThinkingStyle::Auto,
+                base_url,
+                Some(Secret::new("k")),
             );
             let messages = vec![Message::user("hi")];
             let request = TurnRequest {
@@ -376,6 +532,33 @@ mod tests {
         assert!(
             !captured.contains("chat_template_kwargs"),
             "an unsupported family must send no chat_template_kwargs at all; got:\n{captured}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compatible_auto_sends_reasoning_effort_for_gpt() {
+        let captured = test_support::capture_request(|base_url| async move {
+            let provider = provider(
+                ProviderKind::OpenAiCompatible,
+                true,
+                Effort::High,
+                ThinkingStyle::Auto,
+                base_url,
+                Some(Secret::new("k")),
+            );
+            let messages = vec![Message::user("hi")];
+            let request = TurnRequest {
+                messages: &messages,
+                model: "openai/gpt-5",
+                tools: &[],
+            };
+            let mut sink = NullSink;
+            let _ = provider.complete(request, &mut sink).await;
+        })
+        .await;
+        assert!(
+            captured.contains(r#""reasoning_effort":"high""#),
+            "compatible GPT must send reasoning_effort; got:\n{captured}"
         );
     }
 }
