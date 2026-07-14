@@ -122,6 +122,7 @@ pub(super) fn default_provider() -> ProviderProfile {
         models,
         auth: AuthMethod::ApiKey,
         thinking: None,
+        thinking_style: Default::default(),
     }
 }
 
@@ -193,6 +194,7 @@ read_timeout_ms = 99000
             models: vec!["claude-opus-4-8".into()],
             auth: AuthMethod::ApiKey,
             thinking: None,
+            thinking_style: Default::default(),
         };
         upsert_provider(&path, &claude).unwrap();
         persist_active_provider(&path, "claude").unwrap();
@@ -262,6 +264,7 @@ read_timeout_ms = 99000
             models: vec!["claude-opus-4-8".into()],
             auth: AuthMethod::ApiKey,
             thinking: None,
+            thinking_style: Default::default(),
         };
         // Mirror the runtime's `.and_then` chain (upsert then activate) under the new error type.
         upsert_provider(&path, &claude)
@@ -284,6 +287,7 @@ read_timeout_ms = 99000
             models: vec![],
             auth: AuthMethod::ApiKey,
             thinking: None,
+            thinking_style: Default::default(),
         };
         upsert_provider(&path, &nvidia).unwrap();
         persist_active_provider(&path, "nvidia").unwrap();

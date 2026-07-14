@@ -67,6 +67,7 @@ pub fn build_provider(
                 profile.kind,
                 effective_thinking(profile, thinking),
                 effort,
+                profile.thinking_style,
             )))
         }
     }
@@ -419,6 +420,7 @@ mod tests {
             models: vec![],
             auth,
             thinking: None,
+            thinking_style: Default::default(),
         }
     }
 

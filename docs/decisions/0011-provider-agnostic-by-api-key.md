@@ -81,9 +81,9 @@ Three slash commands manage providers live, persisting to the global config (ADR
   turn's model id and picks the right shape; `Effort` maps to both `anthropic_budget_tokens` and the newer
   `as_anthropic_output_effort`. NVIDIA's hosted model zoo similarly gets a per-family capability table
   (`ProviderKind::thinking_capability`, `NvidiaFamily`) instead of a blanket toggle: Nemotron, Kimi
-  (`chat_template_kwargs.thinking`), Qwen, and GLM (`chat_template_kwargs.enable_thinking`) are confirmed
-  against official NVIDIA reference pages; DeepSeek, MiniMax, and Gemma stay unsupported — DeepSeek not
-  merely unverified but *known unreliable* (a reported NIM hang on DeepSeek V4 reasoning models when
+  (`chat_template_kwargs.thinking`), Qwen, GLM, and **Gemma 4** (`chat_template_kwargs.enable_thinking`)
+  are confirmed; DeepSeek, MiniMax, and Gemma 3 / bare `gemma` stay unsupported — DeepSeek not merely
+  unverified but *known unreliable* (a reported NIM hang on DeepSeek V4 reasoning models when
   `chat_template_kwargs` is absent, and a separate vLLM issue where the toggle isn't honored on
   `deepseek-r1-0528`). The in-flight thinking block also now survives `/resume`: the session SQLite store
   gained a `thinking` column (added to an existing database via a `pragma_table_info`-guarded
@@ -91,3 +91,8 @@ Three slash commands manage providers live, persisting to the global config (ADR
 - Adding a vendor = one adapter behind `CompletionProvider` + a `(kind, auth)` arm in the factory.
 - Supersedes ADR 0001's "NVIDIA only / base URL as a `const`": the base URL, model, and provider now come
   from config (ADR 0012); NVIDIA remains the seeded default.
+- **OpenAI-compatible / custom thinking default (2026-07):** first-party kinds keep official wire shapes;
+  compatible endpoints use a market generalist (`chat_template_kwargs` for Qwen/GLM/Kimi/Nemotron/Gemma4,
+  `reasoning_effort` for GPT/Grok-like and forced-thinking unknowns, nothing for DeepSeek) with an optional
+  per-profile `thinking_style` (`auto` | `reasoning_effort` | `chat_template` | `off`) in
+  `~/.kiri/config.toml`. Full matrix: `docs/reference/model-thinking-parameters.md`.
