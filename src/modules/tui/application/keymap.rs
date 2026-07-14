@@ -33,6 +33,7 @@ pub(crate) const SCROLL_PAGE: u16 = 20;
 pub(crate) const WHEEL_STEP: u16 = 3;
 
 mod editor_input;
+mod field_edit;
 mod menu;
 mod modals;
 mod submit;

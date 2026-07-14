@@ -24,14 +24,45 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Mouse { kind, col, row } => keymap::on_mouse(model, kind, col, row),
         Msg::Paste(text) => {
             if let Some(wizard) = model.wizard.as_mut() {
-                // Route a paste into the wizard's active field — the common way an API key is entered.
+                // Route a paste into the wizard's draft — the common way an API key is entered.
                 // It must NEVER fall through to the plaintext composer, where a pasted key would be
                 // unmasked, survive the modal, and could be sent to the provider as a prompt.
-                wizard.push_str(&text);
-            } else if model.pending_approval.is_none()
-                && model.pending_plan.is_none()
-                && model.picker.is_none()
-            {
+                wizard.insert_text(&text);
+            } else if let Some(picker) = model.picker.as_mut() {
+                picker.query.insert(&text);
+                picker.selected = 0;
+            } else if model.search_query.is_some() {
+                if let Some(search) = model.search_query.as_mut() {
+                    search.insert(&text);
+                }
+                // Rebuild match list after paste (same path as typing).
+                let query = model
+                    .search_query
+                    .as_ref()
+                    .map(|s| s.text())
+                    .unwrap_or_default();
+                model.search_results.clear();
+                model.active_search_match = 0;
+                if !query.is_empty() {
+                    use crate::modules::tui::domain::transcript::TranscriptItem;
+                    let query_lower = query.to_lowercase();
+                    for (idx, item) in model.transcript.items().iter().enumerate() {
+                        let hay = match item {
+                            TranscriptItem::User(t) => t,
+                            TranscriptItem::Reasoning(t) => t,
+                            TranscriptItem::Assistant(t) | TranscriptItem::PlanProposed(t) => t,
+                            TranscriptItem::Tool(act) => &act.command,
+                            TranscriptItem::Notice(_, t) => t,
+                        };
+                        if hay.to_lowercase().contains(&query_lower) {
+                            model.search_results.push(idx);
+                        }
+                    }
+                    if !model.search_results.is_empty() {
+                        model.selected_item = Some(model.search_results[0]);
+                    }
+                }
+            } else if model.pending_approval.is_none() && model.pending_plan.is_none() {
                 model.input.insert(&text);
                 keymap::sync_menu(model);
             }
@@ -228,7 +259,7 @@ mod tests {
         // survive the modal, and could be sent to the provider as a prompt.
         use crate::modules::tui::domain::wizard::{ProviderWizard, WizardStep};
         let mut wizard = ProviderWizard::new();
-        wizard.step = WizardStep::ApiKey;
+        wizard.go_to_step(WizardStep::ApiKey);
         let mut m = Model {
             wizard: Some(wizard),
             ..Model::default()
@@ -238,6 +269,11 @@ mod tests {
             m.wizard.as_ref().unwrap().api_key,
             "sk-ant-pasted",
             "the key fills the wizard field (control chars filtered)"
+        );
+        assert_eq!(
+            m.wizard.as_ref().unwrap().draft.text(),
+            "sk-ant-pasted",
+            "the draft tracks the committed key"
         );
         assert!(m.input.is_empty(), "the plaintext composer must stay empty");
     }

@@ -77,7 +77,7 @@ fn picker_search_query_typing_and_backspace() {
     on_key(&mut m, press(Key::Char('a')));
     {
         let picker = m.picker.as_ref().unwrap();
-        assert_eq!(picker.query, "a");
+        assert_eq!(picker.query.text(), "a");
         assert_eq!(picker.filtered_options().len(), 2); // apple, banana
     }
 
@@ -85,7 +85,7 @@ fn picker_search_query_typing_and_backspace() {
     on_key(&mut m, press(Key::Char('n')));
     {
         let picker = m.picker.as_ref().unwrap();
-        assert_eq!(picker.query, "an");
+        assert_eq!(picker.query.text(), "an");
         assert_eq!(picker.filtered_options().len(), 1); // banana
     }
 
@@ -93,7 +93,7 @@ fn picker_search_query_typing_and_backspace() {
     on_key(&mut m, press(Key::Backspace));
     {
         let picker = m.picker.as_ref().unwrap();
-        assert_eq!(picker.query, "a");
+        assert_eq!(picker.query.text(), "a");
         assert_eq!(picker.filtered_options().len(), 2); // apple, banana
     }
 }
@@ -103,7 +103,7 @@ fn wizard_ctrl_v_routes_to_paste_not_a_literal_char() {
     // On a text step, Ctrl+V must paste (into the masked field, via the clipboard) rather than
     // insert a literal 'v' — the regression that silently corrupts a pasted API key.
     let mut wizard = ProviderWizard::new();
-    wizard.step = WizardStep::ApiKey;
+    wizard.go_to_step(WizardStep::ApiKey);
     let mut m = Model {
         wizard: Some(wizard),
         ..Default::default()
@@ -856,7 +856,7 @@ fn ctrl_c_cancels_while_busy_double_ctrl_c_quits() {
         shift: false,
     };
     // Single Ctrl+C while busy → cancel the turn.
-    assert_eq!(on_key(&mut m, ctrl_c.clone()), vec![Effect::CancelTurn]);
+    assert_eq!(on_key(&mut m, ctrl_c), vec![Effect::CancelTurn]);
     // Second Ctrl+C within the window → quit (double-tap), even though the first cancelled.
     assert_eq!(on_key(&mut m, ctrl_c), vec![Effect::Quit]);
     assert!(m.should_quit);
@@ -872,7 +872,7 @@ fn single_ctrl_c_while_idle_does_nothing_then_double_quits() {
         shift: false,
     };
     // Single Ctrl+C while idle → no-op (quit requires a double tap).
-    assert_eq!(on_key(&mut m, ctrl_c.clone()), vec![]);
+    assert_eq!(on_key(&mut m, ctrl_c), vec![]);
     assert!(!m.should_quit);
     // Double Ctrl+C → quit.
     assert_eq!(on_key(&mut m, ctrl_c), vec![Effect::Quit]);
@@ -892,7 +892,7 @@ fn double_esc_cancels_while_busy() {
         shift: false,
     };
     // First Esc while busy → no-op (recorded for the double-tap window).
-    assert_eq!(on_key(&mut m, esc.clone()), vec![]);
+    assert_eq!(on_key(&mut m, esc), vec![]);
     // Second Esc within the window → cancel the turn.
     assert_eq!(on_key(&mut m, esc), vec![Effect::CancelTurn]);
 }
@@ -1313,7 +1313,7 @@ fn ctrl_c_mid_menu_double_tap_quits() {
         shift: false,
     };
     // Single Ctrl+C → no-op (quit now requires a double tap).
-    assert_eq!(on_key(&mut m, ctrl_c.clone()), vec![]);
+    assert_eq!(on_key(&mut m, ctrl_c), vec![]);
     // Double Ctrl+C → quit.
     assert_eq!(on_key(&mut m, ctrl_c), vec![Effect::Quit]);
     assert!(m.should_quit);

@@ -3,7 +3,7 @@
 //! onto the widget's input type without the reducer ever touching `tui_textarea` (closes the keymap leak).
 
 /// A normalized key press, decoupled from crossterm so the reducer and key map stay library-free.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyPress {
     pub code: Key,
     pub ctrl: bool,

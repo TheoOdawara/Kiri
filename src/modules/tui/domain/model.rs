@@ -228,8 +228,8 @@ pub struct Model {
     pub selected_item: Option<usize>,
     /// Individual tool indices that are manually expanded.
     pub expanded_tools_indices: std::collections::HashSet<usize>,
-    /// Active search query in the transcript history.
-    pub search_query: Option<String>,
+    /// Active search query in the transcript history (full text field: cursor, motion, paste, undo).
+    pub search_query: Option<InputBuffer>,
     /// Transcript item indices that match the active search query.
     pub search_results: Vec<usize>,
     /// The current highlighted search result index in `search_results`.

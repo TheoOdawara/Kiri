@@ -1,11 +1,17 @@
 use super::*;
 
-/// Drive the add-provider wizard. The `Kind` step uses arrows + Enter; the text steps take typed
-/// characters + Backspace, advance on Enter, and the final `ApiKey` step finalizes — staging the key in
-/// `Model::pending_credential` (a `Secret`) and emitting `SaveProvider` (no secret). Esc cancels any
-/// step, Ctrl+C quits.
+/// Drive the add-provider wizard. The `Kind` step uses arrows + Enter; the text steps use a full
+/// `InputBuffer` draft (cursor, wrap, selection, undo) via `field_chords` + `feed_key`. The final
+/// `ApiKey` step finalizes — staging the key in `Model::pending_credential` (a `Secret`) and emitting
+/// `SaveProvider` (no secret). Esc cancels any step; Ctrl+C copies a selection or quits.
 pub(super) fn on_wizard_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
-    if key.ctrl && key.code == Key::Char('c') {
+    // Ctrl+C: copy selection from the draft when present; otherwise quit (modal cancel+exit).
+    if key.ctrl && !key.alt && key.code == Key::Char('c') {
+        if let Some(wizard) = model.wizard.as_mut()
+            && let Some(text) = wizard.draft.copy_selection()
+        {
+            return vec![Effect::CopyToClipboard(text)];
+        }
         model.wizard = None;
         model.should_quit = true;
         return vec![Effect::Quit];
@@ -39,17 +45,17 @@ pub(super) fn on_wizard_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                 if wizard.key_required() {
                     // Vendor kinds use a canonical id; go straight to the base URL, seeded with the
                     // kind's default so the common case is one keystroke (Enter).
-                    wizard.step = WizardStep::BaseUrl;
                     if wizard.base_url.is_empty() {
                         wizard.base_url = wizard.kind().default_base_url().to_string();
                     }
+                    wizard.go_to_step(WizardStep::BaseUrl);
                 } else {
                     // Keyless-capable kinds let the user name the provider so several can coexist; seed
                     // the field with the canonical token as an editable suggestion.
-                    wizard.step = WizardStep::ProviderId;
                     if wizard.id.is_empty() {
                         wizard.id = wizard.provider_id();
                     }
+                    wizard.go_to_step(WizardStep::ProviderId);
                 }
             }
             _ => {}
@@ -61,32 +67,28 @@ pub(super) fn on_wizard_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
         match key.code {
             Key::Up | Key::Down => wizard.toggle_thinking(),
             Key::Enter => {
-                if let Some(w) = model.wizard.as_mut() {
-                    w.step = WizardStep::ApiKey;
-                }
+                wizard.go_to_step(WizardStep::ApiKey);
             }
             _ => {}
         }
         return vec![];
     }
 
+    // Text steps: shared clipboard/undo chords, then ordinary editor input. Enter advances.
+    if let Some(effects) = super::field_edit::field_chords(&mut wizard.draft, key) {
+        wizard.commit_draft_to_field();
+        return effects;
+    }
     match key.code {
-        // Ctrl+V pastes into the masked field via the clipboard (which routes to the wizard, never the
-        // plaintext composer), instead of inserting a literal 'v'. Critical on the API-key step: a
-        // pasted key would otherwise be silently corrupted, and the field is masked so it is invisible.
-        Key::Char('v') if key.ctrl && !key.alt => vec![Effect::PasteClipboard],
-        // Only a plain character types into the field; any other chord is ignored so it cannot corrupt
-        // the input (e.g. Ctrl+A inserting 'a').
-        Key::Char(c) if !key.ctrl && !key.alt => {
-            wizard.push_char(c);
-            vec![]
-        }
-        Key::Backspace => {
-            wizard.backspace();
-            vec![]
-        }
         Key::Enter => advance_wizard(model),
-        _ => vec![],
+        // Do not insert a newline into the draft — Enter already advances. Fall through for everything
+        // else (typing, deletion, cursor motion, word motion, Shift-selection).
+        _ => {
+            if let Some(wizard) = model.wizard.as_mut() {
+                wizard.feed_key(key);
+            }
+            vec![]
+        }
     }
 }
 
@@ -98,16 +100,20 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
     let Some(step) = model.wizard.as_ref().map(|w| w.step) else {
         return vec![];
     };
+    // Always commit before reading fields (draft is authoritative while typing).
+    if let Some(wizard) = model.wizard.as_mut() {
+        wizard.commit_draft_to_field();
+    }
     match step {
         WizardStep::Kind => vec![],
         WizardStep::ProviderId => {
             if let Some(wizard) = model.wizard.as_mut() {
                 // The id is sanitized at finalize (provider_id) and falls back to the canonical token, so
                 // a blank field is acceptable here; seed the base URL for the next step.
-                wizard.step = WizardStep::BaseUrl;
                 if wizard.base_url.trim().is_empty() {
                     wizard.base_url = wizard.kind().default_base_url().to_string();
                 }
+                wizard.go_to_step(WizardStep::BaseUrl);
             }
             vec![]
         }
@@ -124,7 +130,7 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
                 }
                 wizard.base_url = default.to_string();
             }
-            wizard.step = WizardStep::Model;
+            wizard.go_to_step(WizardStep::Model);
             vec![]
         }
         WizardStep::Model => {
@@ -134,7 +140,7 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
             if wizard.model.trim().is_empty() {
                 return vec![]; // a model is required
             }
-            wizard.step = WizardStep::ExtraModels;
+            wizard.go_to_step(WizardStep::ExtraModels);
             vec![]
         }
         WizardStep::ExtraModels => {
@@ -142,7 +148,7 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
                 // Skip a Sim/Não question that would be a no-op: a kind/model with no thinking
                 // capability at all (e.g. Gemma on NVIDIA, or a compatible/custom endpoint) goes
                 // straight to the key step instead of asking about a toggle that does nothing.
-                wizard.step = if wizard.kind().thinking_capability(&wizard.model)
+                let next = if wizard.kind().thinking_capability(&wizard.model)
                     == ThinkingCapability::Unsupported
                 {
                     wizard.thinking = false;
@@ -150,6 +156,7 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
                 } else {
                     WizardStep::Thinking
                 };
+                wizard.go_to_step(next);
             }
             vec![]
         }

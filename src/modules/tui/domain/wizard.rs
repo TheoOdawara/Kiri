@@ -1,5 +1,7 @@
 use zeroize::Zeroize;
 
+use crate::modules::tui::domain::input::KeyPress;
+use crate::modules::tui::domain::input_buffer::InputBuffer;
 use crate::modules::tui::domain::nav::wrapping_step;
 use crate::shared::kernel::provider::{AuthMethod, ProviderKind, ProviderProfile};
 
@@ -33,10 +35,11 @@ pub enum WizardStep {
     ApiKey,
 }
 
-/// The add-provider wizard's accumulated state. Each text step edits its own field directly; the `Kind`
-/// step moves `kind_selected`. The API key is redacted in `Debug` so it can never land in a log even
-/// though `Model` derives `Debug`.
-#[derive(Clone, PartialEq, Eq)]
+/// The add-provider wizard's accumulated state. Text steps edit through `draft` (an `InputBuffer` with
+/// real cursor/wrap/selection); the String fields are the committed values per step. The `Kind` step
+/// moves `kind_selected`. The API key is redacted in `Debug` so it can never land in a log even though
+/// `Model` derives `Debug`.
+#[derive(Clone)]
 pub struct ProviderWizard {
     pub step: WizardStep,
     pub kind_selected: usize,
@@ -46,6 +49,8 @@ pub struct ProviderWizard {
     pub model: String,
     pub extra_models: String,
     pub api_key: String,
+    /// Live editor for the current text step — soft-wrap, cursor, selection, undo (same as the composer).
+    pub draft: InputBuffer,
     /// Whether thinking/reasoning is enabled for this provider. Toggled on the `Thinking` step;
     /// pre-set to `kind.thinking_default()` when the `Kind` step advances.
     pub thinking: bool,
@@ -91,6 +96,7 @@ impl ProviderWizard {
             model: String::new(),
             extra_models: String::new(),
             api_key: String::new(),
+            draft: InputBuffer::default(),
             thinking: true,
             onboarding: false,
             edit_mode: false,
@@ -112,7 +118,7 @@ impl ProviderWizard {
             .cloned()
             .collect::<Vec<_>>()
             .join(", ");
-        Self {
+        let mut wizard = Self {
             step: WizardStep::BaseUrl,
             kind_selected,
             id: profile.id.clone(),
@@ -120,11 +126,14 @@ impl ProviderWizard {
             model: profile.model.clone(),
             extra_models,
             api_key: String::new(),
+            draft: InputBuffer::default(),
             thinking: profile.thinking.unwrap_or(profile.kind.thinking_default()),
             onboarding: false,
             edit_mode: true,
             had_key: profile.auth == AuthMethod::ApiKey,
-        }
+        };
+        wizard.load_draft_from_field();
+        wizard
     }
 
     /// The wizard opened at first run with no credential: the welcome framing, NVIDIA preselected
@@ -204,44 +213,72 @@ impl ProviderWizard {
         models
     }
 
-    /// The field the current step edits, or `None` on the `Kind`/`Thinking` steps (both are choosers,
-    /// not text fields).
-    fn field_mut(&mut self) -> Option<&mut String> {
+    /// Whether the current step is a free-text field (vs a chooser).
+    pub fn is_text_step(&self) -> bool {
+        !matches!(self.step, WizardStep::Kind | WizardStep::Thinking)
+    }
+
+    /// Load the committed field for the current step into `draft` (cursor at end).
+    pub fn load_draft_from_field(&mut self) {
+        let value = match self.step {
+            WizardStep::Kind | WizardStep::Thinking => return,
+            WizardStep::ProviderId => self.id.clone(),
+            WizardStep::BaseUrl => self.base_url.clone(),
+            WizardStep::Model => self.model.clone(),
+            WizardStep::ExtraModels => self.extra_models.clone(),
+            WizardStep::ApiKey => self.api_key.clone(),
+        };
+        self.draft.set(value);
+    }
+
+    /// Write `draft` back into the committed field for the current step.
+    pub fn commit_draft_to_field(&mut self) {
+        let text = self.draft.text();
         match self.step {
-            WizardStep::Kind | WizardStep::Thinking => None,
-            WizardStep::ProviderId => Some(&mut self.id),
-            WizardStep::BaseUrl => Some(&mut self.base_url),
-            WizardStep::Model => Some(&mut self.model),
-            WizardStep::ExtraModels => Some(&mut self.extra_models),
-            WizardStep::ApiKey => Some(&mut self.api_key),
+            WizardStep::Kind | WizardStep::Thinking => {}
+            WizardStep::ProviderId => self.id = text,
+            WizardStep::BaseUrl => self.base_url = text,
+            WizardStep::Model => self.model = text,
+            WizardStep::ExtraModels => self.extra_models = text,
+            WizardStep::ApiKey => self.api_key = text,
         }
+    }
+
+    /// Advance to `next`, committing the current draft and loading the next field's value.
+    pub fn go_to_step(&mut self, next: WizardStep) {
+        self.commit_draft_to_field();
+        self.step = next;
+        self.load_draft_from_field();
+    }
+
+    /// Insert pasted/plain text into the draft (control characters dropped — a pasted key often carries
+    /// a trailing newline). No-op on chooser steps.
+    pub fn insert_text(&mut self, text: &str) {
+        if !self.is_text_step() {
+            return;
+        }
+        let filtered: String = text.chars().filter(|c| !c.is_control()).collect();
+        if filtered.is_empty() {
+            return;
+        }
+        self.draft.insert(&filtered);
+        self.commit_draft_to_field();
+    }
+
+    /// Feed a key into the draft editor and keep the committed field in sync.
+    pub fn feed_key(&mut self, key: KeyPress) -> bool {
+        if !self.is_text_step() {
+            return false;
+        }
+        let changed = self.draft.feed_key(key);
+        self.commit_draft_to_field();
+        changed
     }
 
     /// Toggle the thinking flag (only meaningful on the `Thinking` step).
     pub fn toggle_thinking(&mut self) {
         if self.step == WizardStep::Thinking {
             self.thinking = !self.thinking;
-        }
-    }
-
-    pub fn push_char(&mut self, c: char) {
-        if let Some(field) = self.field_mut() {
-            field.push(c);
-        }
-    }
-
-    /// Append pasted text to the current field, dropping control characters (a pasted key often carries
-    /// a trailing newline). A no-op on the `Kind` step. This is how an API key is pasted into the masked
-    /// field instead of leaking into the plaintext composer.
-    pub fn push_str(&mut self, text: &str) {
-        if let Some(field) = self.field_mut() {
-            field.extend(text.chars().filter(|c| !c.is_control()));
-        }
-    }
-
-    pub fn backspace(&mut self) {
-        if let Some(field) = self.field_mut() {
-            field.pop();
         }
     }
 
@@ -273,6 +310,8 @@ impl Default for ProviderWizard {
 impl Drop for ProviderWizard {
     fn drop(&mut self) {
         self.api_key.zeroize();
+        // Drop the draft contents too so a key that lived only in the editor does not outlive the wizard.
+        let _ = self.draft.take();
     }
 }
 
@@ -373,6 +412,11 @@ mod tests {
         assert_eq!(w.base_url, "https://openrouter.ai/api/v1");
         assert_eq!(w.model, "m1");
         assert_eq!(w.extra_models, "m2");
+        assert_eq!(
+            w.draft.text(),
+            "https://openrouter.ai/api/v1",
+            "edit mode loads the base URL into the draft"
+        );
         assert!(
             w.api_key.is_empty(),
             "the key field starts blank in edit mode"
@@ -389,5 +433,22 @@ mod tests {
 
         // A fresh (non-edit) wizard never had a key.
         assert!(!ProviderWizard::new().had_key);
+    }
+
+    #[test]
+    fn insert_text_and_feed_key_edit_in_the_middle() {
+        let mut w = ProviderWizard::new();
+        w.go_to_step(WizardStep::Model);
+        w.insert_text("ab");
+        // Cursor is at end; move left and insert.
+        w.feed_key(KeyPress {
+            code: crate::modules::tui::domain::input::Key::Left,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        });
+        w.insert_text("X");
+        assert_eq!(w.model, "aXb");
+        assert_eq!(w.draft.text(), "aXb");
     }
 }

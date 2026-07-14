@@ -1,6 +1,6 @@
 use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::text::{Line, Span};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::text::Line;
 use ratatui::widgets::{Clear, Paragraph};
 
 use crate::modules::tui::domain::model::Model;
@@ -24,7 +24,6 @@ pub fn render(model: &Model, frame: &mut Frame, anchor: Rect) {
 
     frame.render_widget(Clear, region);
 
-    let prefix = "   busca › ";
     let matches_text = if model.search_results.is_empty() {
         if query.is_empty() {
             " (digite para buscar)".to_string()
@@ -39,21 +38,23 @@ pub fn render(model: &Model, frame: &mut Frame, anchor: Rect) {
         )
     };
 
-    let mut spans = vec![
-        Span::styled(prefix, theme::dim()),
-        Span::styled(query.clone(), theme::strong()),
-        Span::styled(matches_text, theme::dim()),
-    ];
-
-    // Pad with spaces to clear the line background
-    let line_len: usize = spans.iter().map(|s| s.content.len()).sum();
-    if line_len < region.width as usize {
-        let padding = " ".repeat(region.width as usize - line_len);
-        spans.push(Span::raw(padding));
-    }
+    // prefix | query editor | match count — the editor owns the real caret.
+    let suffix_w = matches_text.chars().count() as u16;
+    let prefix_w = 11u16; // "   busca › "
+    let [prefix_area, query_area, suffix_area] = Layout::horizontal([
+        Constraint::Length(prefix_w),
+        Constraint::Min(1),
+        Constraint::Length(suffix_w.min(region.width.saturating_sub(prefix_w))),
+    ])
+    .areas(region);
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(theme::base()),
-        region,
+        Paragraph::new(Line::styled("   busca › ", theme::dim())),
+        prefix_area,
+    );
+    frame.render_widget(query.widget(), query_area);
+    frame.render_widget(
+        Paragraph::new(Line::styled(matches_text, theme::dim())),
+        suffix_area,
     );
 }

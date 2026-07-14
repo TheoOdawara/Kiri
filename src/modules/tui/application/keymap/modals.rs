@@ -168,13 +168,19 @@ fn plan_option_for_digit(c: char) -> Option<PlanOption> {
 /// closes it, Ctrl+C quits. Enter on a `Models` picker emits `SetModel`; on `Effort`, the row index maps
 /// back to `Effort::ALL` for `SetEffort`. The runtime applies the swap and persists it.
 pub(super) fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
-    if key.ctrl && key.code == Key::Char('c') {
+    // Ctrl+C: copy a search selection when present; otherwise quit the session (modal convention).
+    if key.ctrl && !key.alt && key.code == Key::Char('c') {
+        if let Some(picker) = model.picker.as_mut()
+            && let Some(text) = picker.query.copy_selection()
+        {
+            return vec![Effect::CopyToClipboard(text)];
+        }
         model.picker = None;
         model.should_quit = true;
         return vec![Effect::Quit];
     }
 
-    let mut query_changed = false;
+    // Text-field chords and typing update the filter; Up/Down/Enter/Esc stay list navigation.
     if let Some(picker) = model.picker.as_mut() {
         match key.code {
             Key::Up => {
@@ -189,23 +195,24 @@ pub(super) fn on_picker_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                 model.picker = None;
                 return vec![];
             }
-            Key::Backspace => {
-                picker.query.pop();
-                picker.selected = 0;
-                query_changed = true;
-            }
-            Key::Char(c) if !key.ctrl && !key.alt => {
-                picker.query.push(c);
-                picker.selected = 0;
-                query_changed = true;
-            }
             Key::Enter => {}
-            _ => return vec![],
+            _ => {
+                if let Some(effects) = super::field_edit::field_chords(&mut picker.query, key) {
+                    return effects;
+                }
+                // Typing, deletion, horizontal motion, word ops — full InputBuffer behaviour.
+                // Up/Down already returned above so they never move the caret inside the query.
+                if matches!(key.code, Key::Up | Key::Down) {
+                    return vec![];
+                }
+                let before = picker.query.text();
+                picker.query.feed_key(key);
+                if picker.query.text() != before {
+                    picker.selected = 0;
+                }
+                return vec![];
+            }
         }
-    }
-
-    if query_changed {
-        return vec![];
     }
 
     let picker = match &model.picker {

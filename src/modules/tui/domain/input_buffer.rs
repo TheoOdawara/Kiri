@@ -27,6 +27,10 @@ impl Default for InputBuffer {
         let mut area = TextArea::default();
         area.set_wrap_mode(WrapMode::WordOrGlyph);
         area.remove_line_number();
+        // Visible caret out of the box so field editors (wizard/picker/search) that never go through
+        // the runtime's themed `set_styles` still show where the user is typing. The composer overrides
+        // this with brand colours at boot.
+        area.set_cursor_style(Style::default().add_modifier(ratatui::style::Modifier::REVERSED));
         Self { area }
     }
 }

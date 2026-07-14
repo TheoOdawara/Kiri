@@ -37,12 +37,14 @@ pub fn render(picker: &Picker, frame: &mut Frame, area: Rect) {
     ])
     .split(inner_area);
 
-    // 5. Render Search Input row
-    let search_label = Span::styled("  Buscar: ", theme::dim());
-    let search_val = Span::styled(&picker.query, theme::strong());
-    let cursor = Span::styled("▊", theme::accent());
-    let search_line = Line::from(vec![search_label, search_val, cursor]);
-    frame.render_widget(Paragraph::new(search_line).style(theme::base()), chunks[0]);
+    // 5. Render Search Input row — label + live InputBuffer (real cursor, not a trailing glyph).
+    let [label_area, query_area] =
+        Layout::horizontal([Constraint::Length(11), Constraint::Min(1)]).areas(chunks[0]);
+    frame.render_widget(
+        Paragraph::new(Line::styled("  Buscar: ", theme::dim())),
+        label_area,
+    );
+    frame.render_widget(picker.query.widget(), query_area);
 
     // 6. Render Separator Line
     let sep_width = chunks[1].width as usize;

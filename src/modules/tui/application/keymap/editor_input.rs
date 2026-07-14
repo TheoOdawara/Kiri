@@ -131,7 +131,8 @@ pub fn on_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
                     model.search_query = None;
                     model.search_results.clear();
                 } else {
-                    model.search_query = Some(String::new());
+                    model.search_query =
+                        Some(crate::modules::tui::domain::input_buffer::InputBuffer::default());
                     model.search_results.clear();
                     model.active_search_match = 0;
                 }
@@ -408,57 +409,74 @@ fn extract_code_blocks(text: &str) -> String {
 }
 
 fn on_search_key(model: &mut Model, key: KeyPress) -> Vec<Effect> {
-    let mut query = model.search_query.clone().unwrap_or_default();
-
     match key.code {
-        Key::Esc | Key::Enter => {
-            if key.code == Key::Esc {
-                model.search_query = None;
-                model.search_results.clear();
-            } else {
-                model.focused_pane = PaneFocus::Input;
-            }
+        Key::Esc => {
+            model.search_query = None;
+            model.search_results.clear();
             return vec![];
         }
-        Key::Up | Key::Char('p') if key.ctrl => {
-            if !model.search_results.is_empty() {
-                if model.active_search_match > 0 {
-                    model.active_search_match -= 1;
-                } else {
-                    model.active_search_match = model.search_results.len() - 1;
-                }
-                let idx = model.search_results[model.active_search_match];
-                model.selected_item = Some(idx);
-                model.scroll.up(2);
-            }
+        Key::Enter => {
+            model.focused_pane = PaneFocus::Input;
+            return vec![];
         }
-        Key::Down | Key::Char('n') if key.ctrl => {
-            if !model.search_results.is_empty() {
-                if model.active_search_match < model.search_results.len() - 1 {
-                    model.active_search_match += 1;
-                } else {
-                    model.active_search_match = 0;
-                }
-                let idx = model.search_results[model.active_search_match];
-                model.selected_item = Some(idx);
-                model.scroll.down(2);
-            }
+        // Match navigation: Ctrl+P/N only — plain arrows edit the query caret (Notepad-like).
+        Key::Char('p') if key.ctrl && !key.alt => {
+            cycle_search_match(model, -1);
+            return vec![];
         }
-        Key::Backspace => {
-            query.pop();
-            update_search_results(model, &query);
-        }
-        Key::Char(c) if !key.ctrl && !key.alt => {
-            query.push(c);
-            update_search_results(model, &query);
+        Key::Char('n') if key.ctrl && !key.alt => {
+            cycle_search_match(model, 1);
+            return vec![];
         }
         _ => {}
     }
-    vec![]
+
+    // Mutate the buffer, then drop the borrow before refreshing matches from the model.
+    let effects = {
+        let Some(buf) = model.search_query.as_mut() else {
+            return vec![];
+        };
+        if let Some(effects) = super::field_edit::field_chords(buf, key) {
+            Some(effects)
+        } else {
+            buf.feed_key(key);
+            None
+        }
+    };
+    let query = model
+        .search_query
+        .as_ref()
+        .map(|b| b.text())
+        .unwrap_or_default();
+    refresh_search_results(model, &query);
+    effects.unwrap_or_default()
 }
 
-fn update_search_results(model: &mut Model, query: &str) {
-    model.search_query = Some(query.to_string());
+fn cycle_search_match(model: &mut Model, delta: i32) {
+    if model.search_results.is_empty() {
+        return;
+    }
+    let len = model.search_results.len();
+    if delta < 0 {
+        if model.active_search_match > 0 {
+            model.active_search_match -= 1;
+        } else {
+            model.active_search_match = len - 1;
+        }
+        model.scroll.up(2);
+    } else {
+        if model.active_search_match < len - 1 {
+            model.active_search_match += 1;
+        } else {
+            model.active_search_match = 0;
+        }
+        model.scroll.down(2);
+    }
+    let idx = model.search_results[model.active_search_match];
+    model.selected_item = Some(idx);
+}
+
+fn refresh_search_results(model: &mut Model, query: &str) {
     model.search_results.clear();
     model.active_search_match = 0;
 
