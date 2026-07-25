@@ -685,7 +685,6 @@ mod tests {
     use crate::shared::kernel::provider::{
         AuthMethod, Credential, ProviderKind, ProviderProfile, Secret,
     };
-    use std::sync::Arc;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -817,54 +816,24 @@ mod tests {
         );
     }
 
-    /// Lets `wire_sync` be driven against a temp dir, since `Settings::resolve` touches the real `$HOME`.
-    /// `shared_memory_db` takes a name a real resolve would never produce, so the test below proves it
-    /// opened *that* path rather than a recomputed default.
+    /// A real `Settings::resolve` against a temp harness home — possible now that `global_dir` is
+    /// injected instead of derived from `$HOME`, which is what the hand-built literal here used to work
+    /// around. The temp path is also the proof the sync tests need: a consumer that recomputed
+    /// `~/.kiri` instead of reading `Settings` would land nowhere near this directory.
     fn settings_at(global_dir: std::path::PathBuf) -> Settings {
-        use crate::shared::kernel::provider::Effort;
-        use crate::shared::kernel::sandbox::NetworkPolicy;
-        use std::time::Duration;
-
-        Settings {
-            path: global_dir.clone(),
-            seed: None,
-            checkpoint_budget: Duration::from_secs(1),
-            max_tool_calls: 1,
-            plan_allow: Arc::from(Vec::new()),
-            sandbox_enabled: false,
-            require_confinement: false,
-            sandbox_network: NetworkPolicy::Deny,
-            extra_ro: Arc::from(Vec::new()),
-            extra_rw: Arc::from(Vec::new()),
-            connect_timeout: Duration::from_secs(1),
-            read_timeout: Duration::from_secs(1),
-            thinking: false,
-            memory_enabled: true,
-            docs_path: global_dir.join("docs"),
-            shared_memory_db: global_dir.join("sync-test-shared.db"),
-            sessions_db: global_dir.join("sessions.db"),
-            credentials_file: global_dir.join("credentials.json"),
-            global_dir: global_dir.clone(),
-            config_path: global_dir.join("config.toml"),
-            providers: vec![],
-            active_provider: String::new(),
-            effort: Effort::High,
-            embeddings: None,
-            instructions_global: None,
-            instructions_project: None,
-            instruction_paths: vec![],
-        }
+        // The workspace points at the same temp dir so the resolve stays hermetic: with `None` it would
+        // default to the cwd and pull in the repo's own CLAUDE.md and `.kiri/`.
+        Settings::resolve(global_dir.clone(), Some(global_dir), None, None)
+            .expect("resolve against a temp home")
     }
 
     #[test]
     fn settings_exposes_global_dir() {
         // The single-source contract every sync consumer relies on: the data paths descend from one
         // `global_dir`, never a re-derived `config_path.parent()`.
-        let settings = settings_at(std::path::PathBuf::from("/kiri-test-home"));
-        assert_eq!(
-            settings.global_dir,
-            std::path::PathBuf::from("/kiri-test-home")
-        );
+        let dir = tempfile::TempDir::new().unwrap();
+        let settings = settings_at(dir.path().to_path_buf());
+        assert_eq!(settings.global_dir, dir.path());
         assert!(settings.shared_memory_db.starts_with(&settings.global_dir));
         assert!(settings.sessions_db.starts_with(&settings.global_dir));
         assert_eq!(
