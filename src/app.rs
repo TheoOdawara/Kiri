@@ -64,6 +64,7 @@ use crate::modules::tools::infrastructure::fs::default_fs_tools;
 use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tools::infrastructure::sensitive::load_sensitive_matcher;
 use crate::modules::tui::domain::command_menu::CustomCommandEntry;
+use crate::modules::tui::domain::instructions::instructions_display;
 use crate::modules::tui::infrastructure::runtime::{
     BootNotice, HookContext, ProviderSwap, SharedMemoryFactory, SyncContext, Tui, TuiParams,
 };
@@ -132,7 +133,11 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // Owned so the prompt can still advertise the live glob set after `sensitive` moves into the sandbox:
     // the render now happens further down, once the registry exists to generate the `# Tools` list from.
     let sensitive_globs: Vec<String> = sensitive.globs().iter().map(|g| g.to_string()).collect();
-    let instructions_display = settings.instructions_display();
+    let instructions_display = instructions_display(
+        &settings.instruction_paths,
+        settings.instructions_global.as_deref(),
+        settings.instructions_project.as_deref(),
+    );
     let sandbox = FsSandbox::with_confinement(
         &settings.path,
         sensitive,

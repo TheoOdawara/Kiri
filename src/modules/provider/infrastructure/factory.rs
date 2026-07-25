@@ -23,7 +23,7 @@ pub fn build_provider(
     // A blank model would otherwise surface as an opaque provider 400 on the first turn.
     if profile.model.trim().is_empty() {
         return Err(AgentError::Provider(format!(
-            "provider '{}' has no model configured; set its `model` in ~/.kiri/config.toml (NVIDIA users can export NVIDIA_MODEL for the default provider)",
+            "provider '{}' has no model configured; pick one with /models, or set its `model` in ~/.kiri/config.toml",
             profile.id
         )));
     }

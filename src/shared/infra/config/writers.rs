@@ -29,7 +29,7 @@ pub(crate) fn ensure_private_dir(path: &std::path::Path) -> std::io::Result<()> 
 }
 
 /// Read-modify-write, preserving every other section. Only the trusted global config is written, never the
-/// untrusted project layer, which would let a workspace change provider routing (see `resolve_layers`).
+/// untrusted project layer, which would let a workspace change provider routing (see `effective_effort`).
 /// TOML comments in a hand-edited file are dropped on rewrite; the values survive.
 fn update_global_config(
     config_path: &Path,
@@ -119,22 +119,17 @@ pub fn delete_provider(config_path: &Path, id: &str) -> Result<(), AgentError> {
     })
 }
 
-/// The default first-run provider: NVIDIA's OpenAI-compatible endpoint with the model taken from a
-/// legacy `NVIDIA_MODEL` env var if present (one-time migration aid), else left blank for the user to
-/// fill via `/provider`.
+/// The default first-run provider: NVIDIA's OpenAI-compatible endpoint, model left blank for the user to
+/// fill via `/provider` or `/models`. It used to seed itself from a `NVIDIA_MODEL` env var — a migration
+/// aid for a pre-config-file layout that no released version ever shipped, and the only place an env var
+/// could still write itself into the config file. One knob, one home: the model lives in the TOML.
 pub(super) fn default_provider() -> ProviderProfile {
-    let model = std::env::var("NVIDIA_MODEL").unwrap_or_default();
-    let models = if model.is_empty() {
-        Vec::new()
-    } else {
-        vec![model.clone()]
-    };
     ProviderProfile {
         id: DEFAULT_PROVIDER_ID.to_string(),
         kind: ProviderKind::Nvidia,
         base_url: ProviderKind::Nvidia.default_base_url().to_string(),
-        model,
-        models,
+        model: String::new(),
+        models: Vec::new(),
         auth: AuthMethod::ApiKey,
         thinking: None,
         thinking_style: Default::default(),
@@ -154,9 +149,10 @@ pub(super) fn write_starter_config(
         .iter()
         .map(|p| (p.id.clone(), p.clone()))
         .collect();
+    // No `effort`: writing the default would turn a fallback into a persisted choice, so a later change
+    // to what the default *is* would silently not reach anyone who ever ran a first boot.
     let config = RawConfig {
         active_provider: Some(active.to_string()),
-        effort: Some(Effort::default()),
         providers: table,
         ..RawConfig::default()
     };

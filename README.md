@@ -95,13 +95,15 @@ borderless prompt whose gate glyph changes color with its state.
 **Configure** — Kiri manages its own config (`~/.kiri/config.toml`) and secrets in a **`0600`
 `~/.kiri/credentials.json`** (file-only; the OS keyring is not used — ADR 0020). An optional
 **`~/.kiri/.env`** may seed process env on boot; a project-cwd `.env` is **never** read (a hostile
-repo must not inject credentials). The fastest start is to seed the default NVIDIA provider from an
+repo must not inject credentials). The fastest start is to seed the default NVIDIA provider's key from an
 env var on the first run; it is imported once into `credentials.json` (the key is **never** a CLI flag):
 
 ```bash
 export NVIDIA_API_KEY=nvapi-...
-export NVIDIA_MODEL=moonshotai/kimi-k2-instruct   # any model from NVIDIA's catalog
 ```
+
+Then pick the model with **`/models`** inside the TUI, or set `model` under `[providers.nvidia]` in
+`~/.kiri/config.toml`. Only the key comes from the environment; the model is config, not env.
 
 Then add or switch providers from inside the TUI: **`/provider`** (switch, or run the add wizard for
 Claude / GPT / a custom endpoint — paste the API key, it is masked and stored in `credentials.json`),

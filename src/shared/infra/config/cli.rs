@@ -6,6 +6,9 @@ use clap::Parser;
 #[command(
     name = "kiri",
     about = "Kiri — a provider-agnostic coding-agent harness",
+    // From `CARGO_PKG_VERSION`, so `kiri --version` cannot drift from the crate it was built from — the
+    // first thing a bug report needs and the one thing the binary could not previously answer.
+    version,
     args_conflicts_with_subcommands = true
 )]
 pub struct Cli {

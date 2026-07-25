@@ -37,3 +37,16 @@ and model as inputs (no hardcoding inside the service).
 - Multi-provider support (provider config in a separate file, optional/no-auth providers) is a later
   feature, intentionally not built now (YAGNI). When it lands it replaces the `BASE_URL` const with a
   config read; the service signature already supports it.
+
+---
+
+## Amendment (2026-07-25) — `NVIDIA_MODEL` is gone
+
+The env pair above was superseded by the layered TOML config (ADR 0011/0012) and the file-only
+credential store (ADR 0020). `NVIDIA_API_KEY` survives as a one-time import into
+`credentials.json`; `NVIDIA_MODEL` is removed outright.
+
+It was the last env var that could write itself into the config *file*: `default_provider()` read it
+on a first run and persisted it as the seeded provider's `model`, so a shell export silently became
+durable state. The model is now config only — set it with `/models` or under `[providers.<id>]` in
+`~/.kiri/config.toml`. Two homes for one knob is how a config file starts disagreeing with itself.

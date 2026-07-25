@@ -13,7 +13,7 @@ use super::defaults::{
     TOOL_CHECKPOINT,
 };
 use super::raw::{
-    read_config_file, read_project_config_lenient, resolve_layers, resolve_providers,
+    effective_effort, read_config_file, read_project_config_lenient, resolve_providers,
     unknown_keys_warning,
 };
 use super::resolve::{
@@ -114,80 +114,81 @@ pub struct EmbeddingSettings {
 /// exhaust memory during config resolve.
 const MAX_INSTRUCTIONS_BYTES: u64 = 256 * 1024;
 
-/// Open a path for capped read without following a final-component symlink when the OS allows it (#57).
-/// On Unix uses `O_NOFOLLOW`; on Windows re-checks `symlink_metadata` after open (narrow residual race).
-fn open_regular_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // Linux 0x20000 / macOS & BSD 0x100 — `libc::O_NOFOLLOW` without a libc dependency.
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        const O_NOFOLLOW: i32 = 0x20000;
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "freebsd",
-            target_os = "openbsd",
-            target_os = "netbsd",
-            target_os = "dragonfly"
-        ))]
-        const O_NOFOLLOW: i32 = 0x0000_0100;
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "freebsd",
-            target_os = "openbsd",
-            target_os = "netbsd",
-            target_os = "dragonfly"
-        )))]
-        const O_NOFOLLOW: i32 = 0;
+fn not_a_regular_file(reason: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, reason)
+}
 
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(O_NOFOLLOW)
-            .open(path)?;
-        let meta = file.metadata()?;
-        if !meta.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "instructions path is not a regular file",
-            ));
-        }
-        Ok(file)
+/// A path that is a symlink, or whose type cannot be read at all, is refused. Unreadable counts as a
+/// symlink: the check exists to keep an unresolvable path out, so failing to answer must not mean "fine".
+fn reject_symlink(path: &std::path::Path) -> std::io::Result<()> {
+    let is_symlink = std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(true);
+    if is_symlink {
+        return Err(not_a_regular_file(
+            "instructions path must not be a symlink",
+        ));
     }
-    #[cfg(not(unix))]
-    {
-        // Residual: no portable O_NOFOLLOW. Open then re-stat the path; still refuse if it is a symlink.
-        if std::fs::symlink_metadata(path)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(true)
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "instructions path must not be a symlink",
-            ));
-        }
-        let file = std::fs::File::open(path)?;
-        if !file.metadata()?.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "instructions path is not a regular file",
-            ));
-        }
-        // Re-check after open (narrows #57 TOCTOU; not eliminated without nofollow).
-        if std::fs::symlink_metadata(path)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(true)
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "instructions path must not be a symlink",
-            ));
-        }
-        Ok(file)
+    Ok(())
+}
+
+/// `O_NOFOLLOW` where we know the target's value, plain open otherwise. Unknown-value targets are the
+/// reason [`open_regular_file`] re-checks after opening on **every** platform: the former code let the
+/// constant fall back to `0` on an unlisted unix and then skipped the re-check, so the whole #57
+/// protection turned itself off silently — the file opened through the symlink and nothing said so.
+#[cfg(unix)]
+fn open_read_nofollow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // Linux 0x20000 / macOS & BSD 0x100 — `libc::O_NOFOLLOW` without a libc dependency.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const O_NOFOLLOW: i32 = 0x20000;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    const O_NOFOLLOW: i32 = 0x0000_0100;
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    const O_NOFOLLOW: i32 = 0;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_read_nofollow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+/// Open a path for capped read, refusing a final-component symlink (#57). The stat-open-stat sequence runs
+/// on every platform and is the sole protection wherever `O_NOFOLLOW` is unavailable or unknown; where the
+/// flag does apply, the open itself already refuses and the re-check merely narrows the residual TOCTOU
+/// window. One body rather than a per-platform pair: the two arms had drifted, and the weaker one was the
+/// one no CI target exercised.
+fn open_regular_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    reject_symlink(path)?;
+    let file = open_read_nofollow(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(not_a_regular_file(
+            "instructions path is not a regular file",
+        ));
     }
+    reject_symlink(path)?;
+    Ok(file)
 }
 
 /// Returns the text and whether the cap truncated it. Truncation used to be invisible: a long instructions
@@ -343,14 +344,15 @@ impl Settings {
         let project_path = path.join(".kiri").join("config.toml");
         let had_global = global_path.exists();
         // Provider routing and security policy come from the trusted global config only; the workspace
-        // (project) layer contributes only the `effort` preference. See `resolve_layers`.
+        // (project) layer contributes only the `effort` preference. See `effective_effort`.
         let global_raw = read_config_file(&global_path)?;
         let project_raw = read_project_config_lenient(&project_path, &mut warnings);
         // Both layers are checked: a typo in the project layer matters too, even though only `effort`
         // survives from it — the user still deserves to know their key does nothing.
         warnings.extend(unknown_keys_warning(&global_raw, &global_path));
         warnings.extend(unknown_keys_warning(&project_raw, &project_path));
-        let (config, effort) = resolve_layers(global_raw, project_raw);
+        let effort = effective_effort(&global_raw, &project_raw);
+        let config = global_raw;
 
         let (mut providers, mut active) =
             resolve_providers(config.providers, config.active_provider);
@@ -449,28 +451,6 @@ impl Settings {
             instruction_paths: loaded_paths,
             warnings,
         })
-    }
-
-    /// The instructions text formatted for TUI display: paths header followed by both layers' content
-    /// (global first, then project) — display-only, so it merges freely unlike the trust-separated
-    /// system-prompt blocks.
-    pub fn instructions_display(&self) -> Option<String> {
-        if self.instructions_global.is_none() && self.instructions_project.is_none() {
-            return None;
-        }
-        let header = self
-            .instruction_paths
-            .iter()
-            .map(|p| format!("- {}", p.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let text = [&self.instructions_global, &self.instructions_project]
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        Some(format!("Arquivos carregados:\n{header}\n\n{text}"))
     }
 
     /// The active provider profile, resolved against the catalog. Errors if the active id names no
@@ -614,6 +594,14 @@ extra_plan_safe = ["just"]
             settings.config_path.exists(),
             "a first run must leave a real file for the user to edit"
         );
+        let starter = std::fs::read_to_string(&settings.config_path).unwrap();
+        // Neither `effort` nor `model` is written: persisting a default turns a fallback into a stored
+        // choice, and a later change to what the default *is* would then never reach this user.
+        assert!(!starter.contains("effort"), "got: {starter}");
+        assert!(
+            starter.contains("model = \"\""),
+            "the seeded model is written blank, showing the user where /models writes: {starter}"
+        );
 
         // The second resolve reads the file the first one wrote instead of re-seeding.
         let again = resolve_at(global.path(), workspace.path());
@@ -623,7 +611,7 @@ extra_plan_safe = ["just"]
 
     #[test]
     fn the_untrusted_project_layer_contributes_only_effort() {
-        // The end-to-end counterpart of `raw::resolve_layers`'s unit test: proven through a real resolve,
+        // The end-to-end counterpart of `raw::effective_effort`'s unit test: proven through a real resolve,
         // so a future refactor cannot reconnect the workspace layer to provider routing or the sandbox.
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();

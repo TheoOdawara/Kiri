@@ -176,13 +176,16 @@ impl RawCommands {
     }
 }
 
-/// **SECURITY:** the project layer lives inside the untrusted workspace, so only the innocuous `effort`
-/// is honored from it. Providers, the active selection, and the `sandbox`/`http`/`behavior`/`paths` policy
-/// come from the trusted global layer alone — otherwise a malicious repo could redirect a stored credential
-/// to its own endpoint, or weaken the sandbox, by shipping a `.kiri/config.toml`.
-pub(super) fn resolve_layers(global: RawConfig, project: RawConfig) -> (RawConfig, Effort) {
-    let effort = project.effort.or(global.effort).unwrap_or_default();
-    (global, effort)
+/// The one setting the untrusted workspace layer may contribute, resolved project-over-global.
+///
+/// **SECURITY:** everything else — providers, the active selection, and the
+/// `sandbox`/`http`/`behavior`/`paths`/`commands` policy — comes from the trusted global layer alone, so a
+/// malicious repo cannot redirect a stored credential to its own endpoint or weaken the sandbox by shipping
+/// a `.kiri/config.toml`. This used to be `resolve_layers`, which took both layers and returned one of them
+/// *plus* the effort: a name and a signature that read like a merge, while the whole point is that no merge
+/// happens. The caller keeps the global layer it already owns and asks only for the effort.
+pub(super) fn effective_effort(global: &RawConfig, project: &RawConfig) -> Effort {
+    project.effort.or(global.effort).unwrap_or_default()
 }
 
 /// Absent is an empty config, not an error. A malformed one fails fast rather than silently ignoring the
@@ -254,7 +257,7 @@ mod tests {
     use crate::shared::kernel::provider::{AuthMethod, ProviderKind};
 
     #[test]
-    fn resolve_layers_takes_only_effort_from_the_untrusted_workspace() {
+    fn effective_effort_takes_only_effort_from_the_untrusted_workspace() {
         // SECURITY regression: the project layer comes from the workspace and is untrusted. It may set
         // `effort`, but must NOT be able to redefine a provider's endpoint (credential-exfil vector) or
         // weaken the sandbox.
@@ -291,7 +294,8 @@ mod tests {
         )
         .unwrap();
 
-        let (config, effort) = resolve_layers(global, project);
+        let effort = effective_effort(&global, &project);
+        let config = global;
         assert_eq!(effort, Effort::Low, "effort IS honored from the workspace");
         // The workspace cannot redirect the credential or add/replace providers:
         assert!(!config.providers.contains_key("evil"));

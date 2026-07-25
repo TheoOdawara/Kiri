@@ -2,6 +2,7 @@ pub mod command_menu;
 pub mod history;
 pub mod input;
 pub mod input_buffer;
+pub mod instructions;
 pub mod modal;
 pub mod model;
 pub mod nav;

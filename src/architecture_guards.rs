@@ -366,6 +366,31 @@ fn domain_is_free_of_io() {
     }
 }
 
+/// `shared` is the leaf every module depends on, so it must never reach *down* into one — that edge would
+/// make the dependency graph cyclic and the layering meaningless. Walks every `*.rs` under `src/shared/`,
+/// replacing the hand-maintained `include_str!` list that used to live in `shared/infra/config.rs`: that
+/// list covered only the config submodules and had to be edited by hand whenever a file was added, split,
+/// or moved — a guard that silently stops covering what it names is worse than none.
+#[test]
+fn shared_never_imports_from_a_module() {
+    let shared = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("shared");
+    let mut files = Vec::new();
+    rs_files(&shared, &mut files);
+    assert!(!files.is_empty(), "expected to find files under src/shared");
+    // Built by concatenation so this guard's own literal does not self-match when it walks itself.
+    let needle = concat!("crate", "::modules::");
+    for file in &files {
+        let source = std::fs::read_to_string(file).expect("read shared file");
+        assert!(
+            !source.contains(needle),
+            "{} imports from a module; `shared` is the leaf and must not depend on one",
+            file.display()
+        );
+    }
+}
+
 /// Whether `cfg_token` (e.g. `"cfg(unix)"`) appears in `source` with `function_name` naming the item it
 /// gates within a short following window — a much cheaper proxy for "this cfg attribute is on the
 /// function we care about" than a full parse, but one a bare `source.contains(cfg_token)` doesn't give:
