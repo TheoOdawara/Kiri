@@ -72,6 +72,28 @@ impl ToolRegistry {
         self.find(&call.function.name)?.plan_check(sandbox, call)
     }
 
+    /// The `# Tools` prompt lines for the tools `keep` selects: `- name — description`, one per line,
+    /// read straight from each tool's advertised `schema()`. Generated rather than hand-written so the
+    /// prompt cannot drift from the surface the model is actually offered (SEC-06) — a hand-written list
+    /// silently omitted `task`, `remember`, `recall_memory`, `consult_docs`, and every MCP tool. The
+    /// grouping prose stays in the prompt template; this supplies only the entries.
+    pub fn prompt_lines(&self, keep: impl Fn(&dyn Tool) -> bool) -> String {
+        self.tools
+            .iter()
+            .map(|tool| tool.as_ref())
+            .filter(|tool| keep(*tool))
+            .map(|tool| {
+                let schema = tool.schema();
+                // A tool whose schema somehow lacks a description still gets its name listed: the
+                // grouping is the fact this section carries, and dropping the line would hide the tool.
+                let description = schema["function"]["description"]
+                    .as_str()
+                    .unwrap_or_default();
+                format!("- {} — {}\n", tool.name(), description)
+            })
+            .collect()
+    }
+
     fn find(&self, name: &str) -> Option<&dyn Tool> {
         self.tools
             .iter()

@@ -3,12 +3,10 @@ mod defaults;
 mod raw;
 mod resolve;
 mod settings;
-mod system_prompt;
 mod writers;
 
 pub use cli::{Cli, CliCommand, SyncAction};
 pub use settings::{Settings, load_global_env};
-pub use system_prompt::{PromptExtensions, render_system_prompt};
 pub use writers::{
     delete_provider, persist_active_model, persist_active_provider, persist_effort, upsert_provider,
 };
@@ -26,7 +24,6 @@ mod tests {
         // facade-only scan would pass tautologically and let the leaf-module invariant rot silently.
         let sources = [
             include_str!("config.rs"),
-            include_str!("config/system_prompt.rs"),
             include_str!("config/defaults.rs"),
             include_str!("config/raw.rs"),
             include_str!("config/resolve.rs"),

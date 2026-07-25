@@ -209,3 +209,49 @@ static prose itself. No new dependency — a ~15-line manual scan, not a regex.
 
 Locked by `untrusted_content_containing_a_trusted_token_renders_verbatim` and
 `untrusted_blocks_cannot_bleed_into_each_other`. Closes #56.
+
+---
+
+## Amendment (2026-07-25) — the prompt moves to `agent/domain`, and its tool list is generated
+
+Two problems this ADR's own text made visible.
+
+**It lived in the wrong module.** `shared/infra/config/system_prompt.rs` was neither config nor
+infrastructure: it is the agent's own prose, with no I/O, reached only through a `pub use` on the config
+facade. `shared` is the leaf every module depends on, so parking a module's domain rule there inverted the
+direction — and the guard `config_has_no_module_imports` existed partly to keep that misplacement from
+metastasizing. Moved verbatim to `src/modules/agent/domain/system_prompt.rs`; `agent` gained the `domain`
+layer its module header previously said it had no need for. The recursive domain-purity guard now covers
+it, which is a stricter check than the config guard it left behind. Nothing in the render logic changed.
+
+**The `# Tools` list was hand-written, so it was wrong.** This ADR's own Context named "tool list is
+implicit and incomplete" as a problem to fix, and the fix — a literal list in the template — reintroduced
+it the moment the tool surface grew. By 2026-07-25 the section listed ten file tools and omitted `task`
+(ADR 0029), `remember`, `recall_memory`, `consult_docs`, every skill tool, and every MCP tool. The model
+was told its toolset was one thing while being offered another.
+
+The entries now come from `ToolRegistry::prompt_lines`, which renders `- name — description` from each
+registered tool's own `schema()` — the same text the model receives on the wire. Three placeholders
+(`{TOOLS_READ_ONLY}`, `{TOOLS_MUTATING}`, `{TOOLS_PLAN_ONLY}`) receive the groups; the grouping prose,
+which is the fact the schemas do not carry, stays in the template. `agent/domain` gains no `tools`
+dependency: the strings arrive as a `ToolCatalog` parameter, assembled in `app::wire` — the same
+parameter-injection shape SEC-06 already used for the sensitive globs and the enforced limits.
+
+`app::wire` had to move the render **after** the registry is built (it previously ran before the
+sandbox, so `sensitive` could still be borrowed). The globs are now captured as owned `String`s for that
+reason. `every_registered_tool_reaches_exactly_one_prompt_group` locks the exhaustiveness: a tool that
+fell through all three predicates would be advertised on the wire and absent from the prompt.
+
+A catalog entry is untrusted text — an MCP server names and describes its own tools — so it reaches the
+template through the same single-pass `render_template` scan as the rules/skills/instructions blocks, and
+`a_tool_description_cannot_smuggle_a_placeholder` proves an entry cannot expand `{SENSITIVE_LIST}`.
+
+**Two claims in the prose were false and are corrected.** `# Tools` said run_command's network "is denied
+except for recognized dev/package commands (cargo, npm, git, …)" — ADR 0022 removed per-command widening
+outright, so that exemption had not existed for some time. `# Approval modes` said auto mode "calls run
+without prompting" with no exceptions, which was never true for `run_command` and is now true with the
+named exceptions ADR 0030 defines.
+
+**Superseded by ADR 0030:** the `C1` allow-list above (`KIRI_PLAN_ALLOW` and its regex list) is gone.
+The plan-mode gate is now the command policy's `plan_refusal`, matched by program / subcommand / inline-code
+flag rather than by regex, and plan mode additionally confirms every mutating call.

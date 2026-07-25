@@ -12,6 +12,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use crate::modules::agent::application::agent_loop::AgentLoop;
+use crate::modules::agent::domain::system_prompt::{
+    PromptExtensions, ToolCatalog, render_system_prompt,
+};
 use crate::modules::agent::infrastructure::task_tool::TaskTool;
 use crate::modules::extensions::application::{ExtensionCatalog, ExtensionsLoader};
 use crate::modules::extensions::domain::gate::{self, GateState, content_hash};
@@ -64,9 +67,7 @@ use crate::modules::tui::domain::command_menu::CustomCommandEntry;
 use crate::modules::tui::infrastructure::runtime::{
     BootNotice, HookContext, ProviderSwap, SharedMemoryFactory, SyncContext, Tui, TuiParams,
 };
-use crate::shared::infra::config::{
-    PromptExtensions, Settings, SyncAction, ensure_private_dir, render_system_prompt,
-};
+use crate::shared::infra::config::{Settings, SyncAction, ensure_private_dir};
 use crate::shared::kernel::error::AgentResult;
 use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile};
 
@@ -128,23 +129,10 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     }
     // Built here and injected, so `config` never reaches into the `tools` adapter for it.
     let sensitive = load_sensitive_matcher()?;
-    // Render the prompt's tool/limit/sensitive facts from the live sources before `sensitive` moves into
-    // the sandbox, so an override is reflected and the prompt cannot lie about what the harness blocks
-    // (SEC-06).
+    // Owned so the prompt can still advertise the live glob set after `sensitive` moves into the sandbox:
+    // the render now happens further down, once the registry exists to generate the `# Tools` list from.
+    let sensitive_globs: Vec<String> = sensitive.globs().iter().map(|g| g.to_string()).collect();
     let instructions_display = settings.instructions_display();
-    let base_system_prompt = render_system_prompt(
-        &sensitive.globs(),
-        RUN_COMMAND_DEFAULT_TIMEOUT_MS,
-        EXEC_MAX_BYTES,
-        settings.checkpoint_budget,
-        PromptExtensions {
-            rules: (!rules_text.is_empty()).then_some(rules_text.as_str()),
-            skills: (!skills_text.is_empty()).then_some(skills_text.as_str()),
-            agents: (!agents_text.is_empty()).then_some(agents_text.as_str()),
-            instructions_global: settings.instructions_global.as_deref(),
-            instructions_project: settings.instructions_project.as_deref(),
-        },
-    );
     let sandbox = FsSandbox::with_confinement(
         &settings.path,
         sensitive,
@@ -192,6 +180,31 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         )));
     }
     let registry = ToolRegistry::new(tools);
+    // Rendered from the live sources — the assembled registry, the sensitive globs, the enforced limits —
+    // so the prompt cannot lie about the surface the model is actually offered (SEC-06). This is why it
+    // waits for the registry: a hand-written tool list silently omitted `task`, the memory tools, and
+    // every MCP tool.
+    let base_system_prompt = render_system_prompt(
+        &sensitive_globs
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<&str>>(),
+        RUN_COMMAND_DEFAULT_TIMEOUT_MS,
+        EXEC_MAX_BYTES,
+        settings.checkpoint_budget,
+        &ToolCatalog {
+            read_only: registry.prompt_lines(|tool| tool.is_read_only()),
+            mutating: registry.prompt_lines(|tool| !tool.is_read_only() && !tool.plan_only()),
+            plan_only: registry.prompt_lines(|tool| tool.plan_only()),
+        },
+        PromptExtensions {
+            rules: (!rules_text.is_empty()).then_some(rules_text.as_str()),
+            skills: (!skills_text.is_empty()).then_some(skills_text.as_str()),
+            agents: (!agents_text.is_empty()).then_some(agents_text.as_str()),
+            instructions_global: settings.instructions_global.as_deref(),
+            instructions_project: settings.instructions_project.as_deref(),
+        },
+    );
     let agent_loop = AgentLoop::new(
         provider,
         registry,

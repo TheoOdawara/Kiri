@@ -527,3 +527,34 @@ async fn execute_edits_file_outside_workspace() {
     assert!(matches!(outcome, ToolOutcome::Ok(_)));
     assert_eq!(fs::read_to_string(&file).unwrap(), "hello rust");
 }
+
+#[test]
+fn prompt_lines_renders_name_and_schema_description() {
+    let registry = registry();
+    let lines = registry.prompt_lines(|tool| tool.name() == "read_file");
+    let description = registry.find("read_file").unwrap().schema()["function"]["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(lines, format!("- read_file — {description}\n"));
+}
+
+#[test]
+fn every_registered_tool_reaches_exactly_one_prompt_group() {
+    // The whole point of generating the `# Tools` list is that it cannot omit a tool the way the
+    // hand-written one omitted `task`, the memory tools, and every MCP tool. A tool that fell through
+    // all three predicates would be advertised on the wire but absent from the prompt.
+    let registry = registry();
+    let groups = [
+        registry.prompt_lines(|tool| tool.is_read_only()),
+        registry.prompt_lines(|tool| !tool.is_read_only() && !tool.plan_only()),
+        registry.prompt_lines(|tool| tool.plan_only()),
+    ];
+    for tool in &registry.tools {
+        let hits = groups
+            .iter()
+            .filter(|group| group.contains(&format!("- {} — ", tool.name())))
+            .count();
+        assert_eq!(hits, 1, "{} landed in {hits} groups", tool.name());
+    }
+}
