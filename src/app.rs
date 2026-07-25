@@ -76,8 +76,14 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         bail!("Kiri requires an interactive terminal (stdout is not a TTY)");
     }
     // Collected rather than `eprintln!`d, which the alternate-screen TUI would hide: the runtime surfaces
-    // these in-transcript at boot.
-    let mut boot_notices: Vec<BootNotice> = Vec::new();
+    // these in-transcript at boot. Config resolution runs before `wire` and for the same reason cannot
+    // print, so it hands its diagnostics over in `Settings::warnings` — they lead, having happened first.
+    let mut boot_notices: Vec<BootNotice> = settings
+        .warnings
+        .iter()
+        .cloned()
+        .map(BootNotice::new)
+        .collect();
     let client = build_http_client(settings.connect_timeout, settings.read_timeout)
         .context("failed to build the HTTP client")?;
     let secrets = default_secret_store(settings.credentials_file.clone());
@@ -364,6 +370,11 @@ async fn build_extensions(settings: &Settings, notices: &mut Vec<BootNotice>) ->
 
 /// The headless `kiri sync …` route. Never needs a terminal, so it works over SSH and in scripts.
 pub async fn wire_sync(settings: &Settings, action: SyncAction) -> Result<()> {
+    // Headless: no alternate screen to hide them, so stderr is the right channel here — unlike `wire`,
+    // which routes the same diagnostics into the transcript.
+    for warning in &settings.warnings {
+        eprintln!("kiri: {warning}");
+    }
     // Defense in depth: `main.rs` resolves `Settings` first, which already hardens `~/.kiri`. Repeating it
     // is cheap and makes `wire_sync` self-contained when called directly, as tests do.
     ensure_private_dir(&settings.global_dir)?;

@@ -25,11 +25,21 @@ use super::writers::{default_provider, ensure_private_dir, write_starter_config}
 /// Seeds process env from `<global_dir>/.env` before config resolution. Read ONLY from the trusted global
 /// dir, never the cwd: a hostile project repo must not inject env and thereby redirect a credential or
 /// weaken the sandbox (ADR 0020). `dotenvy` never overrides an already-exported var.
-pub fn load_global_env(global_dir: &std::path::Path) {
+///
+/// Returns a warning for a `.env` that exists but could not be applied. An absent file is the normal case
+/// and says nothing; a malformed line used to be swallowed entirely, which left the user with a key that
+/// silently never loaded.
+pub fn load_global_env(global_dir: &std::path::Path) -> Option<String> {
     let env_path = global_dir.join(".env");
-    // Deliberately ignored: `.env` is an optional convenience. A missing file, or a malformed line that
-    // fails to parse, must not abort boot — the affected key simply stays unset and onboarding handles it.
-    let _ = dotenvy::from_path(&env_path);
+    match dotenvy::from_path(&env_path) {
+        Ok(()) => None,
+        // `.env` is an optional convenience: absent is not a problem worth reporting.
+        Err(error) if error.not_found() => None,
+        Err(error) => Some(format!(
+            "could not apply {} ({error}); any key it defines stays unset",
+            env_path.display()
+        )),
+    }
 }
 
 /// The resolved configuration the composition root needs to wire the harness. The matching secret is
@@ -82,6 +92,10 @@ pub struct Settings {
     pub instructions_project: Option<String>,
     /// In discovery order, for TUI display.
     pub instruction_paths: Vec<PathBuf>,
+    /// Diagnostics gathered while resolving. Collected rather than printed: `Settings::resolve` runs
+    /// before the TUI enters its alternate screen, so an `eprintln!` here is invisible for the whole
+    /// session. `app::wire` turns these into in-transcript `BootNotice`s; headless `wire_sync` prints them.
+    pub warnings: Vec<String>,
 }
 
 /// An existing provider id whose endpoint/credential to reuse, plus the embeddings model id.
@@ -240,15 +254,16 @@ impl Settings {
         cli_instructions: Option<PathBuf>,
     ) -> Result<Self> {
         let path = cli_path.unwrap_or_else(|| PathBuf::from("."));
+        let mut warnings: Vec<String> = Vec::new();
 
         // Keep the kiri dir owner-only so the non-secret config.toml (co-located with credentials.json)
         // is not world-readable. Best-effort, but surfaced: a pre-existing `0755` dir that cannot be
         // coerced down is a real security signal — warn rather than swallow it — while still booting.
         if let Err(error) = ensure_private_dir(&global_dir) {
-            eprintln!(
-                "kiri: warning: could not make {} owner-only ({error}); it may be world-readable",
+            warnings.push(format!(
+                "could not make {} owner-only ({error}); it may be world-readable",
                 global_dir.display()
-            );
+            ));
         }
         let global_path = global_dir.join("config.toml");
         let project_path = path.join(".kiri").join("config.toml");
@@ -257,7 +272,7 @@ impl Settings {
         // (project) layer contributes only the `effort` preference. See `resolve_layers`.
         let (config, effort) = resolve_layers(
             read_config_file(&global_path)?,
-            read_project_config_lenient(&project_path),
+            read_project_config_lenient(&project_path, &mut warnings),
         );
 
         let (mut providers, mut active) =
@@ -271,15 +286,15 @@ impl Settings {
             if !had_global
                 && let Err(error) = write_starter_config(&global_path, &providers, &active)
             {
-                eprintln!(
-                    "kiri: could not write a starter config at {} ({error}); continuing",
+                warnings.push(format!(
+                    "could not write a starter config at {} ({error}); continuing",
                     global_path.display()
-                );
+                ));
             }
         }
 
         let (sandbox_enabled, require_confinement) =
-            resolve_sandbox_mode(config.sandbox.mode.as_deref());
+            resolve_sandbox_mode(config.sandbox.mode.as_deref(), &mut warnings);
         let docs_path = config
             .paths
             .docs
@@ -290,15 +305,20 @@ impl Settings {
         let (loaded_instructions_global, loaded_instructions_project, loaded_paths) =
             load_instructions(&path, &global_dir, cli_instructions)?;
 
+        // Hoisted out of the struct literal below: both borrow `warnings`, which the literal itself moves.
+        let plan_allow = compile_patterns("KIRI_PLAN_ALLOW", DEFAULT_PLAN_ALLOW, &mut warnings)?;
+        let sandbox_network =
+            resolve_sandbox_network(config.sandbox.network.as_deref(), &mut warnings);
+
         Ok(Self {
             path,
             seed: cli_prompt,
             checkpoint_budget: TOOL_CHECKPOINT,
             max_tool_calls: MAX_TOOL_CALLS_PER_CHECKPOINT,
-            plan_allow: compile_patterns("KIRI_PLAN_ALLOW", DEFAULT_PLAN_ALLOW)?,
+            plan_allow,
             sandbox_enabled,
             require_confinement,
-            sandbox_network: resolve_sandbox_network(config.sandbox.network.as_deref()),
+            sandbox_network,
             extra_ro: load_extra_paths("KIRI_SANDBOX_RO_PATHS", &[]),
             extra_rw: load_extra_paths("KIRI_SANDBOX_RW_PATHS", DEFAULT_RW_DIRS),
             connect_timeout: resolve_timeout(
@@ -336,6 +356,7 @@ impl Settings {
             instructions_global: loaded_instructions_global,
             instructions_project: loaded_instructions_project,
             instruction_paths: loaded_paths,
+            warnings,
         })
     }
 
@@ -563,6 +584,67 @@ mode = "off"
             .expect("both fields present");
         assert_eq!(embeddings.provider_id, "nvidia");
         assert_eq!(embeddings.model, "embed-v1");
+    }
+
+    #[test]
+    fn a_clean_resolve_produces_no_warnings() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let settings = resolve_at(global.path(), workspace.path());
+        assert!(
+            settings.warnings.is_empty(),
+            "a first run on a healthy machine must be quiet: {:?}",
+            settings.warnings
+        );
+    }
+
+    #[test]
+    fn a_malformed_project_config_reaches_the_warning_channel() {
+        // The channel exists because `Settings::resolve` runs before the TUI enters its alternate screen:
+        // an `eprintln!` here is invisible for the whole session, so every diagnostic must travel in
+        // `Settings::warnings` instead. This is the end-to-end proof for one of them.
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write_project_config(workspace.path(), "this is = not valid = toml [[[");
+
+        let settings = resolve_at(global.path(), workspace.path());
+        assert_eq!(settings.warnings.len(), 1, "got: {:?}", settings.warnings);
+        assert!(
+            settings.warnings[0].contains("invalid project config"),
+            "got: {:?}",
+            settings.warnings
+        );
+    }
+
+    #[test]
+    fn config_warnings_carry_no_presentation_prefix() {
+        // The message is plain text; the `kiri:` prefix belongs to whoever displays it (a `BootNotice` in
+        // the TUI, `eprintln!` in headless sync). A prefix baked in here would double up.
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write_project_config(workspace.path(), "nope [[[");
+
+        let settings = resolve_at(global.path(), workspace.path());
+        assert!(
+            !settings.warnings[0].starts_with("kiri:"),
+            "got: {:?}",
+            settings.warnings
+        );
+    }
+
+    #[test]
+    fn load_global_env_is_quiet_when_absent_and_warns_when_unreadable() {
+        let global = TempDir::new().unwrap();
+        assert!(
+            load_global_env(global.path()).is_none(),
+            "an absent .env is the normal case, not a problem"
+        );
+
+        // A directory where the `.env` file should be: present, but impossible to apply. Previously this
+        // was swallowed by `let _ = …`, leaving the user with a key that silently never loaded.
+        std::fs::create_dir(global.path().join(".env")).unwrap();
+        let warning = load_global_env(global.path()).expect("an unreadable .env must be surfaced");
+        assert!(warning.contains(".env"), "got: {warning}");
     }
 
     #[test]

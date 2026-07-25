@@ -105,14 +105,14 @@ pub(super) fn read_config_file(path: &Path) -> Result<RawConfig> {
 
 /// Lenient, unlike the trusted global layer: a malformed file must not abort the boot, or a cloned repo
 /// could ship a broken config as an availability DoS. Only `effort` comes from this layer anyway.
-pub(super) fn read_project_config_lenient(path: &Path) -> RawConfig {
+pub(super) fn read_project_config_lenient(path: &Path, warnings: &mut Vec<String>) -> RawConfig {
     match read_config_file(path) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!(
-                "kiri: ignoring invalid project config at {} ({error})",
+            warnings.push(format!(
+                "ignoring invalid project config at {} ({error})",
                 path.display()
-            );
+            ));
             RawConfig::default()
         }
     }
@@ -319,11 +319,26 @@ mod tests {
     #[test]
     fn project_config_is_lenient_on_malformed_input() {
         // The untrusted project layer must NOT abort the boot on a malformed file (a repo could ship one
-        // as a DoS); a parse error degrades to defaults rather than propagating.
+        // as a DoS); a parse error degrades to defaults rather than propagating — but it is surfaced to
+        // the caller's warning channel, never swallowed.
         let dir = tempfile::TempDir::new().unwrap();
         let bad = dir.path().join("project.toml");
         std::fs::write(&bad, "this is = not valid = toml [[[").unwrap();
-        let parsed = read_project_config_lenient(&bad);
+        let mut warnings = Vec::new();
+        let parsed = read_project_config_lenient(&bad, &mut warnings);
         assert!(parsed.providers.is_empty() && parsed.effort.is_none());
+        assert_eq!(warnings.len(), 1, "degrading silently is the defect");
+        assert!(warnings[0].contains("project.toml"), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn a_valid_project_config_warns_about_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let good = dir.path().join("project.toml");
+        std::fs::write(&good, "effort = \"low\"\n").unwrap();
+        let mut warnings = Vec::new();
+        let parsed = read_project_config_lenient(&good, &mut warnings);
+        assert_eq!(parsed.effort, Some(Effort::Low));
+        assert!(warnings.is_empty());
     }
 }

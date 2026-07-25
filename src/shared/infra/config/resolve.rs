@@ -57,24 +57,25 @@ fn unrecognized_sandbox_warning(
         return None;
     }
     Some(format!(
-        "kiri: warning: unrecognized {key}={value:?}; using the safe default {default:?}"
+        "unrecognized {key}={value:?}; using the safe default {default:?}"
     ))
 }
 
 /// Returns `(enabled, require)`. The parse itself lives in the kernel [`SandboxMode`], so the loader and
 /// the sync trust gate read it one way; this owns only the config-then-env precedence.
-pub(super) fn resolve_sandbox_mode(config: Option<&str>) -> (bool, bool) {
+pub(super) fn resolve_sandbox_mode(
+    config: Option<&str>,
+    warnings: &mut Vec<String>,
+) -> (bool, bool) {
     let raw = config
         .map(str::to_string)
         .or_else(|| std::env::var("KIRI_SANDBOX").ok());
-    if let Some(warning) = unrecognized_sandbox_warning(
+    warnings.extend(unrecognized_sandbox_warning(
         "KIRI_SANDBOX",
         raw.as_deref(),
         &["os", "off", "require"],
         "os",
-    ) {
-        eprintln!("{warning}");
-    }
+    ));
     match SandboxMode::from_config(raw.as_deref()) {
         SandboxMode::Off => (false, false),
         SandboxMode::Os => (true, false),
@@ -83,18 +84,19 @@ pub(super) fn resolve_sandbox_mode(config: Option<&str>) -> (bool, bool) {
 }
 
 /// Maps the kernel [`NetworkStance`] to the tools-layer [`NetworkPolicy`]. `deny` by default.
-pub(super) fn resolve_sandbox_network(config: Option<&str>) -> NetworkPolicy {
+pub(super) fn resolve_sandbox_network(
+    config: Option<&str>,
+    warnings: &mut Vec<String>,
+) -> NetworkPolicy {
     let raw = config
         .map(str::to_string)
         .or_else(|| std::env::var("KIRI_SANDBOX_NETWORK").ok());
-    if let Some(warning) = unrecognized_sandbox_warning(
+    warnings.extend(unrecognized_sandbox_warning(
         "KIRI_SANDBOX_NETWORK",
         raw.as_deref(),
         &["allow", "deny"],
         "deny",
-    ) {
-        eprintln!("{warning}");
-    }
+    ));
     match NetworkStance::from_config(raw.as_deref()) {
         NetworkStance::Allow => NetworkPolicy::Allow,
         NetworkStance::Deny => NetworkPolicy::Deny,
@@ -168,7 +170,11 @@ fn select_patterns<'a>(raw: Option<&'a str>, defaults: &[&'a str]) -> Vec<&'a st
 
 /// Compile a newline-separated regex list from `env` (with `#` comments) or the given default, failing
 /// fast on an invalid pattern.
-pub(super) fn compile_patterns(env: &str, defaults: &[&str]) -> Result<Arc<[Regex]>> {
+pub(super) fn compile_patterns(
+    env: &str,
+    defaults: &[&str],
+    warnings: &mut Vec<String>,
+) -> Result<Arc<[Regex]>> {
     let raw = std::env::var(env).ok();
     let patterns = select_patterns(raw.as_deref(), defaults);
     // Warn here, where the env name is known, when a present override emptied to nothing and we fell
@@ -177,9 +183,9 @@ pub(super) fn compile_patterns(env: &str, defaults: &[&str]) -> Result<Arc<[Rege
         .as_deref()
         .is_some_and(|value| !value.is_empty() && usable_pattern_lines(value).is_empty())
     {
-        eprintln!(
-            "kiri: {env} has no usable patterns after stripping blank/comment lines; using defaults"
-        );
+        warnings.push(format!(
+            "{env} has no usable patterns after stripping blank/comment lines; using defaults"
+        ));
     }
     let regexes: Result<Vec<Regex>, regex::Error> =
         patterns.iter().map(|p| Regex::new(p)).collect();
@@ -220,23 +226,53 @@ mod tests {
         assert!(!parse_bool(Some("garbage"), false), "unknown falls back");
     }
 
+    /// Discards the warnings channel for the cases that assert only the resolved value.
+    fn no_warnings() -> Vec<String> {
+        Vec::new()
+    }
+
     #[test]
     fn resolve_sandbox_mode_maps_config_values() {
         // The config branch is pure (a `Some` config short-circuits the env read), so these never touch
         // the process env — safe under edition-2024 parallel tests.
-        assert_eq!(resolve_sandbox_mode(Some("off")), (false, false));
-        assert_eq!(resolve_sandbox_mode(Some("os")), (true, false));
-        assert_eq!(resolve_sandbox_mode(Some("require")), (true, true));
+        let mut warnings = no_warnings();
+        assert_eq!(
+            resolve_sandbox_mode(Some("off"), &mut warnings),
+            (false, false)
+        );
+        assert_eq!(
+            resolve_sandbox_mode(Some("os"), &mut warnings),
+            (true, false)
+        );
+        assert_eq!(
+            resolve_sandbox_mode(Some("require"), &mut warnings),
+            (true, true)
+        );
+        assert!(warnings.is_empty(), "recognized values warn about nothing");
         // Unknown maps to the os default — never a silent downgrade to off.
-        assert_eq!(resolve_sandbox_mode(Some("bogus")), (true, false));
+        assert_eq!(
+            resolve_sandbox_mode(Some("bogus"), &mut warnings),
+            (true, false)
+        );
     }
 
     #[test]
     fn resolve_sandbox_network_maps_config_values() {
-        assert_eq!(resolve_sandbox_network(Some("allow")), NetworkPolicy::Allow);
-        assert_eq!(resolve_sandbox_network(Some("deny")), NetworkPolicy::Deny);
+        let mut warnings = no_warnings();
+        assert_eq!(
+            resolve_sandbox_network(Some("allow"), &mut warnings),
+            NetworkPolicy::Allow
+        );
+        assert_eq!(
+            resolve_sandbox_network(Some("deny"), &mut warnings),
+            NetworkPolicy::Deny
+        );
+        assert!(warnings.is_empty(), "recognized values warn about nothing");
         // Unknown maps to deny — never a silent widening.
-        assert_eq!(resolve_sandbox_network(Some("bogus")), NetworkPolicy::Deny);
+        assert_eq!(
+            resolve_sandbox_network(Some("bogus"), &mut warnings),
+            NetworkPolicy::Deny
+        );
     }
 
     #[test]
@@ -252,15 +288,27 @@ mod tests {
         assert!(unrecognized_sandbox_warning("KIRI_SANDBOX", Some("off"), &mode, "os").is_none());
         assert!(unrecognized_sandbox_warning("KIRI_SANDBOX", Some(""), &mode, "os").is_none());
         assert!(unrecognized_sandbox_warning("KIRI_SANDBOX", None, &mode, "os").is_none());
-        // The resolver still falls back to the os default (sandbox stays enabled, not disabled).
-        assert_eq!(resolve_sandbox_mode(Some("of")), (true, false));
+        // The resolver still falls back to the os default (sandbox stays enabled, not disabled) AND now
+        // hands the warning to the caller's channel instead of an `eprintln!` the TUI would swallow.
+        let mut warnings = no_warnings();
+        assert_eq!(
+            resolve_sandbox_mode(Some("of"), &mut warnings),
+            (true, false)
+        );
+        assert_eq!(warnings.len(), 1, "the typo must reach the caller");
+        assert!(warnings[0].contains("KIRI_SANDBOX"), "got: {warnings:?}");
 
         let net = ["allow", "deny"];
         assert!(
             unrecognized_sandbox_warning("KIRI_SANDBOX_NETWORK", Some("alow"), &net, "deny")
                 .is_some()
         );
-        assert_eq!(resolve_sandbox_network(Some("alow")), NetworkPolicy::Deny);
+        let mut warnings = no_warnings();
+        assert_eq!(
+            resolve_sandbox_network(Some("alow"), &mut warnings),
+            NetworkPolicy::Deny
+        );
+        assert_eq!(warnings.len(), 1, "the typo must reach the caller");
     }
 
     #[test]

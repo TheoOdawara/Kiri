@@ -30,13 +30,17 @@ async fn main() -> anyhow::Result<()> {
     let global_dir = global_dir()?;
     // Seed process env from the trusted `~/.kiri/.env` (never the cwd) before resolving config, so a
     // hostile project repo cannot inject a `.env` to redirect credentials or weaken the sandbox (ADR 0020).
-    load_global_env(&global_dir);
+    // This runs before `Cli::parse()` because clap reads `env = "KIRI_PATH"`, so its own diagnostic has to
+    // wait for the `Settings` that carries it to the user.
+    let env_warning = load_global_env(&global_dir);
     let cli = Cli::parse();
     // Resolve once up front, then dispatch: a subcommand runs headless (no TTY) through the composition
     // root, the bare invocation boots the TUI. `resolve` is TTY-independent but NOT side-effect-free — on a
     // first run it seeds a starter `~/.kiri/config.toml` and hardens `~/.kiri` (0700). That now also
     // applies to `kiri sync`, which is acceptable: sync owns and syncs that very config.
-    let settings = Settings::resolve(global_dir, cli.path, cli.prompt, cli.instructions)?;
+    let mut settings = Settings::resolve(global_dir, cli.path, cli.prompt, cli.instructions)?;
+    // The `.env` read precedes resolve, so its warning belongs first in the transcript.
+    settings.warnings.splice(0..0, env_warning);
     if let Some(CliCommand::Sync { action }) = cli.command {
         return app::wire_sync(&settings, action).await;
     }
