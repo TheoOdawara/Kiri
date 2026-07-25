@@ -399,6 +399,7 @@ mod tests {
             models: vec!["m1".to_string(), "m2".to_string()],
             auth,
             thinking: None,
+            thinking_style: Default::default(),
         }
     }
 

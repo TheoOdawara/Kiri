@@ -146,7 +146,7 @@ fn advance_wizard(model: &mut Model) -> Vec<Effect> {
         WizardStep::ExtraModels => {
             if let Some(wizard) = model.wizard.as_mut() {
                 // Skip a Sim/Não question that would be a no-op: a kind/model with no thinking
-                // capability at all (e.g. Gemma on NVIDIA, or a compatible/custom endpoint) goes
+                // capability at all (e.g. Gemma 3 / bare gemma, or an unknown compatible model) goes
                 // straight to the key step instead of asking about a toggle that does nothing.
                 let next = if wizard.kind().thinking_capability(&wizard.model)
                     == ThinkingCapability::Unsupported

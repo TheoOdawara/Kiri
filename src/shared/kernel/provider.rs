@@ -45,17 +45,78 @@ impl ProviderKind {
     }
 
     /// A maintained static table: no vendor API exposes this as discoverable metadata. Drives whether the
-    /// `/provider` wizard shows its `Thinking` step at all.
+    /// `/provider` wizard shows its `Thinking` step at all. Compatible/custom kinds honor
+    /// [`ThinkingStyle`] (default auto); native kinds ignore the style.
     pub fn thinking_capability(self, model: &str) -> ThinkingCapability {
+        self.thinking_capability_with_style(model, ThinkingStyle::Auto)
+    }
+
+    pub fn thinking_capability_with_style(
+        self,
+        model: &str,
+        style: ThinkingStyle,
+    ) -> ThinkingCapability {
         match self {
             ProviderKind::Openai => ThinkingCapability::Discrete,
             ProviderKind::Anthropic => ThinkingCapability::Budget,
             ProviderKind::Nvidia => NvidiaFamily::classify(model).capability(),
-            ProviderKind::OpenAiCompatible | ProviderKind::Custom => {
-                ThinkingCapability::Unsupported
-            }
+            ProviderKind::OpenAiCompatible | ProviderKind::Custom => match style {
+                ThinkingStyle::Off => ThinkingCapability::Unsupported,
+                ThinkingStyle::ReasoningEffort => ThinkingCapability::Discrete,
+                ThinkingStyle::ChatTemplate => {
+                    if NvidiaFamily::classify(model).capability() == ThinkingCapability::Toggle {
+                        ThinkingCapability::Toggle
+                    } else {
+                        ThinkingCapability::Unsupported
+                    }
+                }
+                ThinkingStyle::Auto => generalist_thinking_capability(model),
+            },
         }
     }
+}
+
+/// Optional wire strategy for OpenAI-compatible / custom endpoints. Native kinds ignore this field.
+/// Documented in `docs/reference/model-thinking-parameters.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThinkingStyle {
+    /// Template kwargs for open-weights hybrid models; `reasoning_effort` for GPT/Grok-like ids;
+    /// nothing for DeepSeek (unsafe to guess).
+    #[default]
+    Auto,
+    /// Always OpenAI-style `reasoning_effort`.
+    ReasoningEffort,
+    /// Always family-keyed `chat_template_kwargs` (nothing if the family is unknown).
+    ChatTemplate,
+    /// Never send thinking-related fields.
+    Off,
+}
+
+/// Generalist auto: only offer a thinking control when the model id matches a confirmed convention.
+fn generalist_thinking_capability(model: &str) -> ThinkingCapability {
+    if NvidiaFamily::classify(model).capability() == ThinkingCapability::Toggle {
+        return ThinkingCapability::Toggle;
+    }
+    if is_openai_style_reasoning_model(model) {
+        return ThinkingCapability::Discrete;
+    }
+    ThinkingCapability::Unsupported
+}
+
+/// GPT / Grok / o-series style ids that commonly accept `reasoning_effort` on OpenAI-compatible hosts.
+pub(crate) fn is_openai_style_reasoning_model(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.contains("gpt")
+        || model.contains("grok")
+        || model.contains("codex")
+        || model.contains("o1")
+        || model.contains("o3")
+        || model.contains("o4")
+}
+
+pub(crate) fn is_deepseek_model(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("deepseek")
 }
 
 /// How a provider/model exposes reasoning ("thinking") control, if at all. See
@@ -73,9 +134,10 @@ pub enum ThinkingCapability {
 }
 
 /// An NVIDIA-hosted model family, matched on the model id. One NIM endpoint fronts many families, each
-/// with a different (or absent) reasoning-toggle convention. Never guess a wire shape — a wrong one
+/// with a different (or absent) reasoning-toggle convention. Also reused by the OpenAI-compatible
+/// generalist path for the same template-kwargs keys. Never guess a wire shape — a wrong one
 /// silently no-ops or 400s. Extend this only once a family's convention is confirmed against an official
-/// NVIDIA reference page.
+/// reference page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NvidiaFamily {
     /// `chat_template_kwargs.thinking: bool`.
@@ -87,6 +149,9 @@ pub(crate) enum NvidiaFamily {
     /// `chat_template_kwargs.enable_thinking: bool` — the vLLM/SGLang convention NIM proxies, not
     /// Zhipu's own top-level `thinking: {type: "enabled"}` shape.
     Glm,
+    /// `chat_template_kwargs.enable_thinking: bool` — Gemma **4** only (Vertex open models / vLLM).
+    /// Gemma 3 and bare `gemma` stay [`Other`].
+    Gemma,
     /// No reliable toggle. DeepSeek is worse than unverified: NIM is reported to hang on V4 reasoning
     /// models when `chat_template_kwargs` is absent, and vLLM ignores the toggle on `deepseek-r1-0528`.
     /// A guessed shape would reintroduce that instability.
@@ -104,6 +169,8 @@ impl NvidiaFamily {
             NvidiaFamily::Qwen
         } else if model.contains("glm") {
             NvidiaFamily::Glm
+        } else if is_gemma4_model(&model) {
+            NvidiaFamily::Gemma
         } else {
             NvidiaFamily::Other
         }
@@ -114,10 +181,16 @@ impl NvidiaFamily {
             NvidiaFamily::Nemotron
             | NvidiaFamily::Kimi
             | NvidiaFamily::Qwen
-            | NvidiaFamily::Glm => ThinkingCapability::Toggle,
+            | NvidiaFamily::Glm
+            | NvidiaFamily::Gemma => ThinkingCapability::Toggle,
             NvidiaFamily::Other => ThinkingCapability::Unsupported,
         }
     }
+}
+
+/// Gemma 4 only — not gemma-3 or bare `gemma`.
+fn is_gemma4_model(model: &str) -> bool {
+    model.contains("gemma-4") || model.contains("gemma4") || model.contains("gemma_4")
 }
 
 /// How a provider authenticates, selecting which credential the adapter sends. Serde is hand-written so
@@ -248,6 +321,16 @@ pub struct ProviderProfile {
     /// `None` uses `kind.thinking_default()`; `Some(false)` disables it even for kinds enabling it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
+    /// Wire strategy for OpenAI-compatible / custom endpoints. Native kinds ignore this.
+    /// Omit from TOML to use [`ThinkingStyle::Auto`].
+    #[serde(default, skip_serializing_if = "ThinkingStyle::is_auto")]
+    pub thinking_style: ThinkingStyle,
+}
+
+impl ThinkingStyle {
+    fn is_auto(&self) -> bool {
+        *self == ThinkingStyle::Auto
+    }
 }
 
 /// Stored as JSON in the 0600 credentials file. Never written to the TOML config and never logged.
@@ -379,6 +462,31 @@ mod tests {
     }
 
     #[test]
+    fn thinking_style_defaults_to_auto_and_omits_from_profile_when_auto() {
+        let profile = ProviderProfile {
+            id: "x".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "http://localhost/v1".into(),
+            model: "m".into(),
+            models: vec![],
+            auth: AuthMethod::None,
+            thinking: None,
+            thinking_style: ThinkingStyle::Auto,
+        };
+        let json = serde_json::to_value(&profile).unwrap();
+        assert!(
+            json.get("thinking_style").is_none(),
+            "auto must skip serialization so existing configs stay clean; got {json}"
+        );
+        let forced = ProviderProfile {
+            thinking_style: ThinkingStyle::ChatTemplate,
+            ..profile
+        };
+        let json = serde_json::to_value(&forced).unwrap();
+        assert_eq!(json["thinking_style"], "chat-template");
+    }
+
+    #[test]
     fn auth_method_known_variants_round_trip() {
         for (value, wire) in [
             (AuthMethod::ApiKey, "\"api-key\""),
@@ -449,26 +557,53 @@ mod tests {
     }
 
     #[test]
-    fn compatible_and_custom_kinds_never_offer_thinking() {
+    fn compatible_auto_offers_thinking_only_for_known_families() {
         assert_eq!(
-            ProviderKind::OpenAiCompatible.thinking_capability("anything"),
+            ProviderKind::OpenAiCompatible.thinking_capability("qwen/qwen3-32b"),
+            ThinkingCapability::Toggle
+        );
+        assert_eq!(
+            ProviderKind::OpenAiCompatible.thinking_capability("google/gemma-4-26b-a4b-it"),
+            ThinkingCapability::Toggle
+        );
+        assert_eq!(
+            ProviderKind::Custom.thinking_capability("openai/gpt-5"),
+            ThinkingCapability::Discrete
+        );
+        assert_eq!(
+            ProviderKind::OpenAiCompatible.thinking_capability("deepseek-ai/deepseek-r1"),
             ThinkingCapability::Unsupported
         );
         assert_eq!(
-            ProviderKind::Custom.thinking_capability("anything"),
+            ProviderKind::Custom.thinking_capability("gemma-3"),
             ThinkingCapability::Unsupported
         );
     }
 
     #[test]
+    fn thinking_style_off_disables_compatible_capability() {
+        assert_eq!(
+            ProviderKind::OpenAiCompatible
+                .thinking_capability_with_style("qwen3", ThinkingStyle::Off),
+            ThinkingCapability::Unsupported
+        );
+        assert_eq!(
+            ProviderKind::OpenAiCompatible
+                .thinking_capability_with_style("anything", ThinkingStyle::ReasoningEffort),
+            ThinkingCapability::Discrete
+        );
+    }
+
+    #[test]
     fn nvidia_capability_is_keyed_on_the_model_family() {
-        // Nemotron/Kimi/Qwen/GLM each have an official NVIDIA reference page confirming their
-        // reasoning-toggle convention, so all four now offer a Toggle.
+        // Confirmed template-toggle families (incl. Gemma 4 via enable_thinking).
         for toggle_model in [
             "nvidia/llama-3.3-nemotron-super-49b-v1",
             "moonshotai/kimi-k2",
             "qwen/qwen3-235b-a22b",
             "zai-org/glm-4.5",
+            "google/gemma-4-26b-a4b-it",
+            "gemma4:26b",
         ] {
             assert_eq!(
                 ProviderKind::Nvidia.thinking_capability(toggle_model),
@@ -482,7 +617,9 @@ mod tests {
             "deepseek-ai/deepseek-v4",
             "deepseek-ai/deepseek-r1",
             "minimaxai/minimax-m1",
+            // Gemma 3 / bare gemma: no confirmed enable_thinking convention in this table.
             "google/gemma-3-27b-it",
+            "gemma",
             "some/unknown-model",
         ] {
             assert_eq!(

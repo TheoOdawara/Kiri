@@ -20,6 +20,10 @@ use crate::modules::tui::infrastructure::widgets::{
 /// #8b).
 const MIN_WIDTH: u16 = 20;
 const MIN_HEIGHT: u16 = 8;
+/// Largura mínima da área principal e largura fixa da sidebar. O sidebar aparece sempre que ambas
+/// cabem lado a lado — o threshold é derivado dessa soma, não um número mágico à parte.
+const MAIN_MIN_WIDTH: u16 = 90;
+const SIDEBAR_WIDTH: u16 = 28;
 
 /// The sole ratatui render entry point: project the model onto the frame's regions. Pure with respect
 /// to the model (takes `&Model`); all state changes happen in `update`. The whole frame is first painted
@@ -39,11 +43,11 @@ pub fn view(model: &Model, frame: &mut Frame) {
         area.height = area.height.saturating_sub(1);
     }
 
-    let has_sidebar = area.width >= 130;
+    let has_sidebar = area.width >= MAIN_MIN_WIDTH + SIDEBAR_WIDTH;
     let (main_area, sidebar_area) = if has_sidebar {
         let split = ratatui::layout::Layout::horizontal([
-            ratatui::layout::Constraint::Min(90),
-            ratatui::layout::Constraint::Length(35),
+            ratatui::layout::Constraint::Min(MAIN_MIN_WIDTH),
+            ratatui::layout::Constraint::Length(SIDEBAR_WIDTH),
         ])
         .split(area);
         (split[0], Some(split[1]))

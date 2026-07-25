@@ -106,7 +106,9 @@ export NVIDIA_MODEL=moonshotai/kimi-k2-instruct   # any model from NVIDIA's cata
 Then add or switch providers from inside the TUI: **`/provider`** (switch, or run the add wizard for
 Claude / GPT / a custom endpoint — paste the API key, it is masked and stored in `credentials.json`),
 **`/models`** (switch the model), **`/effort`** (reasoning effort). Generic keys also work via
-`KIRI_<ID>_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
+`KIRI_<ID>_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`. How each model family maps thinking /
+effort, and optional `thinking_style` for compatible endpoints:
+[`docs/reference/model-thinking-parameters.md`](docs/reference/model-thinking-parameters.md).
 
 **Build & run**
 

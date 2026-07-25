@@ -332,6 +332,7 @@ fn wizard_edit_keeps_existing_key_for_a_compatible_provider_with_blank_key() {
         models: vec!["gemma".to_string()],
         auth: AuthMethod::ApiKey,
         thinking: None,
+        thinking_style: Default::default(),
     };
     let mut m = Model {
         wizard: Some(ProviderWizard::from_profile(&existing)),
@@ -628,6 +629,7 @@ fn provider_picker_lists_kind_model_and_auth_per_row_and_selection_still_resolve
         models: vec!["claude-opus-4-8".to_string()],
         auth: AuthMethod::ApiKey,
         thinking: None,
+        thinking_style: Default::default(),
     };
     let mut m = Model::default().with_providers(
         "nvidia".to_string(),
@@ -664,6 +666,7 @@ fn provider_profile_for_tests(id: &str) -> crate::shared::kernel::provider::Prov
         models: vec!["m1".to_string()],
         auth: AuthMethod::ApiKey,
         thinking: None,
+        thinking_style: Default::default(),
     }
 }
 
