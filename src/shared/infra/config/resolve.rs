@@ -2,9 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
-use regex::Regex;
-
 use crate::shared::infra::home;
 use crate::shared::kernel::sandbox::{NetworkPolicy, NetworkStance, SandboxMode};
 
@@ -182,56 +179,6 @@ pub(super) fn load_extra_paths(env: &str, defaults: &[&str]) -> Arc<[PathBuf]> {
     Arc::from(paths)
 }
 
-/// The non-blank, non-comment lines of a newline-separated override, trimmed.
-fn usable_pattern_lines(value: &str) -> Vec<&str> {
-    value
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .collect()
-}
-
-/// An override that filters to zero usable lines (only comments, say) falls back to `defaults` rather than
-/// silently disabling a safety list that would then block nothing.
-fn select_patterns<'a>(raw: Option<&'a str>, defaults: &[&'a str]) -> Vec<&'a str> {
-    match raw {
-        Some(value) if !value.is_empty() => {
-            let filtered = usable_pattern_lines(value);
-            if filtered.is_empty() {
-                defaults.to_vec()
-            } else {
-                filtered
-            }
-        }
-        _ => defaults.to_vec(),
-    }
-}
-
-/// Compile a newline-separated regex list from `env` (with `#` comments) or the given default, failing
-/// fast on an invalid pattern.
-pub(super) fn compile_patterns(
-    env: &str,
-    defaults: &[&str],
-    warnings: &mut Vec<String>,
-) -> Result<Arc<[Regex]>> {
-    let raw = std::env::var(env).ok();
-    let patterns = select_patterns(raw.as_deref(), defaults);
-    // Warn here, where the env name is known, when a present override emptied to nothing and we fell
-    // back to defaults — so a user who tried to override a safety list is not silently ignored.
-    if raw
-        .as_deref()
-        .is_some_and(|value| !value.is_empty() && usable_pattern_lines(value).is_empty())
-    {
-        warnings.push(format!(
-            "{env} has no usable patterns after stripping blank/comment lines; using defaults"
-        ));
-    }
-    let regexes: Result<Vec<Regex>, regex::Error> =
-        patterns.iter().map(|p| Regex::new(p)).collect();
-    let regexes = regexes.map_err(|e| anyhow!("invalid regex in {env}: {e}"))?;
-    Ok(Arc::from(regexes))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,24 +327,6 @@ mod tests {
             NetworkPolicy::Deny
         );
         assert_eq!(warnings.len(), 1, "the typo must reach the caller");
-    }
-
-    #[test]
-    fn select_patterns_falls_back_when_override_empties() {
-        let defaults = ["alpha", "beta"];
-        // An override of only blank/comment lines falls back to defaults (never a silently empty list).
-        assert_eq!(
-            select_patterns(Some("# x\n   \n# y\n"), &defaults),
-            vec!["alpha", "beta"]
-        );
-        // A real override is used verbatim (trimmed, comments stripped).
-        assert_eq!(
-            select_patterns(Some("foo\n# c\nbar\n"), &defaults),
-            vec!["foo", "bar"]
-        );
-        // Absent or empty → defaults.
-        assert_eq!(select_patterns(None, &defaults), vec!["alpha", "beta"]);
-        assert_eq!(select_patterns(Some(""), &defaults), vec!["alpha", "beta"]);
     }
 
     #[test]

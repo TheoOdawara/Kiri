@@ -52,6 +52,7 @@ use crate::modules::sync::infrastructure::git_cli::GitCli;
 use crate::modules::sync::infrastructure::memory_ndjson::NdjsonMemoryExchange;
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::tool::Tool;
+use crate::modules::tools::domain::command_policy::CommandPolicy;
 use crate::modules::tools::infrastructure::args::RUN_COMMAND_DEFAULT_TIMEOUT_MS;
 use crate::modules::tools::infrastructure::confine;
 use crate::modules::tools::infrastructure::control::present_plan::PresentPlan;
@@ -165,7 +166,13 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     let (provider, needs_onboarding) =
         select_initial_provider(&client, &profile, &credential, &settings, &mut boot_notices);
     // `present_plan` carries `plan_only`, so the registry's `schemas()` withholds it outside plan mode.
-    let mut tools = default_fs_tools(settings.plan_allow.clone(), settings.require_confinement);
+    // The composition root is where the config's raw override lists become the policy object: the
+    // config layer may not import a module, and the tools layer may not read config.
+    let command_policy = Arc::new(CommandPolicy::new(
+        &settings.extra_destructive,
+        &settings.extra_plan_safe,
+    ));
+    let mut tools = default_fs_tools(command_policy, settings.require_confinement);
     tools.push(Arc::new(PresentPlan));
     tools.extend(memory_tools);
     tools.extend(default_extension_tools(Arc::new(extensions.skills.clone())));

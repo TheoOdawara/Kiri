@@ -12,7 +12,7 @@ use crate::modules::provider::application::completion_provider::{
 use crate::modules::tools::application::plan::{PRESENT_PLAN, extract_plan};
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::sandbox::Sandbox;
-use crate::modules::tools::application::tool::ToolOutcome;
+use crate::modules::tools::application::tool::{Confirmation, ToolOutcome};
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::conversation::Conversation;
 use crate::shared::kernel::error::AgentError;
@@ -350,10 +350,11 @@ impl AgentLoop {
         }
     }
 
-    /// The auto-mode confirmation gate: a high-blast-radius tool or an out-of-root target still requires a
-    /// live confirmation. Shared by `Auto` and (after `plan_check`) `Plan`, so plan mode never executes an
-    /// out-of-root read without the same gate (SEC-01). `ApprovedAuto` is treated as `Approved` — the
-    /// caller owns any mode transition. `None` means the user aborted at this call.
+    /// The auto-mode confirmation gate: the tool decides, per call, whether this one still needs a live
+    /// confirmation (irreversible, out-of-root, or a destructive shell command — see
+    /// `Tool::confirm_in_auto`). Shared by `Auto` and (after `plan_check`) `Plan`, so plan mode never
+    /// executes an out-of-root read without the same gate (SEC-01). `ApprovedAuto` is treated as
+    /// `Approved` — the caller owns any mode transition. `None` means the user aborted at this call.
     async fn run_gated<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
         &self,
         sandbox: &dyn Sandbox,
@@ -362,26 +363,37 @@ impl AgentLoop {
         io: &mut IO,
     ) -> Option<(ToolOutcome, Duration)> {
         match self.registry.confirm(sandbox, call) {
-            Some(confirmation)
-                if self.registry.confirm_in_auto(&call.function.name)
-                    || !confirmation.default_accept =>
-            {
-                match io.decide(&confirmation).await {
-                    Approval::Approved | Approval::ApprovedAuto => {
-                        io.tool_started(call, command);
-                        Some(timed(self.registry.execute(sandbox, call)).await)
-                    }
-                    Approval::Declined => {
-                        io.tool_started(call, command);
-                        Some((ToolOutcome::Declined, Duration::ZERO))
-                    }
-                    Approval::Aborted => None,
-                }
+            Some(confirmation) if self.registry.confirm_in_auto(call, &confirmation) => {
+                self.confirmed_run(sandbox, call, command, &confirmation, io)
+                    .await
             }
             _ => {
                 io.tool_started(call, command);
                 Some(timed(self.registry.execute(sandbox, call)).await)
             }
+        }
+    }
+
+    /// Ask, then run or decline. The shared tail of every gate that decided a live confirmation is due;
+    /// `ApprovedAuto` is treated as `Approved` — the caller owns any mode transition.
+    async fn confirmed_run<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
+        &self,
+        sandbox: &dyn Sandbox,
+        call: &ToolCall,
+        command: &str,
+        confirmation: &Confirmation,
+        io: &mut IO,
+    ) -> Option<(ToolOutcome, Duration)> {
+        match io.decide(confirmation).await {
+            Approval::Approved | Approval::ApprovedAuto => {
+                io.tool_started(call, command);
+                Some(timed(self.registry.execute(sandbox, call)).await)
+            }
+            Approval::Declined => {
+                io.tool_started(call, command);
+                Some((ToolOutcome::Declined, Duration::ZERO))
+            }
+            Approval::Aborted => None,
         }
     }
 
@@ -396,10 +408,19 @@ impl AgentLoop {
     ) -> Option<(ToolOutcome, Duration)> {
         if let Some(reason) = self.registry.plan_check(sandbox, call) {
             io.tool_started(call, command);
-            Some((ToolOutcome::Error(reason), Duration::ZERO))
-        } else {
-            self.run_gated(sandbox, call, command, io).await
+            return Some((ToolOutcome::Error(reason), Duration::ZERO));
         }
+        // SEC-01: while planning, anything that can mutate is confirmed live, even after `plan_check`
+        // admitted it. Auto mode's per-command silence (ADR 0030) is an auto-mode bargain — a plan turn
+        // is the one most likely to be acting on freshly-read untrusted repo content.
+        if self.registry.is_destructive(&call.function.name)
+            && let Some(confirmation) = self.registry.confirm(sandbox, call)
+        {
+            return self
+                .confirmed_run(sandbox, call, command, &confirmation, io)
+                .await;
+        }
+        self.run_gated(sandbox, call, command, io).await
     }
 
     /// `None` continues the turn: `Approved` resets the checkpoint clock and counter, `ApprovedAuto` also

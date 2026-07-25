@@ -28,6 +28,8 @@ pub(super) struct RawConfig {
     pub(super) paths: RawPaths,
     #[serde(default, skip_serializing_if = "RawEmbeddings::is_empty")]
     pub(super) embeddings: RawEmbeddings,
+    #[serde(default, skip_serializing_if = "RawCommands::is_empty")]
+    pub(super) commands: RawCommands,
     #[serde(flatten)]
     pub(super) unknown: UnknownKeys,
 }
@@ -70,6 +72,22 @@ pub(super) struct RawPaths {
     #[serde(flatten)]
     pub(super) unknown: UnknownKeys,
 }
+/// `[commands]`: additive overrides on the built-in command policy (ADR 0030). Global (trusted) layer
+/// only — an untrusted workspace must not be able to declare its own programs plan-safe. Both lists only
+/// ever add: `extra_plan_safe` grants plan-mode fluency, never silence in auto, and nothing here can
+/// remove a built-in destructive entry.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub(super) struct RawCommands {
+    /// A program name, or `"program subcommand"` to harden one subcommand only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) extra_destructive: Vec<String>,
+    /// Program names plan mode should admit alongside the built-in list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) extra_plan_safe: Vec<String>,
+    #[serde(flatten)]
+    pub(super) unknown: UnknownKeys,
+}
+
 /// `[embeddings]`: an existing provider id to reuse (its base_url + credential) and the embeddings model.
 /// Global (trusted) layer only — semantic recall must not be redirected by an untrusted workspace.
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -83,12 +101,13 @@ pub(super) struct RawEmbeddings {
 impl RawConfig {
     /// Unrecognized keys, section-qualified so the message points at the exact line to fix.
     pub(super) fn unknown_keys(&self) -> Vec<String> {
-        let sections: [(&str, &UnknownKeys); 5] = [
+        let sections: [(&str, &UnknownKeys); 6] = [
             ("http", &self.http.unknown),
             ("behavior", &self.behavior.unknown),
             ("sandbox", &self.sandbox.unknown),
             ("paths", &self.paths.unknown),
             ("embeddings", &self.embeddings.unknown),
+            ("commands", &self.commands.unknown),
         ];
         self.unknown
             .keys()
@@ -109,6 +128,7 @@ impl RawConfig {
         self.sandbox.unknown.clear();
         self.paths.unknown.clear();
         self.embeddings.unknown.clear();
+        self.commands.unknown.clear();
     }
 }
 
@@ -148,6 +168,11 @@ impl RawPaths {
 impl RawEmbeddings {
     fn is_empty(&self) -> bool {
         self.provider.is_none() && self.model.is_none()
+    }
+}
+impl RawCommands {
+    fn is_empty(&self) -> bool {
+        self.extra_destructive.is_empty() && self.extra_plan_safe.is_empty()
     }
 }
 

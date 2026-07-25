@@ -44,7 +44,7 @@ impl Tool for DeleteFile {
         )
     }
 
-    fn confirm_in_auto(&self) -> bool {
+    fn confirm_in_auto(&self, _call: &ToolCall, _confirmation: &Confirmation) -> bool {
         true
     }
 

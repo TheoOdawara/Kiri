@@ -69,7 +69,7 @@ impl Tool for McpToolProxy {
 
     /// MCP servers are unrestricted subprocesses past TOFU approval — never run unattended in Auto
     /// (F-SEC-003 / #82), same high-blast-radius stance as `run_command` / irreversible fs tools.
-    fn confirm_in_auto(&self) -> bool {
+    fn confirm_in_auto(&self, _call: &ToolCall, _confirmation: &Confirmation) -> bool {
         true
     }
 
@@ -208,7 +208,12 @@ mod tests {
             },
             conn,
         );
-        assert!(proxy.confirm_in_auto());
+        // Even a confirmation that would default-accept must not exempt an MCP call from the gate.
+        let accepting = Confirmation {
+            prompt: String::new(),
+            default_accept: true,
+        };
+        assert!(proxy.confirm_in_auto(&call("{}"), &accepting));
     }
 
     #[tokio::test]

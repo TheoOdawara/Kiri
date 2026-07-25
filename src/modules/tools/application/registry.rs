@@ -46,10 +46,9 @@ impl ToolRegistry {
         }
     }
 
-    /// Whether a named tool exists and mutates the filesystem. The engine path gates on
-    /// `is_plannable` instead, so the only caller is the classification test; gated `#[cfg(test)]`
-    /// so it never ships in the release binary.
-    #[cfg(test)]
+    /// Whether a named tool exists and mutates the filesystem. Plan mode confirms every one of these
+    /// (SEC-01): being on the plan-mode allow-list says the program is an investigation tool, not that
+    /// an unattended mutation is acceptable while planning.
     pub fn is_destructive(&self, name: &str) -> bool {
         self.find(name).is_some_and(|tool| !tool.is_read_only())
     }
@@ -60,10 +59,11 @@ impl ToolRegistry {
         self.find(name).is_some_and(|tool| tool.is_plannable())
     }
 
-    /// Whether a named tool must be confirmed even in auto mode (irreversible / high blast radius).
-    /// An unknown tool is not gated — `execute` reports the unknown-tool error instead.
-    pub fn confirm_in_auto(&self, name: &str) -> bool {
-        self.find(name).is_some_and(|tool| tool.confirm_in_auto())
+    /// Whether a call must be confirmed even in auto mode (irreversible, out-of-root, or a destructive
+    /// shell command). An unknown tool is not gated — `execute` reports the unknown-tool error instead.
+    pub fn confirm_in_auto(&self, call: &ToolCall, confirmation: &Confirmation) -> bool {
+        self.find(&call.function.name)
+            .is_some_and(|tool| tool.confirm_in_auto(call, confirmation))
     }
 
     /// In plan mode, ask the named tool whether the call should be blocked. Returns

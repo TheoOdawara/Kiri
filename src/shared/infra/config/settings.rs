@@ -4,22 +4,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use regex::Regex;
 
 use crate::shared::kernel::provider::{Effort, ProviderProfile};
 use crate::shared::kernel::sandbox::NetworkPolicy;
 
 use super::defaults::{
-    DEFAULT_PLAN_ALLOW, DEFAULT_RW_DIRS, HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT,
-    MAX_TOOL_CALLS_PER_CHECKPOINT, TOOL_CHECKPOINT,
+    DEFAULT_RW_DIRS, HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT, MAX_TOOL_CALLS_PER_CHECKPOINT,
+    TOOL_CHECKPOINT,
 };
 use super::raw::{
     read_config_file, read_project_config_lenient, resolve_layers, resolve_providers,
     unknown_keys_warning,
 };
 use super::resolve::{
-    compile_patterns, expand_home, load_extra_paths, resolve_bool, resolve_sandbox_mode,
-    resolve_sandbox_network, resolve_timeout,
+    expand_home, load_extra_paths, resolve_bool, resolve_sandbox_mode, resolve_sandbox_network,
+    resolve_timeout,
 };
 use super::writers::{default_provider, ensure_private_dir, write_starter_config};
 
@@ -50,7 +49,11 @@ pub struct Settings {
     pub seed: Option<String>,
     pub checkpoint_budget: Duration,
     pub max_tool_calls: usize,
-    pub plan_allow: Arc<[Regex]>,
+    /// Additive overrides on the built-in command policy, from the trusted global layer. Kept as raw
+    /// text because `shared/infra/config` must not import a module (the composition root turns these into
+    /// a `tools::domain::command_policy::CommandPolicy`).
+    pub extra_destructive: Arc<[String]>,
+    pub extra_plan_safe: Arc<[String]>,
     /// Whether OS-level command confinement is active (`KIRI_SANDBOX` ≠ `off`, facility available).
     pub sandbox_enabled: bool,
     /// `KIRI_SANDBOX=require`: refuse `run_command` when no OS sandbox is available.
@@ -382,7 +385,6 @@ impl Settings {
             load_instructions(&path, &global_dir, cli_instructions, &mut warnings)?;
 
         // Hoisted out of the struct literal below: each borrows `warnings`, which the literal itself moves.
-        let plan_allow = compile_patterns("KIRI_PLAN_ALLOW", DEFAULT_PLAN_ALLOW, &mut warnings)?;
         let sandbox_network =
             resolve_sandbox_network(config.sandbox.network.as_deref(), &mut warnings);
         let connect_timeout = resolve_timeout(
@@ -411,7 +413,8 @@ impl Settings {
             seed: cli_prompt,
             checkpoint_budget: TOOL_CHECKPOINT,
             max_tool_calls: MAX_TOOL_CALLS_PER_CHECKPOINT,
-            plan_allow,
+            extra_destructive: Arc::from(config.commands.extra_destructive),
+            extra_plan_safe: Arc::from(config.commands.extra_plan_safe),
             sandbox_enabled,
             require_confinement,
             sandbox_network,
@@ -542,6 +545,61 @@ mod tests {
         // The workspace is the sandbox root and is a separate axis from the harness home.
         assert_eq!(settings.path, workspace.path());
         assert_eq!(settings.docs_path, workspace.path().join("docs"));
+    }
+
+    #[test]
+    fn command_overrides_load_from_the_trusted_global_layer() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write(
+            global.path(),
+            "config.toml",
+            r#"
+[commands]
+extra_destructive = ["just", "git commit"]
+extra_plan_safe = ["just"]
+"#,
+        );
+        let settings = resolve_at(global.path(), workspace.path());
+        assert_eq!(&*settings.extra_destructive, ["just", "git commit"]);
+        assert_eq!(&*settings.extra_plan_safe, ["just"]);
+        assert!(settings.warnings.is_empty(), "{:?}", settings.warnings);
+    }
+
+    #[test]
+    fn the_untrusted_project_layer_cannot_declare_a_program_plan_safe() {
+        // A hostile repo that could add to `extra_plan_safe` would hand itself an allow-listed program
+        // to run while the user is only planning.
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write_project_config(
+            workspace.path(),
+            "[commands]\nextra_plan_safe = [\"curl\"]\nextra_destructive = [\"cat\"]\n",
+        );
+        let settings = resolve_at(global.path(), workspace.path());
+        assert!(settings.extra_plan_safe.is_empty());
+        assert!(settings.extra_destructive.is_empty());
+    }
+
+    #[test]
+    fn a_typo_in_the_commands_section_is_reported() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write(
+            global.path(),
+            "config.toml",
+            "[commands]\nextra_destrutive = [\"just\"]\n",
+        );
+        let settings = resolve_at(global.path(), workspace.path());
+        assert!(settings.extra_destructive.is_empty());
+        assert!(
+            settings
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("commands.extra_destrutive")),
+            "the typo must be named: {:?}",
+            settings.warnings
+        );
     }
 
     #[test]

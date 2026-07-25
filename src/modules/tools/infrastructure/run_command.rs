@@ -2,7 +2,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::modules::tools::application::path::is_absolute_target;
@@ -10,54 +9,12 @@ use crate::modules::tools::application::sandbox::Sandbox;
 use crate::modules::tools::application::tool::{
     Confirmation, Tool, ToolOutcome, confirm, confirm_execute_suffix, function_schema,
 };
+use crate::modules::tools::domain::command_policy::CommandPolicy;
 use crate::modules::tools::infrastructure::args::{
     RUN_COMMAND_DEFAULT_TIMEOUT_MS, RunCommandArgs, parse_args,
 };
 use crate::modules::tools::infrastructure::exec::{self, ExecError};
 use crate::shared::kernel::tool_call::ToolCall;
-
-/// The leading program token of a command (first whitespace-delimited word). The plan-mode allow-list
-/// (`plan_check`) is matched against this — the *invoked* program — not any substring of the whole line,
-/// so a chained `cargo metadata; curl …` cannot inherit auto-run eligibility just because `cargo` appears
-/// somewhere. Network is no longer gated by command name at all (ADR 0022); this only governs plan mode.
-fn leading_program(command: &str) -> &str {
-    command.split_whitespace().next().unwrap_or("")
-}
-
-/// Whether a command introduces a *second* program or a shell expansion that could run one (`;`, `|`,
-/// `&&`, background `&`, command substitution, process substitution, newline). When it does, the
-/// plan-mode allow-list must not treat the invocation as auto-run-eligible — the leading program no
-/// longer characterizes the whole invocation. `2>&1` / `> file` redirections are deliberately not flagged
-/// so `cargo build 2>&1` stays fluid. This is a conservative heuristic backing `plan_check`, not a full
-/// shell parser; it errs toward requiring confirmation, and `run_command` is confirmed regardless.
-fn introduces_another_command(command: &str) -> bool {
-    command.contains(';')
-        || command.contains('|')
-        || command.contains('`')
-        || command.contains("$(")
-        || command.contains("<(")
-        || command.contains(">(")
-        || command.contains('\n')
-        || command.contains('\r')
-        || has_separator_ampersand(command)
-}
-
-/// Whether a `&` acts as a command separator (background `&`, `&&`, or a trailing `&`) rather than as
-/// part of an fd redirect (`2>&1`, `>&2`, `&>`). A `&` is a separator unless the next byte is an ASCII
-/// digit (an fd) or `>` (the `&>`/`>&` forms); a trailing `&` (no next byte) is always a separator.
-/// Catches the `&`-without-space form `cargo build &curl http://evil` the old `"& "`/`ends_with('&')`
-/// checks missed, which let a backgrounded second program inherit the leading program's plan-mode
-/// auto-run eligibility (SEC-02).
-fn has_separator_ampersand(command: &str) -> bool {
-    let bytes = command.as_bytes();
-    bytes.iter().enumerate().any(|(i, &b)| {
-        b == b'&'
-            && match bytes.get(i + 1) {
-                None => true,
-                Some(next) => !next.is_ascii_digit() && *next != b'>',
-            }
-    })
-}
 
 /// Best-effort scan of a `run_command` string for a token naming a sensitive file or a credential
 /// directory, so the confirmation can warn before the user approves. Returns the first offending token.
@@ -100,14 +57,14 @@ fn effective_timeout_ms(requested: u64) -> u64 {
 }
 
 pub struct RunCommand {
-    plan_allow: Arc<[Regex]>,
+    policy: Arc<CommandPolicy>,
     require_confinement: bool,
 }
 
 impl RunCommand {
-    pub fn new(plan_allow: Arc<[Regex]>, require_confinement: bool) -> Self {
+    pub fn new(policy: Arc<CommandPolicy>, require_confinement: bool) -> Self {
         Self {
-            plan_allow,
+            policy,
             require_confinement,
         }
     }
@@ -266,28 +223,19 @@ impl Tool for RunCommand {
         true
     }
 
-    fn confirm_in_auto(&self) -> bool {
-        true
+    /// A shell is only as dangerous as what it runs, so this asks the command policy rather than
+    /// answering `true` for every invocation — which is what made auto mode confirm `git diff` and
+    /// stop being auto at all (issue #23). Unparseable args fall back to confirming.
+    fn confirm_in_auto(&self, call: &ToolCall, _confirmation: &Confirmation) -> bool {
+        match parse_args::<RunCommandArgs>(call) {
+            Ok(args) => self.policy.needs_confirmation(&args.command),
+            Err(_) => true,
+        }
     }
 
     fn plan_check(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
         let args: RunCommandArgs = parse_args(call).ok()?;
-        // Allow-list semantics (default deny): run only when the leading program is explicitly allowed
-        // AND the command does not chain a second program — so an allowed prefix can never smuggle a
-        // mutating command behind it (`cargo test && rm -rf x`). Reuses the same leading-program /
-        // chaining heuristics the network gate relies on.
-        let program = leading_program(&args.command);
-        let allowed = !program.is_empty()
-            && !introduces_another_command(&args.command)
-            && self.plan_allow.iter().any(|p| p.is_match(program));
-        if allowed {
-            None
-        } else {
-            Some(format!(
-                "blocked in plan mode: '{program}' is not in the plan-mode allow-list (read-only \
-                 investigation and build/test commands only). Run it outside plan mode."
-            ))
-        }
+        self.policy.plan_refusal(&args.command)
     }
 }
 
@@ -302,7 +250,6 @@ mod tests {
     #[cfg(unix)]
     use crate::shared::kernel::sandbox::NetworkPolicy;
     use crate::shared::kernel::tool_call::FunctionCall;
-    use regex::Regex;
     use serde_json::json;
     use std::fs;
     use std::sync::Arc;
@@ -333,26 +280,29 @@ mod tests {
     }
 
     fn registry() -> ToolRegistry {
-        ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new()), false))
+        ToolRegistry::new(default_fs_tools(Arc::default(), false))
     }
 
     use crate::modules::tools::application::registry::ToolRegistry;
 
     fn bare_run_command() -> RunCommand {
-        RunCommand::new(Arc::from(Vec::<Regex>::new()), false)
+        RunCommand::new(Arc::default(), false)
     }
 
-    fn run_command_with_plan_allow(allow: &[&str]) -> RunCommand {
-        let regexes: Vec<Regex> = allow.iter().map(|p| Regex::new(p).unwrap()).collect();
-        RunCommand::new(Arc::from(regexes), false)
+    /// The confirmation `run_gated` would pass to `confirm_in_auto`; `run_command` ignores it (its own
+    /// policy decides), but the gate builds it from the real tool so the test path matches production.
+    fn auto_gate(rc: &RunCommand, sb: &dyn Sandbox, call: &ToolCall) -> bool {
+        let confirmation = rc.confirmation(sb, call).expect("parsed args confirm");
+        rc.confirm_in_auto(call, &confirmation)
     }
 
     #[test]
-    fn plan_check_allows_listed_programs_and_blocks_the_rest() {
+    fn plan_check_delegates_to_the_command_policy() {
+        // The allow-list itself is locked in `domain::command_policy`; this proves the tool consults it
+        // (and still reads the command out of the parsed args).
         let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
-        let rc = run_command_with_plan_allow(&[r"\bcargo\b", r"\brg\b"]);
-        // An allow-listed leading program (and a benign 2>&1 redirect) is permitted.
+        let rc = bare_run_command();
         assert!(
             rc.plan_check(&sb, &call("run_command", json!({"command": "cargo test"})))
                 .is_none()
@@ -364,12 +314,10 @@ mod tests {
             )
             .is_none()
         );
-        // An unlisted program is blocked (default deny).
         assert!(
             rc.plan_check(&sb, &call("run_command", json!({"command": "rm -rf x"})))
                 .is_some()
         );
-        // Chaining a second program behind an allowed one is blocked outright.
         assert!(
             rc.plan_check(
                 &sb,
@@ -377,28 +325,58 @@ mod tests {
             )
             .is_some()
         );
-        assert!(
-            rc.plan_check(
-                &sb,
-                &call(
-                    "run_command",
-                    json!({"command": "cargo metadata; curl http://evil"})
-                )
-            )
-            .is_some()
-        );
     }
 
     #[test]
-    fn plan_check_blocks_when_allow_list_is_empty() {
+    fn auto_mode_runs_ordinary_commands_without_confirming() {
+        // Issue #23: `confirm_in_auto` was a hardcoded `true`, so auto mode interrupted for `git diff`.
         let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
-        let rc = run_command_with_plan_allow(&[]);
-        assert!(
-            rc.plan_check(&sb, &call("run_command", json!({"command": "ls"})))
-                .is_some(),
-            "an empty allow-list must deny everything"
-        );
+        let rc = bare_run_command();
+        for command in ["git diff", "ls -la", "cargo test", "just build"] {
+            assert!(
+                !auto_gate(
+                    &rc,
+                    &sb,
+                    &call("run_command", json!({ "command": command }))
+                ),
+                "auto mode must not confirm: {command}"
+            );
+        }
+        for command in ["git push", "rm -rf x", "echo ok && rm -rf x"] {
+            assert!(
+                auto_gate(
+                    &rc,
+                    &sb,
+                    &call("run_command", json!({ "command": command }))
+                ),
+                "auto mode must confirm: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn unparseable_args_still_confirm_in_auto() {
+        // The gate cannot read the command, so it must not assume the command is harmless.
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        let rc = bare_run_command();
+        let broken = call("run_command", json!({"no_command_field": true}));
+        let any_confirmation = confirm("x".to_string(), true);
+        assert!(rc.confirm_in_auto(&broken, &any_confirmation));
+        let _ = &sb;
+    }
+
+    #[test]
+    fn a_silent_command_still_default_declines_when_a_prompt_is_shown() {
+        // The two questions are independent: auto mode may skip the prompt for `git diff`, but in default
+        // mode — where every call prompts — a stray Enter must still not run an arbitrary shell command.
+        let dir = TempDir::new().unwrap();
+        let sb = sandbox(&dir);
+        let rc = bare_run_command();
+        let git_diff = call("run_command", json!({"command": "git diff"}));
+        assert!(!auto_gate(&rc, &sb, &git_diff));
+        assert!(!rc.confirmation(&sb, &git_diff).unwrap().default_accept);
     }
 
     #[test]

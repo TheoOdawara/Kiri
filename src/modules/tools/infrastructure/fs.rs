@@ -10,18 +10,21 @@ pub mod write_file;
 
 use std::sync::Arc;
 
-use regex::Regex;
-
 use crate::modules::tools::application::tool::Tool;
+use crate::modules::tools::domain::command_policy::CommandPolicy;
 use crate::modules::tools::infrastructure::run_command::RunCommand;
 
 /// The default file tool set, in the order advertised to the model. `RunCommand` is injected with the
-/// plan-mode allow-list (safe inspection/build/test programs permitted in plan mode) and whether
-/// confinement is required (`KIRI_SANDBOX=require` refuses `run_command` when no OS sandbox is available).
-/// Network access is the sandbox's base stance only (ADR 0022) — no per-command widening. `Arc` (not
-/// `Box`) so the same tool instances can be shared into a filtered child registry for a dispatched
-/// subagent (ADR 0029) without rebuilding or double-connecting anything stateful (e.g. MCP proxies).
-pub fn default_fs_tools(plan_allow: Arc<[Regex]>, require_confinement: bool) -> Vec<Arc<dyn Tool>> {
+/// command policy (which programs plan mode admits, and which must be confirmed even in auto — ADR 0030)
+/// and whether confinement is required (`KIRI_SANDBOX=require` refuses `run_command` when no OS sandbox
+/// is available). Network access is the sandbox's base stance only (ADR 0022) — no per-command widening.
+/// `Arc` (not `Box`) so the same tool instances can be shared into a filtered child registry for a
+/// dispatched subagent (ADR 0029) without rebuilding or double-connecting anything stateful (e.g. MCP
+/// proxies).
+pub fn default_fs_tools(
+    command_policy: Arc<CommandPolicy>,
+    require_confinement: bool,
+) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(read_file::ReadFile),
         Arc::new(write_file::WriteFile),
@@ -32,7 +35,7 @@ pub fn default_fs_tools(plan_allow: Arc<[Regex]>, require_confinement: bool) -> 
         Arc::new(create_dir::CreateDir),
         Arc::new(delete_dir::DeleteDir),
         Arc::new(search::Search),
-        Arc::new(RunCommand::new(plan_allow, require_confinement)),
+        Arc::new(RunCommand::new(command_policy, require_confinement)),
     ]
 }
 
@@ -47,7 +50,7 @@ mod tests {
         // (`default_accept_for`). This locks the read-only surface: a new fs tool that returns
         // `is_read_only() == true` trips this guard, forcing a conscious check that it self-gates before it
         // can silently reach a headless subagent.
-        let tools = default_fs_tools(Arc::from([]), false);
+        let tools = default_fs_tools(Arc::default(), false);
         let mut read_only: Vec<&str> = tools
             .iter()
             .filter(|tool| tool.is_read_only())

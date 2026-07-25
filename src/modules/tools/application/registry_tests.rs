@@ -4,14 +4,13 @@ use crate::modules::tools::infrastructure::sandbox::FsSandbox;
 use crate::modules::tools::infrastructure::sensitive::SensitiveMatcher;
 use crate::modules::tools::infrastructure::support::READ_FILE_MAX_BYTES;
 use crate::shared::kernel::tool_call::FunctionCall;
-use regex::Regex;
 use serde_json::json;
 use std::fs;
 use std::sync::Arc;
 use tempfile::TempDir;
 
 fn registry() -> ToolRegistry {
-    ToolRegistry::new(default_fs_tools(Arc::from(Vec::<Regex>::new()), false))
+    ToolRegistry::new(default_fs_tools(Arc::default(), false))
 }
 
 fn sandbox(dir: &TempDir) -> FsSandbox {
@@ -71,7 +70,7 @@ async fn plan_mode_schemas_expose_only_plannable_tools() {
 #[tokio::test]
 async fn present_plan_is_plan_only() {
     use crate::modules::tools::infrastructure::control::present_plan::PresentPlan;
-    let mut tools = default_fs_tools(Arc::from(Vec::<Regex>::new()), false);
+    let mut tools = default_fs_tools(Arc::default(), false);
     tools.push(Arc::new(PresentPlan));
     let registry = ToolRegistry::new(tools);
 

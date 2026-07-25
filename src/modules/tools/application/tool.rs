@@ -150,8 +150,9 @@ pub trait Tool: Send + Sync {
     }
     /// Whether the tool is advertised in plan mode. Defaults to `is_read_only` — read-only tools are
     /// always plannable. A tool that can mutate but is safe to run for investigation (e.g.
-    /// `run_command` for starting a dev server or reading logs) overrides this to `true`; the
-    /// plan-mode allow-list (in `run_command::plan_check`) admits only safe programs.
+    /// `run_command` for starting a dev server or reading logs) overrides this to `true`; the plan-mode
+    /// allow-list (`domain::command_policy`, via `plan_check`) then admits only safe programs, and
+    /// `plan_checked_run` confirms every mutating call on top of it (SEC-01 / ADR 0030).
     fn is_plannable(&self) -> bool {
         self.is_read_only()
     }
@@ -168,13 +169,17 @@ pub trait Tool: Send + Sync {
     fn plan_check(&self, _sandbox: &dyn Sandbox, _call: &ToolCall) -> Option<String> {
         None
     }
-    /// Whether this tool must still be confirmed in auto mode — a high-blast-radius / irreversible
-    /// action. Defaults to `false`: ordinary mutations (write/edit/create_dir) run unattended in
-    /// auto, while the engine independently gates any out-of-root target. Overridden to `true` by the
-    /// irreversible tools (`run_command`, `delete_file`, `delete_dir`, `move_path`) so an unattended
-    /// turn — including a prompt-injected one — can never silently destroy data or run a shell.
-    fn confirm_in_auto(&self) -> bool {
-        false
+    /// Whether this call must still be confirmed in auto mode. The default is the out-of-root gate
+    /// (SEC-01): a target the tool itself flagged as reaching outside the workspace (`default_accept`
+    /// false) is confirmed, an ordinary in-workspace mutation runs unattended. `delete_file`,
+    /// `delete_dir`, and `move_path` override it to `true` — irreversible however local the target is —
+    /// and `run_command` overrides it per command, because a shell is only as dangerous as what it runs.
+    ///
+    /// The already-built `confirmation` is passed in rather than re-derived, so the gate reads exactly
+    /// the prompt the user would see. `default_accept` answers a different question — what Enter does
+    /// *when* a prompt is shown — and the two were conflated until this took over the decision.
+    fn confirm_in_auto(&self, _call: &ToolCall, confirmation: &Confirmation) -> bool {
+        !confirmation.default_accept
     }
 }
 

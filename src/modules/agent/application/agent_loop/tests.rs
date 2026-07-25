@@ -17,8 +17,6 @@ use crate::shared::kernel::role::Role;
 use crate::shared::kernel::stream_event::StreamEvent;
 use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
-use regex::Regex;
-
 use tempfile::TempDir;
 
 /// A provider that replays pre-canned turns, ignoring the request — drives the loop without a network.
@@ -127,12 +125,9 @@ fn tool_call_id(name: &str, args: &str, id: &str) -> ToolCall {
 
 /// The full fs tool set with no sensitive-path matchers, the single construction every test shares.
 fn registry_for_tests() -> ToolRegistry {
-    // `echo` is allow-listed so the SEC-01 test reaches the confirmation gate; destructive tools are
-    // blocked by being non-plannable, independent of this list.
-    ToolRegistry::new(default_fs_tools(
-        Arc::from(vec![Regex::new(r"\becho\b").unwrap()]),
-        false,
-    ))
+    // The default command policy admits `echo` in plan mode, so the SEC-01 test reaches the confirmation
+    // gate; destructive tools are blocked by being non-plannable, independent of the policy.
+    ToolRegistry::new(default_fs_tools(Arc::default(), false))
 }
 
 fn agent_loop_with(turns: Vec<CompletedTurn>) -> AgentLoop {
@@ -451,6 +446,68 @@ async fn plan_mode_allows_read_only_tools() {
 }
 
 #[tokio::test]
+async fn auto_mode_runs_a_benign_command_and_still_gates_a_destructive_one() {
+    // Issue #23, proven end to end: the real registry, the real sandbox, and real process execution —
+    // only the provider is scripted. Round 1 must execute with no prompt at all; round 2 must prompt,
+    // and declining it must leave the file on disk.
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("marker.txt"), b"still here").unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    // `rm` and `del` are both in the always-destructive set; each is the one its shell actually has.
+    #[cfg(unix)]
+    let delete = r#"{"command":"rm marker.txt"}"#;
+    #[cfg(windows)]
+    let delete = r#"{"command":"del marker.txt"}"#;
+
+    let agent_loop = agent_loop_with(vec![
+        CompletedTurn {
+            content: "looking".to_string(),
+            tool_calls: vec![tool_call("run_command", r#"{"command":"echo hello"}"#)],
+            thinking: None,
+        },
+        CompletedTurn {
+            content: "cleaning".to_string(),
+            tool_calls: vec![tool_call("run_command", delete)],
+            thinking: None,
+        },
+        CompletedTurn {
+            content: "done".to_string(),
+            tool_calls: vec![],
+            thinking: None,
+        },
+    ]);
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("work unattended"));
+    let mut io = TestIo::new(Approval::Declined);
+
+    let outcome = agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(
+        io.decide_calls, 1,
+        "only the destructive command may interrupt an auto turn"
+    );
+    assert!(
+        dir.path().join("marker.txt").exists(),
+        "the declined deletion must not have run"
+    );
+    let first_result = conversation
+        .messages()
+        .iter()
+        .find(|message| message.role == Role::Tool)
+        .and_then(|message| message.content.clone())
+        .unwrap_or_default();
+    assert!(
+        first_result.contains("hello"),
+        "the unprompted command must really have executed: {first_result}"
+    );
+    assert!(matches!(io.finished.last(), Some(ToolOutcome::Declined)));
+}
+
+#[tokio::test]
 async fn plan_mode_confirms_run_command() {
     // SEC-01: run_command is plannable, but plan mode must still confirm it — a prompt-injected plan turn
     // cannot run an arbitrary command unattended.
@@ -483,6 +540,26 @@ async fn plan_mode_confirms_run_command() {
         "run_command must be confirmed even in plan mode (SEC-01)"
     );
     assert!(matches!(io.finished.as_slice(), [ToolOutcome::Declined]));
+}
+
+#[tokio::test]
+async fn plan_mode_confirms_even_a_command_auto_mode_runs_silently() {
+    // The auto-mode deny-list (ADR 0030) must not leak into plan mode: `echo` is silent in auto, but a
+    // plan turn is the one most likely to be acting on freshly-read untrusted repo content, so SEC-01's
+    // live confirmation stands. Written because making auto silent nearly repealed it as a side effect.
+    let dir = TempDir::new().unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let registry = registry_for_tests();
+    let call = tool_call("run_command", r#"{"command":"echo hi"}"#);
+    let confirmation = registry.confirm(&sandbox, &call).expect("parsed args");
+    assert!(
+        !registry.confirm_in_auto(&call, &confirmation),
+        "precondition: auto mode runs this one silently"
+    );
+    assert!(
+        registry.is_destructive("run_command"),
+        "plan mode's gate keys on this, so a reclassification must trip a test"
+    );
 }
 
 #[tokio::test]
