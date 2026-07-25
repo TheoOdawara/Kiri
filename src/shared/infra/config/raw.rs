@@ -28,26 +28,47 @@ pub(super) struct RawConfig {
     pub(super) paths: RawPaths,
     #[serde(default, skip_serializing_if = "RawEmbeddings::is_empty")]
     pub(super) embeddings: RawEmbeddings,
+    #[serde(flatten)]
+    pub(super) unknown: UnknownKeys,
 }
+
+/// Keys the schema does not recognize, captured instead of discarded so a typo is reported. Without this,
+/// `[sandbox] netwrok = "allow"` parses cleanly, leaves the network at `deny`, and never tells anyone — a
+/// silent no-op on a security knob.
+///
+/// Deliberately **not** round-tripped: [`RawConfig::forget_unknown`] empties these before any rewrite, and
+/// an empty flattened map serializes to nothing. TOML forbids emitting a bare value after a table, and a
+/// catch-all cannot guarantee where its entries land relative to `[providers]`/`[sandbox]`/…, so preserving
+/// them risks corrupting the boot-critical config. Dropping them on rewrite is also the pre-existing
+/// behavior, so this trades no data that was previously kept.
+type UnknownKeys = BTreeMap<String, toml::Value>;
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub(super) struct RawHttp {
     pub(super) connect_timeout_ms: Option<u64>,
     pub(super) read_timeout_ms: Option<u64>,
+    #[serde(flatten)]
+    pub(super) unknown: UnknownKeys,
 }
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub(super) struct RawBehavior {
     pub(super) thinking: Option<bool>,
     pub(super) memory: Option<bool>,
+    #[serde(flatten)]
+    pub(super) unknown: UnknownKeys,
 }
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub(super) struct RawSandbox {
     pub(super) mode: Option<String>,
     pub(super) network: Option<String>,
+    #[serde(flatten)]
+    pub(super) unknown: UnknownKeys,
 }
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub(super) struct RawPaths {
     pub(super) docs: Option<String>,
+    #[serde(flatten)]
+    pub(super) unknown: UnknownKeys,
 }
 /// `[embeddings]`: an existing provider id to reuse (its base_url + credential) and the embeddings model.
 /// Global (trusted) layer only — semantic recall must not be redirected by an untrusted workspace.
@@ -55,6 +76,53 @@ pub(super) struct RawPaths {
 pub(super) struct RawEmbeddings {
     pub(super) provider: Option<String>,
     pub(super) model: Option<String>,
+    #[serde(flatten)]
+    pub(super) unknown: UnknownKeys,
+}
+
+impl RawConfig {
+    /// Unrecognized keys, section-qualified so the message points at the exact line to fix.
+    pub(super) fn unknown_keys(&self) -> Vec<String> {
+        let sections: [(&str, &UnknownKeys); 5] = [
+            ("http", &self.http.unknown),
+            ("behavior", &self.behavior.unknown),
+            ("sandbox", &self.sandbox.unknown),
+            ("paths", &self.paths.unknown),
+            ("embeddings", &self.embeddings.unknown),
+        ];
+        self.unknown
+            .keys()
+            .cloned()
+            .chain(
+                sections.into_iter().flat_map(|(section, keys)| {
+                    keys.keys().map(move |key| format!("{section}.{key}"))
+                }),
+            )
+            .collect()
+    }
+
+    /// Clears the captured unknowns so a rewrite emits none of them. See [`UnknownKeys`].
+    pub(super) fn forget_unknown(&mut self) {
+        self.unknown.clear();
+        self.http.unknown.clear();
+        self.behavior.unknown.clear();
+        self.sandbox.unknown.clear();
+        self.paths.unknown.clear();
+        self.embeddings.unknown.clear();
+    }
+}
+
+/// The boot warning for a layer's unrecognized keys, or `None` when it has none.
+pub(super) fn unknown_keys_warning(config: &RawConfig, path: &Path) -> Option<String> {
+    let keys = config.unknown_keys();
+    if keys.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} has unrecognized keys ({}); they have no effect — check for a typo",
+        path.display(),
+        keys.join(", ")
+    ))
 }
 
 impl RawHttp {

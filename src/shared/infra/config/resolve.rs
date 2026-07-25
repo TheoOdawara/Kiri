@@ -8,44 +8,83 @@ use regex::Regex;
 use crate::shared::infra::home;
 use crate::shared::kernel::sandbox::{NetworkPolicy, NetworkStance, SandboxMode};
 
-/// Parse a millisecond duration from raw text, falling back to `default` when absent, unparseable, or
-/// zero. Pure so the parsing is unit-testable.
-fn parse_duration_ms(raw: Option<&str>, default: Duration) -> Duration {
-    match raw.and_then(|v| v.trim().parse::<u64>().ok()) {
-        Some(ms) if ms > 0 => Duration::from_millis(ms),
-        _ => default,
-    }
+/// A positive millisecond count, or `None` for text that is not one. Pure so the parsing is
+/// unit-testable, and `None`-on-garbage is what lets the caller tell a typo from an absent value.
+fn parse_duration_ms(raw: &str) -> Option<Duration> {
+    raw.trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
 }
 
 /// Resolve a timeout: a positive config value wins, else the `KIRI_..._MS` env override, else default.
+/// An unusable value — a non-number, or a zero that would mean "no timeout" but silently means "default" —
+/// is reported rather than absorbed.
 pub(super) fn resolve_timeout(
     config_ms: Option<u64>,
     env_key: &str,
     default: Duration,
+    warnings: &mut Vec<String>,
 ) -> Duration {
-    if let Some(ms) = config_ms.filter(|ms| *ms > 0) {
-        return Duration::from_millis(ms);
+    let fallback = |warnings: &mut Vec<String>, source: String| {
+        warnings.push(format!(
+            "ignoring {source}: expected a positive whole number of milliseconds; using {}ms",
+            default.as_millis()
+        ));
+        default
+    };
+    if let Some(ms) = config_ms {
+        return match ms {
+            0 => fallback(warnings, format!("{env_key}'s config value 0")),
+            ms => Duration::from_millis(ms),
+        };
     }
-    parse_duration_ms(std::env::var(env_key).ok().as_deref(), default)
-}
-
-/// Parse a boolean from raw text (`1/true/on/yes` vs `0/false/off/no`, case-insensitive), falling back
-/// to `default`. Pure so the parsing is unit-testable.
-fn parse_bool(raw: Option<&str>, default: bool) -> bool {
-    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("0" | "false" | "off" | "no") => false,
-        Some("1" | "true" | "on" | "yes") => true,
-        _ => default,
+    let Some(raw) = std::env::var(env_key).ok().filter(|v| !v.trim().is_empty()) else {
+        return default;
+    };
+    match parse_duration_ms(&raw) {
+        Some(duration) => duration,
+        None => fallback(warnings, format!("{env_key}={raw:?}")),
     }
 }
 
-/// Resolve a boolean: a config value wins, else the env override, else `default`.
-pub(super) fn resolve_bool(config: Option<bool>, env_key: &str, default: bool) -> bool {
-    config.unwrap_or_else(|| parse_bool(std::env::var(env_key).ok().as_deref(), default))
+/// Parse a boolean from raw text (`1/true/on/yes` vs `0/false/off/no`, case-insensitive). `None` for
+/// anything else, so the caller can report a typo instead of quietly taking the default.
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "off" | "no" => Some(false),
+        "1" | "true" | "on" | "yes" => Some(true),
+        _ => None,
+    }
 }
 
-/// `recognized` mirrors the matching `from_config`'s token set, so a typo (`KIRI_SANDBOX=of`) is surfaced
-/// rather than silently collapsing to the safe default — no silent no-op on a security knob.
+/// Resolve a boolean: a config value wins (TOML already typed it), else the env override, else `default`.
+/// `KIRI_THINKING=maybe` is a typo, not an instruction to keep the default silently.
+pub(super) fn resolve_bool(
+    config: Option<bool>,
+    env_key: &str,
+    default: bool,
+    warnings: &mut Vec<String>,
+) -> bool {
+    if let Some(value) = config {
+        return value;
+    }
+    let Some(raw) = std::env::var(env_key).ok().filter(|v| !v.trim().is_empty()) else {
+        return default;
+    };
+    parse_bool(&raw).unwrap_or_else(|| {
+        warnings.push(format!(
+            "ignoring {env_key}={raw:?}: expected one of 1/true/on/yes or 0/false/off/no; using {default}"
+        ));
+        default
+    })
+}
+
+/// `recognized` comes from the kernel enum that owns the tokens (`SandboxMode::RECOGNIZED` /
+/// `NetworkStance::RECOGNIZED`), so a typo (`KIRI_SANDBOX=of`) is surfaced rather than silently collapsing
+/// to the safe default — no silent no-op on a security knob — and a mode added to the enum cannot end up
+/// recognized by the parser but unknown here.
 fn unrecognized_sandbox_warning(
     key: &str,
     raw: Option<&str>,
@@ -73,7 +112,7 @@ pub(super) fn resolve_sandbox_mode(
     warnings.extend(unrecognized_sandbox_warning(
         "KIRI_SANDBOX",
         raw.as_deref(),
-        &["os", "off", "require"],
+        SandboxMode::RECOGNIZED,
         "os",
     ));
     match SandboxMode::from_config(raw.as_deref()) {
@@ -94,7 +133,7 @@ pub(super) fn resolve_sandbox_network(
     warnings.extend(unrecognized_sandbox_warning(
         "KIRI_SANDBOX_NETWORK",
         raw.as_deref(),
-        &["allow", "deny"],
+        NetworkStance::RECOGNIZED,
         "deny",
     ));
     match NetworkStance::from_config(raw.as_deref()) {
@@ -198,32 +237,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_duration_ms_uses_default_when_absent_invalid_or_zero() {
-        let default = Duration::from_secs(15);
-        assert_eq!(parse_duration_ms(None, default), default);
-        assert_eq!(parse_duration_ms(Some("not-a-number"), default), default);
-        assert_eq!(parse_duration_ms(Some("0"), default), default);
-        assert_eq!(parse_duration_ms(Some("  "), default), default);
+    fn parse_duration_ms_rejects_garbage_and_zero() {
+        // `None` is the signal the caller turns into a warning; a silent fallback here would hide the typo.
+        assert_eq!(parse_duration_ms("not-a-number"), None);
+        assert_eq!(parse_duration_ms("0"), None);
+        assert_eq!(parse_duration_ms("  "), None);
+        assert_eq!(parse_duration_ms("-5"), None);
     }
 
     #[test]
     fn parse_duration_ms_reads_a_positive_value() {
         assert_eq!(
-            parse_duration_ms(Some("  2500 "), Duration::from_secs(15)),
-            Duration::from_millis(2500)
+            parse_duration_ms("  2500 "),
+            Some(Duration::from_millis(2500))
         );
     }
 
     #[test]
-    fn parse_bool_reads_truthy_and_falsy_and_falls_back() {
+    fn parse_bool_reads_truthy_and_falsy_and_rejects_the_rest() {
         for truthy in ["1", "true", "on", "yes", " TRUE "] {
-            assert!(parse_bool(Some(truthy), false), "{truthy} should be true");
+            assert_eq!(parse_bool(truthy), Some(true), "{truthy} should be true");
         }
         for falsy in ["0", "false", "off", "no", " Off "] {
-            assert!(!parse_bool(Some(falsy), true), "{falsy} should be false");
+            assert_eq!(parse_bool(falsy), Some(false), "{falsy} should be false");
         }
-        assert!(parse_bool(None, true), "absent falls back to default");
-        assert!(!parse_bool(Some("garbage"), false), "unknown falls back");
+        assert_eq!(
+            parse_bool("garbage"),
+            None,
+            "unknown is reportable, not a default"
+        );
+        assert_eq!(parse_bool(""), None);
+    }
+
+    #[test]
+    fn a_zero_config_timeout_is_reported_rather_than_absorbed() {
+        // `read_timeout_ms = 0` reads as "no timeout" but resolves to the default. Whichever the user
+        // meant, silence is wrong: the config branch is pure, so this never touches the env.
+        let mut warnings = no_warnings();
+        let resolved = resolve_timeout(
+            Some(0),
+            "KIRI_UNUSED_TEST_KEY",
+            Duration::from_secs(7),
+            &mut warnings,
+        );
+        assert_eq!(resolved, Duration::from_secs(7));
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(warnings[0].contains("positive"), "got: {warnings:?}");
+    }
+
+    #[test]
+    fn a_config_bool_wins_without_consulting_the_env_or_warning() {
+        let mut warnings = no_warnings();
+        assert!(resolve_bool(
+            Some(true),
+            "KIRI_UNUSED_TEST_KEY",
+            false,
+            &mut warnings
+        ));
+        assert!(warnings.is_empty());
     }
 
     /// Discards the warnings channel for the cases that assert only the resolved value.
@@ -333,7 +404,12 @@ mod tests {
     fn resolve_timeout_config_wins() {
         // A positive config value wins and never consults the env (the pure branch).
         assert_eq!(
-            resolve_timeout(Some(5000), "KIRI_UNUSED_TEST_KEY", Duration::from_secs(1)),
+            resolve_timeout(
+                Some(5000),
+                "KIRI_UNUSED_TEST_KEY",
+                Duration::from_secs(1),
+                &mut no_warnings()
+            ),
             Duration::from_millis(5000)
         );
     }

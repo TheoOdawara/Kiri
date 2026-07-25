@@ -37,6 +37,10 @@ fn update_global_config(
 ) -> Result<(), AgentError> {
     let mut config =
         read_config_file(config_path).map_err(|e| AgentError::Config(e.to_string()))?;
+    // Unrecognized keys are captured on read so the boot can warn about them, but must not be re-emitted:
+    // TOML forbids a bare value after a table and a flattened catch-all cannot control that ordering, so
+    // echoing them back risks corrupting the file this very function exists to write safely.
+    config.forget_unknown();
     mutate(&mut config);
     let body = toml::to_string_pretty(&config)
         .map_err(|e| AgentError::Config(format!("failed to encode config: {e}")))?;
@@ -56,20 +60,31 @@ fn update_global_config(
 }
 
 /// Persist a live `/models` change: set the active model on its provider and add it to that provider's
-/// catalog if missing. A no-op if the provider id is not in the config (the live change still stands).
+/// catalog if missing. Errors when the provider id is absent from the config — the live change stands
+/// either way, but reporting "saved" for a write that landed nowhere is exactly the silent no-op that
+/// leaves a user's model selection quietly reverting on the next boot.
 pub fn persist_active_model(
     config_path: &Path,
     provider_id: &str,
     model: &str,
 ) -> Result<(), AgentError> {
+    let mut found = false;
     update_global_config(config_path, |config| {
         if let Some(profile) = config.providers.get_mut(provider_id) {
+            found = true;
             profile.model = model.to_string();
             if !profile.models.iter().any(|m| m == model) {
                 profile.models.push(model.to_string());
             }
         }
-    })
+    })?;
+    if found {
+        return Ok(());
+    }
+    Err(AgentError::Config(format!(
+        "provider '{provider_id}' is not in {}; the model change applies to this session only",
+        config_path.display()
+    )))
 }
 
 /// Persist a live `/effort` change to the global config.
@@ -241,6 +256,41 @@ read_timeout_ms = 99000
             !dir.path().join(".config.toml.kiri-tmp").exists(),
             "the atomic write must consume the temp sibling"
         );
+    }
+
+    #[test]
+    fn persist_active_model_errors_when_the_provider_is_absent_from_the_config() {
+        // Was a silent no-op: `/models` reported success while writing nothing, so the selection reverted
+        // on the next boot with no explanation.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "effort = \"high\"\n").unwrap();
+
+        let error = persist_active_model(&path, "ghost", "m").unwrap_err();
+        assert!(matches!(error, AgentError::Config(_)));
+        assert!(error.to_string().contains("ghost"), "got: {error}");
+    }
+
+    #[test]
+    fn unrecognized_keys_are_dropped_rather_than_re_emitted_on_rewrite() {
+        // The read captures unknown keys so the boot can warn; the rewrite must not echo them back, or a
+        // stray scalar could land after a table and produce TOML the fail-fast global loader rejects.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "stray = 1\n[sandbox]\nmode = \"require\"\nnetwrok = \"allow\"\n",
+        )
+        .unwrap();
+
+        persist_effort(&path, Effort::Max).unwrap();
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(!rewritten.contains("stray"), "got: {rewritten}");
+        assert!(!rewritten.contains("netwrok"), "got: {rewritten}");
+        // The recognized neighbours in the same section survived.
+        let config = read_config_file(&path).unwrap();
+        assert_eq!(config.sandbox.mode.as_deref(), Some("require"));
+        assert_eq!(config.effort, Some(Effort::Max));
     }
 
     #[test]

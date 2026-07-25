@@ -18,6 +18,12 @@ pub enum SandboxMode {
 }
 
 impl SandboxMode {
+    /// Every accepted token, so a loader can tell "the user typed something we do not understand" from
+    /// "the user typed `os`" — both land on [`SandboxMode::Os`], and only the first deserves a warning.
+    /// Kept beside [`SandboxMode::from_config`], the one place that assigns meaning to these strings, so
+    /// a new mode cannot be recognized in one and unknown in the other.
+    pub const RECOGNIZED: &'static [&'static str] = &["off", "os", "require"];
+
     /// The trust gate flags a strictly-lower incoming rank (`Require > Os > Off`).
     pub fn rank(self) -> u8 {
         match self {
@@ -52,6 +58,9 @@ pub enum NetworkStance {
 }
 
 impl NetworkStance {
+    /// See [`SandboxMode::RECOGNIZED`] — same purpose, same reason for living next to `from_config`.
+    pub const RECOGNIZED: &'static [&'static str] = &["allow", "deny"];
+
     /// Only `allow` widens; anything else, including absent, is `Deny` — never a silent widening.
     pub fn from_config(raw: Option<&str>) -> NetworkStance {
         match raw {
@@ -78,6 +87,32 @@ pub enum NetworkPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_recognized_token_has_its_own_from_config_arm() {
+        // The drift guard `RECOGNIZED` exists for: a token listed here but missing an arm in `from_config`
+        // silently falls through to the safe default, which would make the loader accept it while treating
+        // it as meaningless — the same silent no-op the warning is supposed to expose.
+        let modes: Vec<SandboxMode> = SandboxMode::RECOGNIZED
+            .iter()
+            .map(|token| SandboxMode::from_config(Some(token)))
+            .collect();
+        assert_eq!(
+            modes,
+            vec![SandboxMode::Off, SandboxMode::Os, SandboxMode::Require],
+            "RECOGNIZED and from_config disagree"
+        );
+
+        let stances: Vec<NetworkStance> = NetworkStance::RECOGNIZED
+            .iter()
+            .map(|token| NetworkStance::from_config(Some(token)))
+            .collect();
+        assert_eq!(
+            stances,
+            vec![NetworkStance::Allow, NetworkStance::Deny],
+            "RECOGNIZED and from_config disagree"
+        );
+    }
 
     #[test]
     fn sandbox_mode_from_config_none_and_unknown_are_os() {

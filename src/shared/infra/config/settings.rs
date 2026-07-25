@@ -15,6 +15,7 @@ use super::defaults::{
 };
 use super::raw::{
     read_config_file, read_project_config_lenient, resolve_layers, resolve_providers,
+    unknown_keys_warning,
 };
 use super::resolve::{
     compile_patterns, expand_home, load_extra_paths, resolve_bool, resolve_sandbox_mode,
@@ -186,11 +187,61 @@ fn open_regular_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     }
 }
 
-fn read_capped(path: &std::path::Path) -> std::io::Result<String> {
+/// Returns the text and whether the cap truncated it. Truncation used to be invisible: a long instructions
+/// file lost its tail mid-sentence and the user had no way to know the model never saw it.
+fn read_capped(path: &std::path::Path) -> std::io::Result<(String, bool)> {
     let file = open_regular_file(path)?;
     let mut buf = Vec::new();
-    file.take(MAX_INSTRUCTIONS_BYTES).read_to_end(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    // Read one byte past the cap so a file landing exactly on it is not misreported as truncated.
+    file.take(MAX_INSTRUCTIONS_BYTES + 1)
+        .read_to_end(&mut buf)?;
+    let truncated = buf.len() as u64 > MAX_INSTRUCTIONS_BYTES;
+    buf.truncate(MAX_INSTRUCTIONS_BYTES as usize);
+    Ok((String::from_utf8_lossy(&buf).into_owned(), truncated))
+}
+
+/// Phrases the truncation warning for a layer, naming the file so the user knows which one to trim.
+fn truncation_warning(path: &std::path::Path) -> String {
+    format!(
+        "{} exceeds the {} KiB instructions cap; only the first {} KiB reached the model",
+        path.display(),
+        MAX_INSTRUCTIONS_BYTES / 1024,
+        MAX_INSTRUCTIONS_BYTES / 1024
+    )
+}
+
+/// ADR 0027 accepts DACL *inheritance* as the Windows equivalent of a `0700` dir: `~/.kiri` sits inside
+/// `%USERPROFILE%`, whose default ACL grants only the owning user, `SYSTEM`, and `Administrators`. That
+/// reasoning holds only while the harness home is actually inside the profile — and `home::home_dir()`
+/// prefers `$HOME`, which Git Bash and a data-drive or network-share setup can point elsewhere. There the
+/// credentials file inherits some other directory's ACL instead, so say so rather than assume the
+/// guarantee. Unix is unaffected: it sets `0700` explicitly.
+#[cfg(windows)]
+fn outside_user_profile_warning(global_dir: &std::path::Path) -> Option<String> {
+    let profile = PathBuf::from(std::env::var_os("USERPROFILE")?);
+    // Compare canonical forms: Windows paths are case-insensitive and may differ in prefix form, so a raw
+    // `starts_with` would warn spuriously. If either side cannot be canonicalized, stay quiet rather than
+    // cry wolf.
+    let (canonical_global, canonical_profile) = (
+        global_dir.canonicalize().ok()?,
+        profile.canonicalize().ok()?,
+    );
+    // Compare canonical, report verbatim: a canonicalized Windows path carries a `\\?\` prefix that is
+    // pure noise to whoever reads the warning.
+    (!canonical_global.starts_with(&canonical_profile)).then(|| {
+        format!(
+            "{} is outside {}; on Windows its owner-only protection comes from inheriting the user \
+             profile's ACL, which does not apply here — credentials.json may be readable by other \
+             accounts on this machine",
+            global_dir.display(),
+            profile.display()
+        )
+    })
+}
+
+#[cfg(not(windows))]
+fn outside_user_profile_warning(_global_dir: &std::path::Path) -> Option<String> {
+    None
 }
 
 /// Never a symlink: a hostile committed `CLAUDE.md` symlink must not redirect this read to `~/.ssh/id_rsa`
@@ -217,19 +268,37 @@ fn load_instructions(
     workspace: &std::path::Path,
     global_dir: &std::path::Path,
     cli_override: Option<PathBuf>,
+    warnings: &mut Vec<String>,
 ) -> Result<(Option<String>, Option<String>, Vec<PathBuf>)> {
     if let Some(path) = cli_override {
-        let text = read_capped(&path)
+        let (text, truncated) = read_capped(&path)
             .map_err(|e| anyhow::anyhow!("--instructions: cannot read {}: {e}", path.display()))?;
+        if truncated {
+            warnings.push(truncation_warning(&path));
+        }
         return Ok((Some(text), None, vec![path]));
     }
     // Best-effort: a read failure (permission denied, or the file vanished after the existence check)
     // skips this layer rather than aborting config resolve — instructions are optional, and the harness
-    // must still boot.
-    let load_layer = |dir: &std::path::Path| -> Option<(String, PathBuf)> {
+    // must still boot. The failure is reported, though: an unreadable KIRI.md silently vanishing is the
+    // kind of thing that costs an hour of wondering why a rule is being ignored.
+    let mut load_layer = |dir: &std::path::Path| -> Option<(String, PathBuf)> {
         let p = find_instructions(dir)?;
-        let text = read_capped(&p).ok()?;
-        (!text.trim().is_empty()).then_some((text, p))
+        match read_capped(&p) {
+            Ok((text, truncated)) => {
+                if truncated {
+                    warnings.push(truncation_warning(&p));
+                }
+                (!text.trim().is_empty()).then_some((text, p))
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "could not read {} ({error}); skipping it",
+                    p.display()
+                ));
+                None
+            }
+        }
     };
     let global = load_layer(global_dir);
     let project = load_layer(workspace);
@@ -265,15 +334,20 @@ impl Settings {
                 global_dir.display()
             ));
         }
+        // After the dir exists, so it can be canonicalized.
+        warnings.extend(outside_user_profile_warning(&global_dir));
         let global_path = global_dir.join("config.toml");
         let project_path = path.join(".kiri").join("config.toml");
         let had_global = global_path.exists();
         // Provider routing and security policy come from the trusted global config only; the workspace
         // (project) layer contributes only the `effort` preference. See `resolve_layers`.
-        let (config, effort) = resolve_layers(
-            read_config_file(&global_path)?,
-            read_project_config_lenient(&project_path, &mut warnings),
-        );
+        let global_raw = read_config_file(&global_path)?;
+        let project_raw = read_project_config_lenient(&project_path, &mut warnings);
+        // Both layers are checked: a typo in the project layer matters too, even though only `effort`
+        // survives from it — the user still deserves to know their key does nothing.
+        warnings.extend(unknown_keys_warning(&global_raw, &global_path));
+        warnings.extend(unknown_keys_warning(&project_raw, &project_path));
+        let (config, effort) = resolve_layers(global_raw, project_raw);
 
         let (mut providers, mut active) =
             resolve_providers(config.providers, config.active_provider);
@@ -295,20 +369,42 @@ impl Settings {
 
         let (sandbox_enabled, require_confinement) =
             resolve_sandbox_mode(config.sandbox.mode.as_deref(), &mut warnings);
+        // Both sources tilde-expand: `KIRI_DOCS_PATH=~/docs` used to be taken literally, creating a
+        // directory named `~` instead of resolving to the home.
         let docs_path = config
             .paths
             .docs
-            .map(|d| expand_home(&d))
-            .or_else(|| std::env::var_os("KIRI_DOCS_PATH").map(PathBuf::from))
+            .or_else(|| std::env::var("KIRI_DOCS_PATH").ok())
+            .map(|docs| expand_home(&docs))
             .unwrap_or_else(|| path.join("docs"));
 
         let (loaded_instructions_global, loaded_instructions_project, loaded_paths) =
-            load_instructions(&path, &global_dir, cli_instructions)?;
+            load_instructions(&path, &global_dir, cli_instructions, &mut warnings)?;
 
-        // Hoisted out of the struct literal below: both borrow `warnings`, which the literal itself moves.
+        // Hoisted out of the struct literal below: each borrows `warnings`, which the literal itself moves.
         let plan_allow = compile_patterns("KIRI_PLAN_ALLOW", DEFAULT_PLAN_ALLOW, &mut warnings)?;
         let sandbox_network =
             resolve_sandbox_network(config.sandbox.network.as_deref(), &mut warnings);
+        let connect_timeout = resolve_timeout(
+            config.http.connect_timeout_ms,
+            "KIRI_HTTP_CONNECT_TIMEOUT_MS",
+            HTTP_CONNECT_TIMEOUT,
+            &mut warnings,
+        );
+        let read_timeout = resolve_timeout(
+            config.http.read_timeout_ms,
+            "KIRI_HTTP_READ_TIMEOUT_MS",
+            HTTP_READ_TIMEOUT,
+            &mut warnings,
+        );
+        let thinking = resolve_bool(
+            config.behavior.thinking,
+            "KIRI_THINKING",
+            true,
+            &mut warnings,
+        );
+        let memory_enabled =
+            resolve_bool(config.behavior.memory, "KIRI_MEMORY", true, &mut warnings);
 
         Ok(Self {
             path,
@@ -321,18 +417,10 @@ impl Settings {
             sandbox_network,
             extra_ro: load_extra_paths("KIRI_SANDBOX_RO_PATHS", &[]),
             extra_rw: load_extra_paths("KIRI_SANDBOX_RW_PATHS", DEFAULT_RW_DIRS),
-            connect_timeout: resolve_timeout(
-                config.http.connect_timeout_ms,
-                "KIRI_HTTP_CONNECT_TIMEOUT_MS",
-                HTTP_CONNECT_TIMEOUT,
-            ),
-            read_timeout: resolve_timeout(
-                config.http.read_timeout_ms,
-                "KIRI_HTTP_READ_TIMEOUT_MS",
-                HTTP_READ_TIMEOUT,
-            ),
-            thinking: resolve_bool(config.behavior.thinking, "KIRI_THINKING", true),
-            memory_enabled: resolve_bool(config.behavior.memory, "KIRI_MEMORY", true),
+            connect_timeout,
+            read_timeout,
+            thinking,
+            memory_enabled,
             docs_path,
             shared_memory_db: global_dir.join("memory").join("shared.db"),
             sessions_db: global_dir.join("sessions.db"),
@@ -417,6 +505,15 @@ mod tests {
             None,
         )
         .expect("resolve against temp dirs")
+    }
+
+    /// The layer-loading tests assert on the returned layers; the warnings channel has its own tests below.
+    fn load_instructions_at(
+        workspace: &std::path::Path,
+        global: &std::path::Path,
+        cli_override: Option<PathBuf>,
+    ) -> Result<(Option<String>, Option<String>, Vec<PathBuf>)> {
+        load_instructions(workspace, global, cli_override, &mut Vec::new())
     }
 
     fn write_project_config(workspace: &std::path::Path, body: &str) {
@@ -546,6 +643,27 @@ mode = "off"
     }
 
     #[test]
+    fn a_configured_docs_path_is_tilde_expanded() {
+        // Both sources go through `expand_home` now; `~/docs` taken literally would create a directory
+        // named `~` beside the workspace.
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write(
+            global.path(),
+            "config.toml",
+            "[paths]\ndocs = \"~/kiri-docs\"\n",
+        );
+
+        let settings = resolve_at(global.path(), workspace.path());
+        assert!(
+            !settings.docs_path.starts_with("~"),
+            "the tilde must be resolved, got: {}",
+            settings.docs_path.display()
+        );
+        assert!(settings.docs_path.ends_with("kiri-docs"));
+    }
+
+    #[test]
     fn embeddings_need_both_a_provider_and_a_non_blank_model() {
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
@@ -648,6 +766,156 @@ mode = "off"
     }
 
     #[test]
+    fn an_unrecognized_config_key_is_reported_instead_of_doing_nothing() {
+        // The motivating case: `netwrok` parses cleanly, leaves the network at `deny`, and the user thinks
+        // they allowed it. The key must be named so the typo is findable.
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write(
+            global.path(),
+            "config.toml",
+            "[sandbox]\nnetwrok = \"allow\"\n",
+        );
+
+        let settings = resolve_at(global.path(), workspace.path());
+        assert_eq!(
+            settings.sandbox_network,
+            NetworkPolicy::Deny,
+            "the typo must not silently widen the network"
+        );
+        let warning = settings
+            .warnings
+            .iter()
+            .find(|w| w.contains("unrecognized keys"))
+            .unwrap_or_else(|| panic!("got: {:?}", settings.warnings));
+        assert!(warning.contains("sandbox.netwrok"), "got: {warning}");
+    }
+
+    #[test]
+    fn unrecognized_keys_are_reported_at_the_root_and_in_every_section() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write(
+            global.path(),
+            "config.toml",
+            "stray_root_key = 1\n\
+             [http]\nconect_timeout_ms = 10\n\
+             [behavior]\nthinkng = true\n\
+             [paths]\ndoc = \"x\"\n\
+             [embeddings]\nmodl = \"m\"\n",
+        );
+
+        let settings = resolve_at(global.path(), workspace.path());
+        let warning = settings
+            .warnings
+            .iter()
+            .find(|w| w.contains("unrecognized keys"))
+            .unwrap_or_else(|| panic!("got: {:?}", settings.warnings));
+        for expected in [
+            "stray_root_key",
+            "http.conect_timeout_ms",
+            "behavior.thinkng",
+            "paths.doc",
+            "embeddings.modl",
+        ] {
+            assert!(
+                warning.contains(expected),
+                "{expected} missing from: {warning}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_config_reports_no_unrecognized_keys() {
+        // Guards against the catch-all swallowing a legitimate key: every documented field must be matched
+        // by name, or this warning would fire on a correct config and train the user to ignore it.
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write(
+            global.path(),
+            "config.toml",
+            r#"
+active_provider = "nvidia"
+effort = "high"
+[providers.nvidia]
+kind = "nvidia"
+base_url = "https://integrate.api.nvidia.com/v1"
+model = "m"
+models = ["m"]
+auth = "api-key"
+[http]
+connect_timeout_ms = 1000
+read_timeout_ms = 2000
+[behavior]
+thinking = true
+memory = false
+[sandbox]
+mode = "require"
+network = "allow"
+[paths]
+docs = "/tmp/docs"
+[embeddings]
+provider = "nvidia"
+model = "embed"
+"#,
+        );
+
+        let settings = resolve_at(global.path(), workspace.path());
+        assert!(
+            settings.warnings.is_empty(),
+            "a fully-populated valid config must be quiet: {:?}",
+            settings.warnings
+        );
+        // And the values actually landed, proving the catch-all did not shadow the real fields.
+        assert_eq!(settings.connect_timeout, Duration::from_millis(1000));
+        assert_eq!(settings.read_timeout, Duration::from_millis(2000));
+        assert!(settings.thinking && !settings.memory_enabled);
+        assert_eq!(settings.sandbox_network, NetworkPolicy::Allow);
+        assert!(settings.require_confinement);
+        assert_eq!(settings.effort, Effort::High);
+    }
+
+    #[test]
+    fn an_oversized_instructions_file_warns_that_it_was_truncated() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write(
+            global.path(),
+            "CLAUDE.md",
+            &"a".repeat(MAX_INSTRUCTIONS_BYTES as usize + 1),
+        );
+
+        let settings = resolve_at(global.path(), workspace.path());
+        assert_eq!(
+            settings.instructions_global.as_ref().unwrap().len(),
+            MAX_INSTRUCTIONS_BYTES as usize
+        );
+        assert!(
+            settings.warnings.iter().any(|w| w.contains("cap")),
+            "losing the tail of an instructions file must not be silent: {:?}",
+            settings.warnings
+        );
+    }
+
+    #[test]
+    fn an_instructions_file_exactly_at_the_cap_is_not_reported_as_truncated() {
+        let global = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        write(
+            global.path(),
+            "CLAUDE.md",
+            &"a".repeat(MAX_INSTRUCTIONS_BYTES as usize),
+        );
+
+        let settings = resolve_at(global.path(), workspace.path());
+        assert!(
+            settings.warnings.is_empty(),
+            "a file landing exactly on the cap lost nothing: {:?}",
+            settings.warnings
+        );
+    }
+
+    #[test]
     fn active_profile_errors_when_the_active_id_names_no_provider() {
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
@@ -702,7 +970,7 @@ mode = "off"
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
         let (global_text, project_text, paths) =
-            load_instructions(workspace.path(), global.path(), None).unwrap();
+            load_instructions_at(workspace.path(), global.path(), None).unwrap();
         assert!(global_text.is_none());
         assert!(project_text.is_none());
         assert!(paths.is_empty());
@@ -714,7 +982,7 @@ mode = "off"
         let workspace = TempDir::new().unwrap();
         write(global.path(), "CLAUDE.md", "global rules");
         let (global_text, project_text, paths) =
-            load_instructions(workspace.path(), global.path(), None).unwrap();
+            load_instructions_at(workspace.path(), global.path(), None).unwrap();
         assert_eq!(global_text.unwrap(), "global rules");
         assert!(project_text.is_none());
         assert_eq!(paths, vec![global.path().join("CLAUDE.md")]);
@@ -727,7 +995,7 @@ mode = "off"
         write(global.path(), "CLAUDE.md", "global rules");
         write(workspace.path(), "CLAUDE.md", "project rules");
         let (global_text, project_text, paths) =
-            load_instructions(workspace.path(), global.path(), None).unwrap();
+            load_instructions_at(workspace.path(), global.path(), None).unwrap();
         assert_eq!(
             global_text.unwrap(),
             "global rules",
@@ -750,7 +1018,7 @@ mode = "off"
         write(global.path(), "CLAUDE.md", "   \n  ");
         write(workspace.path(), "CLAUDE.md", "project rules");
         let (global_text, project_text, paths) =
-            load_instructions(workspace.path(), global.path(), None).unwrap();
+            load_instructions_at(workspace.path(), global.path(), None).unwrap();
         assert!(global_text.is_none());
         assert_eq!(project_text.unwrap(), "project rules");
         assert_eq!(paths, vec![workspace.path().join("CLAUDE.md")]);
@@ -767,7 +1035,7 @@ mode = "off"
         let override_path = override_dir.path().join("custom.md");
 
         let (global_text, project_text, paths) =
-            load_instructions(workspace.path(), global.path(), Some(override_path.clone()))
+            load_instructions_at(workspace.path(), global.path(), Some(override_path.clone()))
                 .unwrap();
         assert_eq!(
             global_text.unwrap(),
@@ -783,7 +1051,7 @@ mode = "off"
         let global = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
         let missing = workspace.path().join("nope.md");
-        assert!(load_instructions(workspace.path(), global.path(), Some(missing)).is_err());
+        assert!(load_instructions_at(workspace.path(), global.path(), Some(missing)).is_err());
     }
 
     #[cfg(unix)]
@@ -815,7 +1083,8 @@ mode = "off"
         let oversized = "a".repeat(MAX_INSTRUCTIONS_BYTES as usize + 1024);
         write(global.path(), "CLAUDE.md", &oversized);
 
-        let (global_text, _, _) = load_instructions(workspace.path(), global.path(), None).unwrap();
+        let (global_text, _, _) =
+            load_instructions_at(workspace.path(), global.path(), None).unwrap();
         assert_eq!(
             global_text.unwrap().len(),
             MAX_INSTRUCTIONS_BYTES as usize,

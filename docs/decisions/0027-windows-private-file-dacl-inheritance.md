@@ -66,3 +66,28 @@ an ADR whose central claim didn't hold for one of the four sites it names.
   (the Unix-only `write_atomic_owner_only` building block the wrappers call directly, with no
   `#[cfg(not(unix))]` sibling of its own by design) is checked separately, for presence only.
 - Closes #36.
+
+## Amendment (2026-07-25) — Windows joins the v1 target set
+
+The v1 scope changed from "macOS only; Windows/Linux are a later port" to shipping **macOS, Linux and
+Windows together**. Two sentences above are therefore no longer load-bearing arguments and are retracted as
+justifications, though they remain accurate as descriptions: "a platform this project hasn't shipped for
+yet (macOS is v1; Windows/Linux are a later port)", and "Should Windows support actually ship, this is the
+first thing to verify". Windows ships. The caveat is now a live gap, not deferred work.
+
+What changed in the code as a direct result: the guarantee this ADR accepts rests on `~/.kiri` sitting
+**inside `%USERPROFILE%`**, whose default ACL grants only the owning user, `SYSTEM`, and `Administrators`.
+That containment was assumed, never checked — and `home::home_dir()` prefers `$HOME` over `%USERPROFILE%`
+(ADR 0018), which Git Bash, a data-drive layout, or a redirected/network home can point somewhere else
+entirely. There, `credentials.json` inherits some unrelated directory's ACL instead.
+
+`Settings::resolve` now emits a boot warning (through `Settings::warnings`, ADR-less but see the config
+review's warning channel) when the resolved harness home is not under `%USERPROFILE%`, naming the risk to
+`credentials.json`. Paths are compared canonicalized (Windows paths are case-insensitive and vary in prefix
+form) and reported verbatim; if either side cannot be canonicalized the check stays quiet rather than warn
+spuriously. Unix is untouched — it sets `0700` explicitly and does not rely on inheritance.
+
+This narrows the gap; it does not close it. Still unaddressed, and still honestly stated: the
+domain-joined / Group-Policy / roaming-profile / network-share cases named above, which cannot be verified
+from this project's current hosts. An explicit ACL write remains the real fix, and the `unsafe_code`
+constraint that blocked it here is revisited separately for command confinement (ADR 0032).
