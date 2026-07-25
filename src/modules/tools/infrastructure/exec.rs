@@ -45,6 +45,11 @@ pub(crate) const INHERITED_ENV_VARS: &[&str] = &[
     "HOME",
     "USERPROFILE",
     "SystemRoot",
+    // Windows: the shell resolves the Common AppData path from a REG_EXPAND_SZ of `%SystemDrive%\ProgramData`.
+    // Without these two, the expansion fails and the child writes its shell cache to a literal
+    // `%SystemDrive%\ProgramData\...` directory relative to the cwd — littering the workspace root.
+    "SystemDrive",
+    "ProgramData",
     "APPDATA",
     "LOCALAPPDATA",
     "TEMP",

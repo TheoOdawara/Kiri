@@ -28,6 +28,10 @@ const INHERITED_ENV_VARS: &[&str] = &[
     "HOME",
     "USERPROFILE",
     "SystemRoot",
+    // Same reason as `tools::infrastructure::exec::INHERITED_ENV_VARS`: without them a Windows child
+    // writes its shell cache to a literal `%SystemDrive%\ProgramData\...` folder under the cwd.
+    "SystemDrive",
+    "ProgramData",
     "APPDATA",
     "LOCALAPPDATA",
     "TEMP",
