@@ -891,4 +891,81 @@ mod tests {
             ToolOutcome::Declined => panic!("unexpected Declined"),
         }
     }
+
+    // The Windows counterpart of the macOS/Linux blocks above: same proof, through the restricted-token
+    // adapter (ADR 0031). The workspace is a `TempDir`, which the current user owns, so it accepts the
+    // write grant the mechanism stamps — a workspace the user does not own cannot be confined at all, and
+    // `WindowsRestrictedToken::detect` reports that at boot rather than here.
+    #[cfg(windows)]
+    fn confined_sandbox(dir: &TempDir) -> Option<FsSandbox> {
+        use crate::modules::tools::infrastructure::confine::windows::WindowsRestrictedToken;
+        use crate::shared::kernel::sandbox::NetworkPolicy;
+        // The launcher must be the real CLI: `current_exe()` here is the libtest harness, which cannot
+        // parse `confined-exec`, so using it would make the escape test pass because the command never
+        // ran. Test binaries live in `target/<profile>/deps/`, so the binary is one level up.
+        let launcher = std::env::current_exe()
+            .ok()?
+            .parent()?
+            .parent()?
+            .join("kiri.exe");
+        let adapter = WindowsRestrictedToken::with_launcher(launcher, dir.path()).ok()?;
+        FsSandbox::with_confinement(
+            dir.path(),
+            SensitiveMatcher::empty(),
+            Arc::new(adapter),
+            NetworkPolicy::Deny,
+            Arc::from(Vec::new()),
+            Arc::from(Vec::new()),
+        )
+        .ok()
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn confined_run_command_cannot_write_outside_root() {
+        let dir = TempDir::new().unwrap();
+        let Some(sb) = confined_sandbox(&dir) else {
+            return; // this host cannot stamp the grant; `detect` surfaces that as a boot notice
+        };
+        let reg = registry();
+        let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string());
+        let probe = format!("{home}\\kiri-sbx-must-not-exist-{}.txt", std::process::id());
+        let _ = fs::remove_file(&probe);
+        let cmd = format!("Set-Content -Path '{probe}' -Value leaked");
+        let _ = reg
+            .execute(&sb, &call("run_command", json!({ "command": cmd })))
+            .await;
+        let leaked = std::path::Path::new(&probe).exists();
+        let _ = fs::remove_file(&probe);
+        assert!(
+            !leaked,
+            "a confined run_command must not be able to write outside the workspace root"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn confined_run_command_still_works_inside_root() {
+        let dir = TempDir::new().unwrap();
+        let Some(sb) = confined_sandbox(&dir) else {
+            return;
+        };
+        let reg = registry();
+        let outcome = reg
+            .execute(
+                &sb,
+                &call(
+                    "run_command",
+                    json!({ "command": "Set-Content -Path inside.txt -Value hi; Get-Content inside.txt" }),
+                ),
+            )
+            .await;
+        match outcome {
+            ToolOutcome::Ok(text) => assert!(
+                text.contains("hi"),
+                "confinement must not break in-jail work: {text}"
+            ),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
 }

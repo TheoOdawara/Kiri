@@ -114,19 +114,22 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     let agents_text = extensions.agents_index().unwrap_or_default();
     let hooks_display = extensions.hooks_display();
     let mcp_display = extensions.mcp_display();
-    let confiner = confine::default_command_sandbox(settings.sandbox_enabled);
-    // #112: honest boot notice when OS confinement is unavailable (Windows residual #90).
+    let (confiner, unavailable) =
+        confine::default_command_sandbox(settings.sandbox_enabled, &settings.path);
+    // #112: honest boot notice when OS confinement is unavailable (Windows residual #90). `unavailable`
+    // carries the specific reason when there is one — on Windows the workspace may simply not accept the
+    // grant the mechanism needs (ADR 0031) — so the user is told what to fix rather than just that it is off.
     if !confiner.supports_confinement() {
-        let message = if settings.require_confinement {
-            "OS command sandbox unavailable on this platform; KIRI_SANDBOX=require will refuse \
-             run_command and hooks (path policy + confirmation still apply)."
-                .to_string()
+        let cause = unavailable.unwrap_or_else(|| "no OS facility on this platform".to_string());
+        let consequence = if settings.require_confinement {
+            "KIRI_SANDBOX=require will refuse run_command and hooks (path policy + confirmation \
+             still apply)."
         } else {
-            "OS command sandbox unavailable on this platform; run_command/hooks use path policy + \
-             confirmation only (no OS jail)."
-                .to_string()
+            "run_command/hooks use path policy + confirmation only (no OS jail)."
         };
-        boot_notices.push(BootNotice::new(message));
+        boot_notices.push(BootNotice::new(format!(
+            "OS command sandbox unavailable: {cause} {consequence}"
+        )));
     }
     // Built here and injected, so `config` never reaches into the `tools` adapter for it.
     let sensitive = load_sensitive_matcher()?;

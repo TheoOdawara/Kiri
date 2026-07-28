@@ -33,6 +33,18 @@ pub enum CliCommand {
         #[command(subcommand)]
         action: SyncAction,
     },
+    /// Internal (Windows): re-execution of this binary as the confinement launcher (ADR 0031). Hidden
+    /// because it is not a user-facing command — `run_command` builds this invocation itself, and running
+    /// it by hand only spawns a command with less access than the shell already has.
+    #[command(hide = true)]
+    ConfinedExec {
+        /// A directory the confined command may write. Repeated once per root.
+        #[arg(long = "rw")]
+        rw: Vec<PathBuf>,
+        /// The program and its arguments, after `--`.
+        #[arg(last = true, allow_hyphen_values = true)]
+        command: Vec<std::ffi::OsString>,
+    },
 }
 
 /// The `kiri sync` actions.
@@ -53,4 +65,40 @@ pub enum SyncAction {
     },
     /// Show the sync work-tree's git status.
     Status,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn the_cli_definition_is_internally_consistent() {
+        // clap validates argument combinations in debug asserts, which otherwise fire only when a user
+        // actually runs the command — `trailing_var_arg` + `last` on `confined-exec` panicked at runtime
+        // and compiled clean. This turns that class into a test failure.
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn confined_exec_collects_repeated_roots_and_the_whole_command() {
+        let cli = Cli::parse_from([
+            "kiri",
+            "confined-exec",
+            "--rw",
+            r"C:\ws",
+            "--rw",
+            r"C:\cargo",
+            "--",
+            "pwsh",
+            "-Command",
+            "echo hi",
+        ]);
+        let Some(CliCommand::ConfinedExec { rw, command }) = cli.command else {
+            panic!("expected the confined-exec subcommand");
+        };
+        assert_eq!(rw, [PathBuf::from(r"C:\ws"), PathBuf::from(r"C:\cargo")]);
+        // The leading `-Command` must survive as an argument, not be parsed as a launcher flag.
+        assert_eq!(command, ["pwsh", "-Command", "echo hi"]);
+    }
 }

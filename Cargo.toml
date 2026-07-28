@@ -52,6 +52,18 @@ process-wrap = { version = "9.1.0", default-features = false, features = [
     "kill-on-drop",
     "creation-flags",
 ] }
+# Already in the tree via process-wrap/arboard, so this declares an existing dependency rather than
+# adding one. Needed for the restricted-token write confinement (ADR 0031): there is no safe-Rust path
+# to CreateRestrictedToken / CreateProcessAsUser, and no launcher binary ships with Windows the way
+# sandbox-exec and bwrap do on macOS and Linux.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(unix)'.dependencies]
 process-wrap = { version = "9.1.0", default-features = false, features = [
@@ -70,7 +82,9 @@ tempfile = "3"
 syn = { version = "2", features = ["full", "visit"] }
 
 [lints.rust]
-unsafe_code = "forbid"
+# `deny`, not `forbid`, so the single Win32 confinement module can opt in with `#[allow(unsafe_code)]`
+# (ADR 0032). Every other file in the crate is still refused at compile time.
+unsafe_code = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
