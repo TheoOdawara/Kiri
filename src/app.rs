@@ -15,6 +15,7 @@ use crate::modules::agent::application::agent_loop::AgentLoop;
 use crate::modules::agent::domain::system_prompt::{
     PromptExtensions, ToolCatalog, render_system_prompt,
 };
+use crate::modules::agent::infrastructure::action_reviewer::ProviderActionReviewer;
 use crate::modules::agent::infrastructure::task_tool::TaskTool;
 use crate::modules::extensions::application::{ExtensionCatalog, ExtensionsLoader};
 use crate::modules::extensions::domain::gate::{self, GateState, content_hash};
@@ -68,7 +69,7 @@ use crate::modules::tui::domain::instructions::instructions_display;
 use crate::modules::tui::infrastructure::runtime::{
     BootNotice, HookContext, ProviderSwap, SharedMemoryFactory, SyncContext, Tui, TuiParams,
 };
-use crate::shared::infra::config::{Settings, SyncAction, ensure_private_dir};
+use crate::shared::infra::config::{SandboxAction, Settings, SyncAction, ensure_private_dir};
 use crate::shared::kernel::error::AgentResult;
 use crate::shared::kernel::provider::{AuthMethod, Credential, ProviderProfile};
 
@@ -119,7 +120,9 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
     // #112: honest boot notice when OS confinement is unavailable (Windows residual #90). `unavailable`
     // carries the specific reason when there is one — on Windows the workspace may simply not accept the
     // grant the mechanism needs (ADR 0031) — so the user is told what to fix rather than just that it is off.
-    if !confiner.supports_confinement() {
+    if confiner.guarantees()
+        == crate::modules::tools::application::command_sandbox::SandboxGuarantees::NONE
+    {
         let cause = unavailable.unwrap_or_else(|| "no OS facility on this platform".to_string());
         let consequence = if settings.require_confinement {
             "KIRI_SANDBOX=require will refuse run_command and hooks (path policy + confirmation \
@@ -141,8 +144,10 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         settings.instructions_global.as_deref(),
         settings.instructions_project.as_deref(),
     );
-    let sandbox = FsSandbox::with_confinement(
+    let command_home_root = settings.global_dir.join("sandbox").join("workspaces");
+    let sandbox = FsSandbox::with_confinement_and_home_root(
         &settings.path,
+        command_home_root,
         sensitive,
         confiner,
         settings.sandbox_network,
@@ -219,7 +224,8 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         profile.model.clone(),
         settings.checkpoint_budget,
         settings.max_tool_calls,
-    );
+    )
+    .with_reviewer(Arc::new(ProviderActionReviewer));
 
     let system_prompt = if memory_digest.is_empty() {
         base_system_prompt
@@ -290,6 +296,59 @@ pub async fn wire(settings: Settings) -> Result<Tui> {
         mcp_display,
         hooks: hook_context,
     }))
+}
+
+/// Headless sandbox diagnostics. Adapter selection stays in the composition root, like the TUI and sync
+/// paths, while the output reports capabilities rather than a misleading enabled/disabled boolean.
+pub fn wire_sandbox(settings: &Settings, action: SandboxAction) -> Result<()> {
+    match action {
+        SandboxAction::Status => {
+            let (confiner, unavailable) =
+                confine::default_command_sandbox(settings.sandbox_enabled, &settings.path);
+            let guarantees = confiner.guarantees();
+            println!(
+                "configured: {}",
+                if settings.sandbox_enabled {
+                    "on"
+                } else {
+                    "off"
+                }
+            );
+            println!("required: {}", settings.require_confinement);
+            println!(
+                "filesystem read confinement available: {}",
+                guarantees.filesystem_read
+            );
+            println!(
+                "filesystem write confinement available: {}",
+                guarantees.filesystem_write
+            );
+            println!(
+                "network policy: {}",
+                match settings.sandbox_network {
+                    crate::shared::kernel::sandbox::NetworkPolicy::Deny => "deny",
+                    crate::shared::kernel::sandbox::NetworkPolicy::Allow => "allow",
+                }
+            );
+            println!("network denial available: {}", guarantees.network);
+            println!(
+                "process and IPC isolation available: {}",
+                guarantees.process_and_ipc
+            );
+            println!(
+                "host interop blocking available: {}",
+                guarantees.host_interop
+            );
+            println!(
+                "harness secret protection available: {}",
+                guarantees.protected_secrets
+            );
+            if let Some(reason) = unavailable {
+                println!("unavailable: {reason}");
+            }
+            Ok(())
+        }
+    }
 }
 
 /// `McpToolProxy` leaks each qualified name (`Box::leak`, never freed), so an approved-but-compromised

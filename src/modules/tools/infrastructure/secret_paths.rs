@@ -30,6 +30,11 @@ pub(crate) const HOME_SECRET_FILES: &[&str] =
 /// and the macOS/Linux OS-confinement adapters.
 pub(crate) const HOME_SECRET_SUBPATHS: &[&[&str]] = &[&[".config", "gh"], &[".config", "gcloud"]];
 
+/// Credential files nested below otherwise useful cache/config directories. These are denied without
+/// hiding the whole parent, so read-only package caches remain usable inside confined commands.
+pub(crate) const HOME_SECRET_SUBPATH_FILES: &[&[&str]] =
+    &[&[".cargo", "credentials"], &[".cargo", "credentials.toml"]];
+
 /// The harness's own private directory under home (`~/.kiri`), which holds `credentials.json` (the
 /// `0600` API-key store) and other state. Denied to confined children so a `run_command` cannot read
 /// it back to the model, and denied in file-tool path resolution (not via `SECRET_DIRS` — project

@@ -118,6 +118,14 @@ runs unattended in auto. Only `git push` leaves the machine. Anyone who wants th
   the safe direction is the only kind a deny-list may produce, so this is not a defect to fix.
 - It is a heuristic, not a shell parser, and is not sold as a boundary. The OS confinement layer
   (ADR 0009/0031) is the real control; this decides who gets interrupted.
-- `DEFAULT_RW_DIRS` gained `~/.bun`, `~/.deno`, `~/.pnpm-store`, and `~/.local/share/uv` so a toolchain
-  the policy admits can reach its own cache — an approved command failing under confinement reads as a
-  harness bug, not as a policy decision.
+- Superseded by ADR 0033: toolchain executable roots are read-only and writable caches live under a
+  synthetic per-workspace command home.
+
+## Amendment (2026-07-28) — prompt-free Auto and read-only Plan
+
+ADR 0033 separates human confirmation from automated review. Default remains the only mode with live
+action approval prompts. Auto sends risky or unconfined actions to a strict, fail-closed provider reviewer,
+routes every arbitrary shell command through it, and never asks the user for action approval. Plan runs
+admitted inspection/build/test commands without action prompts against a physically read-only workspace
+mount; external file-tool targets and command working directories are refused. The command-policy table remains the classifier,
+but “needs confirmation” now means “needs automated review” in Auto.

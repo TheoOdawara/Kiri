@@ -1522,7 +1522,6 @@ dependencies = [
  "tui-textarea-2",
  "unicode-width",
  "uuid",
- "windows",
  "zeroize",
 ]
 

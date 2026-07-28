@@ -1,4 +1,6 @@
-use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
+use crate::modules::tools::application::command_sandbox::{
+    CommandSandbox, SandboxGuarantees, SandboxPolicy,
+};
 use crate::shared::kernel::error::AgentError;
 
 /// The no-op confinement adapter: returns the command unchanged. Used on platforms without an OS
@@ -16,7 +18,7 @@ impl CommandSandbox for NoConfinement {
         Ok(cmd)
     }
 
-    fn supports_confinement(&self) -> bool {
-        false
+    fn guarantees(&self) -> SandboxGuarantees {
+        SandboxGuarantees::NONE
     }
 }

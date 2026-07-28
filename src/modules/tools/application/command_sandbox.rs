@@ -3,6 +3,57 @@ use std::path::PathBuf;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::sandbox::NetworkPolicy;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SandboxGuarantees {
+    pub filesystem_read: bool,
+    pub filesystem_write: bool,
+    pub network: bool,
+    pub process_and_ipc: bool,
+    pub host_interop: bool,
+    pub protected_secrets: bool,
+}
+
+impl SandboxGuarantees {
+    pub const NONE: Self = Self {
+        filesystem_read: false,
+        filesystem_write: false,
+        network: false,
+        process_and_ipc: false,
+        host_interop: false,
+        protected_secrets: false,
+    };
+
+    pub const MACOS: Self = Self {
+        filesystem_read: false,
+        filesystem_write: true,
+        network: true,
+        process_and_ipc: false,
+        host_interop: false,
+        protected_secrets: true,
+    };
+
+    pub const BWRAP: Self = Self {
+        filesystem_read: true,
+        filesystem_write: true,
+        network: true,
+        process_and_ipc: true,
+        host_interop: true,
+        protected_secrets: true,
+    };
+
+    pub fn satisfies(self, policy: &SandboxPolicy) -> bool {
+        self.filesystem_write
+            && self.protected_secrets
+            && (policy.network != NetworkPolicy::Deny || self.network)
+    }
+}
+
 /// The OS-confinement policy for a single command: the workspace root it may write under, the network
 /// stance, and any extra paths a legitimate operation needs (toolchain dirs from config, or an
 /// approved out-of-root target for that one call). Pure data — no I/O — so it lives in the
@@ -14,6 +65,8 @@ use crate::shared::kernel::sandbox::NetworkPolicy;
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 pub struct SandboxPolicy {
     pub root: PathBuf,
+    pub command_home: PathBuf,
+    pub workspace_access: WorkspaceAccess,
     pub network: NetworkPolicy,
     pub extra_ro: Vec<PathBuf>,
     pub extra_rw: Vec<PathBuf>,
@@ -33,8 +86,38 @@ pub trait CommandSandbox: Send + Sync + std::fmt::Debug {
         policy: &SandboxPolicy,
     ) -> Result<tokio::process::Command, AgentError>;
 
-    /// Whether this adapter actually enforces OS-level confinement on the current platform. `false`
-    /// for the no-op adapter (unsupported platform or `KIRI_SANDBOX=off`); `run_command` consults
-    /// this to honor `KIRI_SANDBOX=require`.
-    fn supports_confinement(&self) -> bool;
+    fn guarantees(&self) -> SandboxGuarantees;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_guarantees_never_satisfy_required_confinement() {
+        let policy = SandboxPolicy {
+            root: PathBuf::from("/workspace"),
+            command_home: PathBuf::from("/kiri/home"),
+            workspace_access: WorkspaceAccess::ReadOnly,
+            network: NetworkPolicy::Deny,
+            extra_ro: Vec::new(),
+            extra_rw: Vec::new(),
+        };
+
+        assert!(!SandboxGuarantees::NONE.satisfies(&policy));
+    }
+
+    #[test]
+    fn bwrap_guarantees_satisfy_read_only_offline_plan_execution() {
+        let policy = SandboxPolicy {
+            root: PathBuf::from("/workspace"),
+            command_home: PathBuf::from("/kiri/home"),
+            workspace_access: WorkspaceAccess::ReadOnly,
+            network: NetworkPolicy::Deny,
+            extra_ro: Vec::new(),
+            extra_rw: Vec::new(),
+        };
+
+        assert!(SandboxGuarantees::BWRAP.satisfies(&policy));
+    }
 }

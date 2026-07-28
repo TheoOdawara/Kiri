@@ -1,6 +1,7 @@
 # ADR 0018 — Native cross-platform support: portable home resolution + native file-tool I/O
 
 - Status: Accepted
+- Amended by: ADR 0033 (the Windows runtime is now WSL2-based rather than native)
 - Date: 2026-07-02
 
 ## Context

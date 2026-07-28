@@ -165,16 +165,6 @@ impl Tool for RunCommand {
             Err(out) => return out,
         };
 
-        // KIRI_SANDBOX=require: refuse to run an arbitrary shell command unconfined rather than fall
-        // back to the path-policy + confirmation layers alone.
-        if self.require_confinement && !sandbox.confiner().supports_confinement() {
-            return ToolOutcome::Error(
-                "OS command sandbox unavailable on this platform; refusing to run unconfined \
-                 (KIRI_SANDBOX=require)"
-                    .to_string(),
-            );
-        }
-
         let cwd = match sandbox.resolve_existing(&args.cwd) {
             Ok(path) => path,
             Err(error) => return ToolOutcome::Error(error.to_string()),
@@ -184,12 +174,19 @@ impl Tool for RunCommand {
         // no per-command widening by leading-program name — a session-wide opt-in
         // (`KIRI_SANDBOX_NETWORK=allow`) is the only way to grant `run_command` network access.
         let network = sandbox.network();
+        let policy = sandbox.command_policy(network, &[], &[&cwd]);
+        if self.require_confinement && !sandbox.confiner().guarantees().satisfies(&policy) {
+            return ToolOutcome::Error(
+                "required command sandbox guarantees are unavailable; refusing to run unconfined"
+                    .to_string(),
+            );
+        }
         let result = match exec::run_shell(
             &args.command,
             Some(&cwd),
             Duration::from_millis(effective_timeout_ms(args.timeout_ms)),
             sandbox.confiner(),
-            &sandbox.command_policy(network, &[], &[&cwd]),
+            &policy,
         )
         .await
         {
@@ -223,14 +220,17 @@ impl Tool for RunCommand {
         true
     }
 
-    /// A shell is only as dangerous as what it runs, so this asks the command policy rather than
-    /// answering `true` for every invocation — which is what made auto mode confirm `git diff` and
-    /// stop being auto at all (issue #23). Unparseable args fall back to confirming.
-    fn confirm_in_auto(&self, call: &ToolCall, _confirmation: &Confirmation) -> bool {
-        match parse_args::<RunCommandArgs>(call) {
-            Ok(args) => self.policy.needs_confirmation(&args.command),
-            Err(_) => true,
-        }
+    /// Arbitrary shell text cannot be proven safe by token inspection: build scripts, dynamic variables,
+    /// and otherwise benign programs may still mutate the workspace. Auto remains prompt-free, but every
+    /// shell call goes through its isolated reviewer.
+    fn confirm_in_auto(&self, _call: &ToolCall, _confirmation: &Confirmation) -> bool {
+        true
+    }
+
+    fn accesses_outside_workspace(&self, call: &ToolCall, _confirmation: &Confirmation) -> bool {
+        parse_args::<RunCommandArgs>(call)
+            .map(|args| is_absolute_target(&args.cwd))
+            .unwrap_or(true)
     }
 
     fn plan_check(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
@@ -289,8 +289,7 @@ mod tests {
         RunCommand::new(Arc::default(), false)
     }
 
-    /// The confirmation `run_gated` would pass to `confirm_in_auto`; `run_command` ignores it (its own
-    /// policy decides), but the gate builds it from the real tool so the test path matches production.
+    /// Build the same confirmation the Auto gate passes to `confirm_in_auto`.
     fn auto_gate(rc: &RunCommand, sb: &dyn Sandbox, call: &ToolCall) -> bool {
         let confirmation = rc.confirmation(sb, call).expect("parsed args confirm");
         rc.confirm_in_auto(call, &confirmation)
@@ -328,29 +327,24 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_runs_ordinary_commands_without_confirming() {
-        // Issue #23: `confirm_in_auto` was a hardcoded `true`, so auto mode interrupted for `git diff`.
+    fn auto_mode_reviews_every_shell_command_without_a_human_prompt() {
         let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let rc = bare_run_command();
-        for command in ["git diff", "ls -la", "cargo test", "just build"] {
-            assert!(
-                !auto_gate(
-                    &rc,
-                    &sb,
-                    &call("run_command", json!({ "command": command }))
-                ),
-                "auto mode must not confirm: {command}"
-            );
-        }
-        for command in ["git push", "rm -rf x", "echo ok && rm -rf x"] {
+        for command in [
+            "git diff",
+            "cargo test",
+            "find . -delete",
+            "X=rm; $X -rf .",
+            "rm -rf x",
+        ] {
             assert!(
                 auto_gate(
                     &rc,
                     &sb,
                     &call("run_command", json!({ "command": command }))
                 ),
-                "auto mode must confirm: {command}"
+                "auto mode must review shell text: {command}"
             );
         }
     }
@@ -368,15 +362,16 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_command_still_default_declines_when_a_prompt_is_shown() {
-        // The two questions are independent: auto mode may skip the prompt for `git diff`, but in default
-        // mode — where every call prompts — a stray Enter must still not run an arbitrary shell command.
+    fn a_reviewed_command_still_default_declines_when_a_prompt_is_shown() {
         let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let rc = bare_run_command();
         let git_diff = call("run_command", json!({"command": "git diff"}));
-        assert!(!auto_gate(&rc, &sb, &git_diff));
+        assert!(auto_gate(&rc, &sb, &git_diff));
         assert!(!rc.confirmation(&sb, &git_diff).unwrap().default_accept);
+        assert!(
+            !rc.accesses_outside_workspace(&git_diff, &rc.confirmation(&sb, &git_diff).unwrap())
+        );
     }
 
     #[test]
@@ -429,12 +424,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let sb = sandbox(&dir);
         let rc = bare_run_command();
-        let confirmation = rc
-            .confirmation(
-                &sb,
-                &call("run_command", json!({"command": "echo hi", "cwd": "/tmp"})),
-            )
-            .unwrap();
+        let external = call("run_command", json!({"command": "echo hi", "cwd": "/tmp"}));
+        let confirmation = rc.confirmation(&sb, &external).unwrap();
+        assert!(rc.accesses_outside_workspace(&external, &confirmation));
         assert!(
             confirmation.prompt.contains("fora da workspace")
                 && confirmation.prompt.contains("/tmp"),
@@ -889,83 +881,6 @@ mod tests {
             ),
             ToolOutcome::Error(_) => {}
             ToolOutcome::Declined => panic!("unexpected Declined"),
-        }
-    }
-
-    // The Windows counterpart of the macOS/Linux blocks above: same proof, through the restricted-token
-    // adapter (ADR 0031). The workspace is a `TempDir`, which the current user owns, so it accepts the
-    // write grant the mechanism stamps — a workspace the user does not own cannot be confined at all, and
-    // `WindowsRestrictedToken::detect` reports that at boot rather than here.
-    #[cfg(windows)]
-    fn confined_sandbox(dir: &TempDir) -> Option<FsSandbox> {
-        use crate::modules::tools::infrastructure::confine::windows::WindowsRestrictedToken;
-        use crate::shared::kernel::sandbox::NetworkPolicy;
-        // The launcher must be the real CLI: `current_exe()` here is the libtest harness, which cannot
-        // parse `confined-exec`, so using it would make the escape test pass because the command never
-        // ran. Test binaries live in `target/<profile>/deps/`, so the binary is one level up.
-        let launcher = std::env::current_exe()
-            .ok()?
-            .parent()?
-            .parent()?
-            .join("kiri.exe");
-        let adapter = WindowsRestrictedToken::with_launcher(launcher, dir.path()).ok()?;
-        FsSandbox::with_confinement(
-            dir.path(),
-            SensitiveMatcher::empty(),
-            Arc::new(adapter),
-            NetworkPolicy::Deny,
-            Arc::from(Vec::new()),
-            Arc::from(Vec::new()),
-        )
-        .ok()
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn confined_run_command_cannot_write_outside_root() {
-        let dir = TempDir::new().unwrap();
-        let Some(sb) = confined_sandbox(&dir) else {
-            return; // this host cannot stamp the grant; `detect` surfaces that as a boot notice
-        };
-        let reg = registry();
-        let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string());
-        let probe = format!("{home}\\kiri-sbx-must-not-exist-{}.txt", std::process::id());
-        let _ = fs::remove_file(&probe);
-        let cmd = format!("Set-Content -Path '{probe}' -Value leaked");
-        let _ = reg
-            .execute(&sb, &call("run_command", json!({ "command": cmd })))
-            .await;
-        let leaked = std::path::Path::new(&probe).exists();
-        let _ = fs::remove_file(&probe);
-        assert!(
-            !leaked,
-            "a confined run_command must not be able to write outside the workspace root"
-        );
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn confined_run_command_still_works_inside_root() {
-        let dir = TempDir::new().unwrap();
-        let Some(sb) = confined_sandbox(&dir) else {
-            return;
-        };
-        let reg = registry();
-        let outcome = reg
-            .execute(
-                &sb,
-                &call(
-                    "run_command",
-                    json!({ "command": "Set-Content -Path inside.txt -Value hi; Get-Content inside.txt" }),
-                ),
-            )
-            .await;
-        match outcome {
-            ToolOutcome::Ok(text) => assert!(
-                text.contains("hi"),
-                "confinement must not break in-jail work: {text}"
-            ),
-            other => panic!("expected Ok, got {other:?}"),
         }
     }
 }

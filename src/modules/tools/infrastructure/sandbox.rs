@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
-use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
+use crate::modules::tools::application::command_sandbox::{
+    CommandSandbox, SandboxPolicy, WorkspaceAccess,
+};
 use crate::modules::tools::application::path::{
     anchor_to_root_drive, expand_tilde, home, is_absolute_path,
 };
@@ -36,6 +38,8 @@ use crate::modules::tools::infrastructure::secret_paths::{
 #[derive(Debug, Clone)]
 pub struct FsSandbox {
     root: PathBuf,
+    command_home_root: PathBuf,
+    command_home: PathBuf,
     sensitive: SensitiveMatcher,
     /// OS-level confinement applied to every child process the tools spawn. `NoConfinement` on
     /// platforms without a facility (and `KIRI_SANDBOX=off`), the platform adapter otherwise.
@@ -75,14 +79,66 @@ impl FsSandbox {
         extra_ro: Arc<[PathBuf]>,
         extra_rw: Arc<[PathBuf]>,
     ) -> Result<Self> {
+        Self::with_confinement_and_home_root(
+            root,
+            std::env::temp_dir().join("kiri-sandbox-tests"),
+            sensitive,
+            confiner,
+            network,
+            extra_ro,
+            extra_rw,
+        )
+    }
+
+    pub fn with_confinement_and_home_root(
+        root: impl AsRef<Path>,
+        command_home_root: impl AsRef<Path>,
+        sensitive: SensitiveMatcher,
+        confiner: Arc<dyn CommandSandbox>,
+        network: NetworkPolicy,
+        extra_ro: Arc<[PathBuf]>,
+        extra_rw: Arc<[PathBuf]>,
+    ) -> Result<Self> {
         let root = root.as_ref();
         let canonical = std::fs::canonicalize(root)
             .with_context(|| format!("sandbox root {} does not exist", root.display()))?;
         if !canonical.is_dir() {
             bail!("sandbox root {} is not a directory", canonical.display());
         }
+        let command_home_root = command_home_root.as_ref();
+        let identity = blake3::hash(canonical.to_string_lossy().as_bytes()).to_hex();
+        let command_home = command_home_root.join(identity.as_str()).join("home");
+        std::fs::create_dir_all(&command_home).with_context(|| {
+            format!(
+                "failed to create sandbox command home {}",
+                command_home.display()
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&command_home, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| {
+                    format!(
+                        "failed to protect sandbox command home {}",
+                        command_home.display()
+                    )
+                })?;
+        }
+        let command_home = std::fs::canonicalize(&command_home).with_context(|| {
+            format!(
+                "sandbox command home {} does not exist",
+                command_home.display()
+            )
+        })?;
+        #[cfg(unix)]
+        if network == NetworkPolicy::Deny {
+            prepare_offline_cargo_home(&command_home, &extra_ro)?;
+        }
         Ok(Self {
             root: canonical,
+            command_home_root: command_home_root.to_path_buf(),
+            command_home,
             sensitive,
             confiner,
             network,
@@ -102,8 +158,9 @@ impl FsSandbox {
         } else {
             self.root.join(arg)
         };
-        Self::with_confinement(
+        Self::with_confinement_and_home_root(
             &target,
+            &self.command_home_root,
             self.sensitive.clone(),
             self.confiner.clone(),
             self.network,
@@ -111,6 +168,154 @@ impl FsSandbox {
             self.extra_rw.clone(),
         )
     }
+}
+
+#[cfg(unix)]
+fn prepare_offline_cargo_home(command_home: &Path, extra_ro: &[PathBuf]) -> Result<()> {
+    let cargo_home = command_home.join(".cargo-offline");
+    std::fs::create_dir_all(&cargo_home).with_context(|| {
+        format!(
+            "failed to create offline Cargo home {}",
+            cargo_home.display()
+        )
+    })?;
+    for cache_name in ["registry", "git"] {
+        let Some(source) = extra_ro.iter().find(|path| {
+            path.file_name().is_some_and(|name| name == cache_name)
+                && path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name == ".cargo")
+        }) else {
+            continue;
+        };
+        ensure_cargo_cache_link(&cargo_home.join(cache_name), source)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_cargo_cache_link(destination: &Path, source: &Path) -> Result<()> {
+    if cargo_cache_link_matches(destination, source)? {
+        return Ok(());
+    }
+    for attempt in 0..3 {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temporary = destination.with_extension(format!(
+            "{}.{}.{}.link",
+            std::process::id(),
+            unique,
+            attempt
+        ));
+        match std::os::unix::fs::symlink(source, &temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if cargo_cache_link_matches(destination, source)? {
+                    return Ok(());
+                }
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to stage read-only Cargo cache link {}",
+                        temporary.display()
+                    )
+                });
+            }
+        }
+
+        let existing = std::fs::symlink_metadata(destination).ok();
+        let stale = existing
+            .as_ref()
+            .filter(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            .map(|_| {
+                destination.with_extension(format!(
+                    "{}.{}.{}.stale",
+                    std::process::id(),
+                    unique,
+                    attempt
+                ))
+            });
+        if let Some(stale) = &stale
+            && let Err(error) = std::fs::rename(destination, stale)
+        {
+            let _ = std::fs::remove_file(&temporary);
+            if cargo_cache_link_matches(destination, source)? {
+                return Ok(());
+            }
+            if error.kind() == std::io::ErrorKind::NotFound {
+                std::thread::yield_now();
+                continue;
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to quarantine stale Cargo cache {}",
+                    destination.display()
+                )
+            });
+        }
+
+        if let Err(error) = std::fs::rename(&temporary, destination) {
+            if let Some(stale) = &stale
+                && !destination.exists()
+            {
+                let _ = std::fs::rename(stale, destination);
+            }
+            let _ = std::fs::remove_file(&temporary);
+            if cargo_cache_link_matches(destination, source)? {
+                return Ok(());
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to install Cargo cache link {}",
+                    destination.display()
+                )
+            });
+        }
+        if let Some(stale) = stale {
+            remove_stale_cargo_cache(&stale)?;
+        }
+        if cargo_cache_link_matches(destination, source)? {
+            return Ok(());
+        }
+    }
+    bail!(
+        "Cargo cache link {} changed during installation",
+        destination.display()
+    )
+}
+
+#[cfg(unix)]
+fn cargo_cache_link_matches(destination: &Path, source: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::read_link(destination)
+            .map(|target| target == source)
+            .with_context(|| format!("failed to read Cargo cache link {}", destination.display())),
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to inspect Cargo cache link {}",
+                destination.display()
+            )
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn remove_stale_cargo_cache(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect stale Cargo cache {}", path.display()))?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+    .with_context(|| format!("failed to remove stale Cargo cache {}", path.display()))
 }
 
 impl Sandbox for FsSandbox {
@@ -144,6 +349,8 @@ impl Sandbox for FsSandbox {
         rw.extend(extra_rw.iter().map(|path| path.to_path_buf()));
         SandboxPolicy {
             root: self.root.clone(),
+            command_home: self.command_home.clone(),
+            workspace_access: WorkspaceAccess::ReadWrite,
             network,
             extra_ro: ro,
             extra_rw: rw,

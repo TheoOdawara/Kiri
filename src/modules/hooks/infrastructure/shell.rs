@@ -34,8 +34,8 @@ impl ShellHookRunner {
 #[async_trait::async_trait(?Send)]
 impl HookRunner for ShellHookRunner {
     async fn run(&self, sandbox: &dyn Sandbox, hook: &Hook) -> HookOutcome {
-        // #89: KIRI_SANDBOX=require must gate hooks the same way it gates run_command.
-        if self.require_confinement && !sandbox.confiner().supports_confinement() {
+        let policy = sandbox.command_policy(NetworkPolicy::Deny, &[], &[]);
+        if self.require_confinement && !sandbox.confiner().guarantees().satisfies(&policy) {
             return HookOutcome {
                 hook_id: hook.id.clone(),
                 ok: false,
@@ -43,7 +43,6 @@ impl HookRunner for ShellHookRunner {
             };
         }
 
-        let policy = sandbox.command_policy(NetworkPolicy::Deny, &[], &[]);
         let result = exec::run_shell(
             &hook.command,
             Some(sandbox.root()),
@@ -175,7 +174,10 @@ mod tests {
     async fn require_confinement_refuses_when_confiner_unsupported() {
         let dir = TempDir::new().unwrap();
         let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
-        assert!(!sandbox.confiner().supports_confinement());
+        assert_eq!(
+            sandbox.confiner().guarantees(),
+            crate::modules::tools::application::command_sandbox::SandboxGuarantees::NONE
+        );
         let outcome = ShellHookRunner::new(true)
             .run(&sandbox, &hook("echo should-not-run"))
             .await;

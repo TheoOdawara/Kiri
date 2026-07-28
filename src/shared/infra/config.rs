@@ -5,7 +5,7 @@ mod resolve;
 mod settings;
 mod writers;
 
-pub use cli::{Cli, CliCommand, SyncAction};
+pub use cli::{Cli, CliCommand, SandboxAction, SyncAction};
 pub use settings::{Settings, load_global_env};
 pub use writers::{
     delete_provider, persist_active_model, persist_active_provider, persist_effort, upsert_provider,

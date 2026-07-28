@@ -1,6 +1,6 @@
 # ADR 0031 — Windows write confinement: a write-restricted token, measured
 
-- Status: Accepted
+- Status: Superseded by ADR 0033
 - Date: 2026-07-26
 - Amends: ADR 0009 (`0009-os-command-sandbox.md`) and ADR 0018 — both left Windows on `NoConfinement`
   with "Windows is a later port" as the justification. v1 now ships macOS, Linux **and** Windows, so

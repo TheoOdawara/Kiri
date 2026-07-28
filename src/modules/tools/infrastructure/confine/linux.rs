@@ -1,21 +1,24 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
+use crate::modules::tools::application::command_sandbox::{
+    CommandSandbox, SandboxGuarantees, SandboxPolicy, WorkspaceAccess,
+};
 use crate::modules::tools::infrastructure::secret_paths::{
-    HARNESS_PRIVATE_DIR, HOME_SECRET_FILES, HOME_SECRET_SUBPATHS, SECRET_DIRS,
+    HARNESS_PRIVATE_DIR, HOME_SECRET_FILES, HOME_SECRET_SUBPATH_FILES, HOME_SECRET_SUBPATHS,
+    SECRET_DIRS,
 };
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::sandbox::NetworkPolicy;
 
-const BWRAP: &str = "bwrap";
+const BWRAP: &str = "/usr/bin/bwrap";
+const SYSTEM_READ_ROOTS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
 
 /// Linux OS-confinement adapter. Wraps the child in `bwrap <flags> -- <program> <args…>`, mirroring the
 /// macOS Seatbelt adapter's argv-transform shape. A system binary — no FFI, no crate — so the crate-wide
-/// `unsafe_code = "forbid"` lint is untouched. `--ro-bind / /` re-mounts the whole filesystem read-only
-/// (the permissive base matching Seatbelt's `(allow default)`), then targeted `--bind`s re-open the
-/// workspace and configured extras for writing, and `--tmpfs`/`--ro-bind /dev/null` shadow the
-/// single-sourced credential set so a confined `run_command` cannot read it back to the model.
+/// `unsafe_code = "forbid"` lint is untouched. The guest root is not mounted: required system roots and
+/// configured paths are added explicitly, while `--tmpfs`/`--ro-bind /dev/null` shadow any credential
+/// path that an explicit mount would otherwise expose.
 ///
 /// Landlock (the more modern, no-external-binary approach) is deferred: it is deny-by-default
 /// allow-list, which cannot express "read everything except `~/.ssh`" without enumerating the rest of
@@ -40,13 +43,15 @@ impl BwrapSandbox {
 
 /// Run bwrap against `/bin/true` inside the *actual* jail shape `confine()` builds — via the same
 /// `build_args` — and require exit 0. It must be representative, not a lenient subset: an environment
-/// where a minimal `--ro-bind / /` jail runs but the full jail (`--proc`, `--tmpfs`, a writable `--bind`,
+/// where a minimal mount jail runs but the full jail (`--proc`, `--tmpfs`, a writable `--bind`,
 /// the credential shadows) does not — e.g. a hardened CI runner that permits only a partial unprivileged
 /// user namespace — would otherwise pass detection yet fail every real confined command. A cheap,
 /// synchronous check — called once at startup (`detect`) and again on every `confine()` call (fail-closed).
 fn probe() -> bool {
     let policy = SandboxPolicy {
         root: std::env::temp_dir(),
+        command_home: std::env::temp_dir(),
+        workspace_access: WorkspaceAccess::ReadWrite,
         network: NetworkPolicy::Deny,
         extra_ro: Vec::new(),
         extra_rw: Vec::new(),
@@ -103,31 +108,37 @@ impl CommandSandbox for BwrapSandbox {
         Ok(wrapped)
     }
 
-    fn supports_confinement(&self) -> bool {
-        true
+    fn guarantees(&self) -> SandboxGuarantees {
+        SandboxGuarantees::BWRAP
     }
 }
 
 /// Build the bwrap flag list from the policy. bwrap applies binds in argument order: a later bind
-/// shadows an earlier one at the same or a nested path, so the shape mirrors Seatbelt's last-match-wins
-/// profile: whole-FS read-only base, then write-allows for the workspace/extras, then credential
-/// shadows, then explicit read re-allows last so they can punch a hole through the credential shadow.
+/// shadows an earlier one at the same or a nested path. System roots are mounted read-only, followed by
+/// the workspace/extras, credential shadows, and explicit read re-allows last.
 fn build_args(policy: &SandboxPolicy, cwd: Option<&Path>) -> Vec<OsString> {
     let mut args: Vec<OsString> = Vec::new();
 
-    // Permissive base: the whole filesystem, read-only, matching Seatbelt's `(allow default)` posture -
-    // the path-policy and confirmation layers are the primary guard; this OS layer only adds what they
-    // cannot enforce.
-    push_self_bind(&mut args, "--ro-bind", Path::new("/"));
+    for root in SYSTEM_READ_ROOTS
+        .iter()
+        .map(Path::new)
+        .filter(|path| path.exists())
+    {
+        push_self_bind(&mut args, "--ro-bind", root);
+    }
     push_dest_only(&mut args, "--dev", Path::new("/dev"));
     push_dest_only(&mut args, "--proc", Path::new("/proc"));
     push_dest_only(&mut args, "--tmpfs", &std::env::temp_dir());
 
-    // Writes: re-open the workspace root and the configured/per-call extras (bind, not ro-bind, so they
-    // are writable over the read-only base).
-    push_self_bind(&mut args, "--bind", &policy.root);
+    let workspace_flag = match policy.workspace_access {
+        WorkspaceAccess::ReadOnly => "--ro-bind",
+        WorkspaceAccess::ReadWrite => "--bind",
+    };
+    push_self_bind(&mut args, workspace_flag, &policy.root);
     for dir in &policy.extra_rw {
-        push_self_bind(&mut args, "--bind", dir);
+        if dir.exists() {
+            push_self_bind(&mut args, "--bind", dir);
+        }
     }
 
     // Credential set under home, shadowed AFTER the write-allows above so they win even when the
@@ -138,18 +149,37 @@ fn build_args(policy: &SandboxPolicy, cwd: Option<&Path>) -> Vec<OsString> {
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         for dir in SECRET_DIRS {
-            push_dest_only(&mut args, "--tmpfs", &home.join(dir));
+            let target = home.join(dir);
+            if is_exposed(&target, policy) {
+                push_dest_only(&mut args, "--tmpfs", &target);
+            }
         }
-        push_dest_only(&mut args, "--tmpfs", &home.join(HARNESS_PRIVATE_DIR));
+        let harness = home.join(HARNESS_PRIVATE_DIR);
+        if is_exposed(&harness, policy) {
+            push_dest_only(&mut args, "--tmpfs", &harness);
+        }
         for components in HOME_SECRET_SUBPATHS {
             let mut sub = home.clone();
             for component in *components {
                 sub.push(component);
             }
-            push_dest_only(&mut args, "--tmpfs", &sub);
+            if is_exposed(&sub, policy) {
+                push_dest_only(&mut args, "--tmpfs", &sub);
+            }
         }
         for file in HOME_SECRET_FILES {
-            push_shadow_file(&mut args, &home.join(file));
+            let target = home.join(file);
+            if target.exists() && is_exposed(&target, policy) {
+                push_shadow_file(&mut args, &target);
+            }
+        }
+        for components in HOME_SECRET_SUBPATH_FILES {
+            let target = components
+                .iter()
+                .fold(home.clone(), |path, component| path.join(component));
+            if target.exists() && is_exposed(&target, policy) {
+                push_shadow_file(&mut args, &target);
+            }
         }
     }
 
@@ -157,12 +187,24 @@ fn build_args(policy: &SandboxPolicy, cwd: Option<&Path>) -> Vec<OsString> {
     // read-hole through the credential shadows above. Emitted last so it wins (bwrap applies binds in
     // argument order).
     for dir in &policy.extra_ro {
-        push_self_bind(&mut args, "--ro-bind", dir);
+        if dir.exists() {
+            push_self_bind(&mut args, "--ro-bind", dir);
+        }
     }
+    // The exact synthetic home is the final filesystem grant. This restores only that managed subtree
+    // when a broader workspace/extra mount caused the `~/.kiri` credential shadow above to cover it.
+    push_self_bind(&mut args, "--bind", &policy.command_home);
 
     if policy.network == NetworkPolicy::Deny {
         args.push(OsString::from("--unshare-net"));
     }
+    args.extend([
+        OsString::from("--unshare-pid"),
+        OsString::from("--unshare-ipc"),
+        OsString::from("--new-session"),
+        OsString::from("--cap-drop"),
+        OsString::from("ALL"),
+    ]);
     args.push(OsString::from("--die-with-parent"));
     if let Some(dir) = cwd {
         push_dest_only(&mut args, "--chdir", dir);
@@ -171,12 +213,19 @@ fn build_args(policy: &SandboxPolicy, cwd: Option<&Path>) -> Vec<OsString> {
 }
 
 /// `--bind`/`--ro-bind SRC DEST` where the destination is the same path as the source: the shape every
-/// bind in this adapter uses, since the base already maps the whole filesystem 1:1.
+/// bind in this adapter uses, preserving the source's absolute location inside the jail.
 fn push_self_bind(args: &mut Vec<OsString>, flag: &str, path: &Path) {
     let resolved = canon(path);
     args.push(OsString::from(flag));
-    args.push(resolved.clone().into_os_string());
     args.push(resolved.into_os_string());
+    args.push(path.to_owned().into_os_string());
+}
+
+fn is_exposed(path: &Path, policy: &SandboxPolicy) -> bool {
+    path.starts_with(&policy.root)
+        || path.starts_with(&policy.command_home)
+        || policy.extra_ro.iter().any(|root| path.starts_with(root))
+        || policy.extra_rw.iter().any(|root| path.starts_with(root))
 }
 
 /// A bwrap flag that takes a single destination path with no source (`--dev`, `--proc`, `--tmpfs`,
@@ -203,13 +252,45 @@ fn canon(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ops::{Deref, DerefMut};
 
-    fn policy(network: NetworkPolicy) -> SandboxPolicy {
-        SandboxPolicy {
-            root: PathBuf::from("/tmp/kiri-ws"),
-            network,
-            extra_ro: Vec::new(),
-            extra_rw: vec![PathBuf::from("/tmp/kiri-extra")],
+    struct PolicyFixture {
+        _directory: tempfile::TempDir,
+        policy: SandboxPolicy,
+    }
+
+    impl Deref for PolicyFixture {
+        type Target = SandboxPolicy;
+
+        fn deref(&self) -> &Self::Target {
+            &self.policy
+        }
+    }
+
+    impl DerefMut for PolicyFixture {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.policy
+        }
+    }
+
+    fn policy(network: NetworkPolicy, workspace_access: WorkspaceAccess) -> PolicyFixture {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("kiri-ws");
+        let command_home = directory.path().join("kiri-home");
+        let extra = directory.path().join("kiri-extra");
+        for path in [&root, &command_home, &extra] {
+            std::fs::create_dir(path).unwrap();
+        }
+        PolicyFixture {
+            _directory: directory,
+            policy: SandboxPolicy {
+                root,
+                command_home,
+                workspace_access,
+                network,
+                extra_ro: Vec::new(),
+                extra_rw: vec![extra],
+            },
         }
     }
 
@@ -221,19 +302,28 @@ mod tests {
 
     #[test]
     fn args_unshare_net_when_denied() {
-        let args = args_to_strings(&build_args(&policy(NetworkPolicy::Deny), None));
+        let args = args_to_strings(&build_args(
+            &policy(NetworkPolicy::Deny, WorkspaceAccess::ReadWrite),
+            None,
+        ));
         assert!(args.contains(&"--unshare-net".to_string()));
     }
 
     #[test]
     fn args_allow_network_when_permitted() {
-        let args = args_to_strings(&build_args(&policy(NetworkPolicy::Allow), None));
+        let args = args_to_strings(&build_args(
+            &policy(NetworkPolicy::Allow, WorkspaceAccess::ReadWrite),
+            None,
+        ));
         assert!(!args.contains(&"--unshare-net".to_string()));
     }
 
     #[test]
-    fn args_bind_the_workspace_root_and_extras_writable() {
-        let args = args_to_strings(&build_args(&policy(NetworkPolicy::Deny), None));
+    fn read_write_policy_binds_the_workspace_and_extras_writable() {
+        let args = args_to_strings(&build_args(
+            &policy(NetworkPolicy::Deny, WorkspaceAccess::ReadWrite),
+            None,
+        ));
         assert!(
             args.windows(2)
                 .any(|w| w[0] == "--bind" && w[1].contains("kiri-ws"))
@@ -245,16 +335,70 @@ mod tests {
     }
 
     #[test]
+    fn read_only_policy_never_binds_the_workspace_writable() {
+        let args = args_to_strings(&build_args(
+            &policy(NetworkPolicy::Deny, WorkspaceAccess::ReadOnly),
+            None,
+        ));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--ro-bind" && w[1].contains("kiri-ws"))
+        );
+        assert!(
+            !args
+                .windows(2)
+                .any(|w| w[0] == "--bind" && w[1].contains("kiri-ws"))
+        );
+    }
+
+    #[test]
+    fn minimal_jail_does_not_mount_the_host_root() {
+        let args = args_to_strings(&build_args(
+            &policy(NetworkPolicy::Deny, WorkspaceAccess::ReadOnly),
+            None,
+        ));
+        assert!(
+            !args
+                .windows(3)
+                .any(|w| w[0] == "--ro-bind" && w[1] == "/" && w[2] == "/")
+        );
+    }
+
+    #[test]
+    fn jail_enables_process_ipc_session_and_capability_isolation() {
+        let args = args_to_strings(&build_args(
+            &policy(NetworkPolicy::Deny, WorkspaceAccess::ReadOnly),
+            None,
+        ));
+        for flag in [
+            "--unshare-net",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--new-session",
+            "--die-with-parent",
+        ] {
+            assert!(args.contains(&flag.to_string()), "missing {flag}");
+        }
+        assert!(
+            args.windows(2)
+                .any(|window| window == ["--cap-drop", "ALL"])
+        );
+    }
+
+    #[test]
     fn args_shadow_credential_dirs_after_write_allows() {
         let Some(home) = std::env::var_os("HOME") else {
             return; // headless/CI edge: no per-user home whose credential shadows exist
         };
         let home = PathBuf::from(home);
-        let args = build_args(&policy(NetworkPolicy::Deny), None);
+        let mut policy = policy(NetworkPolicy::Deny, WorkspaceAccess::ReadWrite);
+        policy.root = home.clone();
+        policy.command_home = home.join(".kiri/sandbox/workspaces/test/home");
+        let args = build_args(&policy, None);
         let strings = args_to_strings(&args);
         let root_bind_at = strings
             .iter()
-            .position(|a| a.contains("kiri-ws"))
+            .position(|a| a == home.to_string_lossy().as_ref())
             .expect("root bind present");
         let ssh_shadow_at = strings
             .iter()
@@ -265,12 +409,21 @@ mod tests {
             "credential shadows must come after the write-allows so they win (argument-order wins)"
         );
         assert!(strings.iter().any(|a| a.contains(".kiri")));
+        let command_home_at = strings
+            .iter()
+            .rposition(|argument| argument == policy.command_home.to_string_lossy().as_ref())
+            .expect("synthetic home bind present");
+        let harness_shadow_at = strings
+            .iter()
+            .position(|argument| argument == home.join(".kiri").to_string_lossy().as_ref())
+            .expect("harness shadow present");
+        assert!(command_home_at > harness_shadow_at);
     }
 
     #[test]
     fn args_reallow_configured_read_paths_last() {
-        let mut p = policy(NetworkPolicy::Deny);
-        p.extra_ro.push(PathBuf::from("/tmp"));
+        let mut p = policy(NetworkPolicy::Deny, WorkspaceAccess::ReadWrite);
+        p.extra_ro.push(std::env::temp_dir());
         let args = build_args(&p, None);
         let strings = args_to_strings(&args);
         let last_ro_bind = strings
@@ -279,14 +432,17 @@ mod tests {
             .rfind(|(_, a)| a.as_str() == "--ro-bind")
             .map(|(i, _)| i)
             .expect("at least one --ro-bind present");
-        // The last --ro-bind flag emitted must be the explicit extra_ro re-allow, not the base `/`.
+        // The last --ro-bind flag emitted must be the explicit extra_ro re-allow.
         assert_ne!(strings[last_ro_bind + 1], "/");
     }
 
     #[test]
     fn args_include_chdir_when_cwd_given() {
         let dir = std::env::temp_dir();
-        let args = args_to_strings(&build_args(&policy(NetworkPolicy::Deny), Some(&dir)));
+        let args = args_to_strings(&build_args(
+            &policy(NetworkPolicy::Deny, WorkspaceAccess::ReadWrite),
+            Some(&dir),
+        ));
         assert!(args.contains(&"--chdir".to_string()));
     }
 
@@ -299,7 +455,10 @@ mod tests {
         let mut inner = tokio::process::Command::new("/bin/echo");
         inner.arg("hi");
         let wrapped = adapter
-            .confine(inner, &policy(NetworkPolicy::Deny))
+            .confine(
+                inner,
+                &policy(NetworkPolicy::Deny, WorkspaceAccess::ReadWrite),
+            )
             .unwrap();
         let std = wrapped.as_std();
         assert_eq!(std.get_program(), BWRAP);
@@ -327,9 +486,13 @@ mod tests {
         inner.env_clear();
         inner.env("PATH", "/usr/bin");
         let mut wrapped = adapter
-            .confine(inner, &policy(NetworkPolicy::Deny))
+            .confine(
+                inner,
+                &policy(NetworkPolicy::Deny, WorkspaceAccess::ReadWrite),
+            )
             .unwrap();
         let output = wrapped.output().await.expect("bwrap runs /usr/bin/env");
+        assert!(output.status.success(), "bwrap failed: {output:?}");
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             let key = line.split('=').next().unwrap_or(line);
@@ -343,5 +506,23 @@ mod tests {
             stdout.contains("PATH="),
             "the explicit override must still reach the child: {stdout:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn read_only_workspace_rejects_a_real_write() {
+        if BwrapSandbox::detect().is_none() {
+            return; // CI's mandatory bwrap smoke makes this a hard failure there
+        }
+        let adapter = BwrapSandbox;
+        let fixture = policy(NetworkPolicy::Deny, WorkspaceAccess::ReadOnly);
+        let target = fixture.root.join("must-not-exist");
+        let mut inner = tokio::process::Command::new("/usr/bin/touch");
+        inner.arg(&target).env_clear();
+        let mut wrapped = adapter.confine(inner, &fixture).unwrap();
+
+        let output = wrapped.output().await.expect("bwrap runs touch");
+
+        assert!(!output.status.success());
+        assert!(!target.exists());
     }
 }

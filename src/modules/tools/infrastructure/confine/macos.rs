@@ -1,9 +1,12 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
+use crate::modules::tools::application::command_sandbox::{
+    CommandSandbox, SandboxGuarantees, SandboxPolicy, WorkspaceAccess,
+};
 use crate::modules::tools::infrastructure::secret_paths::{
-    HARNESS_PRIVATE_DIR, HOME_SECRET_FILES, HOME_SECRET_SUBPATHS, SECRET_DIRS,
+    HARNESS_PRIVATE_DIR, HOME_SECRET_FILES, HOME_SECRET_SUBPATH_FILES, HOME_SECRET_SUBPATHS,
+    SECRET_DIRS,
 };
 use crate::modules::tools::infrastructure::sensitive::sensitive_globs;
 use crate::shared::kernel::error::AgentError;
@@ -80,8 +83,8 @@ impl CommandSandbox for MacosSeatbelt {
         Ok(wrapped)
     }
 
-    fn supports_confinement(&self) -> bool {
-        true
+    fn guarantees(&self) -> SandboxGuarantees {
+        SandboxGuarantees::MACOS
     }
 }
 
@@ -103,7 +106,9 @@ fn build_profile(policy: &SandboxPolicy) -> String {
     push_allow_write(&mut profile, Path::new("/dev"));
     push_allow_write(&mut profile, Path::new("/private/tmp"));
     push_allow_write(&mut profile, &std::env::temp_dir());
-    push_allow_write(&mut profile, &policy.root);
+    if policy.workspace_access == WorkspaceAccess::ReadWrite {
+        push_allow_write(&mut profile, &policy.root);
+    }
     for dir in &policy.extra_rw {
         push_allow_write(&mut profile, dir);
     }
@@ -130,6 +135,10 @@ fn build_profile(policy: &SandboxPolicy) -> String {
     // Defense-in-depth: `run_command` is already always-decline-confirm. Emitted before `extra_ro` so an
     // explicit read-hole can still opt a path back in, mirroring the credential-dir denies.
     push_sensitive_name_denies(&mut profile);
+
+    // The synthetic per-workspace HOME is harness-owned state, not a credential store. Re-open this
+    // exact subtree after the real ~/.kiri deny so caches remain writable even in Plan mode.
+    push_allow_write(&mut profile, &policy.command_home);
 
     // Re-allow any explicitly configured read paths (KIRI_SANDBOX_RO_PATHS), so the user can punch a
     // read-hole through the credential-dir denies above — e.g. a deploy tool that legitimately reads
@@ -193,6 +202,9 @@ fn push_home_denies(profile: &mut String, home: &Path) {
     for file in HOME_SECRET_FILES {
         push_deny_read(profile, &home.join(file));
     }
+    for components in HOME_SECRET_SUBPATH_FILES {
+        push_deny_read(profile, &join_home_subpath(home, components));
+    }
 }
 
 /// The write-side mirror of `push_home_denies`: refuse writes into the same credential set, so a confined
@@ -208,6 +220,9 @@ fn push_home_write_denies(profile: &mut String, home: &Path) {
     }
     for file in HOME_SECRET_FILES {
         push_deny_write(profile, &home.join(file));
+    }
+    for components in HOME_SECRET_SUBPATH_FILES {
+        push_deny_write(profile, &join_home_subpath(home, components));
     }
 }
 
@@ -267,6 +282,8 @@ mod tests {
     fn policy(network: NetworkPolicy) -> SandboxPolicy {
         SandboxPolicy {
             root: PathBuf::from("/tmp/kiri-ws"),
+            command_home: PathBuf::from("/tmp/kiri-home"),
+            workspace_access: WorkspaceAccess::ReadWrite,
             network,
             extra_ro: Vec::new(),
             extra_rw: vec![PathBuf::from("/tmp/kiri-extra")],
@@ -335,6 +352,7 @@ mod tests {
         assert!(profile.contains("(deny file-read* (subpath \"/Users/fake/.kiri\"))"));
         assert!(profile.contains("/Users/fake/.netrc"));
         assert!(profile.contains("/Users/fake/.ssh"));
+        assert!(profile.contains("/Users/fake/.cargo/credentials.toml"));
     }
 
     #[test]
@@ -361,6 +379,8 @@ mod tests {
         // Fixed read-only shape (empty extra_ro): the `~/.kiri` deny stands, with no overriding allow.
         let fixed = build_profile(&SandboxPolicy {
             root: home.clone(),
+            command_home: PathBuf::from("/tmp/kiri-home"),
+            workspace_access: WorkspaceAccess::ReadWrite,
             network: NetworkPolicy::Deny,
             extra_ro: Vec::new(),
             extra_rw: Vec::new(),
@@ -379,6 +399,8 @@ mod tests {
         // is exactly the path the call-site fix removed.
         let buggy = build_profile(&SandboxPolicy {
             root: home.clone(),
+            command_home: PathBuf::from("/tmp/kiri-home"),
+            workspace_access: WorkspaceAccess::ReadWrite,
             network: NetworkPolicy::Deny,
             extra_ro: vec![home.clone()],
             extra_rw: Vec::new(),
@@ -414,6 +436,8 @@ mod tests {
 
         let profile = build_profile(&SandboxPolicy {
             root: home.clone(),
+            command_home: PathBuf::from("/tmp/kiri-home"),
+            workspace_access: WorkspaceAccess::ReadWrite,
             network: NetworkPolicy::Deny,
             extra_ro: Vec::new(),
             extra_rw: Vec::new(),

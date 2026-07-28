@@ -18,20 +18,16 @@ pub(super) const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(300);
 /// (and the no-regression target). See docs/decisions/0001-openai-compatible-provider.md.
 pub(super) const DEFAULT_PROVIDER_ID: &str = "nvidia";
 
-/// Toolchain cache/config directories a build legitimately writes to, allowed for writing under
-/// confinement by default so the first `cargo build` / `npm install` works with no extra setup. The
-/// list tracks the toolchains the command policy admits (ADR 0030): a program plan mode runs must be
-/// able to reach its own cache, or confinement turns an approved command into a confusing failure.
-pub(super) const DEFAULT_RW_DIRS: &[&str] = &[
-    "~/.cargo",
+/// User-installed toolchain binaries/runtimes required by the supported Linux command surface. They are
+/// mounted read-only; caches and package state live under the synthetic per-workspace HOME instead of
+/// reopening the user's real home for writes.
+pub(super) const DEFAULT_RO_DIRS: &[&str] = &[
+    "~/.cargo/bin",
+    "~/.cargo/registry",
+    "~/.cargo/git",
     "~/.rustup",
-    "~/.npm",
-    "~/.cache",
-    "~/.gradle",
-    "~/.m2",
-    "~/go",
-    "~/.bun",
-    "~/.deno",
-    "~/.pnpm-store",
-    "~/.local/share/uv",
+    "~/.bun/bin",
+    "~/.deno/bin",
+    "~/.local/bin",
+    "/usr/local/go",
 ];

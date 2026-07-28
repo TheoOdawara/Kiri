@@ -1,6 +1,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::modules::agent::application::action_reviewer::{
+    ActionReviewRequest, ActionReviewer, RefuseActionReviewer, ReviewDecision,
+};
 use crate::modules::agent::application::approval_policy::{
     Approval, ApprovalPolicy, CheckpointReason,
 };
@@ -9,15 +12,64 @@ use crate::modules::agent::application::tool_observer::ToolObserver;
 use crate::modules::provider::application::completion_provider::{
     CompletionProvider, EventSink, TurnRequest,
 };
+use crate::modules::tools::application::command_sandbox::{
+    CommandSandbox, SandboxPolicy, WorkspaceAccess,
+};
 use crate::modules::tools::application::plan::{PRESENT_PLAN, extract_plan};
 use crate::modules::tools::application::registry::ToolRegistry;
-use crate::modules::tools::application::sandbox::Sandbox;
+use crate::modules::tools::application::sandbox::{CreateResolution, Sandbox};
 use crate::modules::tools::application::tool::{Confirmation, ToolOutcome};
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::conversation::Conversation;
 use crate::shared::kernel::error::AgentError;
 use crate::shared::kernel::message::Message;
+use crate::shared::kernel::role::Role;
+use crate::shared::kernel::sandbox::NetworkPolicy;
 use crate::shared::kernel::tool_call::ToolCall;
+
+struct ReadOnlyWorkspace<'a>(&'a dyn Sandbox);
+
+impl Sandbox for ReadOnlyWorkspace<'_> {
+    fn root(&self) -> &std::path::Path {
+        self.0.root()
+    }
+
+    fn resolve_existing(&self, rel: &str) -> Result<std::path::PathBuf, AgentError> {
+        self.0.resolve_existing(rel)
+    }
+
+    fn resolve_create(&self, rel: &str) -> Result<CreateResolution, AgentError> {
+        self.0.resolve_create(rel)
+    }
+
+    fn secret_dir_component(&self, real: &std::path::Path) -> Option<&'static str> {
+        self.0.secret_dir_component(real)
+    }
+
+    fn command_policy(
+        &self,
+        network: NetworkPolicy,
+        extra_ro: &[&std::path::Path],
+        extra_rw: &[&std::path::Path],
+    ) -> SandboxPolicy {
+        let mut policy = self.0.command_policy(network, extra_ro, extra_rw);
+        policy.extra_ro.append(&mut policy.extra_rw);
+        policy.workspace_access = WorkspaceAccess::ReadOnly;
+        policy
+    }
+
+    fn confiner(&self) -> &dyn CommandSandbox {
+        self.0.confiner()
+    }
+
+    fn network(&self) -> NetworkPolicy {
+        self.0.network()
+    }
+
+    fn is_sensitive_name(&self, name: &str) -> bool {
+        self.0.is_sensitive_name(name)
+    }
+}
 
 /// Protocol strings the model reads back in the conversation history, so they stay English — unlike the
 /// user-facing pt-BR confirmation prompts in the `Bridge` adapter.
@@ -56,6 +108,7 @@ fn answer_unanswered(conversation: &mut Conversation, calls: &[ToolCall], messag
 /// UI, execute the approved ones, and feed the results back — guarded by a checkpoint against runaways.
 pub struct AgentLoop {
     provider: Arc<dyn CompletionProvider>,
+    reviewer: Arc<dyn ActionReviewer>,
     registry: ToolRegistry,
     model: String,
     checkpoint_budget: Duration,
@@ -72,11 +125,17 @@ impl AgentLoop {
     ) -> Self {
         Self {
             provider,
+            reviewer: Arc::new(RefuseActionReviewer),
             registry,
             model,
             checkpoint_budget,
             max_tool_calls,
         }
+    }
+
+    pub fn with_reviewer(mut self, reviewer: Arc<dyn ActionReviewer>) -> Self {
+        self.reviewer = reviewer;
+        self
     }
 
     /// A live `/provider` or `/effort` change rebuilds the Arc, since effort is captured at construction.
@@ -117,6 +176,14 @@ impl AgentLoop {
         // outright — never downgrade to Auto's live-confirmation gate (issue #28). The schema, the
         // plan-mode reminder, and the `present_plan` interception are all sticky to this, not to `mode`.
         let started_in_plan = mode == ApprovalMode::Plan;
+        let user_intent = conversation
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::User)
+            .and_then(|message| message.content.as_deref())
+            .unwrap_or_default()
+            .to_string();
         // Computed once from the ORIGIN mode: recomputing on a mid-turn `ApprovedAuto` would hand the turn
         // the destructive tools plan mode withheld.
         let schemas = self.registry.schemas_for(mode);
@@ -230,14 +297,8 @@ impl AgentLoop {
                     }
                 }
 
-                // Shown in every mode, so the user sees each action even under auto.
-                let command = self
-                    .registry
-                    .command_line(sandbox, call)
-                    .unwrap_or_else(|| call.function.name.clone());
-
                 let result = self
-                    .decide_and_run(sandbox, call, &command, &mut mode, started_in_plan, io)
+                    .decide_and_run(sandbox, call, &user_intent, &mut mode, started_in_plan, io)
                     .await;
 
                 let Some((outcome, elapsed)) = result else {
@@ -292,27 +353,35 @@ impl AgentLoop {
         &self,
         sandbox: &dyn Sandbox,
         call: &ToolCall,
-        command: &str,
+        user_intent: &str,
         mode: &mut ApprovalMode,
         started_in_plan: bool,
         io: &mut IO,
     ) -> Option<(ToolOutcome, Duration)> {
+        // Shown in every mode, so the user sees each action even under auto.
+        let command = self
+            .registry
+            .command_line(sandbox, call)
+            .unwrap_or_else(|| call.function.name.clone());
         match *mode {
             // An Auto turn that STARTED in Plan keeps the plan-mode blacklist (see `started_in_plan`).
             // The schema freeze already withholds write_file/delete_file, but run_command is advertised in
             // Plan too, so without this a blacklisted command would silently downgrade from "refused" to
             // "confirm-prompted" the instant the checkpoint fires.
             ApprovalMode::Auto if started_in_plan => {
-                self.plan_checked_run(sandbox, call, command, io).await
+                self.plan_checked_auto(sandbox, call, &command, user_intent, io)
+                    .await
             }
-            // Runs without asking, EXCEPT high-blast-radius tools and out-of-root targets. On platforms
-            // with no OS sandbox this is the only thing stopping an unattended — or prompt-injected — turn
-            // from destroying data or reaching outside the workspace.
-            ApprovalMode::Auto => self.run_gated(sandbox, call, command, io).await,
+            // Auto never asks the user. Deterministically safe confined actions run directly; risky or
+            // unconfined actions go through the isolated reviewer, and external paths are refused.
+            ApprovalMode::Auto => {
+                self.run_auto(sandbox, call, &command, user_intent, io)
+                    .await
+            }
             // Non-plannable tools are withheld from the schema; if the model names one anyway, refuse it
             // without touching the filesystem.
             ApprovalMode::Plan if !self.registry.is_plannable(&call.function.name) => {
-                io.tool_started(call, command);
+                io.tool_started(call, &command);
                 Some((
                     ToolOutcome::Error(format!(
                         "'{}' is blocked in plan mode (not available for planning)",
@@ -321,84 +390,145 @@ impl AgentLoop {
                     Duration::ZERO,
                 ))
             }
-            // SEC-01: a plannable tool is not a free pass. The same gate Auto enforces applies here, so a
-            // prompt-injected plan turn cannot read `~/.ssh/id_rsa` back to the model or run an arbitrary
-            // command unattended. In-root reads and searches still run free.
-            ApprovalMode::Plan => self.plan_checked_run(sandbox, call, command, io).await,
+            // A plannable tool is not a free pass. Plan never prompts: it runs admitted in-workspace
+            // actions against a read-only workspace view and refuses external targets.
+            ApprovalMode::Plan => self.plan_checked_run(sandbox, call, &command, io).await,
             ApprovalMode::Default => match self.registry.confirm(sandbox, call) {
                 Some(confirmation) => match io.decide(&confirmation).await {
                     Approval::Approved => {
-                        io.tool_started(call, command);
+                        io.tool_started(call, &command);
                         Some(timed(self.registry.execute(sandbox, call)).await)
                     }
                     Approval::ApprovedAuto => {
                         *mode = ApprovalMode::Auto;
-                        io.tool_started(call, command);
+                        io.tool_started(call, &command);
                         Some(timed(self.registry.execute(sandbox, call)).await)
                     }
                     Approval::Declined => {
-                        io.tool_started(call, command);
+                        io.tool_started(call, &command);
                         Some((ToolOutcome::Declined, Duration::ZERO))
                     }
                     Approval::Aborted => None,
                 },
                 None => {
-                    io.tool_started(call, command);
+                    io.tool_started(call, &command);
                     Some(timed(self.registry.execute(sandbox, call)).await)
                 }
             },
         }
     }
 
-    /// The auto-mode confirmation gate: the tool decides, per call, whether this one still needs a live
-    /// confirmation (irreversible, out-of-root, or a destructive shell command — see
-    /// `Tool::confirm_in_auto`). Shared by `Auto` and (after `plan_check`) `Plan`, so plan mode never
-    /// executes an out-of-root read without the same gate (SEC-01). `ApprovedAuto` is treated as
-    /// `Approved` — the caller owns any mode transition. `None` means the user aborted at this call.
-    async fn run_gated<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
+    async fn run_auto<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
         &self,
         sandbox: &dyn Sandbox,
         call: &ToolCall,
         command: &str,
+        user_intent: &str,
         io: &mut IO,
     ) -> Option<(ToolOutcome, Duration)> {
-        match self.registry.confirm(sandbox, call) {
-            Some(confirmation) if self.registry.confirm_in_auto(call, &confirmation) => {
-                self.confirmed_run(sandbox, call, command, &confirmation, io)
-                    .await
-            }
-            _ => {
-                io.tool_started(call, command);
+        let guarantees = sandbox.confiner().guarantees();
+        let confirmation = self.registry.confirm(sandbox, call);
+        if confirmation.as_ref().is_some_and(|confirmation| {
+            self.registry.accesses_outside_workspace(call, confirmation)
+        }) {
+            io.tool_started(call, command);
+            return Some((
+                ToolOutcome::Error(
+                    "auto mode cannot grant access outside the workspace; pre-grant an exact root in trusted global configuration"
+                        .to_string(),
+                ),
+                Duration::ZERO,
+            ));
+        }
+        let risky = confirmation
+            .as_ref()
+            .is_some_and(|confirmation| self.registry.confirm_in_auto(call, confirmation));
+        if guarantees
+            != crate::modules::tools::application::command_sandbox::SandboxGuarantees::NONE
+            && !risky
+        {
+            io.tool_started(call, command);
+            return Some(timed(self.registry.execute(sandbox, call)).await);
+        }
+
+        let request = ActionReviewRequest {
+            user_intent: user_intent.to_string(),
+            tool: call.function.name.clone(),
+            action: command.to_string(),
+            workspace: sandbox.root().display().to_string(),
+            guarantees,
+        };
+        let review = self
+            .reviewer
+            .review(self.provider.as_ref(), &self.model, &request)
+            .await;
+        io.tool_started(call, command);
+        match review {
+            Ok(review) if review.decision == ReviewDecision::Allow => {
                 Some(timed(self.registry.execute(sandbox, call)).await)
             }
+            Ok(review) => Some((
+                ToolOutcome::Error(format!(
+                    "auto reviewer refused the action: {}",
+                    review.reason
+                )),
+                Duration::ZERO,
+            )),
+            Err(error) => Some((
+                ToolOutcome::Error(format!("auto reviewer failed closed: {error}")),
+                Duration::ZERO,
+            )),
         }
     }
 
-    /// Ask, then run or decline. The shared tail of every gate that decided a live confirmation is due;
-    /// `ApprovedAuto` is treated as `Approved` — the caller owns any mode transition.
-    async fn confirmed_run<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
+    fn plan_refusal(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
+        let sandbox = ReadOnlyWorkspace(sandbox);
+        if let Some(reason) = self.registry.plan_check(&sandbox, call) {
+            return Some(reason);
+        }
+        if self.registry.is_destructive(&call.function.name) {
+            let policy = sandbox.command_policy(sandbox.network(), &[], &[]);
+            if !sandbox.confiner().guarantees().satisfies(&policy) {
+                return Some(
+                    "plan mode cannot run commands without enforced read-only confinement"
+                        .to_string(),
+                );
+            }
+        }
+        if self
+            .registry
+            .confirm(&sandbox, call)
+            .is_some_and(|confirmation| {
+                self.registry
+                    .accesses_outside_workspace(call, &confirmation)
+            })
+        {
+            return Some(
+                "plan mode cannot access paths outside the read-only workspace".to_string(),
+            );
+        }
+        None
+    }
+
+    /// A checkpoint can switch the live mode to Auto, but a turn that began in Plan keeps both gates:
+    /// Plan's read-only admission first, then Auto's isolated reviewer for risky admitted actions.
+    async fn plan_checked_auto<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
         &self,
         sandbox: &dyn Sandbox,
         call: &ToolCall,
         command: &str,
-        confirmation: &Confirmation,
+        user_intent: &str,
         io: &mut IO,
     ) -> Option<(ToolOutcome, Duration)> {
-        match io.decide(confirmation).await {
-            Approval::Approved | Approval::ApprovedAuto => {
-                io.tool_started(call, command);
-                Some(timed(self.registry.execute(sandbox, call)).await)
-            }
-            Approval::Declined => {
-                io.tool_started(call, command);
-                Some((ToolOutcome::Declined, Duration::ZERO))
-            }
-            Approval::Aborted => None,
+        if let Some(reason) = self.plan_refusal(sandbox, call) {
+            io.tool_started(call, command);
+            return Some((ToolOutcome::Error(reason), Duration::ZERO));
         }
+        self.run_auto(&ReadOnlyWorkspace(sandbox), call, command, user_intent, io)
+            .await
     }
 
-    /// Shared by `Plan` and by `Auto` for a turn that started in `Plan`: both must refuse a blocked call
-    /// outright — no filesystem touch, no confirmation prompt — never fall back to Auto's ordinary gate.
+    /// Plan refuses blocked calls outright — no filesystem touch and no confirmation prompt.
     async fn plan_checked_run<IO: EventSink + Presenter + ApprovalPolicy + ToolObserver>(
         &self,
         sandbox: &dyn Sandbox,
@@ -406,21 +536,15 @@ impl AgentLoop {
         command: &str,
         io: &mut IO,
     ) -> Option<(ToolOutcome, Duration)> {
-        if let Some(reason) = self.registry.plan_check(sandbox, call) {
+        if let Some(reason) = self.plan_refusal(sandbox, call) {
             io.tool_started(call, command);
             return Some((ToolOutcome::Error(reason), Duration::ZERO));
         }
-        // SEC-01: while planning, anything that can mutate is confirmed live, even after `plan_check`
-        // admitted it. Auto mode's per-command silence (ADR 0030) is an auto-mode bargain — a plan turn
-        // is the one most likely to be acting on freshly-read untrusted repo content.
-        if self.registry.is_destructive(&call.function.name)
-            && let Some(confirmation) = self.registry.confirm(sandbox, call)
-        {
-            return self
-                .confirmed_run(sandbox, call, command, &confirmation, io)
-                .await;
-        }
-        self.run_gated(sandbox, call, command, io).await
+        let sandbox = ReadOnlyWorkspace(sandbox);
+        // The allow-list is the Plan gate. Admitted inspection/build/test commands run without a human
+        // prompt; their command sandbox policy mounts the workspace read-only.
+        io.tool_started(call, command);
+        Some(timed(self.registry.execute(&sandbox, call)).await)
     }
 
     /// `None` continues the turn: `Approved` resets the checkpoint clock and counter, `ApprovedAuto` also

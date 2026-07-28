@@ -16,6 +16,7 @@ use crate::modules::agent::application::approval_policy::{
 };
 use crate::modules::agent::application::presenter::Presenter;
 use crate::modules::agent::application::tool_observer::ToolObserver;
+use crate::modules::agent::infrastructure::action_reviewer::ProviderActionReviewer;
 use crate::modules::extensions::domain::resource::AgentProfile;
 use crate::modules::provider::application::completion_provider::{CompletionProvider, EventSink};
 use crate::modules::tools::application::registry::ToolRegistry;
@@ -199,7 +200,8 @@ impl Tool for TaskTool {
             model,
             self.checkpoint_budget,
             self.max_tool_calls,
-        );
+        )
+        .with_reviewer(Arc::new(ProviderActionReviewer));
 
         let mut conversation = Conversation::new(profile.system_prompt.clone());
         conversation.push(Message::user(args.prompt));

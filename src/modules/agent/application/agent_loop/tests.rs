@@ -19,6 +19,46 @@ use crate::shared::kernel::tool_call::{FunctionCall, ToolCall};
 
 use tempfile::TempDir;
 
+#[derive(Debug)]
+struct TestConfinement;
+
+impl CommandSandbox for TestConfinement {
+    fn confine(
+        &self,
+        command: tokio::process::Command,
+        _policy: &SandboxPolicy,
+    ) -> Result<tokio::process::Command, AgentError> {
+        Ok(command)
+    }
+
+    fn guarantees(&self) -> crate::modules::tools::application::command_sandbox::SandboxGuarantees {
+        crate::modules::tools::application::command_sandbox::SandboxGuarantees::BWRAP
+    }
+}
+
+struct ScriptedReviewer {
+    decision: ReviewDecision,
+    requests: Mutex<Vec<ActionReviewRequest>>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl ActionReviewer for ScriptedReviewer {
+    async fn review(
+        &self,
+        _provider: &dyn CompletionProvider,
+        _model: &str,
+        request: &ActionReviewRequest,
+    ) -> Result<crate::modules::agent::application::action_reviewer::ActionReview, AgentError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(
+            crate::modules::agent::application::action_reviewer::ActionReview {
+                decision: self.decision,
+                reason: "scripted decision".to_string(),
+            },
+        )
+    }
+}
+
 /// A provider that replays pre-canned turns, ignoring the request — drives the loop without a network.
 struct ScriptedProvider {
     turns: Mutex<VecDeque<CompletedTurn>>,
@@ -130,6 +170,36 @@ fn registry_for_tests() -> ToolRegistry {
     ToolRegistry::new(default_fs_tools(Arc::default(), false))
 }
 
+#[test]
+fn plan_workspace_view_forces_read_only_command_policy() {
+    let dir = TempDir::new().unwrap();
+    let configured_write = dir.path().join("configured-cache");
+    let sandbox = FsSandbox::with_confinement(
+        dir.path(),
+        SensitiveMatcher::empty(),
+        Arc::new(TestConfinement),
+        crate::shared::kernel::sandbox::NetworkPolicy::Deny,
+        Arc::from(Vec::new()),
+        Arc::from(vec![configured_write.clone()]),
+    )
+    .unwrap();
+    let view = ReadOnlyWorkspace(&sandbox);
+    let command_cwd = dir.path().join("nested");
+
+    let policy = view.command_policy(
+        crate::shared::kernel::sandbox::NetworkPolicy::Deny,
+        &[],
+        &[&command_cwd],
+    );
+
+    assert_eq!(
+        policy.workspace_access,
+        crate::modules::tools::application::command_sandbox::WorkspaceAccess::ReadOnly
+    );
+    assert!(policy.extra_rw.is_empty());
+    assert_eq!(policy.extra_ro, vec![configured_write, command_cwd]);
+}
+
 fn agent_loop_with(turns: Vec<CompletedTurn>) -> AgentLoop {
     let provider = Arc::new(ScriptedProvider {
         turns: Mutex::new(VecDeque::from(turns)),
@@ -141,6 +211,35 @@ fn agent_loop_with(turns: Vec<CompletedTurn>) -> AgentLoop {
         Duration::from_secs(3600),
         1000,
     )
+}
+
+fn agent_loop_with_reviewer(
+    turns: Vec<CompletedTurn>,
+    reviewer: Arc<dyn ActionReviewer>,
+) -> AgentLoop {
+    let provider = Arc::new(ScriptedProvider {
+        turns: Mutex::new(VecDeque::from(turns)),
+    });
+    AgentLoop::new(
+        provider,
+        registry_for_tests(),
+        "model".to_string(),
+        Duration::from_secs(3600),
+        1000,
+    )
+    .with_reviewer(reviewer)
+}
+
+fn confined_sandbox(dir: &TempDir) -> FsSandbox {
+    FsSandbox::with_confinement(
+        dir.path(),
+        SensitiveMatcher::empty(),
+        Arc::new(TestConfinement),
+        crate::shared::kernel::sandbox::NetworkPolicy::Deny,
+        Arc::from(Vec::new()),
+        Arc::from(Vec::new()),
+    )
+    .unwrap()
 }
 
 #[tokio::test]
@@ -285,7 +384,7 @@ async fn run_aborts_when_the_user_ends_the_session_at_a_prompt() {
 #[tokio::test]
 async fn auto_mode_runs_tools_without_asking() {
     let dir = TempDir::new().unwrap();
-    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let sandbox = confined_sandbox(&dir);
     let agent_loop = agent_loop_with(vec![
         CompletedTurn {
             content: "writing".to_string(),
@@ -321,7 +420,7 @@ async fn auto_mode_runs_tools_without_asking() {
 #[tokio::test]
 async fn approved_auto_stops_asking_for_the_rest_of_the_turn() {
     let dir = TempDir::new().unwrap();
-    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let sandbox = confined_sandbox(&dir);
     // One assistant turn with two destructive calls: the first prompts, the second must not.
     let agent_loop = agent_loop_with(vec![
         CompletedTurn {
@@ -446,36 +545,28 @@ async fn plan_mode_allows_read_only_tools() {
 }
 
 #[tokio::test]
-async fn auto_mode_runs_a_benign_command_and_still_gates_a_destructive_one() {
-    // Issue #23, proven end to end: the real registry, the real sandbox, and real process execution —
-    // only the provider is scripted. Round 1 must execute with no prompt at all; round 2 must prompt,
-    // and declining it must leave the file on disk.
+async fn auto_mode_runs_a_shell_command_only_after_automated_review() {
     let dir = TempDir::new().unwrap();
-    std::fs::write(dir.path().join("marker.txt"), b"still here").unwrap();
-    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
-    // `rm` and `del` are both in the always-destructive set; each is the one its shell actually has.
-    #[cfg(unix)]
-    let delete = r#"{"command":"rm marker.txt"}"#;
-    #[cfg(windows)]
-    let delete = r#"{"command":"del marker.txt"}"#;
-
-    let agent_loop = agent_loop_with(vec![
-        CompletedTurn {
-            content: "looking".to_string(),
-            tool_calls: vec![tool_call("run_command", r#"{"command":"echo hello"}"#)],
-            thinking: None,
-        },
-        CompletedTurn {
-            content: "cleaning".to_string(),
-            tool_calls: vec![tool_call("run_command", delete)],
-            thinking: None,
-        },
-        CompletedTurn {
-            content: "done".to_string(),
-            tool_calls: vec![],
-            thinking: None,
-        },
-    ]);
+    let sandbox = confined_sandbox(&dir);
+    let reviewer = Arc::new(ScriptedReviewer {
+        decision: ReviewDecision::Allow,
+        requests: Mutex::new(Vec::new()),
+    });
+    let agent_loop = agent_loop_with_reviewer(
+        vec![
+            CompletedTurn {
+                content: "looking".to_string(),
+                tool_calls: vec![tool_call("run_command", r#"{"command":"echo hello"}"#)],
+                thinking: None,
+            },
+            CompletedTurn {
+                content: "done".to_string(),
+                tool_calls: vec![],
+                thinking: None,
+            },
+        ],
+        reviewer.clone(),
+    );
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("work unattended"));
     let mut io = TestIo::new(Approval::Declined);
@@ -487,12 +578,8 @@ async fn auto_mode_runs_a_benign_command_and_still_gates_a_destructive_one() {
 
     assert_eq!(outcome, TurnOutcome::Completed);
     assert_eq!(
-        io.decide_calls, 1,
-        "only the destructive command may interrupt an auto turn"
-    );
-    assert!(
-        dir.path().join("marker.txt").exists(),
-        "the declined deletion must not have run"
+        io.decide_calls, 0,
+        "auto mode never interrupts the user for an action decision"
     );
     let first_result = conversation
         .messages()
@@ -502,17 +589,17 @@ async fn auto_mode_runs_a_benign_command_and_still_gates_a_destructive_one() {
         .unwrap_or_default();
     assert!(
         first_result.contains("hello"),
-        "the unprompted command must really have executed: {first_result}"
+        "the reviewed command must really have executed: {first_result}"
     );
-    assert!(matches!(io.finished.last(), Some(ToolOutcome::Declined)));
+    let requests = reviewer.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].tool, "run_command");
 }
 
 #[tokio::test]
-async fn plan_mode_confirms_run_command() {
-    // SEC-01: run_command is plannable, but plan mode must still confirm it — a prompt-injected plan turn
-    // cannot run an arbitrary command unattended.
+async fn plan_mode_runs_an_allowlisted_command_without_confirmation() {
     let dir = TempDir::new().unwrap();
-    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let sandbox = confined_sandbox(&dir);
     let agent_loop = agent_loop_with(vec![
         CompletedTurn {
             content: "running".to_string(),
@@ -536,29 +623,55 @@ async fn plan_mode_confirms_run_command() {
 
     assert_eq!(outcome, TurnOutcome::Completed);
     assert_eq!(
-        io.decide_calls, 1,
-        "run_command must be confirmed even in plan mode (SEC-01)"
+        io.decide_calls, 0,
+        "allow-listed inspection/build/test commands run freely in plan mode"
     );
-    assert!(matches!(io.finished.as_slice(), [ToolOutcome::Declined]));
+    assert!(matches!(io.finished.as_slice(), [ToolOutcome::Ok(output)] if output.contains("hi")));
 }
 
 #[tokio::test]
-async fn plan_mode_confirms_even_a_command_auto_mode_runs_silently() {
-    // The auto-mode deny-list (ADR 0030) must not leak into plan mode: `echo` is silent in auto, but a
-    // plan turn is the one most likely to be acting on freshly-read untrusted repo content, so SEC-01's
-    // live confirmation stands. Written because making auto silent nearly repealed it as a side effect.
+async fn plan_mode_refuses_commands_when_read_only_confinement_is_off() {
+    let dir = TempDir::new().unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let agent_loop = agent_loop_with(vec![
+        CompletedTurn {
+            content: "checking".to_string(),
+            tool_calls: vec![tool_call("run_command", r#"{"command":"echo hi"}"#)],
+            thinking: None,
+        },
+        CompletedTurn {
+            content: "plan".to_string(),
+            tool_calls: vec![],
+            thinking: None,
+        },
+    ]);
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("inspect without a sandbox"));
+    let mut io = TestIo::new(Approval::Approved);
+
+    agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
+        .await
+        .unwrap();
+
+    assert_eq!(io.decide_calls, 0);
+    assert!(matches!(io.finished.as_slice(), [ToolOutcome::Error(_)]));
+}
+
+#[tokio::test]
+async fn run_command_stays_mutating_even_when_plan_executes_it_read_only() {
     let dir = TempDir::new().unwrap();
     let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
     let registry = registry_for_tests();
     let call = tool_call("run_command", r#"{"command":"echo hi"}"#);
     let confirmation = registry.confirm(&sandbox, &call).expect("parsed args");
     assert!(
-        !registry.confirm_in_auto(&call, &confirmation),
-        "precondition: auto mode runs this one silently"
+        registry.confirm_in_auto(&call, &confirmation),
+        "every shell command requires automated review in auto mode"
     );
     assert!(
         registry.is_destructive("run_command"),
-        "plan mode's gate keys on this, so a reclassification must trip a test"
+        "the tool can still mutate outside plan mode"
     );
 }
 
@@ -573,7 +686,7 @@ async fn checkpoint_approved_auto_does_not_reopen_the_plan_blacklist() {
     let agent_loop = AgentLoop::new(
         Arc::new(ScriptedProvider {
             turns: Mutex::new(VecDeque::from(vec![
-                // Round 1: an allow-listed command (echo), confirmed — the call cap then trips.
+                // Round 1: an allow-listed command (echo), free in Plan — the call cap then trips.
                 CompletedTurn {
                     content: "planning".to_string(),
                     tool_calls: vec![tool_call("run_command", r#"{"command":"echo hi"}"#)],
@@ -600,9 +713,8 @@ async fn checkpoint_approved_auto_does_not_reopen_the_plan_blacklist() {
     );
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("plan something"));
-    // Consumed in order: round 1's per-call confirmation, then the post-round checkpoint's decision.
-    let mut io = TestIo::new(Approval::Approved)
-        .with_decisions(vec![Approval::Approved, Approval::ApprovedAuto]);
+    // The only decision is the post-round checkpoint; the allowed Plan command does not prompt.
+    let mut io = TestIo::new(Approval::Approved).with_decisions(vec![Approval::ApprovedAuto]);
 
     let outcome = agent_loop
         .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
@@ -615,7 +727,7 @@ async fn checkpoint_approved_auto_does_not_reopen_the_plan_blacklist() {
         "the blacklisted command must never execute, even after the checkpoint escalates to Auto"
     );
     assert_eq!(
-        io.decide_calls, 1,
+        io.decide_calls, 0,
         "the blocked round-2 call must be refused outright, never reaching a confirmation prompt"
     );
     let last_tool_msg = conversation
@@ -632,6 +744,59 @@ async fn checkpoint_approved_auto_does_not_reopen_the_plan_blacklist() {
         "got: {:?}",
         last_tool_msg.content
     );
+}
+
+#[tokio::test]
+async fn checkpoint_approved_auto_reviews_an_admitted_plan_command() {
+    let dir = TempDir::new().unwrap();
+    let sandbox = confined_sandbox(&dir);
+    let reviewer = Arc::new(ScriptedReviewer {
+        decision: ReviewDecision::Allow,
+        requests: Mutex::new(Vec::new()),
+    });
+    let agent_loop = AgentLoop::new(
+        Arc::new(ScriptedProvider {
+            turns: Mutex::new(VecDeque::from(vec![
+                CompletedTurn {
+                    content: "planning".to_string(),
+                    tool_calls: vec![tool_call("run_command", r#"{"command":"echo first"}"#)],
+                    thinking: None,
+                },
+                CompletedTurn {
+                    content: "continuing".to_string(),
+                    tool_calls: vec![tool_call("run_command", r#"{"command":"echo second"}"#)],
+                    thinking: None,
+                },
+                CompletedTurn {
+                    content: "done".to_string(),
+                    tool_calls: vec![],
+                    thinking: None,
+                },
+            ])),
+        }),
+        registry_for_tests(),
+        "model".to_string(),
+        Duration::from_secs(3600),
+        1,
+    )
+    .with_reviewer(reviewer.clone());
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("plan something"));
+    let mut io = TestIo::new(Approval::Approved).with_decisions(vec![Approval::ApprovedAuto]);
+
+    agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Plan, &mut io)
+        .await
+        .unwrap();
+
+    assert_eq!(io.decide_calls, 0, "the action path must stay prompt-free");
+    let requests = reviewer.requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "the post-checkpoint command must be reviewed"
+    );
+    assert!(requests[0].action.contains("echo second"));
 }
 
 #[tokio::test]
@@ -687,9 +852,8 @@ async fn checkpoint_approved_auto_does_not_defeat_present_plan_interception() {
 }
 
 #[tokio::test]
-async fn plan_mode_confirms_out_of_root_read() {
-    // SEC-01: an out-of-root read while planning must be confirmed, so a prompt-injected plan turn cannot
-    // exfiltrate `~/.ssh/id_rsa` back to the model.
+async fn plan_mode_refuses_out_of_root_read_without_human_confirmation() {
+    // Plan is prompt-free and workspace-scoped: a prompt-injected turn cannot exfiltrate an external file.
     let outside = TempDir::new().unwrap();
     let secret = outside.path().join("secret.txt");
     std::fs::write(&secret, b"top secret").unwrap();
@@ -718,10 +882,7 @@ async fn plan_mode_confirms_out_of_root_read() {
         .unwrap();
 
     assert_eq!(outcome, TurnOutcome::Completed);
-    assert_eq!(
-        io.decide_calls, 1,
-        "an out-of-root read must be confirmed even in plan mode (SEC-01)"
-    );
+    assert_eq!(io.decide_calls, 0, "plan mode never asks the user");
     let tool_msg = conversation
         .messages()
         .iter()
@@ -733,9 +894,9 @@ async fn plan_mode_confirms_out_of_root_read() {
             .as_deref()
             .unwrap_or("")
             .contains("top secret"),
-        "a declined out-of-root read must not leak the file to the model"
+        "a refused out-of-root read must not leak the file to the model"
     );
-    assert!(matches!(io.finished.as_slice(), [ToolOutcome::Declined]));
+    assert!(matches!(io.finished.as_slice(), [ToolOutcome::Error(_)]));
 }
 
 #[tokio::test]
@@ -784,7 +945,7 @@ async fn plan_mode_present_plan_proposes_the_plan_and_keeps_the_wire_valid() {
 #[tokio::test]
 async fn auto_mode_emits_tool_started_and_finished() {
     let dir = TempDir::new().unwrap();
-    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let sandbox = confined_sandbox(&dir);
     let agent_loop = agent_loop_with(vec![
         CompletedTurn {
             content: "writing".to_string(),
@@ -921,7 +1082,7 @@ async fn declined_emits_started_and_declined_finish() {
 async fn auto_mode_runs_inroot_read_without_confirming() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let sandbox = confined_sandbox(&dir);
     let agent_loop = agent_loop_with(vec![
         CompletedTurn {
             content: "reading".to_string(),
@@ -950,10 +1111,10 @@ async fn auto_mode_runs_inroot_read_without_confirming() {
 }
 
 #[tokio::test]
-async fn auto_mode_confirms_destructive_delete() {
+async fn auto_mode_refuses_a_destructive_delete_without_human_confirmation() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
-    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let sandbox = confined_sandbox(&dir);
     let agent_loop = agent_loop_with(vec![
         CompletedTurn {
             content: "deleting".to_string(),
@@ -968,7 +1129,7 @@ async fn auto_mode_confirms_destructive_delete() {
     ]);
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("delete a.txt"));
-    // Declines the destructive call — auto must still ask, so the file survives.
+    // The default reviewer is fail-closed, so the file survives without a human prompt.
     let mut io = TestIo::new(Approval::Declined);
 
     agent_loop
@@ -977,8 +1138,8 @@ async fn auto_mode_confirms_destructive_delete() {
         .unwrap();
 
     assert_eq!(
-        io.decide_calls, 1,
-        "a destructive tool must be confirmed even in auto mode"
+        io.decide_calls, 0,
+        "auto must never use the human approval policy"
     );
     assert!(
         dir.path().join("a.txt").exists(),
@@ -987,10 +1148,88 @@ async fn auto_mode_confirms_destructive_delete() {
 }
 
 #[tokio::test]
-async fn auto_mode_confirms_out_of_root_target() {
+async fn auto_executes_a_risky_action_only_when_the_reviewer_allows_it() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+    let sandbox = confined_sandbox(&dir);
+    let reviewer = Arc::new(ScriptedReviewer {
+        decision: ReviewDecision::Allow,
+        requests: Mutex::new(Vec::new()),
+    });
+    let agent_loop = agent_loop_with_reviewer(
+        vec![
+            CompletedTurn {
+                content: "deleting".to_string(),
+                tool_calls: vec![tool_call("delete_file", r#"{"path":"a.txt"}"#)],
+                thinking: None,
+            },
+            CompletedTurn {
+                content: "done".to_string(),
+                tool_calls: vec![],
+                thinking: None,
+            },
+        ],
+        reviewer.clone(),
+    );
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("delete a.txt"));
+    let mut io = TestIo::new(Approval::Declined);
+
+    agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+        .await
+        .unwrap();
+
+    assert_eq!(io.decide_calls, 0);
+    assert!(!dir.path().join("a.txt").exists());
+    let requests = reviewer.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].user_intent, "delete a.txt");
+    assert_eq!(requests[0].tool, "delete_file");
+}
+
+#[tokio::test]
+async fn auto_with_sandbox_off_reviews_even_a_safe_read() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let reviewer = Arc::new(ScriptedReviewer {
+        decision: ReviewDecision::Allow,
+        requests: Mutex::new(Vec::new()),
+    });
+    let agent_loop = agent_loop_with_reviewer(
+        vec![
+            CompletedTurn {
+                content: "reading".to_string(),
+                tool_calls: vec![tool_call("read_file", r#"{"path":"a.txt"}"#)],
+                thinking: None,
+            },
+            CompletedTurn {
+                content: "done".to_string(),
+                tool_calls: vec![],
+                thinking: None,
+            },
+        ],
+        reviewer.clone(),
+    );
+    let mut conversation = Conversation::new("system");
+    conversation.push(Message::user("read a.txt"));
+    let mut io = TestIo::new(Approval::Declined);
+
+    agent_loop
+        .run(&mut conversation, &sandbox, ApprovalMode::Auto, &mut io)
+        .await
+        .unwrap();
+
+    assert_eq!(io.decide_calls, 0);
+    assert_eq!(reviewer.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn auto_mode_refuses_an_out_of_root_target_without_human_confirmation() {
     let outside = TempDir::new().unwrap();
     let dir = TempDir::new().unwrap();
-    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let sandbox = confined_sandbox(&dir);
     let target = outside.path().join("new.txt");
     let args = serde_json::json!({ "path": target.to_str().unwrap(), "content": "x" }).to_string();
     let agent_loop = agent_loop_with(vec![
@@ -1007,7 +1246,7 @@ async fn auto_mode_confirms_out_of_root_target() {
     ]);
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("write outside the workspace"));
-    // write_file is an ordinary mutation, but the target is outside the root — auto must still ask.
+    // An out-of-root target is reviewer-gated and fails closed.
     let mut io = TestIo::new(Approval::Declined);
 
     agent_loop
@@ -1016,8 +1255,8 @@ async fn auto_mode_confirms_out_of_root_target() {
         .unwrap();
 
     assert_eq!(
-        io.decide_calls, 1,
-        "an out-of-root target must be confirmed even in auto mode"
+        io.decide_calls, 0,
+        "auto must never use the human approval policy"
     );
     assert!(
         !target.exists(),
@@ -1029,7 +1268,7 @@ async fn auto_mode_confirms_out_of_root_target() {
 async fn iteration_cap_fires_the_checkpoint() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let sandbox = confined_sandbox(&dir);
     // Two read-only rounds are queued; with a cap of 1 the checkpoint must fire after the first.
     let provider = Arc::new(ScriptedProvider {
         turns: Mutex::new(VecDeque::from(vec![
@@ -1081,7 +1320,7 @@ async fn a_tool_timeout_is_never_auto_retried_within_the_turn() {
     // invariant that makes this safe: a timed-out call produces exactly ONE execution attempt and one
     // tool_result, and only the model's next turn can retry. run_command stands in for every tool here.
     let dir = TempDir::new().unwrap();
-    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let sandbox = confined_sandbox(&dir);
     // `timeout_ms` is clamped to a 1000ms floor, so the 100ms requested below actually races a ~1s
     // timeout; a comfortably slower command keeps this deterministic.
     let slow = if cfg!(windows) {
@@ -1089,21 +1328,28 @@ async fn a_tool_timeout_is_never_auto_retried_within_the_turn() {
     } else {
         "sleep 5"
     };
-    let agent_loop = agent_loop_with(vec![
-        CompletedTurn {
-            content: "running".to_string(),
-            tool_calls: vec![tool_call(
-                "run_command",
-                &format!(r#"{{"command":"{slow}","timeout_ms":100}}"#),
-            )],
-            thinking: None,
-        },
-        CompletedTurn {
-            content: "done".to_string(),
-            tool_calls: vec![],
-            thinking: None,
-        },
-    ]);
+    let reviewer = Arc::new(ScriptedReviewer {
+        decision: ReviewDecision::Allow,
+        requests: Mutex::new(Vec::new()),
+    });
+    let agent_loop = agent_loop_with_reviewer(
+        vec![
+            CompletedTurn {
+                content: "running".to_string(),
+                tool_calls: vec![tool_call(
+                    "run_command",
+                    &format!(r#"{{"command":"{slow}","timeout_ms":100}}"#),
+                )],
+                thinking: None,
+            },
+            CompletedTurn {
+                content: "done".to_string(),
+                tool_calls: vec![],
+                thinking: None,
+            },
+        ],
+        reviewer,
+    );
     let mut conversation = Conversation::new("system");
     conversation.push(Message::user("run something slow"));
     let mut io = TestIo::new(Approval::Approved);
@@ -1145,7 +1391,7 @@ async fn the_call_cap_pauses_within_a_single_oversized_round() {
     // Three write_file calls in one assistant message, cap 2, in auto. The cap must trip WITHIN the round:
     // the first two write, the third is paused-and-declined before executing.
     let dir = TempDir::new().unwrap();
-    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let sandbox = confined_sandbox(&dir);
     let provider = Arc::new(ScriptedProvider {
         turns: Mutex::new(VecDeque::from(vec![CompletedTurn {
             content: String::new(),
@@ -1282,7 +1528,7 @@ async fn wall_clock_checkpoint_fires_with_an_elapsed_reason() {
     // A zero wall-clock budget trips the time leg; the cap is large, so the reason must be Elapsed.
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("a.txt"), b"hi").unwrap();
-    let sandbox = FsSandbox::new(dir.path(), SensitiveMatcher::empty()).unwrap();
+    let sandbox = confined_sandbox(&dir);
     let provider = Arc::new(ScriptedProvider {
         turns: Mutex::new(VecDeque::from(vec![CompletedTurn {
             content: "x".to_string(),

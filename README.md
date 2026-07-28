@@ -67,7 +67,7 @@ borderless prompt whose gate glyph changes color with its state.
 
 ## Features
 
-- **Directed agent loop** — the model plans, then acts through tools, **one approved call at a time**.
+- **Directed agent loop** — the model plans, then acts through tools under the active approval mode.
 - **Streaming reasoning + content** — thoughts and answer stream token-by-token over SSE.
 - **Filesystem tools + `run_command`** behind a **path sandbox** — the workspace root is the single
   I/O chokepoint; shell runs are timeout-bound and env-scrubbed.
@@ -91,6 +91,18 @@ borderless prompt whose gate glyph changes color with its state.
 - An API key for at least one provider — e.g. NVIDIA from [build.nvidia.com](https://build.nvidia.com),
   Anthropic from the Console, or OpenAI from the Platform. **API key, not a subscription** — Kiri bills
   pay-per-token against your own account; subscription (Claude Pro/Max, ChatGPT Plus/Pro) is not supported.
+
+On Windows x86-64, install the launcher and WSL2 runtime with npm:
+
+```powershell
+npm install --global @kiri-ai/cli
+kiri wsl status
+```
+
+Bun users run `bun add --global --trust @kiri-ai/cli`; explicit trust is required because Bun blocks
+dependency lifecycle scripts by default. Windows requires an initialized WSL2 Ubuntu 22.04/24.04/26.04 or
+Debian 12/13 distribution. If none is installed, run `wsl --install -d Ubuntu-24.04` first. The installer
+verifies release checksums and installs `bubblewrap` inside the selected distribution.
 
 **Configure** — Kiri manages its own config (`~/.kiri/config.toml`) and secrets in a **`0600`
 `~/.kiri/credentials.json`** (file-only; the OS keyring is not used — ADR 0020). An optional
@@ -134,8 +146,11 @@ Options:
 ```
 
 **Approval modes.** `Shift+Tab` cycles three modes (shown on the meta rule): **default** opens an
-approval box for every tool call, **auto** runs them without asking, and **plan** offers only read-only
-tools so the agent drafts a plan you approve before it runs. In the approval box, navigate with `↑`/`↓`
+approval box for tool calls, **auto** never asks for action approval and uses a fail-closed reviewer for
+risky or unconfined actions, and **plan** never asks for action approval, offers only plan-safe tools, and
+mounts the workspace read-only. External file-tool targets and command working directories are refused in
+Auto and Plan. The runaway checkpoint remains
+active in every mode. In Default's approval box, navigate with `↑`/`↓`
 and `Enter` (or press `1`/`2`/`3`): **Sim**, **Sim, e não perguntar de novo** (switches to auto), or
 **Não**. `Esc`/`n` declines just that call; `Ctrl+C` ends the session. Paths inside the workspace default
 to accept; absolute or `~/` paths outside it default to decline.
@@ -185,7 +200,9 @@ instead of being sent to the model.
 ## Tools
 
 Each tool resolves paths through the sandbox: relative paths stay under the workspace root (`..` and
-symlink escapes are rejected), while absolute or `~/` paths reach outside it **only with your approval**.
+symlink escapes are rejected). Default may approve an explicit absolute or `~/` path; Auto and Plan refuse
+external paths. On Windows, the native executable is only a launcher: commands run inside WSL2 under the
+Linux bubblewrap adapter. Run `kiri sandbox status` for the effective guarantees.
 
 | Tool | Purpose |
 |---|---|
@@ -207,12 +224,12 @@ Modular hexagonal (ports & adapters, vertical slices) in a single binary. Each m
 
 ```
 src/
-  main.rs                 # ~8-line entry
+  main.rs                 # platform entry and headless command dispatch
   app.rs                  # composition root — wires adapters, picks the frontend
   shared/{kernel,infra}   # cross-cutting primitives; CLI + env + Settings
   modules/
     agent/                # conversation domain + the agent loop + the UI ports
-    provider/             # CompletionProvider port + the NVIDIA OpenAI/SSE adapter
+    provider/             # provider ports/adapters and WSL loopback bridge
     tools/                # Tool trait + ToolRegistry + the sandbox + fs adapters
     tui/                  # the full-screen ratatui frontend (Elm-style state machine)
 ```
@@ -220,7 +237,7 @@ src/
 Invariants: network I/O lives only in `provider/infrastructure`, filesystem I/O only behind the sandbox,
 and `domain` has no I/O at all. The decisions behind this are recorded as ADRs in
 [`docs/decisions/`](docs/decisions/) — provider (0001), tools & sandbox (0002), architecture (0003),
-the rename & TUI (0004), and the approval modes & plan flow (0005).
+the rename & TUI (0004), approval modes (0005/0030), and Windows WSL2 runtime (0033).
 
 ## Development
 

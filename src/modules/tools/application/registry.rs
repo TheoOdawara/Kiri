@@ -46,9 +46,8 @@ impl ToolRegistry {
         }
     }
 
-    /// Whether a named tool exists and mutates the filesystem. Plan mode confirms every one of these
-    /// (SEC-01): being on the plan-mode allow-list says the program is an investigation tool, not that
-    /// an unattended mutation is acceptable while planning.
+    /// Whether a named tool exists and may mutate the filesystem. Plan mode uses this to require an
+    /// enforceable read-only command sandbox before executing an otherwise admitted tool.
     pub fn is_destructive(&self, name: &str) -> bool {
         self.find(name).is_some_and(|tool| !tool.is_read_only())
     }
@@ -64,6 +63,11 @@ impl ToolRegistry {
     pub fn confirm_in_auto(&self, call: &ToolCall, confirmation: &Confirmation) -> bool {
         self.find(&call.function.name)
             .is_some_and(|tool| tool.confirm_in_auto(call, confirmation))
+    }
+
+    pub fn accesses_outside_workspace(&self, call: &ToolCall, confirmation: &Confirmation) -> bool {
+        self.find(&call.function.name)
+            .is_some_and(|tool| tool.accesses_outside_workspace(call, confirmation))
     }
 
     /// In plan mode, ask the named tool whether the call should be blocked. Returns

@@ -1,0 +1,28 @@
+{
+  "name": "@kiri-ai/cli",
+  "version": "0.1.0",
+  "description": "Kiri coding-agent harness for Windows through WSL2",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TheoOdawara/Kiri.git"
+  },
+  "homepage": "https://github.com/TheoOdawara/Kiri",
+  "bugs": "https://github.com/TheoOdawara/Kiri/issues",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "install-windows.ps1",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./install-windows.ps1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

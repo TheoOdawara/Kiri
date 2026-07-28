@@ -9,7 +9,7 @@ use crate::shared::kernel::provider::{Effort, ProviderProfile};
 use crate::shared::kernel::sandbox::NetworkPolicy;
 
 use super::defaults::{
-    DEFAULT_RW_DIRS, HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT, MAX_TOOL_CALLS_PER_CHECKPOINT,
+    DEFAULT_RO_DIRS, HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT, MAX_TOOL_CALLS_PER_CHECKPOINT,
     TOOL_CHECKPOINT,
 };
 use super::raw::{
@@ -420,8 +420,8 @@ impl Settings {
             sandbox_enabled,
             require_confinement,
             sandbox_network,
-            extra_ro: load_extra_paths("KIRI_SANDBOX_RO_PATHS", &[]),
-            extra_rw: load_extra_paths("KIRI_SANDBOX_RW_PATHS", DEFAULT_RW_DIRS),
+            extra_ro: load_extra_paths("KIRI_SANDBOX_RO_PATHS", DEFAULT_RO_DIRS),
+            extra_rw: load_extra_paths("KIRI_SANDBOX_RW_PATHS", &[]),
             connect_timeout,
             read_timeout,
             thinking,

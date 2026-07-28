@@ -16,7 +16,9 @@ use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
+use crate::modules::tools::application::command_sandbox::{
+    CommandSandbox, SandboxPolicy, WorkspaceAccess,
+};
 
 /// Combined stdout/stderr is truncated at this many bytes before it reaches the model.
 pub const EXEC_MAX_BYTES: usize = 64 * 1024;
@@ -58,9 +60,23 @@ pub(crate) const INHERITED_ENV_VARS: &[&str] = &[
     "TERM",
     "LANG",
     "LC_ALL",
-    // Git over SSH needs the agent socket; never secrets themselves (#59).
-    "SSH_AUTH_SOCK",
-    "SSH_AGENT_PID",
+];
+const SANDBOX_ENV_VARS: &[&str] = &[
+    "HOME",
+    "XDG_CACHE_HOME",
+    "CARGO_HOME",
+    "CARGO_NET_OFFLINE",
+    "CARGO_TARGET_DIR",
+    "NPM_CONFIG_CACHE",
+    "PIP_CACHE_DIR",
+    "UV_CACHE_DIR",
+    "DENO_DIR",
+    "BUN_INSTALL",
+    "GOCACHE",
+    "GOMODCACHE",
+    "GRADLE_USER_HOME",
+    "MAVEN_CONFIG",
+    "RUSTUP_HOME",
 ];
 
 /// The bound for a file tool's command. `run_command` overrides it with its own configurable timeout.
@@ -76,6 +92,37 @@ pub(crate) fn scrub_tokio_env(cmd: &mut Command, lookup: impl Fn(&str) -> Option
         if let Some(value) = lookup(key) {
             cmd.env(key, value);
         }
+    }
+}
+
+fn apply_sandbox_env(cmd: &mut Command, policy: &SandboxPolicy) {
+    let home = &policy.command_home;
+    cmd.env("HOME", home);
+    cmd.env("XDG_CACHE_HOME", home.join(".cache"));
+    let offline = policy.network == crate::shared::kernel::sandbox::NetworkPolicy::Deny;
+    cmd.env(
+        "CARGO_HOME",
+        home.join(if offline { ".cargo-offline" } else { ".cargo" }),
+    );
+    if offline {
+        cmd.env("CARGO_NET_OFFLINE", "true");
+    }
+    cmd.env("CARGO_TARGET_DIR", home.join(".cache").join("cargo-target"));
+    cmd.env("NPM_CONFIG_CACHE", home.join(".cache").join("npm"));
+    cmd.env("PIP_CACHE_DIR", home.join(".cache").join("pip"));
+    cmd.env("UV_CACHE_DIR", home.join(".cache").join("uv"));
+    cmd.env("DENO_DIR", home.join(".cache").join("deno"));
+    cmd.env("BUN_INSTALL", home.join(".bun"));
+    cmd.env("GOCACHE", home.join(".cache").join("go-build"));
+    cmd.env("GOMODCACHE", home.join("go").join("pkg").join("mod"));
+    cmd.env("GRADLE_USER_HOME", home.join(".gradle"));
+    cmd.env("MAVEN_CONFIG", home.join(".m2"));
+    if let Some(rustup_home) = policy
+        .extra_ro
+        .iter()
+        .find(|path| path.file_name().is_some_and(|name| name == ".rustup"))
+    {
+        cmd.env("RUSTUP_HOME", rustup_home);
     }
 }
 
@@ -121,7 +168,7 @@ pub async fn run_shell(
         c.args(["-Command", script]);
         c
     } else {
-        let mut c = Command::new("sh");
+        let mut c = Command::new("/bin/sh");
         c.args(["-c", script]);
         c
     };
@@ -129,6 +176,7 @@ pub async fn run_shell(
         cmd.current_dir(dir);
     }
     scrub_tokio_env(&mut cmd, |key| std::env::var(key).ok());
+    apply_sandbox_env(&mut cmd, policy);
     let cmd = confiner
         .confine(cmd, policy)
         .map_err(|error| ExecError::Spawn(error.to_string()))?;
@@ -314,6 +362,8 @@ mod tests {
     fn policy() -> SandboxPolicy {
         SandboxPolicy {
             root: std::path::PathBuf::from("."),
+            command_home: std::env::temp_dir(),
+            workspace_access: WorkspaceAccess::ReadWrite,
             network: NetworkPolicy::Allow,
             extra_ro: Vec::new(),
             extra_rw: Vec::new(),
@@ -364,6 +414,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sandbox_env_places_cargo_outputs_under_the_synthetic_home() {
+        let mut command = Command::new("true");
+        let policy = policy();
+        apply_sandbox_env(&mut command, &policy);
+        let target = command
+            .as_std()
+            .get_envs()
+            .find_map(|(key, value)| (key == "CARGO_TARGET_DIR").then_some(value))
+            .flatten()
+            .expect("CARGO_TARGET_DIR is set");
+
+        assert_eq!(target, policy.command_home.join(".cache/cargo-target"));
+    }
+
+    #[test]
+    fn offline_sandbox_keeps_cargo_state_in_the_synthetic_home() {
+        let directory = tempfile::tempdir().unwrap();
+        let cargo_home = directory.path().join(".cargo");
+        let registry = cargo_home.join("registry");
+        std::fs::create_dir_all(&registry).unwrap();
+        let mut policy = policy();
+        policy.network = NetworkPolicy::Deny;
+        policy.extra_ro.push(registry);
+        let mut command = Command::new("true");
+
+        apply_sandbox_env(&mut command, &policy);
+        let configured = command
+            .as_std()
+            .get_envs()
+            .find_map(|(key, value)| (key == "CARGO_HOME").then_some(value))
+            .flatten()
+            .expect("CARGO_HOME is set");
+
+        assert_eq!(configured, policy.command_home.join(".cargo-offline"));
+        let offline = command
+            .as_std()
+            .get_envs()
+            .find_map(|(key, value)| (key == "CARGO_NET_OFFLINE").then_some(value))
+            .flatten()
+            .expect("CARGO_NET_OFFLINE is set");
+        assert_eq!(offline, "true");
+    }
+
     /// Vars a POSIX shell synthesizes itself on startup, from nothing — never inherited from the parent,
     /// so scrubbing the parent env cannot leak anything through them. `PWD` derives from the process's
     /// cwd, `SHLVL` defaults to 1 with no inherited value, `_` is `sh`'s own "last command" bookkeeping.
@@ -398,7 +492,9 @@ mod tests {
                 continue;
             }
             assert!(
-                INHERITED_ENV_VARS.contains(&key) || SHELL_SYNTHESIZED_VARS.contains(&key),
+                INHERITED_ENV_VARS.contains(&key)
+                    || SANDBOX_ENV_VARS.contains(&key)
+                    || SHELL_SYNTHESIZED_VARS.contains(&key),
                 "child process saw an env var outside the allowlist: {key} (full env: {output})"
             );
         }

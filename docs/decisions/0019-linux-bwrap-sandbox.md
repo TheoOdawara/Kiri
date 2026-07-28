@@ -1,6 +1,7 @@
 # ADR 0019 — Linux OS-level command sandbox via Bubblewrap; Windows still deferred
 
 - Status: Accepted
+- Amended by: ADR 0033 (Windows reuses this adapter inside WSL2)
 - Date: 2026-07-02
 
 ## Context

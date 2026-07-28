@@ -36,6 +36,111 @@ fn new_canonicalizes_root_to_absolute_existing_dir() {
 }
 
 #[test]
+fn relocating_to_another_workspace_uses_a_different_command_home() {
+    let parent = TempDir::new().unwrap();
+    let first = parent.path().join("first");
+    let second = parent.path().join("second");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    let sandbox = FsSandbox::new(&first, SensitiveMatcher::empty()).unwrap();
+    let first_home = sandbox
+        .command_policy(NetworkPolicy::Deny, &[], &[])
+        .command_home;
+
+    let relocated = sandbox.relocated("../second").unwrap();
+    let second_home = relocated
+        .command_policy(NetworkPolicy::Deny, &[], &[])
+        .command_home;
+
+    assert_ne!(first_home, second_home);
+}
+
+#[cfg(unix)]
+#[test]
+fn offline_cargo_home_links_the_real_read_only_caches() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    let cargo_home = directory.path().join("real-home/.cargo");
+    let registry = cargo_home.join("registry");
+    let git = cargo_home.join("git");
+    for path in [&workspace, &registry, &git] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let sandbox = FsSandbox::with_confinement_and_home_root(
+        &workspace,
+        directory.path().join("command-homes"),
+        SensitiveMatcher::empty(),
+        Arc::new(NoConfinement),
+        NetworkPolicy::Deny,
+        Arc::from(vec![registry.clone(), git.clone()]),
+        Arc::from(Vec::new()),
+    )
+    .unwrap();
+
+    let policy = sandbox.command_policy(NetworkPolicy::Deny, &[], &[]);
+    assert_eq!(
+        std::fs::read_link(policy.command_home.join(".cargo-offline/registry")).unwrap(),
+        registry
+    );
+    assert_eq!(
+        std::fs::read_link(policy.command_home.join(".cargo-offline/git")).unwrap(),
+        git
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn offline_cargo_home_replaces_a_stale_writable_cache() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    let home_root = directory.path().join("command-homes");
+    let registry = directory.path().join("real-home/.cargo/registry");
+    for path in [&workspace, &registry] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let initial = FsSandbox::with_confinement_and_home_root(
+        &workspace,
+        &home_root,
+        SensitiveMatcher::empty(),
+        Arc::new(NoConfinement),
+        NetworkPolicy::Deny,
+        Arc::from(Vec::new()),
+        Arc::from(Vec::new()),
+    )
+    .unwrap();
+    let cargo_home = initial
+        .command_policy(NetworkPolicy::Deny, &[], &[])
+        .command_home
+        .join(".cargo-offline");
+    let stale = cargo_home.join("registry");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("writable-state"), b"stale").unwrap();
+
+    FsSandbox::with_confinement_and_home_root(
+        &workspace,
+        &home_root,
+        SensitiveMatcher::empty(),
+        Arc::new(NoConfinement),
+        NetworkPolicy::Deny,
+        Arc::from(vec![registry.clone()]),
+        Arc::from(Vec::new()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_link(cargo_home.join("registry")).unwrap(),
+        registry
+    );
+    assert!(std::fs::read_dir(cargo_home).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("stale")
+    }));
+}
+
+#[test]
 fn rejects_parent_traversal() {
     let dir = TempDir::new().unwrap();
     let sb = sandbox(&dir);

@@ -27,6 +27,7 @@ pub fn build_provider(
             profile.id
         )));
     }
+    let base_url = effective_base_url(&profile.base_url);
     match (profile.kind, &profile.auth) {
         // Without this arm an unrecognized auth would fall through to the OpenAI adapter's catch-all.
         (_, AuthMethod::Unknown(method)) => Err(AgentError::Provider(format!(
@@ -51,7 +52,7 @@ pub fn build_provider(
             let key = api_key_of(credential, profile)?;
             Ok(Arc::new(AnthropicProvider::new(
                 client,
-                profile.base_url.clone(),
+                base_url.clone(),
                 key,
                 effective_thinking(profile, thinking),
                 effort,
@@ -62,7 +63,7 @@ pub fn build_provider(
             let key = optional_key(credential, profile)?;
             Ok(Arc::new(OpenAiProvider::new(
                 client,
-                profile.base_url.clone(),
+                base_url,
                 key,
                 profile.kind,
                 effective_thinking(profile, thinking),
@@ -103,10 +104,44 @@ pub fn build_embedding_provider(
     let key = optional_key(credential, profile)?;
     Ok(Arc::new(OpenAiEmbeddingProvider::new(
         client,
-        profile.base_url.clone(),
+        effective_base_url(&profile.base_url),
         key,
         model,
     )))
+}
+
+fn effective_base_url(configured: &str) -> String {
+    rewrite_wsl_loopback(
+        configured,
+        std::env::var("KIRI_WSL_NETWORKING_MODE").ok().as_deref(),
+        std::env::var("KIRI_WINDOWS_HOST").ok().as_deref(),
+    )
+}
+
+fn rewrite_wsl_loopback(
+    configured: &str,
+    mode: Option<&str>,
+    windows_host: Option<&str>,
+) -> String {
+    if !mode.is_some_and(|value| value.eq_ignore_ascii_case("nat")) {
+        return configured.to_string();
+    }
+    let Some(host) = windows_host.and_then(|value| value.parse::<std::net::Ipv4Addr>().ok()) else {
+        return configured.to_string();
+    };
+    let Ok(mut url) = reqwest::Url::parse(configured) else {
+        return configured.to_string();
+    };
+    let is_loopback = url.host_str().is_some_and(|value| {
+        value.eq_ignore_ascii_case("localhost")
+            || value
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if !is_loopback || url.set_host(Some(&host.to_string())).is_err() {
+        return configured.to_string();
+    }
+    url.to_string()
 }
 
 /// Empties are filtered per candidate, so a set-but-blank generic var cannot shadow a real vendor one.
@@ -243,7 +278,7 @@ fn optional_key(
 mod tests {
     use super::{
         CredentialResolution, api_key_of, build_provider, effective_thinking,
-        resolve_credential_with_env, secret_from_env_value,
+        resolve_credential_with_env, rewrite_wsl_loopback, secret_from_env_value,
     };
     use crate::modules::provider::application::secret_store::SecretStore;
     use crate::shared::kernel::error::AgentError;
@@ -605,6 +640,42 @@ mod tests {
         assert!(
             secret_from_env_value("   ".to_string()).is_none(),
             "a blank env value must be treated as absent"
+        );
+    }
+
+    #[test]
+    fn wsl_nat_rewrites_only_loopback_hosts() {
+        assert_eq!(
+            rewrite_wsl_loopback("http://localhost:1234/v1", Some("nat"), Some("172.30.96.1")),
+            "http://172.30.96.1:1234/v1"
+        );
+        assert_eq!(
+            rewrite_wsl_loopback(
+                "https://api.example.test/v1",
+                Some("nat"),
+                Some("172.30.96.1")
+            ),
+            "https://api.example.test/v1"
+        );
+        assert_eq!(
+            rewrite_wsl_loopback(
+                "http://localhost:1234/v1",
+                Some("mirrored"),
+                Some("172.30.96.1")
+            ),
+            "http://localhost:1234/v1"
+        );
+    }
+
+    #[test]
+    fn wsl_nat_fails_closed_on_an_invalid_host_bridge() {
+        assert_eq!(
+            rewrite_wsl_loopback(
+                "http://127.0.0.1:11434/v1",
+                Some("nat"),
+                Some("attacker.example")
+            ),
+            "http://127.0.0.1:11434/v1"
         );
     }
 }

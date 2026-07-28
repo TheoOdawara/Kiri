@@ -1,6 +1,6 @@
 # ADR 0032 — `unsafe_code` relaxed from `forbid` to `deny`, for exactly one module
 
-- Status: Accepted
+- Status: Superseded by ADR 0033
 - Date: 2026-07-26
 - Amends: the crate-wide `[lints.rust] unsafe_code = "forbid"` in `Cargo.toml`, which ADR 0027 cited as
   an argument for its own posture.

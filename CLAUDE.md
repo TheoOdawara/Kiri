@@ -12,12 +12,10 @@ Layers on the global contract — only project-specific rules below; when they c
 - **clap** (derive) — CLI parsing. **async-trait** — dyn-compatible async ports. **thiserror** — the typed
   `AgentError` kernel type. **anyhow** — error glue at the binary edge. **toml** — layered config.
   **dotenvy** — seed process env from the trusted `~/.kiri/.env` (never the cwd; ADR 0020). **zeroize** — secret memory.
-  **windows** (`cfg(windows)` only, already in the tree via `process-wrap`/`arboard`) — the Win32 calls the
-  write-restricted-token confinement needs; there is no safe-Rust path to `CreateProcessAsUser` (ADR 0031).
+  **Windows launcher** (`cfg(windows)`) — stdlib-only WSL2 discovery, path mapping, and lifecycle. The full
+  runtime and user commands execute inside WSL2 (ADR 0033).
 - Single binary crate. No workspace, no lib target.
-- `unsafe_code = "deny"`, not `forbid`: exactly one file opts in with `#[allow(unsafe_code)]`
-  (`tools/infrastructure/confine/windows/restricted.rs`), and the `-D warnings` gate makes an `unsafe`
-  anywhere else a build failure. See ADR 0032.
+- `unsafe_code = "forbid"`; there are no per-module exceptions.
 
 ## Commands (verified on Rust 1.96)
 
@@ -25,11 +23,12 @@ Layers on the global contract — only project-specific rules below; when they c
 - Lint: `cargo clippy --all-targets -- -D warnings`
 - Typecheck: `cargo check`
 - Build: `cargo build` · release: `cargo build --release`
-- Test: `cargo test`
+- Test: `cargo test --all-targets`
 - Run: `cargo run -- <args>`
 
 Definition-of-done gate (overrides the global Biome/Jest defaults):
-`cargo fmt --check → cargo clippy --all-targets -- -D warnings → cargo build → cargo test`, each exit 0.
+`cargo fmt --check → cargo clippy --all-targets -- -D warnings → cargo build → cargo test --all-targets`,
+each exit 0.
 
 ## Architecture (enforced strictly)
 
@@ -37,7 +36,7 @@ Definition-of-done gate (overrides the global Biome/Jest defaults):
 `docs/decisions/0003-modular-hexagonal-architecture.md`; it supersedes the old `main → services → models`
 layering.
 
-Layout: `src/main.rs` (~8-line entry) → `src/app.rs` (composition root, `wire`) + `src/shared/{kernel,infra}`
+Layout: `src/main.rs` (platform entry/headless dispatch) → `src/app.rs` (composition root, `wire`) + `src/shared/{kernel,infra}`
 + `src/modules/<context>/{domain,application,infrastructure}`.
 
 `app::wire` (TUI) and `app::wire_sync` (headless `kiri sync`) are the **only** places adapters are chosen.
@@ -115,12 +114,10 @@ in the transcript rather than `eprintln!` behind the alternate-screen TUI.
   home-directory resolution — `$HOME` / `%USERPROFILE%` / `%HOMEDRIVE%%HOMEPATH%`, ADR 0018 — the single
   source `config` and `tools/application::path` both read).
 
-**OS confinement (ADR 0009/0031):** the `CommandSandbox` port has four adapters — `MacosSeatbelt`
-(`sandbox-exec`), `BwrapSandbox` (`bwrap`), `WindowsRestrictedToken` (a write-restricted token; this
-binary re-executed as the hidden `kiri confined-exec` is the launcher, since `CreateProcessAsUser` *is*
-the spawn while the port decorates), and `NoConfinement`. Windows confines **writes only** — reads are
-not confined and the network stance is not enforced there; `confine/windows/restricted.rs` is the single
-file allowed to write `unsafe` (`unsafe_code = "deny"`, ADR 0032).
+**OS confinement (ADR 0009/0033):** the `CommandSandbox` port has `MacosSeatbelt` (`sandbox-exec`),
+`BwrapSandbox` (`bwrap`), and `NoConfinement`. Windows ships a native launcher only; it runs the Linux
+payload in WSL2, where `BwrapSandbox` enforces the filesystem, network, process/IPC, host-interop, and
+secret-protection policy. There is no native Win32 runtime fallback.
 
 **Invariants:** network I/O only in `provider/infrastructure` — **except** `sync/infrastructure`, which
 shells out to `git` to reach the user's profile repo (ADR 0015); filesystem I/O only in

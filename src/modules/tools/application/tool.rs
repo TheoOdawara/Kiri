@@ -165,13 +165,13 @@ pub trait Tool: Send + Sync {
     }
     /// In plan mode, check whether this call should be blocked before execution. Returns
     /// `Some(reason)` if blocked, `None` if allowed. Defaults to `None` — tools that need
-    /// plan-mode restrictions (e.g. `run_command` checking a command blacklist) override this.
+    /// plan-mode restrictions (e.g. `run_command` checking a command allow-list) override this.
     fn plan_check(&self, _sandbox: &dyn Sandbox, _call: &ToolCall) -> Option<String> {
         None
     }
     /// Whether this call must still be confirmed in auto mode. The default is the out-of-root gate
     /// (SEC-01): a target the tool itself flagged as reaching outside the workspace (`default_accept`
-    /// false) is confirmed, an ordinary in-workspace mutation runs unattended. `delete_file`,
+    /// false) is reviewed, an ordinary confined in-workspace mutation runs unattended. `delete_file`,
     /// `delete_dir`, and `move_path` override it to `true` — irreversible however local the target is —
     /// and `run_command` overrides it per command, because a shell is only as dangerous as what it runs.
     ///
@@ -179,6 +179,13 @@ pub trait Tool: Send + Sync {
     /// the prompt the user would see. `default_accept` answers a different question — what Enter does
     /// *when* a prompt is shown — and the two were conflated until this took over the decision.
     fn confirm_in_auto(&self, _call: &ToolCall, confirmation: &Confirmation) -> bool {
+        !confirmation.default_accept
+    }
+
+    /// Whether this call explicitly targets a location outside the active workspace. Most path tools
+    /// encode that in the confirmation default; tools whose prompt default represents a different risk
+    /// (notably `run_command`) override this independently.
+    fn accesses_outside_workspace(&self, _call: &ToolCall, confirmation: &Confirmation) -> bool {
         !confirmation.default_accept
     }
 }
