@@ -12,7 +12,12 @@ Layers on the global contract — only project-specific rules below; when they c
 - **clap** (derive) — CLI parsing. **async-trait** — dyn-compatible async ports. **thiserror** — the typed
   `AgentError` kernel type. **anyhow** — error glue at the binary edge. **toml** — layered config.
   **dotenvy** — seed process env from the trusted `~/.kiri/.env` (never the cwd; ADR 0020). **zeroize** — secret memory.
+  **windows** (`cfg(windows)` only, already in the tree via `process-wrap`/`arboard`) — the Win32 calls the
+  write-restricted-token confinement needs; there is no safe-Rust path to `CreateProcessAsUser` (ADR 0031).
 - Single binary crate. No workspace, no lib target.
+- `unsafe_code = "deny"`, not `forbid`: exactly one file opts in with `#[allow(unsafe_code)]`
+  (`tools/infrastructure/confine/windows/restricted.rs`), and the `-D warnings` gate makes an `unsafe`
+  anywhere else a build failure. See ADR 0032.
 
 ## Commands (verified on Rust 1.96)
 
@@ -45,7 +50,10 @@ in the transcript rather than `eprintln!` behind the alternate-screen TUI.
   **ports** they need, as **traits** (named by capability, no `I` prefix) · `infrastructure/` = **adapters**
   implementing the ports.
 - **Modules (bounded contexts):** `agent` (the `AgentLoop` + the UI
-  ports `Presenter`/`ApprovalPolicy`/`ToolObserver`, plus the provider's `EventSink`; the conversation
+  ports `Presenter`/`ApprovalPolicy`/`ToolObserver`, plus the provider's `EventSink`; `domain` holds only
+  the system prompt — template + `render_template`, whose `# Tools` block is generated from the live
+  registry via `ToolRegistry::prompt_lines` and injected as a `ToolCatalog` parameter, so the prompt
+  cannot drift from the surface the model is offered (ADR 0007 amended); the conversation
   types it drives live in shared/kernel; `infrastructure` holds the one exception to "agent has no
   adapters" — the `task` tool (`TaskTool`), which dispatches a loaded `AgentProfile` as a nested, read-only
   `AgentLoop` turn behind `HeadlessIo`, structurally capped at depth 1; see ADR 0029), `provider` (the `CompletionProvider`
@@ -54,8 +62,9 @@ in the transcript rather than `eprintln!` behind the alternate-screen TUI.
   the only backend — the OS keyring was removed, ADR 0020) and the
   `factory` that picks the adapter from `(kind, auth)`; see ADRs 0011/0012/0020), `tools` (the `Tool` trait + `ToolRegistry`
   + the `Sandbox` port — `FsSandbox` the fs adapter — + one fs adapter per tool, each doing native
-  `std::fs` I/O on every platform; `run_command` is the sole shell-out surface (`sh -c` / `cmd /C`), see
-  ADR 0018), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
+  `std::fs` I/O on every platform; `run_command` is the sole shell-out surface (`sh -c` / `pwsh -Command`), gated by
+  the `domain::command_policy` table — one table, two postures: plan mode is an allow-list, auto mode a
+  deny-list where only a destructive command interrupts (ADR 0030); see ADR 0018), `tui` (the Elm-style `Model`/`update`/keymap + the `Bridge`
   adapter + the ratatui runtime — the sole front-end), `memory` (durable knowledge: `MemoryEntry`/`MemoryKind`
   domain — kinds include `preference` — + the capability port `Memory` (impl by `LayeredMemory`, composing
   project + shared) over the use-case ports `MemoryStore`/`SharedStore` and the persistence ports
@@ -106,6 +115,13 @@ in the transcript rather than `eprintln!` behind the alternate-screen TUI.
   home-directory resolution — `$HOME` / `%USERPROFILE%` / `%HOMEDRIVE%%HOMEPATH%`, ADR 0018 — the single
   source `config` and `tools/application::path` both read).
 
+**OS confinement (ADR 0009/0031):** the `CommandSandbox` port has four adapters — `MacosSeatbelt`
+(`sandbox-exec`), `BwrapSandbox` (`bwrap`), `WindowsRestrictedToken` (a write-restricted token; this
+binary re-executed as the hidden `kiri confined-exec` is the launcher, since `CreateProcessAsUser` *is*
+the spawn while the port decorates), and `NoConfinement`. Windows confines **writes only** — reads are
+not confined and the network stance is not enforced there; `confine/windows/restricted.rs` is the single
+file allowed to write `unsafe` (`unsafe_code = "deny"`, ADR 0032).
+
 **Invariants:** network I/O only in `provider/infrastructure` — **except** `sync/infrastructure`, which
 shells out to `git` to reach the user's profile repo (ADR 0015); filesystem I/O only in
 `tools/infrastructure` (the `FsSandbox` adapter — behind the `tools/application::Sandbox` port — is the
@@ -124,11 +140,15 @@ no UI-framework dependency — the **one** sanctioned exception is the TUI `Inpu
 stdin/stdout directly (all UI via the engine ports). Ports return `AgentError`; `anyhow` only at the binary edge.
 These boundaries are not just convention: `src/architecture_guards.rs` holds `#[test]`s that walk `src/`
 and fail the build if **domain purity** is re-breached — a `domain` file coupling to a UI crate
-(ratatui/tui_textarea, only `InputBuffer` sanctioned, ADR 0017) or doing fs/net/db I/O. The inward
+(ratatui/tui_textarea, only `InputBuffer` sanctioned, ADR 0017) or doing fs/net/db I/O, and if
+`shared/` — the leaf every module depends on — imports from any module
+(`shared_never_imports_from_a_module`). The inward
 import-direction rule (application/domain must not import infrastructure) is enforced by convention and
 review, not yet by a guard.
 
-**Extending:** a new tool = one file under `tools/infrastructure/fs/` implementing `Tool` (it receives
+**Extending:** hardening or relaxing which shell commands interrupt = a row in
+`tools/domain/command_policy::RULES`, or `[commands] extra_destructive`/`extra_plan_safe` in the trusted
+global config (both only ever *add*); a new tool = one file under `tools/infrastructure/fs/` implementing `Tool` (it receives
 the `Sandbox` port as `&dyn Sandbox`), registered in `default_fs_tools`; a new provider = one adapter implementing `CompletionProvider` + a `(kind, auth)` arm in
 `provider/infrastructure/factory`; a new memory/docs tool = one file under `memory/infrastructure/tools/`,
 registered in `default_memory_tools`.
