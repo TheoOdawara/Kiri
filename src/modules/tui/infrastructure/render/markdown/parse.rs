@@ -177,7 +177,7 @@ impl ParseCtx {
                 self.accum = InlineAccum::default();
                 self.current_text.clear();
             }
-            Tag::Heading { level: _, .. } => {
+            Tag::Heading { .. } => {
                 self.accum = InlineAccum::default();
                 self.current_text.clear();
                 self.fmt_stack.push(FmtTag::Heading);

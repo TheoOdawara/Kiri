@@ -10,6 +10,7 @@ All notable changes to this project are documented here.
 - Explicit sandbox guarantees, prompt-free Auto reviewer, and prompt-free read-only Plan execution.
 - Synthetic per-workspace command homes and NAT/mirrored bridging for Windows-local providers.
 - Windows installer, npm/Bun package, Windows/Linux CI, release checksums, and provenance attestations.
+- One-command Windows source bootstrap for the native launcher and matching Linux development payload.
 
 ### Changed
 

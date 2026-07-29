@@ -485,26 +485,16 @@ mod tests {
         let mut inner = tokio::process::Command::new("/usr/bin/env");
         inner.env_clear();
         inner.env("PATH", "/usr/bin");
-        let mut wrapped = adapter
-            .confine(
-                inner,
-                &policy(NetworkPolicy::Deny, WorkspaceAccess::ReadWrite),
-            )
-            .unwrap();
+        let fixture = policy(NetworkPolicy::Deny, WorkspaceAccess::ReadWrite);
+        let mut wrapped = adapter.confine(inner, &fixture).unwrap();
         let output = wrapped.output().await.expect("bwrap runs /usr/bin/env");
         assert!(output.status.success(), "bwrap failed: {output:?}");
         let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let key = line.split('=').next().unwrap_or(line);
-            assert_eq!(
-                key, "PATH",
-                "the wrapped command must not inherit the full parent env, only the caller's explicit \
-                 overrides: saw {stdout:?}"
-            );
-        }
-        assert!(
-            stdout.contains("PATH="),
-            "the explicit override must still reach the child: {stdout:?}"
+        let actual: std::collections::BTreeSet<_> = stdout.lines().collect();
+        let expected = std::collections::BTreeSet::from(["PATH=/usr/bin", "PWD=/"]);
+        assert_eq!(
+            actual, expected,
+            "the wrapped command must receive only the caller's PATH and bwrap's synthetic PWD"
         );
     }
 

@@ -71,6 +71,7 @@ impl FsSandbox {
 
     /// Build a sandbox with an explicit OS-confinement adapter and policy extras. The composition root
     /// uses this; `new` is the unconfined shorthand (tests, and the default before `app::wire`).
+    #[cfg(test)]
     pub fn with_confinement(
         root: impl AsRef<Path>,
         sensitive: SensitiveMatcher,

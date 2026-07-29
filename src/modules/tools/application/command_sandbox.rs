@@ -29,6 +29,7 @@ impl SandboxGuarantees {
         protected_secrets: false,
     };
 
+    #[cfg(target_os = "macos")]
     pub const MACOS: Self = Self {
         filesystem_read: false,
         filesystem_write: true,

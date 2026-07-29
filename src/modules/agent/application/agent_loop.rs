@@ -18,7 +18,7 @@ use crate::modules::tools::application::command_sandbox::{
 use crate::modules::tools::application::plan::{PRESENT_PLAN, extract_plan};
 use crate::modules::tools::application::registry::ToolRegistry;
 use crate::modules::tools::application::sandbox::{CreateResolution, Sandbox};
-use crate::modules::tools::application::tool::{Confirmation, ToolOutcome};
+use crate::modules::tools::application::tool::ToolOutcome;
 use crate::shared::kernel::approval_mode::ApprovalMode;
 use crate::shared::kernel::conversation::Conversation;
 use crate::shared::kernel::error::AgentError;

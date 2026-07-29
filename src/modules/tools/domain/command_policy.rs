@@ -313,6 +313,7 @@ impl CommandPolicy {
 
     /// Whether this command line must be confirmed even in auto mode. `true` for anything it cannot
     /// classify: a deny-list only holds if what it fails to read counts as dangerous.
+    #[cfg(test)]
     pub fn needs_confirmation(&self, command: &str) -> bool {
         if has_substitution(command) {
             return true;

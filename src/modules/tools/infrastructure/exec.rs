@@ -16,12 +16,13 @@ use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::modules::tools::application::command_sandbox::{
-    CommandSandbox, SandboxPolicy, WorkspaceAccess,
-};
+#[cfg(test)]
+use crate::modules::tools::application::command_sandbox::WorkspaceAccess;
+use crate::modules::tools::application::command_sandbox::{CommandSandbox, SandboxPolicy};
 
 /// Combined stdout/stderr is truncated at this many bytes before it reaches the model.
 pub const EXEC_MAX_BYTES: usize = 64 * 1024;
+const STREAM_CAPTURE_BYTES: usize = EXEC_MAX_BYTES + 1;
 
 /// The line [`capped_combined_marking_stderr`] inserts between stdout and stderr when both are
 /// non-empty — a stable, human-legible boundary both the model (it gets this text as the tool result) and
@@ -61,6 +62,7 @@ pub(crate) const INHERITED_ENV_VARS: &[&str] = &[
     "LANG",
     "LC_ALL",
 ];
+#[cfg(test)]
 const SANDBOX_ENV_VARS: &[&str] = &[
     "HOME",
     "XDG_CACHE_HOME",
@@ -294,7 +296,7 @@ async fn run(mut cmd: Command, timeout: Duration) -> Result<ExecResult, ExecErro
     }
 }
 
-/// Drain stdout/stderr with a hard per-stream cap of [`EXEC_MAX_BYTES`], discarding the remainder so the
+/// Drain stdout/stderr with a hard per-stream cap plus one sentinel byte, discarding the remainder so the
 /// child never blocks on a full pipe. Bounds harness RSS even when the model-facing combined cap is
 /// applied later via [`capped_combined`].
 async fn collect_output(child: &mut dyn ChildWrapper) -> Result<ExecResult, ExecError> {
@@ -309,12 +311,12 @@ async fn collect_output(child: &mut dyn ChildWrapper) -> Result<ExecResult, Exec
 
     let stdout_task = async {
         let mut buf = Vec::new();
-        read_capped_stream(&mut stdout_pipe, &mut buf, EXEC_MAX_BYTES).await?;
+        read_capped_stream(&mut stdout_pipe, &mut buf, STREAM_CAPTURE_BYTES).await?;
         Ok::<Vec<u8>, std::io::Error>(buf)
     };
     let stderr_task = async {
         let mut buf = Vec::new();
-        read_capped_stream(&mut stderr_pipe, &mut buf, EXEC_MAX_BYTES).await?;
+        read_capped_stream(&mut stderr_pipe, &mut buf, STREAM_CAPTURE_BYTES).await?;
         Ok::<Vec<u8>, std::io::Error>(buf)
     };
 
@@ -563,10 +565,11 @@ mod tests {
         .await
         .expect("script runs");
         assert!(
-            result.stdout.len() <= EXEC_MAX_BYTES,
+            result.stdout.len() <= STREAM_CAPTURE_BYTES,
             "stdout buffer must be capped during drain, got {}",
             result.stdout.len()
         );
+        assert!(capped_combined(&result).contains("truncated at"));
     }
 
     /// F-BUG-002 / #42: timeout must kill the **whole process tree**, not only the direct shell.

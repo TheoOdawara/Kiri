@@ -126,11 +126,25 @@ effort, and optional `thinking_style` for compatible endpoints:
 
 **Build & run**
 
+On macOS and Linux:
+
 ```bash
 cargo build --release
 cargo run                      # full-screen TUI on a terminal
 cargo run -- "list the crates in this repo and summarize Cargo.toml"
 ```
+
+From a Windows source checkout, bootstrap both the native launcher and its Linux payload:
+
+```powershell
+.\scripts\setup-windows-dev.ps1
+cargo run
+```
+
+The script installs the required Ubuntu/Debian packages, installs Rust stable inside WSL when absent,
+builds both binaries from the same checkout, repairs the versioned payload, and verifies bubblewrap.
+Pass `-Distro Ubuntu-24.04` to select a distribution or `-WhatIf` to inspect the plan without changing
+the machine. Rerun it after changing Linux runtime code.
 
 ## Usage
 
