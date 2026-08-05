@@ -30,8 +30,14 @@ PowerShell 7 installation directory.
 The installer requests elevation immediately when it is invoked, before it
 starts the installation steps that require elevated access.
 
-The installer mechanism and update or pinning policy remain operational
-decisions.
+The Windows npm and Bun distribution packages invoke the official PowerShell 7
+MSI to install the required `pwsh` dependency. The MSI installation is
+elevated and its result is verified before the Kiri installation is considered
+complete. Kiri remains a separate native package artifact.
+
+The installer mechanism is therefore the official PowerShell 7 MSI. The
+PowerShell update or pinning policy after installation remains an operational
+decision.
 
 ## Consequences
 
@@ -43,6 +49,8 @@ decisions.
   the installation in a known state.
 - Runtime startup still verifies that the expected `pwsh` executable is
   available; installation-time success is not treated as proof forever.
+- npm and Bun installations must handle the MSI's elevation and verification
+  failure paths without leaving Kiri in an apparently complete state.
 
 ## Alternatives considered
 
@@ -51,3 +59,5 @@ decisions.
 - Bundling an unmanaged private copy inside the Kiri executable was rejected as
   the default because PowerShell has its own supported installation and update
   lifecycle.
+- Using a package-manager-specific PowerShell installer was rejected because
+  it would make the required Windows shell vary by Kiri distribution channel.

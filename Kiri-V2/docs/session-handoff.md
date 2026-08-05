@@ -1,6 +1,6 @@
 # Kiri-V2 design checkpoint
 
-- Date: 2026-08-04
+- Date: 2026-08-05
 - Phase: design only
 - Implementation status: no Kiri-V2 code has been changed
 
@@ -30,19 +30,19 @@ The current product contract says:
 - installation requests elevation immediately, makes three total attempts with
   waits of 1 second and 3 seconds, then explains the resolution if it fails;
 - `pwsh` discovery checks `PATH` first and the standard installation directory
-  second.
+  second;
+- Kiri is distributed through npm/Bun on Windows, npm/Homebrew on macOS, and
+  npm/AUR on Linux, with channel-owned automatic updates on every startup.
 
 ## Immediate next decision
 
-Choose the PowerShell installation mechanism. MSI is the current recommendation;
-it is not yet an accepted decision.
-
-After that, decide PowerShell update or pinning behavior and finish the supported
-distribution matrix.
+Define PowerShell 7 update or pinning behavior after installation, then decide
+whether local keyless providers are first-class in v1 and which remote providers
+are supported. The distribution matrix is fixed in ADR 0012.
 
 ## Remaining product-boundary decisions
 
-- exact Linux, macOS, and Windows distribution targets;
+- PowerShell 7 update or pinning behavior after installation;
 - whether local keyless providers are first-class in v1;
 - which remote providers are supported in v1;
 - what Claude/Codex/other harness compatibility means;

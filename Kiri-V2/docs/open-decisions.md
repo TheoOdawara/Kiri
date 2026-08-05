@@ -1,7 +1,7 @@
 # Kiri-V2 open decisions
 
 - Status: working register
-- Date: 2026-08-04
+- Date: 2026-08-05
 
 This document tracks design questions that still need an explicit decision.
 An unchecked item is not an implementation task by itself. It becomes a
@@ -54,11 +54,10 @@ decision in a new or updated Kiri-V2 record.
       See [ADR 0007: Complete Kiri-V2 v1 scope](decisions/0007-complete-v1-scope.md).
 - [x] Decide whether Kiri is TUI-first, CLI-first, or must support both equally.
       See [ADR 0008: TUI-first with a first-class CLI](decisions/0008-tui-first-cli-first-class.md).
-- [ ] Define the supported operating systems, distribution targets, and runtime
-      model for each operating system.
-      Confirmed target operating systems: Linux, macOS, and Windows. The
-      Linux and macOS use native runtimes. Windows also uses a native runtime;
-      the distribution matrix remains open.
+- [x] Define the supported operating systems, distribution targets, and runtime
+      model for each operating system. Linux, macOS, and Windows use native
+      runtimes. The package channels, CPU targets, and minimum operating-system
+      policy are defined in [ADR 0012](decisions/0012-package-distribution-and-auto-update.md).
 - [x] Decide whether a Windows runtime is native, WSL-backed, or another model.
       Windows-native is decided; WSL is not the required Windows runtime in v1.
       See [ADR 0010](decisions/0010-native-windows-runtime-and-pwsh.md). The
@@ -76,8 +75,12 @@ decision in a new or updated Kiri-V2 record.
       falls back to the standard PowerShell 7 installation directory. See [ADR 0011](decisions/0011-installer-managed-powershell.md).
 - [x] Define elevation timing for PowerShell 7 installation. The installer
       requests elevation immediately when invoked. See [ADR 0011](decisions/0011-installer-managed-powershell.md).
-- [ ] Define the PowerShell installer mechanism and update or pinning policy
-      after installation.
+- [x] Define the supported package distribution channels and automatic update
+      ownership. See [ADR 0012](decisions/0012-package-distribution-and-auto-update.md).
+- [x] Define the PowerShell installer mechanism. Windows npm and Bun packages
+      invoke the official PowerShell 7 MSI; the update or pinning policy after
+      installation remains open. See [ADR 0011](decisions/0011-installer-managed-powershell.md).
+- [ ] Define PowerShell 7 update or pinning behavior after installation.
 - [ ] Decide whether local keyless providers are first-class in v1.
 - [ ] Decide which remote providers, if any, are supported in v1.
 - [ ] Decide whether Claude, Codex, or other harness compatibility means

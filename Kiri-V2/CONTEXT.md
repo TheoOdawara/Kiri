@@ -39,6 +39,17 @@ invoked as `pwsh`; direct structured program execution remains separate from
 shell execution. The Kiri installer installs it as a required Windows
 dependency.
 
+## Distribution channel
+
+A supported package-manager path through which a user installs and updates
+Kiri, such as npm, Bun, Homebrew, or AUR.
+
+## Native package artifact
+
+The prebuilt Kiri executable for one supported operating system and CPU target.
+Distribution channels deliver this artifact rather than compiling Kiri during
+installation.
+
 ## Decision question
 
 A question with alternatives that asks the user to choose how the work should
