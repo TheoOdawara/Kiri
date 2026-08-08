@@ -19,7 +19,7 @@ must not close any item in this register unless we also record them under
 
 The current records are:
 
-- ADRs 0001–0013 are recorded as accepted decisions.
+- ADRs 0001–0014 are recorded as accepted decisions.
 - Specification 0001 is recorded as proposed, but the decisions made in it
   are valid; `proposed` describes document lifecycle, not decision validity.
 - Historical code, Claude/Codex conventions, and external examples are
@@ -42,6 +42,7 @@ The following Kiri-V2 records are the current design baseline:
 - [ADR 0011: Installer-managed PowerShell 7 prerequisite](decisions/0011-installer-managed-powershell.md)
 - [ADR 0012: Package distribution and channel-owned auto-update](decisions/0012-package-distribution-and-auto-update.md)
 - [ADR 0013: MSIX-managed PowerShell 7 prerequisite](decisions/0013-msix-managed-powershell.md)
+- [ADR 0014: PowerShell 7 rolling stable update policy](decisions/0014-powershell-update-policy.md)
 - [Specification 0001: On-disk schemas](specs/0001-on-disk-schemas.md)
 
 The checklist below contains only decisions that are not already defined in
@@ -82,9 +83,11 @@ decision in a new or updated Kiri-V2 record.
       ownership. See [ADR 0012](decisions/0012-package-distribution-and-auto-update.md).
 - [x] Define the PowerShell installer mechanism. Windows npm and Bun packages
       use the official signed MSIX or MSIXBundle distribution, preferably via
-      WinGet; the update or pinning policy after installation remains open. See
-      [ADR 0013](decisions/0013-msix-managed-powershell.md).
-- [ ] Define PowerShell 7 update or pinning behavior after installation.
+      WinGet. The update or pinning policy is defined separately in [ADR 0014](decisions/0014-powershell-update-policy.md). See [ADR 0013](decisions/0013-msix-managed-powershell.md).
+- [x] Define PowerShell 7 update or pinning behavior after installation. Kiri
+      uses rolling stable updates with no exact Kiri-managed pin; the official
+      package channel owns updates and Kiri validates the executable per
+      session. See [ADR 0014](decisions/0014-powershell-update-policy.md).
 - [ ] Decide whether local keyless providers are first-class in v1.
 - [ ] Decide which remote providers, if any, are supported in v1.
 - [ ] Decide whether Claude, Codex, or other harness compatibility means

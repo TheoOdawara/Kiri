@@ -28,9 +28,10 @@ with the older Windows PowerShell.
 - Windows PowerShell 5.1 is not the default Kiri shell. Explicit legacy
   compatibility behavior remains an operational decision.
 
-The installer-managed prerequisite is defined in ADR 0011 and uses the latest
-stable PowerShell 7 release available at installation time. Discovery rules,
-installation failure behavior, and update or pinning policy remain open.
+The installer-managed prerequisite is defined in ADR 0011 and amended by ADRs
+0013 and 0014. It uses the latest stable PowerShell 7 release available at
+installation time. Discovery rules, installation failure behavior, and the
+rolling update policy are defined by those decisions.
 
 ## Consequences
 

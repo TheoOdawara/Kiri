@@ -32,7 +32,7 @@ MSIXBundle from Microsoft's official distribution.
   executable passes normal discovery and version validation.
 - Existing retry count, retry delays, elevation timing, and failure reporting
   from ADR 0011 remain unchanged.
-- PowerShell update and version-pinning behavior remains a separate decision.
+- PowerShell update and version-pinning behavior is defined by ADR 0014.
 
 `pwsh` discovery is ordered as follows:
 

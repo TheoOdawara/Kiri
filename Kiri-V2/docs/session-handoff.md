@@ -29,6 +29,8 @@ The current product contract says:
 - the Kiri installer installs the latest stable PowerShell 7 release;
 - new Windows installations use Microsoft's signed MSIX or MSIXBundle
   distribution, preferably through WinGet;
+- PowerShell updates follow a rolling stable policy owned by the official
+  package channel; Kiri does not maintain an exact version pin;
 - installation requests elevation immediately, makes three total attempts with
   waits of 1 second and 3 seconds, then explains the resolution if it fails;
 - `pwsh` discovery checks `PATH`, the registered MSIX installation, and then
@@ -38,13 +40,12 @@ The current product contract says:
 
 ## Immediate next decision
 
-Define PowerShell 7 update or pinning behavior after installation, then decide
-whether local keyless providers are first-class in v1 and which remote providers
-are supported. The distribution matrix is fixed in ADR 0012.
+Decide whether local keyless providers are first-class in v1 and which remote
+providers are supported. The PowerShell package and update policies are fixed
+in ADRs 0013 and 0014; the distribution matrix is fixed in ADR 0012.
 
 ## Remaining product-boundary decisions
 
-- PowerShell 7 update or pinning behavior after installation;
 - whether local keyless providers are first-class in v1;
 - which remote providers are supported in v1;
 - what Claude/Codex/other harness compatibility means;

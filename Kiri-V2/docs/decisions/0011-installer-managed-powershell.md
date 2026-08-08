@@ -36,8 +36,8 @@ installer to install the required `pwsh` dependency. The installer mechanism
 and package discovery are amended by ADR 0013, which selects signed MSIX or
 MSIXBundle distribution. Kiri remains a separate native package artifact.
 
-The PowerShell update or pinning policy after installation remains an
-operational decision.
+The PowerShell update and pinning policy after installation is defined by ADR
+0014.
 
 ## Consequences
 
