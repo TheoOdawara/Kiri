@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-04
+- Amended by: 0013
 
 ## Context
 
@@ -31,13 +32,12 @@ The installer requests elevation immediately when it is invoked, before it
 starts the installation steps that require elevated access.
 
 The Windows npm and Bun distribution packages invoke the official PowerShell 7
-MSI to install the required `pwsh` dependency. The MSI installation is
-elevated and its result is verified before the Kiri installation is considered
-complete. Kiri remains a separate native package artifact.
+installer to install the required `pwsh` dependency. The installer mechanism
+and package discovery are amended by ADR 0013, which selects signed MSIX or
+MSIXBundle distribution. Kiri remains a separate native package artifact.
 
-The installer mechanism is therefore the official PowerShell 7 MSI. The
-PowerShell update or pinning policy after installation remains an operational
-decision.
+The PowerShell update or pinning policy after installation remains an
+operational decision.
 
 ## Consequences
 
@@ -49,8 +49,9 @@ decision.
   the installation in a known state.
 - Runtime startup still verifies that the expected `pwsh` executable is
   available; installation-time success is not treated as proof forever.
-- npm and Bun installations must handle the MSI's elevation and verification
-  failure paths without leaving Kiri in an apparently complete state.
+- npm and Bun installations must handle the package installation's elevation
+  and verification failure paths without leaving Kiri in an apparently
+  complete state.
 
 ## Alternatives considered
 

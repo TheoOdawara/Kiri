@@ -1,7 +1,7 @@
 # Kiri-V2 open decisions
 
 - Status: working register
-- Date: 2026-08-05
+- Date: 2026-08-08
 
 This document tracks design questions that still need an explicit decision.
 An unchecked item is not an implementation task by itself. It becomes a
@@ -19,7 +19,7 @@ must not close any item in this register unless we also record them under
 
 The current records are:
 
-- ADRs 0001–0011 are recorded as accepted decisions.
+- ADRs 0001–0013 are recorded as accepted decisions.
 - Specification 0001 is recorded as proposed, but the decisions made in it
   are valid; `proposed` describes document lifecycle, not decision validity.
 - Historical code, Claude/Codex conventions, and external examples are
@@ -40,6 +40,8 @@ The following Kiri-V2 records are the current design baseline:
 - [ADR 0009: Windows-native execution is first-class](decisions/0009-windows-native-execution.md)
 - [ADR 0010: Native Windows runtime and PowerShell 7](decisions/0010-native-windows-runtime-and-pwsh.md)
 - [ADR 0011: Installer-managed PowerShell 7 prerequisite](decisions/0011-installer-managed-powershell.md)
+- [ADR 0012: Package distribution and channel-owned auto-update](decisions/0012-package-distribution-and-auto-update.md)
+- [ADR 0013: MSIX-managed PowerShell 7 prerequisite](decisions/0013-msix-managed-powershell.md)
 - [Specification 0001: On-disk schemas](specs/0001-on-disk-schemas.md)
 
 The checklist below contains only decisions that are not already defined in
@@ -64,7 +66,7 @@ decision in a new or updated Kiri-V2 record.
       native sandbox implementation remains open.
 - [x] Define the required PowerShell 7 version and installation or bundling policy.
       The installer installs the latest stable release available at installation
-      time. See [ADR 0011](decisions/0011-installer-managed-powershell.md).
+      time as an MSIX or MSIXBundle. See [ADR 0013](decisions/0013-msix-managed-powershell.md).
 - [x] Define the behavior when PowerShell 7 installation or verification fails.
       The installer retries internally; after the retry fails, it warns the
       user and explains how to resolve the dependency. See [ADR 0011](decisions/0011-installer-managed-powershell.md).
@@ -72,14 +74,16 @@ decision in a new or updated Kiri-V2 record.
       verification. There are three total attempts: initial, after 1 second,
       and after 3 seconds. See [ADR 0011](decisions/0011-installer-managed-powershell.md).
 - [x] Define `pwsh` discovery after installation. Kiri checks `PATH` first and
-      falls back to the standard PowerShell 7 installation directory. See [ADR 0011](decisions/0011-installer-managed-powershell.md).
+      then checks the registered MSIX installation, with the standard MSI
+      directory retained only for existing MSI installations. See [ADR 0013](decisions/0013-msix-managed-powershell.md).
 - [x] Define elevation timing for PowerShell 7 installation. The installer
       requests elevation immediately when invoked. See [ADR 0011](decisions/0011-installer-managed-powershell.md).
 - [x] Define the supported package distribution channels and automatic update
       ownership. See [ADR 0012](decisions/0012-package-distribution-and-auto-update.md).
 - [x] Define the PowerShell installer mechanism. Windows npm and Bun packages
-      invoke the official PowerShell 7 MSI; the update or pinning policy after
-      installation remains open. See [ADR 0011](decisions/0011-installer-managed-powershell.md).
+      use the official signed MSIX or MSIXBundle distribution, preferably via
+      WinGet; the update or pinning policy after installation remains open. See
+      [ADR 0013](decisions/0013-msix-managed-powershell.md).
 - [ ] Define PowerShell 7 update or pinning behavior after installation.
 - [ ] Decide whether local keyless providers are first-class in v1.
 - [ ] Decide which remote providers, if any, are supported in v1.

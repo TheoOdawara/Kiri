@@ -24,6 +24,7 @@ known failures, and lessons learned. It is not the architecture for Kiri-V2.
 - [0010. Native Windows runtime and PowerShell 7](decisions/0010-native-windows-runtime-and-pwsh.md)
 - [0011. Installer-managed PowerShell 7 prerequisite](decisions/0011-installer-managed-powershell.md)
 - [0012. Package distribution and channel-owned auto-update](decisions/0012-package-distribution-and-auto-update.md)
+- [0013. MSIX-managed PowerShell 7 prerequisite](decisions/0013-msix-managed-powershell.md)
 
 ## Specifications
 
