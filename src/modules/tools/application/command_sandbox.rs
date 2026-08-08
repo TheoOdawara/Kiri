@@ -39,6 +39,7 @@ impl SandboxGuarantees {
         protected_secrets: true,
     };
 
+    #[cfg(any(target_os = "linux", test))]
     pub const BWRAP: Self = Self {
         filesystem_read: true,
         filesystem_write: true,
