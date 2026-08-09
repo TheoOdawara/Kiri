@@ -22,7 +22,7 @@ field remains governed by the accepted ADRs and the policy engine.
 
 ## Non-goals
 
-- Defining provider-specific request formats or credential storage.
+- Defining provider-specific request formats or credential backend adapters.
 - Defining the supervisor IPC protocol or the SQLite session schema.
 - Defining a user-authored validator catalog or MCP server schema.
 - Importing Claude, Codex, or agent configuration.
@@ -37,6 +37,7 @@ Kiri reads these locations:
 
 ```text
 ~/.kiri/config.toml                         global configuration
+~/.kiri/credentials.json                    file credential backend
 ~/.kiri/{skills,commands,rules,agents,hooks}/*.md
 
 <project>/KIRI.md                            native instructions
@@ -80,6 +81,7 @@ reported and ignored.
 | `default_mode` | `plan`, `default`, `auto` | no | no | Mode used when a new session starts. |
 | `[session].exit_policy` | `detach`, `pause`, `stop` | no | no | Action for active sessions when the TUI closes. |
 | `[providers.<id>]` | provider table | no | no | Non-secret provider connection profile. |
+| `[credentials].backend` | `file` or `keyring` | no | no | General credential backend; defaults to `file`. |
 | `[policy].network` | `no_network`, `read_remote`, `write_remote` | no | no | Global network capability ceiling. |
 | `[limits]` | limit table | no | lower only | User/project concurrency limits, never above Kiri's hard ceiling. |
 | `[memory]` | memory table | no | no | Active global backend and memory policies. |
@@ -100,7 +102,9 @@ exit_policy = "pause"
 kind = "openai-compatible"
 base_url = "http://localhost:11434/v1"
 model = "local-model"
-credential = "local"
+
+[credentials]
+backend = "file"
 
 [policy]
 network = "no_network"
@@ -146,6 +150,20 @@ never valid fields in this table.
 Provider IDs are unique within the configuration layer and match
 `[a-z0-9][a-z0-9._-]{0,63}`. The provider adapter validates `kind`, the URL,
 and credential requirements before a session starts.
+
+#### Credential storage
+
+`credential` is an opaque reference to the general `CredentialStore`; it is
+not the credential value. Profiles for keyless local providers omit the field.
+The global `[credentials].backend` selects `file` or `keyring`, and defaults to
+`file`. The project layer cannot override it.
+
+The file backend stores values in `~/.kiri/credentials.json`. The keyring
+backend stores the same references in the native operating system credential
+manager. Backend changes migrate all entries, verify the destination, and
+activate the new backend only after verification. An unavailable selected
+backend is an explicit error; Kiri never silently falls back to the other
+backend.
 
 #### Limits
 
@@ -200,6 +218,8 @@ to the project, canonical path, and capabilities.
 - Unknown keys are preserved by the configuration editor and surfaced as
   warnings. They have no effect until a later schema recognizes them.
 - Writes are atomic and never include credentials.
+- A selected credential backend that is unavailable is a visible error; Kiri
+  does not silently select the other backend.
 - The UI edits one source layer at a time and never writes a generated merged
   file.
 
@@ -338,7 +358,8 @@ representations for:
 
 - one-layer configuration and layer-aware validation;
 - common and kind-specific workflow frontmatter;
-- memory frontmatter and lineage metadata.
+- memory frontmatter and lineage metadata;
+- credential backend selection and opaque credential references.
 
 The parser must return field-level diagnostics with path, key, and reason. It
 must not execute resource bodies while parsing or discovering them.
@@ -365,6 +386,15 @@ must not execute resource bodies while parsing or discovering them.
 - Given a configuration edit containing unknown keys, when the UI writes the
   selected layer, then those keys remain present and are still surfaced as
   warnings.
+- Given a provider profile with an opaque credential reference, when Kiri loads
+  it, then the selected global credential backend resolves the value without
+  exposing it in configuration or session data.
+- Given a backend switch, when every credential is copied and verified, then
+  Kiri activates the destination backend and preserves the credential
+  references used by provider profiles.
+- Given an unavailable selected credential backend, when Kiri resolves a
+  credential, then it reports an actionable error and does not silently use the
+  other backend.
 
 ## Deferred, non-blocking follow-ups
 

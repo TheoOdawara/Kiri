@@ -39,6 +39,17 @@ invoked as `pwsh`; direct structured program execution remains separate from
 shell execution. The Kiri installer installs it as a required Windows
 dependency.
 
+## Credential
+
+A secret value referenced by a provider or another Kiri integration. Raw
+credential values are not configuration or workflow content.
+
+## Credential backend
+
+The storage mechanism used by Kiri for credentials. The file backend is the
+default; the native OS keyring is optional and switchable, with verified
+migration between backends.
+
 ## Distribution channel
 
 A supported package-manager path through which a user installs and updates

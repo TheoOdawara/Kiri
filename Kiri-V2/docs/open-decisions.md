@@ -19,7 +19,7 @@ must not close any item in this register unless we also record them under
 
 The current records are:
 
-- ADRs 0001–0014 are recorded as accepted decisions.
+- ADRs 0001–0015 are recorded as accepted decisions.
 - Specification 0001 is recorded as proposed, but the decisions made in it
   are valid; `proposed` describes document lifecycle, not decision validity.
 - Historical code, Claude/Codex conventions, and external examples are
@@ -43,6 +43,7 @@ The following Kiri-V2 records are the current design baseline:
 - [ADR 0012: Package distribution and channel-owned auto-update](decisions/0012-package-distribution-and-auto-update.md)
 - [ADR 0013: MSIX-managed PowerShell 7 prerequisite](decisions/0013-msix-managed-powershell.md)
 - [ADR 0014: PowerShell 7 rolling stable update policy](decisions/0014-powershell-update-policy.md)
+- [ADR 0015: General credential storage backends](decisions/0015-credential-storage-backends.md)
 - [Specification 0001: On-disk schemas](specs/0001-on-disk-schemas.md)
 
 The checklist below contains only decisions that are not already defined in
@@ -140,8 +141,10 @@ decision in a new or updated Kiri-V2 record.
       configuration.
 - [ ] Define the closed provider `kind` catalog and its adapter requirements.
 - [ ] Define command catalog entries and their configuration surface.
-- [ ] Define the exact credential reference model and where credential values
-      are stored.
+- [x] Define the exact credential reference model and where credential values
+      are stored. Provider profiles hold opaque references; the default file
+      backend uses `~/.kiri/credentials.json`, and the optional keyring backend
+      uses the native OS credential manager. See [ADR 0015](decisions/0015-credential-storage-backends.md).
 - [ ] Define whether configuration edits are watched, reloaded, or applied
       only at session boundaries.
 - [ ] Define concurrent-edit, lock, backup, rollback, and interrupted-write

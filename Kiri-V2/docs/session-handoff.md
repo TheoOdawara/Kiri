@@ -31,6 +31,8 @@ The current product contract says:
   distribution, preferably through WinGet;
 - PowerShell updates follow a rolling stable policy owned by the official
   package channel; Kiri does not maintain an exact version pin;
+- general credentials use the file backend by default, with an optional
+  switchable OS keyring backend and verified migration between them;
 - installation requests elevation immediately, makes three total attempts with
   waits of 1 second and 3 seconds, then explains the resolution if it fails;
 - `pwsh` discovery checks `PATH`, the registered MSIX installation, and then

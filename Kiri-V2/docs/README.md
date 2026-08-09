@@ -26,6 +26,7 @@ known failures, and lessons learned. It is not the architecture for Kiri-V2.
 - [0012. Package distribution and channel-owned auto-update](decisions/0012-package-distribution-and-auto-update.md)
 - [0013. MSIX-managed PowerShell 7 prerequisite](decisions/0013-msix-managed-powershell.md)
 - [0014. PowerShell 7 rolling stable update policy](decisions/0014-powershell-update-policy.md)
+- [0015. General credential storage backends](decisions/0015-credential-storage-backends.md)
 
 ## Specifications
 
