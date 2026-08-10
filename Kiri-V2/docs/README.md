@@ -27,6 +27,7 @@ known failures, and lessons learned. It is not the architecture for Kiri-V2.
 - [0013. MSIX-managed PowerShell 7 prerequisite](decisions/0013-msix-managed-powershell.md)
 - [0014. PowerShell 7 rolling stable update policy](decisions/0014-powershell-update-policy.md)
 - [0015. General credential storage backends](decisions/0015-credential-storage-backends.md)
+- [0016. First-class keyless local providers](decisions/0016-first-class-local-providers.md)
 
 ## Specifications
 

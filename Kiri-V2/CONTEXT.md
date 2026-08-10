@@ -50,6 +50,12 @@ The storage mechanism used by Kiri for credentials. The file backend is the
 default; the native OS keyring is optional and switchable, with verified
 migration between backends.
 
+## Local provider
+
+A model provider running on the user's machine. Ollama and LM Studio are
+first-class Kiri-V2 local providers and are keyless by default; a local server
+that enables authentication may use a credential from the general backend.
+
 ## Distribution channel
 
 A supported package-manager path through which a user installs and updates

@@ -19,7 +19,7 @@ must not close any item in this register unless we also record them under
 
 The current records are:
 
-- ADRs 0001–0015 are recorded as accepted decisions.
+- ADRs 0001–0016 are recorded as accepted decisions.
 - Specification 0001 is recorded as proposed, but the decisions made in it
   are valid; `proposed` describes document lifecycle, not decision validity.
 - Historical code, Claude/Codex conventions, and external examples are
@@ -44,6 +44,7 @@ The following Kiri-V2 records are the current design baseline:
 - [ADR 0013: MSIX-managed PowerShell 7 prerequisite](decisions/0013-msix-managed-powershell.md)
 - [ADR 0014: PowerShell 7 rolling stable update policy](decisions/0014-powershell-update-policy.md)
 - [ADR 0015: General credential storage backends](decisions/0015-credential-storage-backends.md)
+- [ADR 0016: First-class keyless local providers](decisions/0016-first-class-local-providers.md)
 - [Specification 0001: On-disk schemas](specs/0001-on-disk-schemas.md)
 
 The checklist below contains only decisions that are not already defined in
@@ -89,7 +90,9 @@ decision in a new or updated Kiri-V2 record.
       uses rolling stable updates with no exact Kiri-managed pin; the official
       package channel owns updates and Kiri validates the executable per
       session. See [ADR 0014](decisions/0014-powershell-update-policy.md).
-- [ ] Decide whether local keyless providers are first-class in v1.
+- [x] Decide whether local keyless providers are first-class in v1. Ollama
+      and LM Studio are built-in local providers, keyless by default, using
+      the shared OpenAI-compatible adapter. See [ADR 0016](decisions/0016-first-class-local-providers.md).
 - [ ] Decide which remote providers, if any, are supported in v1.
 - [ ] Decide whether Claude, Codex, or other harness compatibility means
       conventions only, import, migration, or no compatibility.

@@ -33,6 +33,8 @@ The current product contract says:
   package channel; Kiri does not maintain an exact version pin;
 - general credentials use the file backend by default, with an optional
   switchable OS keyring backend and verified migration between them;
+- Ollama and LM Studio are first-class local providers, keyless by default,
+  with optional credentials when local server authentication is enabled;
 - installation requests elevation immediately, makes three total attempts with
   waits of 1 second and 3 seconds, then explains the resolution if it fails;
 - `pwsh` discovery checks `PATH`, the registered MSIX installation, and then
@@ -42,13 +44,12 @@ The current product contract says:
 
 ## Immediate next decision
 
-Decide whether local keyless providers are first-class in v1 and which remote
-providers are supported. The PowerShell package and update policies are fixed
-in ADRs 0013 and 0014; the distribution matrix is fixed in ADR 0012.
+Decide which remote providers are supported. The local provider, credential,
+PowerShell package, and update policies are fixed in ADRs 0013–0016; the
+distribution matrix is fixed in ADR 0012.
 
 ## Remaining product-boundary decisions
 
-- whether local keyless providers are first-class in v1;
 - which remote providers are supported in v1;
 - what Claude/Codex/other harness compatibility means;
 - the native Windows sandbox implementation.

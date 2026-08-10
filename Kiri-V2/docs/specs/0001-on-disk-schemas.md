@@ -165,6 +165,17 @@ activate the new backend only after verification. An unavailable selected
 backend is an explicit error; Kiri never silently falls back to the other
 backend.
 
+#### Built-in local providers
+
+The v1 built-in local provider profiles are Ollama and LM Studio. Both use the
+shared OpenAI-compatible adapter. Their default base URLs are
+`http://localhost:11434/v1` and `http://localhost:1234/v1`, respectively.
+
+These profiles omit `credential` by default and are available during provider
+selection without API-key onboarding. A user may add an opaque credential
+reference when the local server requires authentication. The provider catalog
+remains responsible for validating the configured URL, model, and capabilities.
+
 #### Limits
 
 The v1 limit keys are:
@@ -395,6 +406,9 @@ must not execute resource bodies while parsing or discovering them.
 - Given an unavailable selected credential backend, when Kiri resolves a
   credential, then it reports an actionable error and does not silently use the
   other backend.
+- Given a fresh installation with a reachable Ollama or LM Studio server, when
+  the user selects the local provider, then Kiri does not require an API key or
+  create a credential entry before model discovery.
 
 ## Deferred, non-blocking follow-ups
 
