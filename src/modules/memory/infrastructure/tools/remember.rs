@@ -1,0 +1,210 @@
+use std::sync::Arc;
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use crate::modules::memory::application::memory_port::Memory;
+use crate::modules::memory::domain::entry::{MemoryEntry, MemoryKind};
+use crate::modules::memory::domain::scope::Scope;
+use crate::modules::tools::application::sandbox::Sandbox;
+use crate::modules::tools::application::tool::{
+    Confirmation, Tool, ToolOutcome, confirm, confirm_execute_suffix, function_schema,
+};
+use crate::modules::tools::infrastructure::args::{parse, parse_args};
+use crate::shared::kernel::tool_call::ToolCall;
+
+#[derive(Deserialize)]
+struct RememberArgs {
+    kind: String,
+    content: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    scope: String,
+}
+
+/// Tool that persists a memory entry to the project (`.kiri/memory/`) or shared
+/// (`~/.kiri/memory/shared.db`) store, so durable knowledge survives across turns and sessions.
+pub struct Remember {
+    memory: Arc<dyn Memory>,
+    project_id: String,
+}
+
+impl Remember {
+    pub fn new(memory: Arc<dyn Memory>, project_id: String) -> Self {
+        Self { memory, project_id }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl Tool for Remember {
+    fn name(&self) -> &'static str {
+        "remember"
+    }
+
+    fn schema(&self) -> Value {
+        function_schema(
+            self.name(),
+            "Persist a durable memory entry. Use it to record knowledge worth keeping across turns and \
+             sessions. 'kind' is one of: decision, pattern, anti-pattern, snippet, heuristic, fact, \
+             preference. Use 'preference' for a durable user preference ('always use X', 'I prefer Y') \
+             and store it with scope 'shared'. 'scope' is 'project' (this repo) or 'shared' \
+             (cross-project, high availability). Keep 'content' concise and self-contained (markdown \
+             allowed).",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "content", "scope"],
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["decision", "pattern", "anti-pattern", "snippet", "heuristic", "fact", "preference"],
+                        "description": "The category of the entry."
+                    },
+                    "content": { "type": "string", "description": "The knowledge to store (markdown ok)." },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional tags for retrieval."
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["project", "shared"],
+                        "description": "Where to store: 'project' (this repo) or 'shared' (cross-project)."
+                    }
+                }
+            }),
+        )
+    }
+
+    fn command_line(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> Option<String> {
+        let a: RememberArgs = parse(call.function.arguments.as_str()).ok()?;
+        Some(format!("remember {} ({})", a.kind, a.scope))
+    }
+
+    fn confirmation(&self, sandbox: &dyn Sandbox, call: &ToolCall) -> Option<Confirmation> {
+        let cmd = self.command_line(sandbox, call)?;
+        Some(confirm(
+            format!("Gravar na memória. {}", confirm_execute_suffix(&cmd)),
+            true,
+        ))
+    }
+
+    async fn execute(&self, _sandbox: &dyn Sandbox, call: &ToolCall) -> ToolOutcome {
+        let args: RememberArgs = match parse_args(call) {
+            Ok(args) => args,
+            Err(out) => return out,
+        };
+        let Ok(kind) = args.kind.parse::<MemoryKind>() else {
+            return ToolOutcome::Error(format!(
+                "invalid kind '{}': expected one of decision, pattern, anti-pattern, snippet, \
+                 heuristic, fact, preference",
+                args.kind
+            ));
+        };
+        let Some(scope) = Scope::from_wire(&args.scope) else {
+            return ToolOutcome::Error(format!(
+                "invalid scope '{}': expected 'project' or 'shared'",
+                args.scope
+            ));
+        };
+        let entry = MemoryEntry::new(
+            kind,
+            args.content,
+            args.tags.into_iter().collect(),
+            scope.project_id_for(&self.project_id),
+        );
+
+        let result = match scope {
+            Scope::Project => {
+                if !self.memory.project_memory_available() {
+                    return ToolOutcome::Error("project memory is unavailable".to_string());
+                }
+                self.memory.remember_project(entry).await
+            }
+            Scope::Shared => {
+                if !self.memory.shared_memory_available() {
+                    return ToolOutcome::Error("shared memory is unavailable".to_string());
+                }
+                self.memory.remember_shared(entry).await
+            }
+        };
+
+        match result {
+            Ok(()) => ToolOutcome::Ok(format!("remembered {} in {} memory", args.kind, args.scope)),
+            Err(error) => ToolOutcome::Error(error.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::memory::infrastructure::test_support::{call, sandbox, temp_port};
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn persists_then_recallable() {
+        let dir = TempDir::new().unwrap();
+        let port = temp_port(&dir).await;
+        let tool = Remember::new(port.clone(), "proj-test".into());
+        let sb = sandbox();
+
+        let out = tool
+            .execute(
+                &sb,
+                &call(
+                    r#"{"kind":"fact","content":"edition 2024 ships in 1.85","scope":"project"}"#,
+                ),
+            )
+            .await;
+        assert!(matches!(out, ToolOutcome::Ok(_)));
+
+        let hits = port.recall_project("edition", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn persists_preference_to_shared_then_recallable() {
+        let dir = TempDir::new().unwrap();
+        let port = temp_port(&dir).await;
+        let tool = Remember::new(port.clone(), "proj-test".into());
+        let sb = sandbox();
+
+        let out = tool
+            .execute(
+                &sb,
+                &call(
+                    r#"{"kind":"preference","content":"always use tabs over spaces","scope":"shared"}"#,
+                ),
+            )
+            .await;
+        assert!(matches!(out, ToolOutcome::Ok(_)));
+
+        let hits = port.recall_shared("tabs", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, MemoryKind::Preference);
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_kind_and_scope() {
+        let dir = TempDir::new().unwrap();
+        let tool = Remember::new(temp_port(&dir).await, "proj-test".into());
+        let sb = sandbox();
+
+        let bad_kind = tool
+            .execute(
+                &sb,
+                &call(r#"{"kind":"nope","content":"x","scope":"project"}"#),
+            )
+            .await;
+        assert!(matches!(bad_kind, ToolOutcome::Error(_)));
+
+        let bad_scope = tool
+            .execute(
+                &sb,
+                &call(r#"{"kind":"fact","content":"x","scope":"galaxy"}"#),
+            )
+            .await;
+        assert!(matches!(bad_scope, ToolOutcome::Error(_)));
+    }
+}

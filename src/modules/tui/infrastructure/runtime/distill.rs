@@ -1,0 +1,200 @@
+//! End-of-session distillation: run the distiller while keeping the UI responsive (a spinner ticks and
+//! Ctrl+C skips). Best-effort and bounded — a skip or failure surfaces a Notice and never blocks quit.
+
+use std::time::Instant;
+
+use crossterm::event::{Event, KeyCode, KeyModifiers};
+use tokio_stream::StreamExt;
+
+use crate::modules::memory::application::distill::{DistillReport, Distiller};
+use crate::shared::kernel::conversation::Conversation;
+use crate::shared::kernel::error::AgentError;
+use crate::shared::kernel::message::Message;
+use crate::shared::kernel::role::Role;
+
+use super::render::draw_and_copy;
+use super::turn::spinner_frame;
+use super::{RunLoop, UiDriver};
+
+/// Whether a session is worth distilling: it must hold at least one user message and one non-empty
+/// assistant reply, so an empty or aborted session never spends an LLM call on noise.
+fn should_distill(conversation: &Conversation) -> bool {
+    let mut has_user = false;
+    let mut has_assistant = false;
+    for message in conversation.messages() {
+        match message.role {
+            Role::User => has_user = true,
+            Role::Assistant
+                if message
+                    .content
+                    .as_deref()
+                    .is_some_and(|c| !c.trim().is_empty()) =>
+            {
+                has_assistant = true
+            }
+            _ => {}
+        }
+    }
+    has_user && has_assistant
+}
+
+/// Whether a crossterm event is Ctrl+C — the skip key during distillation.
+fn is_ctrl_c(event: &Event) -> bool {
+    matches!(event, Event::Key(key)
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+/// One step the distillation `select!` produced.
+enum DistillStep {
+    Done(Result<DistillReport, AgentError>),
+    Skip,
+    Tick,
+}
+
+/// How the biased event-stream arm classifies a poll during distillation (F-BUG-001 / #80).
+/// Closed stream / I/O error must not become an infinite Tick under `biased` select.
+#[derive(Debug, PartialEq, Eq)]
+enum DistillEventPoll {
+    Event,
+    Ended,
+}
+
+fn classify_distill_event_poll<T, E>(maybe: &Option<Result<T, E>>) -> DistillEventPoll {
+    match maybe {
+        Some(Ok(_)) => DistillEventPoll::Event,
+        _ => DistillEventPoll::Ended,
+    }
+}
+
+impl RunLoop {
+    /// Run the end-of-session distillation while keeping the UI responsive: a spinner ticks and Ctrl+C
+    /// skips. Best-effort and bounded — the distiller's own timeout caps the wait, a skip or failure
+    /// surfaces a Notice and never blocks the caller (a `/new`, a session switch, or quit). The
+    /// conversation is read only and already persisted, so distillation never risks the session's data.
+    pub(super) async fn drive_distillation(&mut self, ui: &mut UiDriver<'_>) {
+        if !should_distill(&self.conversation) {
+            return;
+        }
+        // Both scopes inert (memory disabled or failed): there is nothing to write to, so skip the LLM call.
+        if !self.memory.project_memory_available() && !self.memory.shared_memory_available() {
+            return;
+        }
+
+        let provider = self.agent_loop.provider();
+        let model_id = self.agent_loop.model().to_string();
+        let distiller = Distiller::new(self.memory.clone(), self.project_id.to_string());
+        let messages: Vec<Message> = self.conversation.messages().to_vec();
+
+        self.model
+            .notify_info("destilando memórias da sessão… (^C pula)");
+        self.model.busy = true;
+        let started = Instant::now();
+        self.model.timeline.render_at = Some(started);
+        // Best-effort pre-op repaint to show the "distilling…" notice before the blocking call; the loop
+        // redraws on its next iteration, so a failed draw here must not block the distillation.
+        let _ = draw_and_copy(ui.terminal, &mut self.model);
+
+        let outcome = {
+            let mut distillation =
+                Box::pin(distiller.distill(provider.as_ref(), &model_id, &messages));
+            loop {
+                let step = tokio::select! {
+                    biased;
+                    maybe = ui.events.next() => match (classify_distill_event_poll(&maybe), maybe) {
+                        (DistillEventPoll::Event, Some(Ok(event))) if is_ctrl_c(&event) => {
+                            DistillStep::Skip
+                        }
+                        // Other input is ignored during the (brief) distillation.
+                        (DistillEventPoll::Event, Some(Ok(_))) => DistillStep::Tick,
+                        // Stream closed or I/O error: do not map to Tick under `biased` (would spin
+                        // and starve the distill future — F-BUG-001 / #80). End best-effort distill.
+                        (DistillEventPoll::Ended, _) | (DistillEventPoll::Event, _) => {
+                            DistillStep::Skip
+                        }
+                    },
+                    _ = ui.ticker.tick() => DistillStep::Tick,
+                    done = &mut distillation => DistillStep::Done(done),
+                };
+                match step {
+                    DistillStep::Done(result) => break Some(result),
+                    DistillStep::Skip => break None,
+                    DistillStep::Tick => {
+                        self.model.status.spinner_frame = spinner_frame(started.elapsed());
+                        self.model.timeline.render_at = Some(Instant::now());
+                        // A draw failure ends the best-effort distillation rather than looping blind.
+                        if draw_and_copy(ui.terminal, &mut self.model).is_err() {
+                            break None;
+                        }
+                    }
+                }
+            }
+        };
+
+        self.model.busy = false;
+        match outcome {
+            None => self.model.notify_info("destilação pulada"),
+            // ERR-01: a durable-write failure must be surfaced, never folded silently into "nothing kept".
+            Some(Ok(report)) if report.failed > 0 => self.model.notify_info(format!(
+                "memória: {} aprendizado(s) salvos, {} falha(s) ao gravar",
+                report.written, report.failed
+            )),
+            Some(Ok(report)) if report.written > 0 => self.model.notify_info(format!(
+                "memória atualizada: {} aprendizado(s)",
+                report.written
+            )),
+            // Nothing worth keeping: stay quiet rather than add noise on every /new.
+            Some(Ok(_)) => {}
+            Some(Err(error)) => self
+                .model
+                .notify_info(format!("destilação não concluída: {error}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod distill_event_poll_tests {
+    use super::{DistillEventPoll, classify_distill_event_poll};
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum DistillArmContract {
+        MayTick,
+        MustSkip,
+    }
+
+    fn distill_arm_contract(poll: DistillEventPoll) -> DistillArmContract {
+        match poll {
+            DistillEventPoll::Event => DistillArmContract::MayTick,
+            DistillEventPoll::Ended => DistillArmContract::MustSkip,
+        }
+    }
+
+    #[test]
+    fn live_event_is_not_stream_end() {
+        assert_eq!(
+            classify_distill_event_poll::<(), ()>(&Some(Ok(()))),
+            DistillEventPoll::Event
+        );
+        assert_eq!(
+            distill_arm_contract(DistillEventPoll::Event),
+            DistillArmContract::MayTick
+        );
+    }
+
+    #[test]
+    fn closed_stream_must_skip_not_tick() {
+        let poll = classify_distill_event_poll::<(), ()>(&None);
+        assert_eq!(poll, DistillEventPoll::Ended);
+        assert_eq!(
+            distill_arm_contract(poll),
+            DistillArmContract::MustSkip,
+            "regression: Ended mapped to Tick reintroduces the spin"
+        );
+    }
+
+    #[test]
+    fn io_error_must_skip_not_tick() {
+        let poll = classify_distill_event_poll::<(), ()>(&Some(Err(())));
+        assert_eq!(poll, DistillEventPoll::Ended);
+        assert_eq!(distill_arm_contract(poll), DistillArmContract::MustSkip);
+    }
+}
