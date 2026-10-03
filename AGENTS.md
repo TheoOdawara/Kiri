@@ -1,6 +1,6 @@
 # Kiri — Repository Contract
 
-Layers on the global contract. Product truth: `docs/requirements.md`. Architecture decision:
+Layers on the global contract. Product truth: `docs/requirements/`. Architecture decision:
 `docs/decisions/0001-architecture.md`.
 
 ## Stack
