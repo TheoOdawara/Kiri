@@ -3,11 +3,11 @@
 - Date: 2026-09-30
 
 Supersedes the `Architecture` section of `CLAUDE.md` and every earlier ADR in this folder; all of them
-describe the implementation discarded in the reset (see `docs/requirements.md`, Evolution log).
+describe the implementation discarded in the reset (see `docs/requirements/CHANGELOG.md`).
 
 ## Context
 
-`docs/requirements.md` sets the forces:
+`docs/requirements/` sets the forces:
 
 - One engine serves four front-ends: inline TUI (Milestone 1), full-screen TUI, headless `kiri -p`, and
   IDEs via ACP.

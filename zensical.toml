@@ -1,0 +1,3 @@
+[project]
+site_name = "Kiri — internal docs"
+docs_dir = "docs"
