@@ -1,0 +1,12 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "docs: serve",
+      "type": "shell",
+      "command": "uvx zensical==0.0.67 serve --open",
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}

@@ -108,7 +108,7 @@ The system shall let an ACP-capable IDE drive the agent through `kiri acp`.
 
 > As an engineer, I want the Kiri seal on launch, so that the product is recognisable.
 
-The system shall show the Kiri-Gate seal of `docs/marca/seal.txt`, centered, with the tagline beneath it, when an interactive interface launches.
+The system shall show the Kiri-Gate seal of `docs/brand/seal.txt`, centered, with the tagline beneath it, when an interactive interface launches.
 
 | Attribute | Value |
 | --- | --- |

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/marca/Logo.png" alt="Kiri" width="200">
+  <img src="docs/brand/logo.png" alt="Kiri" width="200">
 </p>
 
 <h1 align="center">KIRI</h1>
@@ -42,7 +42,7 @@ hand-guard read as a containment ring — the Quality Gate — around three foun
 | --- | --- |
 | [Requirements](docs/requirements/README.md) | The versioned SRS: scope, milestones, and every requirement |
 | [ADR 0001](docs/decisions/0001-architecture.md) | The architecture: daemon, ACP boundary, three crates |
-| [Brand](docs/marca/) | Logo, seal, and palette |
+| [Brand](docs/brand/) | Logo, seal, and palette |
 | [AGENTS.md](AGENTS.md) | The repository contract for contributors and agents |
 
 ## License

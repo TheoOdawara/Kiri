@@ -23,7 +23,7 @@
 - **Process:** every capability has a closed spec before code.
 - **Windows:** native. Running through WSL is not a supported path.
 - **Previous implementation:** discarded, and not a reference for any decision.
-- **Brand:** the one thing preserved, in [`docs/marca/`](../marca/).
+- **Brand:** the one thing preserved, in [`docs/brand/`](../brand/).
   - Kept as they are: the logo, the block-character seal (`seal.txt`), and the tagline
     *Engineering-Grade Code Harness — Forged from Tradition, Built for Precision.*
   - Kept as a concept and redesigned: the forging-and-cooling motion.

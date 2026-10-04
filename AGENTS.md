@@ -1,7 +1,8 @@
 # Kiri — Repository Contract
 
 Layers on the global contract. Product truth: `docs/requirements/`. Architecture decision:
-`docs/decisions/0001-architecture.md`.
+`docs/decisions/0001-architecture.md`. Backlog: https://github.com/users/TheoOdawara/projects/7, in
+one-week sprints.
 
 ## Stack
 
@@ -22,9 +23,14 @@ codebase's conventions do not apply.
 
 ## Commands
 
-Declared pending: there is no `Cargo.toml`, so no gate runs yet. Each gate — static analysis, type
+| Gate | Invocation | Exit |
+|---|---|---|
+| Docs site build | `uvx zensical==0.0.67 build` | 0 |
+| Docs site, served locally | `uvx zensical==0.0.67 serve --open` | — |
+
+Declared pending: there is no `Cargo.toml`, so no code gate runs yet. Each one — static analysis, type
 checking, formatting, build, tests — is recorded here, with its exact invocation and a validated exit
-code, when the workspace lands. Until then `/closeout` has no gate to run.
+code, when the workspace lands. Until then `/closeout` runs the docs build only.
 
 ## Architecture
 
@@ -47,6 +53,8 @@ Decided in ADR 0001. Rules below apply from the first file written.
 | `kiri` | The binary: `daemon`, CLI, `-p`, `acp` | `kiri-core`, `kiri-tui` | — |
 
 A new crate exists only when it has a consumer of its own.
+
+Issue labels, one per crate: `area:core`, `area:tui`, `area:cli` (the `kiri` binary).
 
 ### Inside `kiri-core`
 
@@ -90,3 +98,5 @@ Chat: Portuguese (pt-BR). Docs, `AGENTS.md`, and identifiers: English.
 - `.claude/settings.json` runs `cargo fmt && cargo clippy --quiet` after every Edit, Write, or MultiEdit,
   on any file, not only `.rs`. Until a `Cargo.toml` exists it fails on every edit; the failure is noise,
   not a signal about the edited file.
+- Zensical reads `zensical.toml` only from the current folder, so every docs command runs from the
+  repository root.
