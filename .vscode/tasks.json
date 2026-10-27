@@ -4,7 +4,7 @@
     {
       "label": "docs: serve",
       "type": "shell",
-      "command": "uvx zensical==0.0.67 serve --open",
+      "command": "uvx zensical==0.0.73 serve --open",
       "isBackground": true,
       "problemMatcher": []
     }

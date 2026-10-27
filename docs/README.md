@@ -17,7 +17,7 @@
 From the repository root, run the `docs: serve` task in VS Code, or:
 
 ```
-uvx zensical==0.0.67 serve --open
+uvx zensical==0.0.73 serve --open
 ```
 
 It serves on `http://localhost:8000`. The site is local only and is never deployed.
