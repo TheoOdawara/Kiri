@@ -11,8 +11,8 @@ The system shall keep a running session alive when its terminal closes and let t
 
 | Attribute | Value |
 | --- | --- |
-| Rationale | The daemon owns every session. |
-| Source | [ADR 0001](../../decisions/0001-architecture.md) |
+| Rationale | The daemon owns every session. A session with no running turn is not kept after the daemon exits until [FR-CNT-03](#fr-cnt-03) ships. "Running session" is defined in the [glossary](../glossary.md). |
+| Source | [ADR 0001](../../decisions/0001-architecture.md); review 2026-10-26 |
 | Priority | Must |
 | Status | approved |
 | Milestone | M1 |
@@ -20,6 +20,8 @@ The system shall keep a running session alive when its terminal closes and let t
 
 **Acceptance criteria**
 - **FR-CNT-01.1** — Given a running session, when the user closes the terminal and opens Kiri again, then the session is still running and the user reattaches to it.
+- **FR-CNT-01.2** — Given two or more running sessions in a project, when the user opens Kiri there, then the user picks which one to reattach to.
+- **FR-CNT-01.3** — Given a turn waiting for an approval when its terminal closes, when the user reattaches, then the approval is shown and the turn has not moved past it.
 
 
 <a id="fr-cnt-02"></a>
@@ -161,3 +163,24 @@ The system shall let a session send a message to another session of the same use
 
 **Acceptance criteria**
 - **FR-CNT-08.1** — Given two running sessions, when one sends a message to the other, then the other receives it.
+
+
+<a id="fr-cnt-09"></a>
+## FR-CNT-09 — Client and daemon versions
+
+> As an engineer, I want a new Kiri to work after an update while an old daemon still runs, so that updating never leaves me with a broken session.
+
+The system shall, when a client connects to a daemon of another version, replace the daemon if no session is running, and otherwise tell the user.
+
+| Attribute | Value |
+| --- | --- |
+| Rationale | The daemon outlives the binary it was started from: every rebuild or update leaves an older daemon running. |
+| Source | Author decision, review 2026-10-26 |
+| Priority | Must |
+| Status | approved |
+| Milestone | M1 |
+| Since | v2.0.0 |
+
+**Acceptance criteria**
+- **FR-CNT-09.1** — Given a daemon of another version with no running session, when a client connects, then the daemon is replaced by one of the client's version and the session starts.
+- **FR-CNT-09.2** — Given a daemon of another version with a running session, when a client connects, then the user sees both versions and the running session is not interrupted.

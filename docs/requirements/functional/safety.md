@@ -7,19 +7,20 @@ Approval modes, permissions, the classifier, OS confinement, and trust.
 
 > As an engineer, I want a read-only mode, so that the agent investigates and plans without changing anything.
 
-The system shall refuse, in plan mode, every edit and every side-effecting command.
+The system shall keep plan mode from changing the user's files: it refuses every file edit and write, and runs shell commands only under read-only OS confinement.
 
 | Attribute | Value |
 | --- | --- |
-| Rationale | Planning carries no risk. |
-| Source | Author interview, 2026-09-30 |
+| Rationale | Planning carries no risk. Kiri cannot tell from a command's text whether it writes, so the operating system enforces it ([FR-SAF-07](#fr-saf-07)). Whether a command in plan mode reaches the network is [OQ-09](../open-questions.md). |
+| Source | Author interview, 2026-09-30; review 2026-10-26 |
 | Priority | Must |
 | Status | approved |
 | Milestone | M1 |
 | Since | v1.0.0 |
 
 **Acceptance criteria**
-- **FR-SAF-01.1** — Given plan mode, when the model attempts an edit or a side-effecting command, then it is refused and nothing changes.
+- **FR-SAF-01.1** — Given plan mode, when the model attempts a file edit or write, then it is refused and the file is unchanged.
+- **FR-SAF-01.2** — Given plan mode, when the model runs a command that writes a file, then the operating system stops the write and the file is unchanged.
 
 
 <a id="fr-saf-02"></a>
@@ -27,19 +28,20 @@ The system shall refuse, in plan mode, every edit and every side-effecting comma
 
 > As an engineer, I want to be asked before any side effect, so that nothing changes without my approval.
 
-The system shall ask the user, in default mode, before any side effect.
+The system shall ask the user, in default mode, before any side effect that no permission rule allows.
 
 | Attribute | Value |
 | --- | --- |
-| Rationale | Nothing with side effects runs without the user's policy allowing it. |
-| Source | Author interview, 2026-09-30 |
+| Rationale | Nothing with side effects runs without the user's policy allowing it. A rule of [FR-SAF-04](#fr-saf-04) is that policy, so it applies in default mode too. |
+| Source | Author interview, 2026-09-30; review 2026-10-26 |
 | Priority | Must |
 | Status | approved |
 | Milestone | M1 |
 | Since | v1.0.0 |
 
 **Acceptance criteria**
-- **FR-SAF-02.1** — Given default mode, when the model proposes a side effect, then nothing runs until the user approves.
+- **FR-SAF-02.1** — Given default mode, when the model proposes a side effect that no permission rule allows, then nothing runs until the user approves.
+- **FR-SAF-02.2** — Given default mode and a permission rule that allows an action, when the model proposes it, then it runs without asking.
 
 
 <a id="fr-saf-03"></a>
@@ -51,8 +53,8 @@ The system shall act, in auto mode, without asking, within the permissions, the 
 
 | Attribute | Value |
 | --- | --- |
-| Rationale | Until FR-SAF-07 ships, the permissions of FR-SAF-04 are the only bound of auto mode. |
-| Source | Author decision, kickoff 2026-10-03 |
+| Rationale | From Milestone 1, auto mode is bounded by the sandbox of [FR-SAF-07](#fr-saf-07) and the permissions of [FR-SAF-04](#fr-saf-04). |
+| Source | Author decision, kickoff 2026-10-03; review 2026-10-26 |
 | Priority | Must |
 | Status | approved |
 | Milestone | M1 |
@@ -133,11 +135,11 @@ The system shall run commands inside OS-level confinement on Windows (native mec
 
 | Attribute | Value |
 | --- | --- |
-| Rationale | A policy the OS enforces holds against a wrong or hostile command. |
-| Source | Author interview, 2026-09-30 |
-| Priority | Won't (this release) |
+| Rationale | A policy the OS enforces holds against a wrong or hostile command. It is Milestone 1 because a permission matched against a command's text does not bound a shell: `sh -c` runs anything. |
+| Source | Author interview, 2026-09-30; review 2026-10-26 |
+| Priority | Must |
 | Status | approved |
-| Milestone | Later |
+| Milestone | M1 |
 | Since | v1.0.0 |
 
 **Acceptance criteria**

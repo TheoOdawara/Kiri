@@ -18,3 +18,5 @@ Undecided items. Each leaves this file for a link to the spec or decision that s
 - **OQ-07** — How auto-update (FR-DST-05) behaves on an install made through `cargo install` or a package manager.
 <a id="oq-08"></a>
 - **OQ-08** — The recorded reason for excluding hosted execution and team features from scope.
+<a id="oq-09"></a>
+- **OQ-09** — Whether a shell command in plan mode (FR-SAF-01) may reach the network.

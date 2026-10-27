@@ -1,6 +1,6 @@
 # Kiri — Software Requirements Specification
 
-**Version:** 1.0.1 · **Date:** 2026-10-03 · [Changelog](CHANGELOG.md)
+**Version:** 2.0.0 · **Date:** 2026-10-26 · [Changelog](CHANGELOG.md)
 
 ## Purpose
 
@@ -15,8 +15,8 @@ each tool locks the user to one vendor. Kiri is a terminal coding agent for engi
 ## Scope
 
 **In scope.** Milestone 1 (`M1`) is the core, usable daily: the agent loop, providers by API key and local
-endpoint, the built-in tools, approval modes with configurable permissions, the inline interface on the
-daemon, and the brand. Everything else is `Later`; its order is decided as development proceeds.
+endpoint, the built-in tools, approval modes with configurable permissions and OS confinement, the inline
+interface on the daemon, and the brand. Everything else is `Later`; its order is decided as development proceeds.
 
 **Out of scope.**
 
@@ -42,6 +42,8 @@ daemon, and the brand. Everything else is `Later`; its order is decided as devel
 | [FR-AGT-02](functional/agent.md#fr-agt-02) | Live streaming | Must | approved | M1 |
 | [FR-AGT-03](functional/agent.md#fr-agt-03) | Turn interruption | Must | approved | M1 |
 | [FR-AGT-04](functional/agent.md#fr-agt-04) | Project instructions | Must | approved | M1 |
+| [FR-AGT-05](functional/agent.md#fr-agt-05) | Context compaction | Must | approved | M1 |
+| [FR-AGT-06](functional/agent.md#fr-agt-06) | Token usage | Must | approved | M1 |
 | [FR-PRV-01](functional/providers.md#fr-prv-01) | OpenAI-compatible endpoint | Must | approved | M1 |
 | [FR-PRV-02](functional/providers.md#fr-prv-02) | Anthropic and Anthropic-compatible endpoint | Must | approved | M1 |
 | [FR-PRV-03](functional/providers.md#fr-prv-03) | OpenAI | Must | approved | M1 |
@@ -57,13 +59,14 @@ daemon, and the brand. Everything else is `Later`; its order is decided as devel
 | [FR-TOL-04](functional/tools.md#fr-tol-04) | Write files | Must | approved | M1 |
 | [FR-TOL-05](functional/tools.md#fr-tol-05) | Run shell commands | Must | approved | M1 |
 | [FR-TOL-06](functional/tools.md#fr-tol-06) | Edits shown as diffs | Must | approved | M1 |
+| [FR-TOL-07](functional/tools.md#fr-tol-07) | The client's environment | Must | approved | M1 |
 | [FR-SAF-01](functional/safety.md#fr-saf-01) | Plan mode | Must | approved | M1 |
 | [FR-SAF-02](functional/safety.md#fr-saf-02) | Default mode | Must | approved | M1 |
 | [FR-SAF-03](functional/safety.md#fr-saf-03) | Auto mode | Must | approved | M1 |
 | [FR-SAF-04](functional/safety.md#fr-saf-04) | Configurable permissions | Must | approved | M1 |
 | [FR-SAF-05](functional/safety.md#fr-saf-05) | Auto-mode classifier | Won't (this release) | approved | Later |
 | [FR-SAF-06](functional/safety.md#fr-saf-06) | Classifier model choice | Won't (this release) | approved | Later |
-| [FR-SAF-07](functional/safety.md#fr-saf-07) | OS confinement | Won't (this release) | approved | Later |
+| [FR-SAF-07](functional/safety.md#fr-saf-07) | OS confinement | Must | approved | M1 |
 | [FR-SAF-08](functional/safety.md#fr-saf-08) | Trust approval | Must | approved | M1 |
 | [FR-GAT-01](functional/gate.md#fr-gat-01) | Check discovery | Won't (this release) | approved | Later |
 | [FR-GAT-02](functional/gate.md#fr-gat-02) | Gate before finish | Won't (this release) | approved | Later |
@@ -93,6 +96,7 @@ daemon, and the brand. Everything else is `Later`; its order is decided as devel
 | [FR-CNT-06](functional/continuity.md#fr-cnt-06) | Sync across machines | Won't (this release) | approved | Later |
 | [FR-CNT-07](functional/continuity.md#fr-cnt-07) | Sync setup offer | Won't (this release) | approved | Later |
 | [FR-CNT-08](functional/continuity.md#fr-cnt-08) | Session-to-session messaging | Won't (this release) | approved | Later |
+| [FR-CNT-09](functional/continuity.md#fr-cnt-09) | Client and daemon versions | Must | approved | M1 |
 | [FR-DST-01](functional/distribution.md#fr-dst-01) | Cargo install | Won't (this release) | approved | Later |
 | [FR-DST-02](functional/distribution.md#fr-dst-02) | Prebuilt binaries | Won't (this release) | approved | Later |
 | [FR-DST-03](functional/distribution.md#fr-dst-03) | Install script | Won't (this release) | approved | Later |

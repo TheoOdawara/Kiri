@@ -120,3 +120,24 @@ The system shall show every file edit to the user as a diff.
 
 **Acceptance criteria**
 - **FR-TOL-06.1** — Given an edit or a write proposed by the model, when it is shown to the user, then the user sees the lines removed and the lines added.
+
+
+<a id="fr-tol-07"></a>
+## FR-TOL-07 — The client's environment
+
+> As an engineer, I want commands to run with my terminal's environment, so that the agent uses the same toolchain I do.
+
+The system shall run a session's shell commands with the environment variables and working directory of the client that opened the session.
+
+| Attribute | Value |
+| --- | --- |
+| Rationale | The daemon inherits the environment of the terminal that started it. A session opened later, from a terminal with another `PATH` or an activated virtual environment, would otherwise run the wrong toolchain. |
+| Source | Author decision, review 2026-10-26 |
+| Priority | Must |
+| Status | approved |
+| Milestone | M1 |
+| Since | v2.0.0 |
+
+**Acceptance criteria**
+- **FR-TOL-07.1** — Given a daemon started from terminal A and a session opened from terminal B with another value of `PATH`, when the model runs a command in that session, then the command sees B's `PATH` and B's working directory.
+- **FR-TOL-07.2** — Given a session that received its client's environment, when the session is persisted, then Kiri does not store that environment.

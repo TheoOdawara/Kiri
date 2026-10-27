@@ -48,11 +48,11 @@ The system shall run turns on Anthropic's API and on any Anthropic-compatible en
 
 > As an engineer, I want to use OpenAI's API with my key, so that OpenAI models work with their native interface.
 
-The system shall run turns on OpenAI's API with an API key.
+The system shall run turns on OpenAI's Responses API with an API key.
 
 | Attribute | Value |
 | --- | --- |
-| Rationale | OpenAI is a first-party provider kind in ADR 0001. |
+| Rationale | OpenAI is a first-party provider kind in ADR 0001, through its own Responses API rather than the compatible endpoint of FR-PRV-01. |
 | Source | Author interview, 2026-09-30 |
 | Priority | Must |
 | Status | approved |
@@ -60,7 +60,7 @@ The system shall run turns on OpenAI's API with an API key.
 | Since | v1.0.0 |
 
 **Acceptance criteria**
-- **FR-PRV-03.1** — Given an OpenAI API key, when the user sends a prompt, then the turn completes through OpenAI's API.
+- **FR-PRV-03.1** — Given an OpenAI API key, when the user sends a prompt, then the turn completes through OpenAI's Responses API.
 
 
 <a id="fr-prv-04"></a>

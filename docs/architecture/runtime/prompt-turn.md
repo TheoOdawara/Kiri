@@ -15,6 +15,6 @@ Requirements: [FR-AGT-01, 02](../../requirements/functional/agent.md),
 6. When the model calls a tool, **agent** hands the call to **tools**.
 7. **tools** asks **permissions**: run, ask, or block. On ask, the daemon emits an approval-needed event,
    **kiri-tui** shows it, and the engineer's answer returns as an ACP command.
-8. **tools** executes the call — inside **sandbox** once it exists — and the result returns to the model.
+8. **tools** executes the call inside **sandbox**, and the result returns to the model.
 9. Steps 4 to 8 repeat until the model answers; **agent** emits the turn-end event and **session** persists
    the conversation.

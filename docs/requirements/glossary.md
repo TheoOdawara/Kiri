@@ -18,6 +18,7 @@
 | Permission | A rule that makes an action run, ask, or be blocked. |
 | Plugin | A bundle of skills, commands, agents, hooks, and MCP servers. |
 | Provider | A source of model output: an API, a local server, or a subscription. |
+| Running session | A session whose turn is in progress or waiting for an approval. |
 | Sandbox | OS-level confinement of the commands the agent runs. |
 | Session | One conversation with its history and state, owned by the daemon. |
 | Side effect | Any change outside the conversation: a file write, or a command that changes state. |

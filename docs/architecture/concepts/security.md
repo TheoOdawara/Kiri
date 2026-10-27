@@ -9,8 +9,8 @@
 | Secrets | Keys and tokens stay out of configuration, logs, and transcripts | [NFR-SEC-01](../../requirements/non-functional/security.md#nfr-sec-01) | M1 |
 | Owner-only transport | Another OS user cannot reach the daemon | [NFR-SEC-02](../../requirements/non-functional/security.md#nfr-sec-02) | M1 |
 | Process isolation | Third-party code runs only as a child process | [ADR 0001](../../decisions/0001-architecture.md) | Later |
-| OS confinement | A command cannot write outside the allowed area | [FR-SAF-07](../../requirements/functional/safety.md#fr-saf-07) | Later |
+| OS confinement | A command cannot write outside the allowed area | [FR-SAF-07](../../requirements/functional/safety.md#fr-saf-07) | M1 |
 | Classifier | An optional model judges each action in auto mode | [FR-SAF-05](../../requirements/functional/safety.md#fr-saf-05) | Later |
 
-Until OS confinement ships, permissions are the only bound of auto mode. Where secrets are stored is
+Auto mode is bounded by OS confinement and the permissions together. Where secrets are stored is
 [OQ-01](../../requirements/open-questions.md).

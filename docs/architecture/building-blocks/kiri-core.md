@@ -19,7 +19,7 @@ extension methods. Milestone: M1.
 | `provider` | The `Provider` trait and one file per provider; raw SSE bytes to provider events | [FR-PRV](../../requirements/functional/providers.md) | M1; subscriptions Later |
 | `tools` | The built-in tools: read, search, edit, write, shell | [FR-TOL](../../requirements/functional/tools.md) | M1 |
 | `permissions` | Approval modes and the run / ask / block rules; the classifier | [FR-SAF-01 to 06](../../requirements/functional/safety.md) | M1; classifier Later |
-| `sandbox` | The `Sandbox` trait and one implementation per OS, selected at compile time | [FR-SAF-07](../../requirements/functional/safety.md#fr-saf-07) | Later |
+| `sandbox` | The `Sandbox` trait and one implementation per OS, selected at compile time | [FR-SAF-07](../../requirements/functional/safety.md#fr-saf-07) | M1 |
 | `session` | Session lifecycle, attach and reattach, persistence, subagents as child sessions | [FR-CNT-01 to 04, 08](../../requirements/functional/continuity.md) | M1; resume, rewind, messaging Later |
 | `extensions` | Skills, commands, hooks, MCP servers, plugins, and trust | [FR-EXT](../../requirements/functional/extensions.md), [FR-SAF-08](../../requirements/functional/safety.md#fr-saf-08) | Later; trust M1 |
 | `sync` | `~/.kiri` through a private git repository | [FR-CNT-06, 07](../../requirements/functional/continuity.md#fr-cnt-06) | Later |

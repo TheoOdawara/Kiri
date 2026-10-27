@@ -5,7 +5,7 @@ ISO/IEC 25010 characteristic: security.
 <a id="nfr-sec-01"></a>
 ## NFR-SEC-01 — Secrets stay out of files and logs
 
-The system shall keep API keys and tokens out of configuration files, logs, and transcripts.
+The system shall keep the API keys and tokens it holds out of configuration files, logs, and transcripts.
 
 | Attribute | Value |
 | --- | --- |
@@ -17,7 +17,7 @@ The system shall keep API keys and tokens out of configuration files, logs, and 
 | Since | v1.0.0 |
 
 **Acceptance criteria**
-- **NFR-SEC-01.1** — After a session that used an API key, 0 occurrences of the key exist in any configuration file, log, or transcript.
+- **NFR-SEC-01.1** — After a session that used an API key Kiri holds, 0 occurrences of that key exist in any configuration file, log, or transcript, including where a tool's output contained it.
 
 
 <a id="nfr-sec-02"></a>

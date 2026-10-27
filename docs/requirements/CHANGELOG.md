@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.0.0 — 2026-10-26
+
+Review of the SRS against the requirements method of tightship 1.2.0 and of the architecture in
+[ADR 0001](../decisions/0001-architecture.md). The method is unchanged since 1.1.0 and the format already
+followed it; the changes are to content.
+
+- **Moved:** OS confinement (FR-SAF-07) goes from `Later` to Milestone 1. A permission matched against a
+  command's text does not bound a shell, so auto mode needs the sandbox from the start. This is the major bump.
+- **Added:** context compaction (FR-AGT-05), token usage (FR-AGT-06), the client's environment (FR-TOL-07),
+  and client and daemon versions (FR-CNT-09), all Milestone 1. The last two come from the daemon: it inherits
+  the first terminal's environment and outlives the binary that started it.
+- **Changed:** FR-SAF-01, plan mode refuses edits and writes and runs commands under read-only confinement,
+  since Kiri cannot tell from a command's text whether it writes. FR-SAF-02, a permission rule that allows
+  an action applies in default mode too, which removes the conflict with FR-SAF-04. FR-SAF-03, auto mode is
+  bounded by the sandbox and the permissions.
+- **Changed:** FR-AGT-03 adds 03.2, an interrupt ends the running command. FR-AGT-04 loads instruction
+  files only in a trusted project (04.2), closing a prompt-injection path. FR-CNT-01 adds 01.2 (picking among
+  running sessions) and 01.3 (a pending approval survives a closed terminal).
+- **Changed:** NFR-REL-02, the network idle timeout is set per provider, since a local model can be silent
+  for more than 60 seconds; long-lived child processes are bounded per request.
+- **Clarified:** FR-AGT-02 streams the reasoning the provider exposes; FR-PRV-03 names the Responses API;
+  NFR-SEC-01 covers the keys Kiri holds, including in tool output. Glossary: running session.
+- **Opened:** OQ-09.
+
 ## 1.0.1 — 2026-10-03
 
 - **Changed:** the 73 requirements move from `proposed` to `approved`, confirmed by the author.
