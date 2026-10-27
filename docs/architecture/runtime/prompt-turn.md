@@ -4,7 +4,7 @@ One prompt, from the keyboard to the final answer. Milestone: M1.
 Requirements: [FR-AGT-01, 02](../../requirements/functional/agent.md),
 [FR-SAF-02](../../requirements/functional/safety.md#fr-saf-02).
 
-![A prompt turn](../../diagrams/runtime-prompt-turn.drawio.svg)
+![A prompt turn](../diagrams/runtime-prompt-turn.drawio.svg)
 
 1. The engineer types a prompt in **kiri-tui**.
 2. **kiri-tui** sends the prompt as an ACP command over the local socket to the daemon.

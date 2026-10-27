@@ -1,3 +1,23 @@
 [project]
 site_name = "Kiri — internal docs"
 docs_dir = "docs"
+extra_css = ["stylesheets/docs-theme.css", "stylesheets/image-viewer.css"]
+extra_javascript = [{ path = "javascripts/image-viewer.js", type = "module" }]
+
+[project.theme]
+logo = "design/brand/icon.png"
+favicon = "design/brand/icon.png"
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"

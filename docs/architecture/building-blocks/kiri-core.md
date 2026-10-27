@@ -11,7 +11,7 @@ extension methods. Milestone: M1.
 
 ## Inner blocks
 
-![Components of kiri-core](../../diagrams/components-kiri-core.drawio.svg)
+![Components of kiri-core](../diagrams/components-kiri-core.drawio.svg)
 
 | Module | Responsibility | Requirements | Milestone |
 | --- | --- | --- | --- |

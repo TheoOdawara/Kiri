@@ -1,6 +1,6 @@
 # Building blocks
 
-![Containers](../../diagrams/containers.drawio.svg)
+![Containers](../diagrams/containers.drawio.svg)
 
 The diagram shows the running processes; each is built from the crates below.
 

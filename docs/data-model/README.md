@@ -3,7 +3,7 @@
 Only the conceptual model exists. It is inferred from the [requirements](../requirements/README.md) and
 [ADR 0001](../decisions/0001-architecture.md); no attribute and no file layout has been decided.
 
-![Conceptual model](../diagrams/data-conceptual.drawio.svg)
+![Conceptual model](diagrams/conceptual.drawio.svg)
 
 ## Entities
 

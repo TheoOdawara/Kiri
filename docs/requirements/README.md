@@ -1,6 +1,6 @@
 # Kiri — Software Requirements Specification
 
-**Version:** 2.0.0 · **Date:** 2026-10-26 · [Changelog](CHANGELOG.md)
+**Version:** 2.0.1 · **Date:** 2026-10-26 · [Changelog](CHANGELOG.md)
 
 ## Purpose
 

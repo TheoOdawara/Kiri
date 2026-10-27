@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.1 — 2026-10-26
+
+- **Changed:** FR-UI-06 and the overview point to the brand's new folder, `docs/design/brand/`. No meaning
+  changes.
+
 ## 2.0.0 — 2026-10-26
 
 Review of the SRS against the requirements method of tightship 1.2.0 and of the architecture in

@@ -2,7 +2,7 @@
 
 One environment: the user's machine. Nothing is hosted.
 
-![Deployment](../diagrams/deployment.drawio.svg)
+![Deployment](diagrams/deployment.drawio.svg)
 
 | Block | Runs as | Where | Milestone |
 | --- | --- | --- | --- |

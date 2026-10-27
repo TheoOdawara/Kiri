@@ -18,7 +18,7 @@ Constraints: [requirements overview](../requirements/overview.md#constraints).
 
 ## Context and scope
 
-![Context](../diagrams/context.drawio.svg)
+![Context](diagrams/context.drawio.svg)
 
 | Actor or system | What flows | Protocol | Milestone |
 | --- | --- | --- | --- |
