@@ -1,6 +1,7 @@
 # 0001. Architecture: daemon, ACP boundary, capability modules, data extensions
 - Status: accepted
 - Date: 2026-09-30
+- Amended: 2026-10-27, the `sync` module is removed with FR-CNT-06 and 07 (SRS 3.0.0)
 
 Supersedes the `Architecture` section of `CLAUDE.md` and every earlier ADR in this folder; all of them
 describe the implementation discarded in the reset (see `docs/requirements/CHANGELOG.md`).
@@ -60,7 +61,7 @@ consumer of its own.
 ### 4. Engine internals — modules by capability
 
 - `kiri-core` is split into capability modules: `agent`, `provider`, `tools`, `permissions`, `sandbox`,
-  `session`, `extensions`, `sync`. Each file groups one responsibility. No domain/application/
+  `session`, `extensions`. Each file groups one responsibility. No domain/application/
   infrastructure layering.
 - A trait exists only with two or more real implementations: `Provider` (OpenAI-compatible, Anthropic,
   OpenAI Responses, ChatGPT subscription, Claude CLI backend) and `Sandbox` (one per OS, chosen at
@@ -98,8 +99,8 @@ watch it, and message it.
 ### 9. Persistence — text files under `~/.kiri`
 
 Sessions, memory, configuration, and extensions are text (JSONL, TOML, Markdown) under `~/.kiri` and
-the project's `.kiri/`. No SQLite: sync goes through git, and text diffs and merges where a database
-file conflicts whole.
+the project's `.kiri/`. No SQLite: the user reads and edits
+these files with any editor, and a session's JSONL only appends.
 
 ## Consequences
 
@@ -141,4 +142,4 @@ Harder, and accepted:
   about 29k lines of Go, changing weekly.
 - **Claude Pro/Max via a CLIProxyAPI sidecar** — someone else's release pace, a second runtime, and a
   new local attack surface.
-- **SQLite for sessions and memory** — a binary file conflicts whole under git sync.
+- **SQLite for sessions and memory** — a binary file the user cannot read or edit, and one more dependency.

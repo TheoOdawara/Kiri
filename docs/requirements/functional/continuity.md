@@ -1,6 +1,8 @@
 # Continuity — `CNT`
 
-What outlives a terminal, a session, and a machine.
+What outlives a terminal and a session.
+
+![Use cases: Continuity](../diagrams/use-cases-continuity.drawio.svg)
 
 <a id="fr-cnt-01"></a>
 ## FR-CNT-01 — Sessions survive the terminal
@@ -116,9 +118,10 @@ The system shall sync configuration, memory, and extensions under `~/.kiri` acro
 | Rationale | The user works on more than one machine. |
 | Source | Author interview, 2026-09-30 |
 | Priority | Won't (this release) |
-| Status | approved |
+| Status | retired |
 | Milestone | Later |
 | Since | v1.0.0 |
+| Retired | v3.0.0: the author dropped sync across machines (2026-10-27) |
 
 **Acceptance criteria**
 - **FR-CNT-06.1** — Given two machines with sync on, when memory or extensions change on one, then the other receives the change.
@@ -136,9 +139,10 @@ The system shall offer, at first run, to create the sync repository, using `gh` 
 | Rationale | Sync is optional. |
 | Source | Author interview, 2026-09-30 |
 | Priority | Won't (this release) |
-| Status | approved |
+| Status | retired |
 | Milestone | Later |
 | Since | v1.0.0 |
+| Retired | v3.0.0: the author dropped sync across machines (2026-10-27) |
 
 **Acceptance criteria**
 - **FR-CNT-07.1** — Given a first run, when the user declines creating the sync repository, then Kiri works normally.

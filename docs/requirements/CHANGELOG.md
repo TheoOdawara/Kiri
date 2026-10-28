@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.0.0 — 2026-10-27
+
+- **Retired:** sync across machines (FR-CNT-06) and its setup offer (FR-CNT-07). The author dropped sync
+  through a git repository; it moves to out of scope. This is the major bump.
+- **Retired:** `cargo install` (FR-DST-01) and package managers (FR-DST-04). The install script
+  (FR-DST-03), which fetches the prebuilt binary (FR-DST-02), is the only way to install.
+- **Changed:** NFR-SEC-01's rationale no longer rests on a synced `~/.kiri`. OQ-01 drops the same constraint.
+  The overview drops the dependency on a private GitHub repository.
+- **Added:** vim editing (FR-UI-08) and images in the prompt (FR-UI-09), both Milestone 1.
+- **Settled:** OQ-01, where secrets are stored, by [ADR 0002](../decisions/0002-stack.md).
+- **Settled:** OQ-07, auto-update on a `cargo install` or package-manager install, which no longer exists.
+
 ## 2.0.1 — 2026-10-26
 
 - **Changed:** FR-UI-06 and the overview point to the brand's new folder, `docs/design/brand/`. No meaning

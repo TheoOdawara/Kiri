@@ -2,6 +2,8 @@
 
 The front-ends a user drives Kiri from, and the brand they carry.
 
+![Use cases: Interfaces and modes of use](../diagrams/use-cases-interfaces.drawio.svg)
+
 <a id="fr-ui-01"></a>
 ## FR-UI-01 — Inline interface
 
@@ -141,3 +143,46 @@ The system shall render the interactive interfaces in the brand palette.
 
 **Acceptance criteria**
 - **FR-UI-07.1** — Given a truecolor terminal, when an interactive interface renders, then every color it uses belongs to the brand palette.
+
+
+<a id="fr-ui-08"></a>
+## FR-UI-08 — Vim editing
+
+> As an engineer, I want to edit my prompt with vim keys, so that I write and fix a prompt without leaving my habits.
+
+The system shall offer vim-style modal editing of the prompt in the interactive interfaces, turned on in configuration.
+
+| Attribute | Value |
+| --- | --- |
+| Rationale | The author edits in vim. The modes, motions, and operators are settled in the interface's spec. |
+| Source | Author interview, 2026-10-27 |
+| Priority | Must |
+| Status | approved |
+| Milestone | M1 |
+| Since | v3.0.0 |
+
+**Acceptance criteria**
+- **FR-UI-08.1** — Given vim editing on, when the user presses Esc in the prompt, then the prompt enters normal mode and a motion key moves the cursor instead of inserting text.
+- **FR-UI-08.2** — Given vim editing off, which is the default, when the user types in the prompt, then every key inserts text.
+
+
+<a id="fr-ui-09"></a>
+## FR-UI-09 — Images in the prompt
+
+> As an engineer, I want to paste or drop an image into my prompt, so that the model sees a screenshot or a mockup.
+
+The system shall attach an image to the prompt from the clipboard or from a file dragged into the terminal.
+
+| Attribute | Value |
+| --- | --- |
+| Rationale | Screenshots are part of daily work, and pasting one in Claude Code on Windows takes seconds or fails. |
+| Source | Author interview, 2026-10-27 |
+| Priority | Must |
+| Status | approved |
+| Milestone | M1 |
+| Since | v3.0.0 |
+
+**Acceptance criteria**
+- **FR-UI-09.1** — Given an image in the clipboard on Linux, macOS, or Windows, when the user pastes it, then the prompt shows the image attached within 1 second.
+- **FR-UI-09.2** — Given an image file dragged into the terminal, when the prompt receives its path, then the image is attached.
+- **FR-UI-09.3** — Given a model that does not accept images, when the user sends a prompt with an image, then Kiri says so and sends nothing.

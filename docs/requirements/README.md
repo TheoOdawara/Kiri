@@ -1,6 +1,6 @@
 # Kiri — Software Requirements Specification
 
-**Version:** 2.0.1 · **Date:** 2026-10-26 · [Changelog](CHANGELOG.md)
+**Version:** 3.0.0 · **Date:** 2026-10-27 · [Changelog](CHANGELOG.md)
 
 ## Purpose
 
@@ -16,7 +16,7 @@ each tool locks the user to one vendor. Kiri is a terminal coding agent for engi
 
 **In scope.** Milestone 1 (`M1`) is the core, usable daily: the agent loop, providers by API key and local
 endpoint, the built-in tools, approval modes with configurable permissions and OS confinement, the inline
-interface on the daemon, and the brand. Everything else is `Later`; its order is decided as development proceeds.
+interface on the daemon with vim editing and images in the prompt, and the brand. Everything else is `Later`; its order is decided as development proceeds.
 
 **Out of scope.**
 
@@ -27,6 +27,8 @@ interface on the daemon, and the brand. Everything else is `Later`; its order is
 | Impersonating a vendor's client to use a subscription | It breaks on every vendor release ([ADR 0001](../decisions/0001-architecture.md)) |
 | Hosted or cloud agent execution | [OQ-08](open-questions.md) |
 | Team or multi-user features, accounts, billing | [OQ-08](open-questions.md) |
+| Syncing `~/.kiri` across machines | The author dropped it; FR-CNT-06 and 07 are retired |
+| Installing through `cargo install` or a package manager | The install script is the only way to install; FR-DST-01 and 04 are retired |
 
 ## Contents
 
@@ -78,6 +80,8 @@ interface on the daemon, and the brand. Everything else is `Later`; its order is
 | [FR-UI-05](functional/interfaces.md#fr-ui-05) | IDE integration | Won't (this release) | approved | Later |
 | [FR-UI-06](functional/interfaces.md#fr-ui-06) | Seal on launch | Must | approved | M1 |
 | [FR-UI-07](functional/interfaces.md#fr-ui-07) | Brand palette | Must | approved | M1 |
+| [FR-UI-08](functional/interfaces.md#fr-ui-08) | Vim editing | Must | approved | M1 |
+| [FR-UI-09](functional/interfaces.md#fr-ui-09) | Images in the prompt | Must | approved | M1 |
 | [FR-EXT-01](functional/extensions.md#fr-ext-01) | MCP servers | Won't (this release) | approved | Later |
 | [FR-EXT-02](functional/extensions.md#fr-ext-02) | Skills | Won't (this release) | approved | Later |
 | [FR-EXT-03](functional/extensions.md#fr-ext-03) | Commands | Won't (this release) | approved | Later |
@@ -93,14 +97,14 @@ interface on the daemon, and the brand. Everything else is `Later`; its order is
 | [FR-CNT-03](functional/continuity.md#fr-cnt-03) | List and resume sessions | Won't (this release) | approved | Later |
 | [FR-CNT-04](functional/continuity.md#fr-cnt-04) | Checkpoints and rewind | Won't (this release) | approved | Later |
 | [FR-CNT-05](functional/continuity.md#fr-cnt-05) | Persistent memory | Won't (this release) | approved | Later |
-| [FR-CNT-06](functional/continuity.md#fr-cnt-06) | Sync across machines | Won't (this release) | approved | Later |
-| [FR-CNT-07](functional/continuity.md#fr-cnt-07) | Sync setup offer | Won't (this release) | approved | Later |
+| [FR-CNT-06](functional/continuity.md#fr-cnt-06) | Sync across machines | Won't (this release) | retired | Later |
+| [FR-CNT-07](functional/continuity.md#fr-cnt-07) | Sync setup offer | Won't (this release) | retired | Later |
 | [FR-CNT-08](functional/continuity.md#fr-cnt-08) | Session-to-session messaging | Won't (this release) | approved | Later |
 | [FR-CNT-09](functional/continuity.md#fr-cnt-09) | Client and daemon versions | Must | approved | M1 |
-| [FR-DST-01](functional/distribution.md#fr-dst-01) | Cargo install | Won't (this release) | approved | Later |
+| [FR-DST-01](functional/distribution.md#fr-dst-01) | Cargo install | Won't (this release) | retired | Later |
 | [FR-DST-02](functional/distribution.md#fr-dst-02) | Prebuilt binaries | Won't (this release) | approved | Later |
 | [FR-DST-03](functional/distribution.md#fr-dst-03) | Install script | Won't (this release) | approved | Later |
-| [FR-DST-04](functional/distribution.md#fr-dst-04) | Package managers | Won't (this release) | approved | Later |
+| [FR-DST-04](functional/distribution.md#fr-dst-04) | Package managers | Won't (this release) | retired | Later |
 | [FR-DST-05](functional/distribution.md#fr-dst-05) | Auto-update | Won't (this release) | approved | Later |
 | [NFR-FLEX-01](non-functional/flexibility.md#nfr-flex-01) | Platform parity | Must | approved | M1 |
 | [NFR-REL-01](non-functional/reliability.md#nfr-rel-01) | No crash on a runtime path | Must | approved | M1 |

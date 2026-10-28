@@ -2,6 +2,8 @@
 
 Approval modes, permissions, the classifier, OS confinement, and trust.
 
+![Use cases: Safety and control](../diagrams/use-cases-safety.drawio.svg)
+
 <a id="fr-saf-01"></a>
 ## FR-SAF-01 — Plan mode
 

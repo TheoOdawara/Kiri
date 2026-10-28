@@ -2,6 +2,8 @@
 
 The model providers and subscriptions a session can run on.
 
+![Use cases: Providers](../diagrams/use-cases-providers.drawio.svg)
+
 <a id="fr-prv-01"></a>
 ## FR-PRV-01 — OpenAI-compatible endpoint
 

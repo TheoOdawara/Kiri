@@ -2,6 +2,8 @@
 
 The conversation loop between the user, the model, and the tools.
 
+![Use cases: Agent](../diagrams/use-cases-agent.drawio.svg)
+
 <a id="fr-agt-01"></a>
 ## FR-AGT-01 — Multi-turn loop
 

@@ -36,6 +36,5 @@
 - Anthropic has blocked third-party OAuth use of Claude Pro/Max since 2026-04-04 and tolerates `claude -p`
   (verified 2026-09-30). FR-PRV-06 depends on the user's installed, logged-in `claude` CLI at a minimum version.
 - OpenAI supports "Sign in with ChatGPT" for third-party tools (verified 2026-09-30). FR-PRV-05 depends on it.
-- Sync depends on a private GitHub repository; `gh` is used when installed and is never required.
 - Bundled skills depend on their upstream repositories staying available.
 - IDE integration depends on the IDE implementing ACP.

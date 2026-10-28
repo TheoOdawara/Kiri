@@ -9,7 +9,7 @@ The system shall keep the API keys and tokens it holds out of configuration file
 
 | Attribute | Value |
 | --- | --- |
-| Rationale | `~/.kiri` is synced through git; a secret written there leaks. Where secrets are stored is [OQ-01](../open-questions.md). |
+| Rationale | Configuration files, logs, and transcripts get shared, pasted into issues, and copied between machines; a secret in them leaks. Where secrets are stored is decided in [ADR 0002](../../decisions/0002-stack.md). |
 | Source | Author interview, 2026-09-30 |
 | Priority | Must |
 | Status | approved |

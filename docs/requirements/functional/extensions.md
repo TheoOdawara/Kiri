@@ -2,6 +2,8 @@
 
 What a user adds to Kiri: MCP servers, skills, commands, hooks, subagents, and plugins.
 
+![Use cases: Extensions](../diagrams/use-cases-extensions.drawio.svg)
+
 <a id="fr-ext-01"></a>
 ## FR-EXT-01 — MCP servers
 

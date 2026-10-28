@@ -2,6 +2,8 @@
 
 The built-in tools the agent acts through.
 
+![Use cases: Tools](../diagrams/use-cases-tools.drawio.svg)
+
 <a id="fr-tol-01"></a>
 ## FR-TOL-01 — Read files
 

@@ -2,6 +2,8 @@
 
 How Kiri reaches a user's machine and stays current.
 
+![Use cases: Distribution](../diagrams/use-cases-distribution.drawio.svg)
+
 <a id="fr-dst-01"></a>
 ## FR-DST-01 — Cargo install
 
@@ -14,9 +16,10 @@ The system shall be installable with `cargo install`.
 | Rationale | The shortest path for a Rust user. |
 | Source | Author interview, 2026-09-30 |
 | Priority | Won't (this release) |
-| Status | approved |
+| Status | retired |
 | Milestone | Later |
 | Since | v1.0.0 |
+| Retired | v3.0.0: the install script is the only way to install (2026-10-27) |
 
 **Acceptance criteria**
 - **FR-DST-01.1** — Given a Rust toolchain, when the user runs `cargo install` for Kiri, then the `kiri` binary runs.
@@ -74,9 +77,10 @@ The system shall be installable from winget, scoop, Homebrew, and Linux packages
 | Rationale | Each platform has its habit. |
 | Source | Author interview, 2026-09-30 |
 | Priority | Won't (this release) |
-| Status | approved |
+| Status | retired |
 | Milestone | Later |
 | Since | v1.0.0 |
+| Retired | v3.0.0: the install script is the only way to install (2026-10-27) |
 
 **Acceptance criteria**
 - **FR-DST-04.1** — Given each listed package manager, when the user installs Kiri through it, then the `kiri` binary runs.
@@ -91,7 +95,7 @@ The system shall replace itself with a new release when one is published.
 
 | Attribute | Value |
 | --- | --- |
-| Rationale | Releases reach users without manual work. Its behavior on a package-manager install is [OQ-07](../open-questions.md). |
+| Rationale | Releases reach users without manual work. |
 | Source | Author interview, 2026-09-30 |
 | Priority | Won't (this release) |
 | Status | approved |

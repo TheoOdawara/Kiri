@@ -22,12 +22,11 @@ extension methods. Milestone: M1.
 | `sandbox` | The `Sandbox` trait and one implementation per OS, selected at compile time | [FR-SAF-07](../../requirements/functional/safety.md#fr-saf-07) | M1 |
 | `session` | Session lifecycle, attach and reattach, persistence, subagents as child sessions | [FR-CNT-01 to 04, 08](../../requirements/functional/continuity.md) | M1; resume, rewind, messaging Later |
 | `extensions` | Skills, commands, hooks, MCP servers, plugins, and trust | [FR-EXT](../../requirements/functional/extensions.md), [FR-SAF-08](../../requirements/functional/safety.md#fr-saf-08) | Later; trust M1 |
-| `sync` | `~/.kiri` through a private git repository | [FR-CNT-06, 07](../../requirements/functional/continuity.md#fr-cnt-06) | Later |
 
 The arrows of the diagram follow from the requirements, not from code; each spec confirms its own.
 
 **Not placed in a module yet:** the built-in gate ([FR-GAT](../../requirements/functional/gate.md)) and
-persistent memory ([FR-CNT-05](../../requirements/functional/continuity.md#fr-cnt-05)). ADR 0001 names eight
+persistent memory ([FR-CNT-05](../../requirements/functional/continuity.md#fr-cnt-05)). ADR 0001 names seven
 modules and neither is among them; the spec of each decides where it lives.
 
 ## Changing it safely

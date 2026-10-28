@@ -2,6 +2,8 @@
 
 The gate that keeps the agent from finishing on red checks.
 
+![Use cases: Built-in gate](../diagrams/use-cases-gate.drawio.svg)
+
 <a id="fr-gat-01"></a>
 ## FR-GAT-01 — Check discovery
 
