@@ -28,7 +28,7 @@ Constraints: [requirements overview](../requirements/overview.md#constraints).
 | Subscriptions | Turns on a ChatGPT or Claude plan | OAuth; the `claude` CLI in stream-json mode | Later |
 | IDE | The same commands and events as the terminal | ACP over stdio | Later |
 | Extension processes | Tool calls to MCP servers; events to hooks | stdio | Later |
-| GitHub | The sync repository, skill upstreams, and releases | git, HTTPS | Later |
+| GitHub | Skill upstreams and releases | HTTPS | Later |
 
 ## Solution strategy
 
@@ -41,7 +41,9 @@ Each line is a decision of [ADR 0001](../decisions/0001-architecture.md).
 - **Modules by capability inside the engine.** They call each other directly; events exist only at the boundary.
 - **Extensions are data and child processes.** Third-party code never runs inside the daemon.
 - **Claude Pro/Max is an agent backend.** Its loop drives; Kiri's tools, permissions, and sandbox execute.
-- **Persistence is text.** JSONL, TOML, and Markdown, so sync goes through git.
+- **Persistence is text.** JSONL, TOML, and Markdown, readable and editable by the user.
+- **Dependencies are few and named.** [ADR 0002](../decisions/0002-stack.md) lists each one and what stays
+  in the standard library.
 
 ## Index
 

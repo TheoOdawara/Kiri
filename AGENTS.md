@@ -6,8 +6,9 @@ one-week sprints.
 
 ## Stack
 
-- Rust, in a Cargo workspace (ADR 0001). No crate and no dependency exists yet; each dependency is chosen
-  in the spec that first needs it.
+- Rust, in a Cargo workspace (ADR 0001). No crate exists yet.
+- Every dependency, the toolchain, the release targets, and what stays in the standard library are in
+  `docs/decisions/0002-stack.md`. A dependency not listed there is added to it before the code uses it.
 
 ## Programming languages & scripts
 
@@ -31,7 +32,7 @@ Decided in ADR 0001. Nothing is built yet.
 | `kiri` | The binary: `daemon`, CLI, `-p`, `acp` | `kiri-core`, `kiri-tui` | — | `area:cli` |
 
 - `kiri-core` is split by capability: `agent`, `provider`, `tools`, `permissions`, `sandbox`, `session`,
-  `extensions`, `sync`. Modules call each other directly; events exist only at the ACP boundary. Its two
+  `extensions`. Modules call each other directly; events exist only at the ACP boundary. Its two
   traits are `Provider`, one file per provider in `provider/`, and `Sandbox`, one file per OS in
   `sandbox/`, chosen at compile time.
 - Streaming: SSE bytes → provider events → batches of about 10 ms → ACP events.

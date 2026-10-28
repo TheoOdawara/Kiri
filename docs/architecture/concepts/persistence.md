@@ -8,6 +8,8 @@ Everything Kiri stores is text: JSONL, TOML, or Markdown. There is no database. 
 | `~/.kiri` | The user's sessions, configuration, memory, and extensions |
 | `<project>/.kiri` | The project's configuration and extensions |
 
-Text is the choice because sync goes through git: text diffs and merges where a database file conflicts
-whole. Secrets are the exception: they stay out of both locations
-([NFR-SEC-01](../../requirements/non-functional/security.md#nfr-sec-01)).
+Text is the choice because the user reads and edits these files with any editor, and a session's JSONL only
+appends. Secrets stay out of configuration, logs, and transcripts
+([NFR-SEC-01](../../requirements/non-functional/security.md#nfr-sec-01)): they live in the macOS Keychain, or in
+`~/.kiri/credentials.json`, readable only by its owner and encrypted with DPAPI on Windows
+([ADR 0002](../../decisions/0002-stack.md)).

@@ -12,5 +12,5 @@
 | OS confinement | A command cannot write outside the allowed area | [FR-SAF-07](../../requirements/functional/safety.md#fr-saf-07) | M1 |
 | Classifier | An optional model judges each action in auto mode | [FR-SAF-05](../../requirements/functional/safety.md#fr-saf-05) | Later |
 
-Auto mode is bounded by OS confinement and the permissions together. Where secrets are stored is
-[OQ-01](../../requirements/open-questions.md).
+Auto mode is bounded by OS confinement and the permissions together. Secrets live in the macOS Keychain or
+in an owner-only credentials file, encrypted with DPAPI on Windows ([ADR 0002](../../decisions/0002-stack.md)).
