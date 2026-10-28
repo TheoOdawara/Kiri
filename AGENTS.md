@@ -60,7 +60,8 @@ codebase's conventions do not apply.
 
 ## Language
 
-Chat: Portuguese (pt-BR). Docs, `AGENTS.md`, and identifiers: English.
+English for code, identifiers, file names, comments, docs, `AGENTS.md`, commits, and branches. Interface
+text is English until OQ-02 decides on localization.
 
 ## Gotchas
 

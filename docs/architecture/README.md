@@ -55,7 +55,7 @@ Each line is a decision of [ADR 0001](../decisions/0001-architecture.md).
 | [Concepts](concepts/README.md) | What cuts across blocks: security, streaming, persistence |
 | [Risks](risks.md) | Risks and accepted costs |
 | [Data model](../data-model/README.md) | Entities and their relations |
-| [Decisions](../decisions/0001-architecture.md) | Why each choice was made |
+| [Decisions](../decisions/README.md) | Why each choice was made |
 | [Quality requirements](../requirements/non-functional/README.md) | The NFRs |
 | [Glossary](../requirements/glossary.md) | Every domain term |
 

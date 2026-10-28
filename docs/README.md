@@ -5,7 +5,7 @@
 | [requirements/](requirements/README.md) | The versioned SRS: scope, milestones, and every requirement |
 | [architecture/](architecture/README.md) | The map: building blocks, runtime scenarios, deployment, concepts, risks |
 | [data-model/](data-model/README.md) | The conceptual model: entities and their relations |
-| [decisions/](decisions/0001-architecture.md) | ADRs: why each cross-cutting choice was made |
+| [decisions/](decisions/README.md) | ADRs: why each cross-cutting choice was made |
 | [design/](design/README.md) | The brand, the tokens, and each screen of the terminal interface |
 
 - Each doc keeps its diagrams in its own `diagrams/` folder, as `.drawio.svg` files the draw.io extension

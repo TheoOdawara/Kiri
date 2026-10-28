@@ -29,7 +29,10 @@ Only the conceptual model exists. It is inferred from the [requirements](../requ
 
 ## Not written yet
 
-- **Logical model** — one file per entity, with attributes, identity, and invariants. Each entity's spec decides them.
-- **Access patterns** — they need the volumes each spec sets.
-- **Storage** — the formats and locations are fixed ([persistence](../architecture/concepts/persistence.md)); which
-  file holds which entity is decided by each spec.
+- **Logical model** — `diagrams/logical.drawio.svg`, in crow's foot notation, once the specs set each
+  entity's attributes and identity.
+- **Physical model** — none: Kiri has no database. What is stored is text files
+  ([persistence](../architecture/concepts/persistence.md)).
+- **Access patterns** — `access-patterns.md`, once each spec sets its operations and volumes.
+- **Storage** — `storage.md`: each file's path, format, writer, and lifecycle, as each spec decides which file
+  holds which entity.

@@ -16,11 +16,21 @@ Windows, restricted to the owning user ([NFR-SEC-02](../requirements/non-functio
 
 ## Packaging and install
 
-Nothing is installable yet. The planned channels are [FR-DST-01 to 05](../requirements/functional/distribution.md),
-all `Later`.
+Nothing is installable yet; distribution is `Later`. As planned in
+[ADR 0002](../decisions/0002-stack.md) and [FR-DST](../requirements/functional/distribution.md):
+
+- **One way to install:** a one-line script, `sh` on Linux and macOS and PowerShell on Windows, that
+  downloads the release archive from GitHub Releases and checks its SHA-256.
+- **Targets:** `x86_64` and `aarch64` of Linux (static musl), macOS, and Windows (MSVC).
+- **Archive:** `.tar.gz` on Linux and macOS, `.zip` on Windows, holding `kiri`, `rg`, and on Linux `bwrap`.
+- **Signatures:** every archive is signed with minisign. The macOS binary is signed with one fixed
+  certificate of Kiri's own, so the Keychain keeps recognizing it across updates; Windows ships without
+  Authenticode at first.
+- **Updates:** `kiri` verifies the minisign signature and replaces its own executable
+  ([FR-DST-05](../requirements/functional/distribution.md#fr-dst-05)).
 
 ## Delivery
 
-- **Gates:** the repository's `AGENTS.md`, section Commands. Today only the docs build exists.
+- **Gates:** the repository's `gates` project skill. Today only the docs build exists.
 - **CI:** none. No workflow exists in the repository.
 - **Branches:** work branches merge into `staging` by pull request; a release is a merge of `staging` into `main`.

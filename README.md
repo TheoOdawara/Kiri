@@ -41,7 +41,7 @@ hand-guard read as a containment ring — the Quality Gate — around three foun
 | Doc | Holds |
 | --- | --- |
 | [Requirements](docs/requirements/README.md) | The versioned SRS: scope, milestones, and every requirement |
-| [ADR 0001](docs/decisions/0001-architecture.md) | The architecture: daemon, ACP boundary, three crates |
+| [Decisions](docs/decisions/README.md) | The ADRs: the architecture (daemon, ACP boundary, three crates) and the stack |
 | [Brand](docs/design/brand/README.md) | Logo, seal, and palette |
 | [AGENTS.md](AGENTS.md) | The repository contract for contributors and agents |
 
