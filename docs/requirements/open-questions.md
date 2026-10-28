@@ -12,7 +12,3 @@ Undecided items. Each leaves this file for a link to the spec or decision that s
 - **OQ-05** — How the approval mode (FR-SAF-01 to FR-SAF-03) is chosen at start and changed inside a session.
 <a id="oq-06"></a>
 - **OQ-06** — A measurable criterion for onboarding a secondary user who has never seen the repository.
-<a id="oq-08"></a>
-- **OQ-08** — The recorded reason for excluding hosted execution and team features from scope.
-<a id="oq-09"></a>
-- **OQ-09** — Whether a shell command in plan mode (FR-SAF-01) may reach the network.

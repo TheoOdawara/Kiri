@@ -8,8 +8,13 @@
   (FR-DST-03), which fetches the prebuilt binary (FR-DST-02), is the only way to install.
 - **Changed:** NFR-SEC-01's rationale no longer rests on a synced `~/.kiri`. OQ-01 drops the same constraint.
   The overview drops the dependency on a private GitHub repository.
-- **Added:** vim editing (FR-UI-08) and images in the prompt (FR-UI-09), both Milestone 1.
+- **Added:** vim editing (FR-UI-08) and images in the prompt (FR-UI-09), both Milestone 1. Glossary: vim
+  editing.
 - **Settled:** OQ-01, where secrets are stored, by [ADR 0002](../decisions/0002-stack.md).
+- **Changed:** FR-SAF-01, a command in plan mode runs as it would in auto mode, network included, with the
+  user's files read-only (01.3).
+- **Settled:** OQ-09, by FR-SAF-01.3. OQ-08, the reasons for keeping hosted execution and team features
+  out of scope: Kiri is open source and runs entirely on the user's machine.
 - **Settled:** OQ-07, auto-update on a `cargo install` or package-manager install, which no longer exists.
 
 ## 2.0.1 — 2026-10-26

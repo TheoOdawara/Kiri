@@ -9,12 +9,12 @@ Approval modes, permissions, the classifier, OS confinement, and trust.
 
 > As an engineer, I want a read-only mode, so that the agent investigates and plans without changing anything.
 
-The system shall keep plan mode from changing the user's files: it refuses every file edit and write, and runs shell commands only under read-only OS confinement.
+The system shall keep plan mode from changing the user's files: it refuses every file edit and write, and runs shell commands as auto mode does, under read-only OS confinement.
 
 | Attribute | Value |
 | --- | --- |
-| Rationale | Planning carries no risk. Kiri cannot tell from a command's text whether it writes, so the operating system enforces it ([FR-SAF-07](#fr-saf-07)). Whether a command in plan mode reaches the network is [OQ-09](../open-questions.md). |
-| Source | Author interview, 2026-09-30; review 2026-10-26 |
+| Rationale | Planning carries no risk. Kiri cannot tell from a command's text whether it writes, so the operating system enforces it ([FR-SAF-07](#fr-saf-07)). Investigating should not stop for approvals, so commands follow auto mode's rules ([FR-SAF-03](#fr-saf-03)), network included. Claude Code offers this as an option; in Kiri it is how plan mode works. |
+| Source | Author interview, 2026-09-30; review 2026-10-26; OQ-09 settled 2026-10-27 |
 | Priority | Must |
 | Status | approved |
 | Milestone | M1 |
@@ -23,6 +23,7 @@ The system shall keep plan mode from changing the user's files: it refuses every
 **Acceptance criteria**
 - **FR-SAF-01.1** — Given plan mode, when the model attempts a file edit or write, then it is refused and the file is unchanged.
 - **FR-SAF-01.2** — Given plan mode, when the model runs a command that writes a file, then the operating system stops the write and the file is unchanged.
+- **FR-SAF-01.3** — Given plan mode, when the model runs a command, then it runs, asks, or is blocked exactly as it would in auto mode, network access included, with the user's files read-only.
 
 
 <a id="fr-saf-02"></a>

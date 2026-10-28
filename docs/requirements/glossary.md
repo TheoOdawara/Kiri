@@ -26,3 +26,4 @@
 | Subagent | A child session the agent dispatches for a scoped task. |
 | Trust | The user's explicit approval for a project or plugin to take effect. |
 | Turn | One prompt and everything the agent does until it answers. |
+| Vim editing | Modal editing of the prompt: normal mode moves and edits, insert mode types; unrelated to approval modes. |

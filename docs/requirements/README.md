@@ -25,8 +25,8 @@ interface on the daemon with vim editing and images in the prompt, and the brand
 | Running Windows through WSL | Windows is native |
 | GUI, desktop app, or web UI | Kiri is a terminal agent |
 | Impersonating a vendor's client to use a subscription | It breaks on every vendor release ([ADR 0001](../decisions/0001-architecture.md)) |
-| Hosted or cloud agent execution | [OQ-08](open-questions.md) |
-| Team or multi-user features, accounts, billing | [OQ-08](open-questions.md) |
+| Hosted or cloud agent execution | Kiri runs entirely on the user's machine, against the user's files and environment |
+| Team or multi-user features, accounts, billing | Kiri is open source and local; there is no Kiri service to hold accounts or bill, and each user brings a provider |
 | Syncing `~/.kiri` across machines | The author dropped it; FR-CNT-06 and 07 are retired |
 | Installing through `cargo install` or a package manager | The install script is the only way to install; FR-DST-01 and 04 are retired |
 
