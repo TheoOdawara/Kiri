@@ -1,0 +1,99 @@
+# Changelog
+
+## 3.0.0 — 2026-10-27
+
+- **Retired:** sync across machines (FR-CNT-06) and its setup offer (FR-CNT-07). The author dropped sync
+  through a git repository; it moves to out of scope. This is the major bump.
+- **Retired:** `cargo install` (FR-DST-01) and package managers (FR-DST-04). The install script
+  (FR-DST-03), which fetches the prebuilt binary (FR-DST-02), is the only way to install.
+- **Changed:** NFR-SEC-01's rationale no longer rests on a synced `~/.kiri`. OQ-01 drops the same constraint.
+  The overview drops the dependency on a private GitHub repository.
+- **Added:** vim editing (FR-UI-08) and images in the prompt (FR-UI-09), both Milestone 1. Glossary: vim
+  editing.
+- **Settled:** OQ-01, where secrets are stored, by [ADR 0002](../decisions/0002-stack.md).
+- **Changed:** FR-SAF-01, a command in plan mode runs as it would in auto mode, network included, with the
+  user's files read-only (01.3).
+- **Settled:** OQ-09, by FR-SAF-01.3. OQ-08, the reasons for keeping hosted execution and team features
+  out of scope: Kiri is open source and runs entirely on the user's machine.
+- **Settled:** OQ-07, auto-update on a `cargo install` or package-manager install, which no longer exists.
+
+## 2.0.1 — 2026-10-26
+
+- **Changed:** FR-UI-06 and the overview point to the brand's new folder, `docs/design/brand/`. No meaning
+  changes.
+
+## 2.0.0 — 2026-10-26
+
+Review of the SRS against the requirements method of tightship 1.2.0 and of the architecture in
+[ADR 0001](../decisions/0001-architecture.md). The method is unchanged since 1.1.0 and the format already
+followed it; the changes are to content.
+
+- **Moved:** OS confinement (FR-SAF-07) goes from `Later` to Milestone 1. A permission matched against a
+  command's text does not bound a shell, so auto mode needs the sandbox from the start. This is the major bump.
+- **Added:** context compaction (FR-AGT-05), token usage (FR-AGT-06), the client's environment (FR-TOL-07),
+  and client and daemon versions (FR-CNT-09), all Milestone 1. The last two come from the daemon: it inherits
+  the first terminal's environment and outlives the binary that started it.
+- **Changed:** FR-SAF-01, plan mode refuses edits and writes and runs commands under read-only confinement,
+  since Kiri cannot tell from a command's text whether it writes. FR-SAF-02, a permission rule that allows
+  an action applies in default mode too, which removes the conflict with FR-SAF-04. FR-SAF-03, auto mode is
+  bounded by the sandbox and the permissions.
+- **Changed:** FR-AGT-03 adds 03.2, an interrupt ends the running command. FR-AGT-04 loads instruction
+  files only in a trusted project (04.2), closing a prompt-injection path. FR-CNT-01 adds 01.2 (picking among
+  running sessions) and 01.3 (a pending approval survives a closed terminal).
+- **Changed:** NFR-REL-02, the network idle timeout is set per provider, since a local model can be silent
+  for more than 60 seconds; long-lived child processes are bounded per request.
+- **Clarified:** FR-AGT-02 streams the reasoning the provider exposes; FR-PRV-03 names the Responses API;
+  NFR-SEC-01 covers the keys Kiri holds, including in tool output. Glossary: running session.
+- **Opened:** OQ-09.
+
+## 1.0.1 — 2026-10-03
+
+- **Changed:** the 73 requirements move from `proposed` to `approved`, confirmed by the author.
+- **Changed:** the values of NFR-REL-02, NFR-PERF-01, and NFR-PERF-02 are confirmed; the pending note leaves
+  their rationale.
+
+## 1.0.0 — 2026-10-03
+
+Kickoff of the versioned SRS, migrated from the single file `docs/requirements.md`.
+
+- **Added:** the 73 requirements of the [index](README.md#requirements), all `proposed`.
+- **Decided at kickoff:** the daemon and reattach are Milestone 1 (FR-CNT-01, FR-CNT-02); configurable permissions
+  are Milestone 1 and are the only bound of auto mode until the sandbox ships (FR-SAF-03, FR-SAF-04); skills are
+  fetched from their upstream independently of Kiri's releases (FR-EXT-08).
+- **Added from ADR 0001:** plugins from git marketplaces (FR-EXT-09), subagent attach (FR-EXT-10),
+  session-to-session messaging (FR-CNT-08), owner-only transport (NFR-SEC-02), Claude Code formats (NFR-COMP-01).
+- **Proposed values awaiting confirmation:** NFR-REL-02, NFR-PERF-01, NFR-PERF-02.
+
+## Before 1.0.0
+
+The evolution log of `docs/requirements.md`, kept as written.
+
+- **2026-09-30** — Kickoff after a full reset. The previous implementation is discarded; only the brand
+  (assets, concept, palette, seal, tagline) is preserved. Scope captured from the author's interview:
+  terminal coding agent, Rust, native on three platforms, open source, core-first milestones. Verified
+  that Anthropic has blocked third-party use of Claude Pro/Max OAuth since 2026-04-04 and that OpenAI
+  officially supports "Sign in with ChatGPT" for third-party tools; impersonating a vendor client moved to
+  Out of scope.
+- **2026-09-30** — Claude Pro/Max subscription moved back into scope by the author's decision, as an
+  opt-in with an explicit ban-risk warning; the mechanism became an open question. Anthropic-compatible
+  endpoints (MiniMax, GLM, Kimi) added as a provider kind.
+- **2026-09-30** — Author settled five open questions: Milestone 1 ships the inline interface; Claude
+  Pro/Max goes through Kiri's own proxy; ChatGPT uses the same OAuth flow other agents offer; Windows gets
+  a native sandbox; wave order is decided as development proceeds. Added: bundled `ponytail` and
+  `humanize` skills that track their upstream; a free, low-end-hardware classifier as a constraint; sync
+  data lives in `~/.kiri`.
+- **2026-09-30** — Bundled skills set to `ponytail`, `humanizer`, `i-have-adhd`, `grill-me`, with their
+  upstream repos. Jev recorded as the classifier's reference behavior; it stays out as the implementation
+  because it is paid and remote.
+- **2026-09-30** — Classifier made optional and user-chosen (any configured model); without one, auto
+  mode rests on the sandbox, configurable permissions, and the user's workflow. The free/local-hardware
+  constraint was dropped. Sync goes through a private GitHub repo offered at first run (via `gh`),
+  declinable. `grill-me` upstream set to mattpocock/skills.
+- **2026-09-30** — Architecture decided in ADR 0001 (daemon owning every session, ACP boundary, three
+  crates, capability modules, data-only extensions). Claude Pro/Max moved from an own proxy to driving the
+  official `claude` CLI, after research showed impersonation breaks on every Claude Code release while
+  `claude -p` remains the tolerated path; the warning was reworded accordingly. Sessions now survive a
+  closed terminal.
+- **2026-09-30** — Brand scope narrowed by the author: logo, block-character seal, and tagline are kept
+  as they are; the forging/cooling motion is kept as a concept to be redesigned; the palette is a starting
+  point to be made lighter and more readable; glyphs and layout are open.
