@@ -7,10 +7,10 @@
 | [data-model/](data-model/README.md) | The conceptual model: entities and their relations |
 | [decisions/](decisions/README.md) | ADRs: why each cross-cutting choice was made |
 | [design/](design/README.md) | The brand, the tokens, and each screen of the terminal interface |
+| [roadmap/](roadmap/README.md) | Milestones and epics, requirement coverage, and each sprint's plan and result |
 
 - Each doc keeps its diagrams in its own `diagrams/` folder, as `.drawio.svg` files the draw.io extension
   edits in VS Code.
-- `roadmap/` does not exist yet: the first sprint plan creates it.
 - `specs/` does not exist yet: no feature has been specced.
 
 ## Reading it as a site
