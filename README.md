@@ -19,8 +19,9 @@
 ## Status
 
 Kiri is being rebuilt from its requirements. So far `kiri` is a line client that streams text answers from an
-OpenAI-compatible endpoint, set through `KIRI_BASE_URL`, `KIRI_API_KEY`, and `KIRI_MODEL`. It has no tools yet, and
-there is nothing to install.
+OpenAI-compatible endpoint, set through `KIRI_BASE_URL`, `KIRI_API_KEY`, and `KIRI_MODEL`. `KIRI_REASONING_EFFORT`
+and `KIRI_THINKING` set reasoning on the models in its catalog, and `KIRI_REQUEST_PARAMS` adds any key to the request
+on any model. It has no tools yet, and there is nothing to install.
 The previous implementation was discarded; only the brand was kept.
 
 ## The idea

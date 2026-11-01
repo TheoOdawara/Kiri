@@ -43,6 +43,7 @@ pub(crate) async fn run_turn(turn: Turn) {
     messages.push(Message {
         role: Role::User,
         text: turn.prompt,
+        reasoning: None,
     });
 
     let mut output = TurnOutput::new(turn.session_id, turn.outgoing.clone());
@@ -68,6 +69,7 @@ pub(crate) async fn run_turn(turn: Turn) {
                     messages.push(Message {
                         role: Role::Assistant,
                         text: output.text,
+                        reasoning: (!output.reasoning.is_empty()).then_some(output.reasoning),
                     });
                     session.messages = messages;
                 }
@@ -133,6 +135,7 @@ struct TurnOutput {
     run: Option<OpenRun>,
     tool_calls: Vec<OpenToolCall>,
     text: String,
+    reasoning: String,
 }
 
 impl TurnOutput {
@@ -143,12 +146,17 @@ impl TurnOutput {
             run: None,
             tool_calls: Vec::new(),
             text: String::new(),
+            reasoning: String::new(),
         }
     }
 
     async fn accept(&mut self, event: ProviderEvent) -> Result<(), ProviderError> {
         match event {
-            ProviderEvent::Reasoning(delta) => self.extend_run(RunKind::Reasoning, &delta).await,
+            ProviderEvent::Reasoning(delta) => {
+                self.extend_run(RunKind::Reasoning, &delta).await?;
+                self.reasoning.push_str(&delta);
+                Ok(())
+            }
             ProviderEvent::Text(delta) => {
                 self.extend_run(RunKind::Text, &delta).await?;
                 self.text.push_str(&delta);

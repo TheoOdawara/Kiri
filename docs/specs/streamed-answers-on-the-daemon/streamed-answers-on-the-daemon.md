@@ -197,7 +197,7 @@ The daemon exits with code 0 when its last connection closes, or 5 seconds after
 
 ### 5. Configuration at session start
 
-The daemon validates the environment at start and keeps the result. An invalid result does not stop it: each `session/new` answers the error, and the client prints it and exits with code 1. The checks run in the order of the [Errors](#errors) table, and the first failure is the one reported. No message or log carries the value of a variable, except the invalid value of `KIRI_REASONING_EFFORT`.
+The daemon validates the environment at start and keeps the result. An invalid result does not stop it: each `session/new` answers the error, and the client prints it and exits with code 1. The checks run in the order of the [Errors](#errors) table, and the first failure is the one reported. No message or log carries the value of a variable, except the model ID and the invalid value of `KIRI_REASONING_EFFORT`.
 
 ### 6. Sessions and conversation
 

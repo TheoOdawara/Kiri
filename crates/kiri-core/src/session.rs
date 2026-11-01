@@ -39,6 +39,7 @@ impl Role {
 pub(crate) struct Message {
     pub(crate) role: Role,
     pub(crate) text: String,
+    pub(crate) reasoning: Option<String>,
 }
 
 pub(crate) struct Session {

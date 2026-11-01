@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use reqwest::{Client, redirect};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use crate::env::{Config, ConfigError};
@@ -35,6 +35,8 @@ pub(crate) struct OpenAiCompatible {
     url: String,
     api_key: String,
     model: String,
+    request_params: Map<String, Value>,
+    replays_reasoning: bool,
 }
 
 impl OpenAiCompatible {
@@ -53,15 +55,33 @@ impl OpenAiCompatible {
             ),
             api_key: config.api_key,
             model: config.model,
+            request_params: config.request_params,
+            replays_reasoning: config.replays_reasoning,
         })
     }
 
-    pub(crate) async fn send(&self, messages: &[Message]) -> Result<Reply, ProviderError> {
+    fn request_body(&self, messages: &[Message]) -> Value {
         let messages: Vec<Value> = messages
             .iter()
-            .map(|message| json!({"role": message.role.as_str(), "content": message.text}))
+            .map(|message| {
+                let mut entry = json!({"role": message.role.as_str(), "content": message.text});
+                if self.replays_reasoning
+                    && let Some(reasoning) = &message.reasoning
+                {
+                    entry["reasoning_content"] = json!(reasoning);
+                }
+                entry
+            })
             .collect();
-        let body = json!({"model": self.model, "messages": messages, "stream": true});
+        let mut body = self.request_params.clone();
+        body.insert("model".to_owned(), json!(self.model));
+        body.insert("messages".to_owned(), json!(messages));
+        body.insert("stream".to_owned(), json!(true));
+        Value::Object(body)
+    }
+
+    pub(crate) async fn send(&self, messages: &[Message]) -> Result<Reply, ProviderError> {
+        let body = self.request_body(messages);
         let response = self
             .client
             .post(&self.url)
@@ -269,6 +289,8 @@ mod tests {
                 base_url: base_url.to_owned(),
                 api_key: "key".to_owned(),
                 model: "model".to_owned(),
+                request_params: Map::new(),
+                replays_reasoning: false,
             })
             .unwrap_or_else(|_| panic!("no client"))
             .url

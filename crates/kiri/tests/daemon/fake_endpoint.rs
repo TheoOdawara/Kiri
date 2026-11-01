@@ -57,6 +57,10 @@ impl FakeEndpoint {
         self.state.lock().unwrap().bodies[request].clone()
     }
 
+    pub fn request_count(&self) -> usize {
+        self.state.lock().unwrap().bodies.len()
+    }
+
     pub fn request_line(&self, request: usize) -> String {
         self.body(request);
         self.state.lock().unwrap().request_lines[request].clone()

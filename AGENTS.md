@@ -17,7 +17,7 @@ one-week sprints.
 
 ## Architecture
 
-Decided in ADR 0001. Built so far: the daemon on demand and `initialize` (#14), restricted to its OS user (#15), a text answer streamed from an OpenAI-compatible endpoint (#16), and reasoning and tool calls in arrival order, in batches of about 10 ms (#17); the rest of this section is the target.
+Decided in ADR 0001. Built so far: the daemon on demand and `initialize` (#14), restricted to its OS user (#15), a text answer streamed from an OpenAI-compatible endpoint (#16), reasoning and tool calls in arrival order, in batches of about 10 ms (#17), and the native catalog with request parameters (#18); the rest of this section is the target.
 
 - Process model: `kiri daemon` owns every session, for every provider. There is one per user, started by
   the first client and exiting after an idle period with no running session and no client. The TUI,

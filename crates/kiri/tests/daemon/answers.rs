@@ -195,6 +195,235 @@ fn an_invalid_configuration_stops_the_client_with_the_cause() {
 }
 
 #[test]
+fn a_catalog_setting_is_sent_in_its_model_format_and_reasoning_replays_by_catalog() {
+    let deepseek_off = json!({"type": "disabled"});
+    let cases = [
+        (
+            "deepseek-v4-pro",
+            ("KIRI_REASONING_EFFORT", "high"),
+            "reasoning_effort",
+            json!("high"),
+            true,
+        ),
+        (
+            "deepseek-flash",
+            ("KIRI_THINKING", "off"),
+            "thinking",
+            deepseek_off,
+            true,
+        ),
+        (
+            "kimi-k3.1-pro",
+            ("KIRI_REASONING_EFFORT", "max"),
+            "reasoning_effort",
+            json!("max"),
+            true,
+        ),
+        (
+            "glm-5.3",
+            ("KIRI_REASONING_EFFORT", "low"),
+            "reasoning_effort",
+            json!("low"),
+            true,
+        ),
+        (
+            "glm-5.3-flash",
+            ("KIRI_REASONING_EFFORT", "high"),
+            "reasoning_effort",
+            json!("high"),
+            true,
+        ),
+        (
+            "qwen3.8-max",
+            ("KIRI_THINKING", "off"),
+            "enable_thinking",
+            json!(false),
+            false,
+        ),
+        (
+            "qwen3.8-flash",
+            ("KIRI_THINKING", "on"),
+            "enable_thinking",
+            json!(true),
+            false,
+        ),
+        (
+            "gemini-4-argon",
+            ("KIRI_REASONING_EFFORT", "medium"),
+            "reasoning_effort",
+            json!("medium"),
+            false,
+        ),
+        (
+            "gemini-3.8-flash",
+            ("KIRI_REASONING_EFFORT", "low"),
+            "reasoning_effort",
+            json!("low"),
+            false,
+        ),
+    ];
+    for (model, (variable, value), key, sent, replays) in cases {
+        let home = TestHome::new();
+        let endpoint = FakeEndpoint::answering(vec![
+            Part::Delta(json!({"reasoning": "first "})),
+            Part::Text("reply"),
+            Part::Delta(json!({"reasoning_content": "second"})),
+        ]);
+        let mut command = home.kiri_on(&endpoint.base_url, &[]);
+        command.env("KIRI_MODEL", model).env(variable, value);
+        let mut client = Client::start(command);
+        client.read_until("> ");
+
+        client.send_line("first prompt");
+        client.read_until("> ");
+        client.send_line("second prompt");
+        client.read_until("> ");
+
+        let body = endpoint.body(1);
+        assert_eq!(body["model"], model);
+        assert_eq!(body[key], sent, "{model}");
+        let mut assistant = json!({"role": "assistant", "content": "reply"});
+        if replays {
+            assistant["reasoning_content"] = json!("first second");
+        }
+        assert_eq!(body["messages"][1], assistant, "{model}");
+        client.end();
+        home.wait_for_daemon_exit();
+    }
+}
+
+#[test]
+fn a_model_outside_the_catalog_replays_no_reasoning_and_takes_the_pass_through_unchanged() {
+    let home = TestHome::new();
+    let endpoint = FakeEndpoint::answering(vec![
+        Part::Delta(json!({"reasoning_content": "thought"})),
+        Part::Text("reply"),
+    ]);
+    let mut command = home.kiri_on(&endpoint.base_url, &[]);
+    command.env(
+        "KIRI_REQUEST_PARAMS",
+        r#"{"chat_template_kwargs":{"enable_thinking":true},"temperature":0.2}"#,
+    );
+    let mut client = Client::start(command);
+    client.read_until("> ");
+
+    client.send_line("first prompt");
+    client.read_until("reply\n> ");
+    client.send_line("second prompt");
+    client.read_until("reply\n> ");
+
+    assert_eq!(
+        endpoint.body(1),
+        json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "first prompt"},
+                {"role": "assistant", "content": "reply"},
+                {"role": "user", "content": "second prompt"},
+            ],
+            "stream": true,
+            "chat_template_kwargs": {"enable_thinking": true},
+            "temperature": 0.2,
+        })
+    );
+    client.end();
+    home.wait_for_daemon_exit();
+}
+
+#[test]
+fn the_pass_through_overrides_the_catalog() {
+    let home = TestHome::new();
+    let endpoint = FakeEndpoint::answering(vec![Part::Text("reply")]);
+    let mut command = home.kiri_on(&endpoint.base_url, &[]);
+    command
+        .env("KIRI_MODEL", "deepseek-v4-pro")
+        .env("KIRI_REASONING_EFFORT", "high")
+        .env("KIRI_REQUEST_PARAMS", r#"{"reasoning_effort":"max"}"#);
+    let mut client = Client::start(command);
+    client.read_until("> ");
+
+    client.send_line("hello");
+    client.read_until("reply\n> ");
+
+    assert_eq!(endpoint.body(0)["reasoning_effort"], "max");
+    client.end();
+    home.wait_for_daemon_exit();
+}
+
+#[test]
+fn a_refused_setting_stops_the_client_with_its_message_and_no_request() {
+    let cases: [(&[(&str, &str)], &str); 6] = [
+        (
+            &[
+                ("KIRI_MODEL", "glm-5.3"),
+                ("KIRI_REASONING_EFFORT", "medium"),
+            ],
+            "glm-5.3 accepts these KIRI_REASONING_EFFORT values: low, high, max. Got: medium.",
+        ),
+        (
+            &[
+                ("KIRI_MODEL", "qwen3.8-max"),
+                ("KIRI_REASONING_EFFORT", "low"),
+            ],
+            "qwen3.8-max has no reasoning effort setting in Kiri. Unset KIRI_REASONING_EFFORT, or use KIRI_REQUEST_PARAMS.",
+        ),
+        (
+            &[("KIRI_MODEL", "glm-5.3"), ("KIRI_THINKING", "on")],
+            "glm-5.3 has no thinking switch in Kiri. Unset KIRI_THINKING, or use KIRI_REQUEST_PARAMS.",
+        ),
+        (
+            &[("KIRI_THINKING", "on")],
+            "test-model is not in Kiri's catalog, so KIRI_REASONING_EFFORT and KIRI_THINKING do not apply. Use KIRI_REQUEST_PARAMS.",
+        ),
+        (
+            &[("KIRI_REQUEST_PARAMS", "[1,2]")],
+            "KIRI_REQUEST_PARAMS must be a JSON object.",
+        ),
+        (
+            &[("KIRI_REQUEST_PARAMS", r#"{"stream":false}"#)],
+            "KIRI_REQUEST_PARAMS cannot set stream, because Kiri sets it.",
+        ),
+    ];
+    for (variables, message) in cases {
+        let home = TestHome::new();
+        let endpoint = FakeEndpoint::answering(vec![Part::Text("reply")]);
+        let mut command = home.kiri_on(&endpoint.base_url, &[]);
+        command.envs(variables.iter().copied());
+
+        let output = command.output().unwrap();
+
+        assert_eq!(output.status.code(), Some(1), "{message}");
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim_end(), message);
+        home.wait_for_daemon_exit();
+        assert_eq!(endpoint.request_count(), 0, "{message}");
+    }
+}
+
+#[test]
+fn the_log_never_holds_the_request_params() {
+    let marker = "request-params-marker";
+    let cases = [
+        format!(r#"{{"note":"{marker}"}}"#),
+        format!("[\"{marker}\"]"),
+    ];
+    for params in cases {
+        let home = TestHome::new();
+        let endpoint = FakeEndpoint::answering(vec![Part::Text("reply")]);
+        let mut command = home.kiri_on(&endpoint.base_url, &[]);
+        command
+            .env("KIRI_REQUEST_PARAMS", &params)
+            .stdin(std::process::Stdio::null());
+
+        let output = command.output().unwrap();
+
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(marker));
+        home.wait_for_daemon_exit();
+        assert!(!home.log().is_empty());
+        assert!(!home.log().contains(marker));
+    }
+}
+
+#[test]
 fn an_invalid_configuration_stops_listening_before_the_answer() {
     let home = TestHome::new();
     let mut daemon = home
