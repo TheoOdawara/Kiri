@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_PIPE_LISTENING, HANDLE,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_BAD_PIPE, ERROR_BROKEN_PIPE, HANDLE,
     INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::NetworkManagement::NetManagement::{
@@ -187,7 +187,7 @@ impl ForeignPipe {
         }
         let cause = io::Error::last_os_error();
         match cause.raw_os_error().map(|code| code as u32) {
-            Some(ERROR_BROKEN_PIPE | ERROR_PIPE_LISTENING) => Ok(true),
+            Some(ERROR_BROKEN_PIPE | ERROR_BAD_PIPE) => Ok(true),
             _ => Err(format!("PeekNamedPipe failed: {cause}").into()),
         }
     }
