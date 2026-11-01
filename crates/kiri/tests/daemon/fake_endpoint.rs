@@ -10,7 +10,10 @@ use crate::support::wait_until;
 #[derive(Clone)]
 pub enum Part {
     Text(&'static str),
+    Delta(Value),
+    Wait(Duration),
     Hold,
+    BreakStream,
 }
 
 pub const FINISHED: [&str; 2] = [
@@ -116,12 +119,17 @@ fn answer(stream: TcpStream, script: &[Part], state: &Mutex<State>) {
     for part in script {
         match part {
             Part::Text(text) => {
-                let chunk =
-                    json!({"choices": [{"delta": {"content": text}, "finish_reason": null}]});
-                if write_event(&mut writer, &chunk.to_string()).is_err() {
+                if write_delta(&mut writer, &json!({"content": text})).is_err() {
                     break;
                 }
             }
+            Part::Delta(delta) => {
+                if write_delta(&mut writer, delta).is_err() {
+                    break;
+                }
+            }
+            Part::Wait(duration) => std::thread::sleep(*duration),
+            Part::BreakStream => return,
             Part::Hold => {
                 if !hold(&reader, state) {
                     state.lock().unwrap().closed += 1;
@@ -133,6 +141,11 @@ fn answer(stream: TcpStream, script: &[Part], state: &Mutex<State>) {
     for event in FINISHED {
         let _ = write_event(&mut writer, event);
     }
+}
+
+fn write_delta(writer: &mut TcpStream, delta: &Value) -> std::io::Result<()> {
+    let chunk = json!({"choices": [{"delta": delta, "finish_reason": null}]});
+    write_event(writer, &chunk.to_string())
 }
 
 fn write_event(writer: &mut TcpStream, data: &str) -> std::io::Result<()> {

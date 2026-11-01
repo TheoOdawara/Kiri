@@ -201,15 +201,15 @@ The daemon validates the environment at start and keeps the result. An invalid r
 
 ### 6. Sessions and conversation
 
-Each connection can open many sessions, and each session runs one turn at a time. A prompt during a running turn answers `-32602` with "A turn is already running in this session." A prompt for a session this connection did not create answers `-32002` with "Unknown session: `<id>`." The conversation is held in memory. A turn that ends in `end_turn` or `max_tokens` adds its prompt, its reply, and its reasoning to the conversation. Any other ending adds nothing, so a failed turn leaves the next request valid.
+Each connection can open many sessions, and each session runs one turn at a time. A prompt during a running turn answers `-32602` with "A turn is already running in this session." A prompt for a session this connection did not create answers `-32002` with "Unknown session: `<id>`." The conversation is held in memory. A turn that ends in `end_turn` or `max_tokens` adds its prompt, its reply, and its reasoning to the conversation. Any other ending adds nothing, and neither does a reply with no text, so the next request stays valid: some endpoints may refuse an empty assistant message or two user messages in a row.
 
 ### 7. Streaming order and batching
 
-`agent` keeps one open run of text or of reasoning, and sends it as one ACP event every 10 ms, when the kind changes, and when the stream ends. A tool call flushes the open run and goes out at once. The concatenated output of the events equals the provider's in the same order.
+`agent` keeps one open run of text or of reasoning, and sends it as one ACP event 10 ms after the run opens, when the kind changes, and when the turn ends, however it ends. A tool call flushes the open run and goes out at once. A cancelled or failed turn also sends the `tool_call_update` of each open tool call before its answer. The concatenated output of the events equals the provider's in the same order.
 
 ### 8. Tool calls do not run
 
-A tool call the endpoint sends is shown and never executed. Its `tool_call_update` carries status `failed`, and the conversation keeps only the text and reasoning of that reply. #6 removes this rule.
+A tool call the endpoint sends is shown and never executed. Its `tool_call_update` carries status `failed`, and the conversation keeps only the text and reasoning of that reply, or nothing when the reply has no text. #6 removes this rule.
 
 ### 9. Native settings and pass-through
 

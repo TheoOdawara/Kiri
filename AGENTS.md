@@ -17,8 +17,7 @@ one-week sprints.
 
 ## Architecture
 
-Decided in ADR 0001. Built so far: the daemon on demand and `initialize` (#14), restricted to its OS user (#15), and a text answer streamed from an
-OpenAI-compatible endpoint (#16); the rest of this section is the target.
+Decided in ADR 0001. Built so far: the daemon on demand and `initialize` (#14), restricted to its OS user (#15), a text answer streamed from an OpenAI-compatible endpoint (#16), and reasoning and tool calls in arrival order, in batches of about 10 ms (#17); the rest of this section is the target.
 
 - Process model: `kiri daemon` owns every session, for every provider. There is one per user, started by
   the first client and exiting after an idle period with no running session and no client. The TUI,
@@ -89,6 +88,8 @@ text is English until OQ-02 decides on localization.
   error. Sent first, the error lets a fixed client reach the old daemon before it stops listening.
 - A turn updates the conversation and clears `running_turn` before its answer goes out. Otherwise a client's
   immediate next prompt gets "A turn is already running in this session."
+- A batch is cleared only after its `send` returns, and a tool call is recorded only after its own. `run_turn`'s
+  `select!` can drop the stream mid-send, and `finish` then sends what is still held, without repeating anything.
 - A refusal happens inside `Listener::accept`, so `serve` never sees it. Counted as a client, it would keep a daemon
   with no real client alive forever.
 

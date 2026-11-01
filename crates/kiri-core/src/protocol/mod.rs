@@ -19,7 +19,9 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 
-pub use agent_client_protocol_schema::v1::{ContentBlock, SessionId, SessionUpdate, StopReason};
+pub use agent_client_protocol_schema::v1::{
+    ContentBlock, ContentChunk, SessionId, SessionUpdate, StopReason, ToolCallId,
+};
 pub use endpoint::{Endpoint, EndpointError};
 
 #[derive(Debug, Error)]

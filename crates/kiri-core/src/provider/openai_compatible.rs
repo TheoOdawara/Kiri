@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use eventsource_stream::{Event, EventStreamError, Eventsource};
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
@@ -18,7 +20,14 @@ pub(crate) struct ProviderError;
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum ProviderEvent {
+    Reasoning(String),
     Text(String),
+    ToolCallFragment {
+        index: u64,
+        id: Option<String>,
+        name: Option<String>,
+        arguments: Option<String>,
+    },
 }
 
 pub(crate) struct OpenAiCompatible {
@@ -73,6 +82,7 @@ impl OpenAiCompatible {
         }
         Ok(Reply {
             events: response.bytes_stream().eventsource().boxed(),
+            pending: VecDeque::new(),
             finished: false,
         })
     }
@@ -80,12 +90,19 @@ impl OpenAiCompatible {
 
 pub(crate) struct Reply {
     events: BoxStream<'static, Result<Event, EventStreamError<reqwest::Error>>>,
+    pending: VecDeque<ProviderEvent>,
     finished: bool,
 }
 
 impl Reply {
     pub(crate) async fn next_event(&mut self) -> Result<Option<ProviderEvent>, ProviderError> {
-        while !self.finished {
+        loop {
+            if let Some(event) = self.pending.pop_front() {
+                return Ok(Some(event));
+            }
+            if self.finished {
+                return Ok(None);
+            }
             let event = match self.events.next().await {
                 Some(Ok(event)) => event,
                 Some(Err(_)) | None => {
@@ -93,67 +110,151 @@ impl Reply {
                     return Err(ProviderError);
                 }
             };
-            let (text, finished) = read_chunk(&event.data).map_err(|_| {
+            let (events, finished) = read_chunk(&event.data).map_err(|_| {
                 tracing::warn!("the endpoint sent an unreadable chunk");
                 ProviderError
             })?;
             self.finished = finished;
-            if let Some(text) = text {
-                return Ok(Some(ProviderEvent::Text(text)));
-            }
+            self.pending.extend(events);
         }
-        Ok(None)
     }
 }
 
-// shortcut: reads only delta.content, #17 adds reasoning and tool calls, and #19 maps the finish reasons.
-fn read_chunk(data: &str) -> Result<(Option<String>, bool), serde_json::Error> {
+// shortcut: any finish reason ends the stream the same way, #19 maps them to stop reasons.
+fn read_chunk(data: &str) -> Result<(Vec<ProviderEvent>, bool), serde_json::Error> {
     if data == DONE {
-        return Ok((None, true));
+        return Ok((Vec::new(), true));
     }
     let chunk: Value = serde_json::from_str(data)?;
     let Some(choice) = chunk.pointer("/choices/0") else {
-        return Ok((None, false));
+        return Ok((Vec::new(), false));
     };
-    let text = choice
-        .pointer("/delta/content")
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned);
+    let delta = &choice["delta"];
+    let mut events = Vec::new();
+    if let Some(reasoning) =
+        non_empty_text(&delta["reasoning_content"]).or_else(|| non_empty_text(&delta["reasoning"]))
+    {
+        events.push(ProviderEvent::Reasoning(reasoning));
+    }
+    if let Some(text) = non_empty_text(&delta["content"]) {
+        events.push(ProviderEvent::Text(text));
+    }
+    let tool_calls = delta["tool_calls"].as_array().into_iter().flatten();
+    for (position, tool_call) in tool_calls.enumerate() {
+        events.push(ProviderEvent::ToolCallFragment {
+            index: tool_call["index"].as_u64().unwrap_or(position as u64),
+            id: non_empty_text(&tool_call["id"]),
+            name: non_empty_text(&tool_call["function"]["name"]),
+            arguments: non_empty_text(&tool_call["function"]["arguments"]),
+        });
+    }
     let finished = choice.get("finish_reason").is_some_and(Value::is_string);
-    Ok((text, finished))
+    Ok((events, finished))
+}
+
+fn non_empty_text(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn text(text: &str) -> ProviderEvent {
+        ProviderEvent::Text(text.to_owned())
+    }
+
+    fn reasoning(text: &str) -> ProviderEvent {
+        ProviderEvent::Reasoning(text.to_owned())
+    }
+
     #[test]
-    fn a_chunk_gives_its_text_and_whether_the_stream_finished() {
+    fn a_chunk_gives_its_events_and_whether_the_stream_finished() {
         let cases = [
             (
                 r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#,
-                Some("hi"),
+                vec![text("hi")],
                 false,
             ),
             (
                 r#"{"choices":[{"delta":{"content":"end"},"finish_reason":"stop"}]}"#,
-                Some("end"),
+                vec![text("end")],
                 true,
             ),
             (
                 r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
-                None,
+                vec![],
                 true,
             ),
-            (r#"{"choices":[],"usage":{}}"#, None, false),
-            ("[DONE]", None, true),
+            (r#"{"choices":[],"usage":{}}"#, vec![], false),
+            ("[DONE]", vec![], true),
+            (
+                r#"{"choices":[{"delta":{"reasoning_content":"a"}}]}"#,
+                vec![reasoning("a")],
+                false,
+            ),
+            (
+                r#"{"choices":[{"delta":{"reasoning":"b"}}]}"#,
+                vec![reasoning("b")],
+                false,
+            ),
+            (
+                r#"{"choices":[{"delta":{"reasoning_content":null,"reasoning":"c"}}]}"#,
+                vec![reasoning("c")],
+                false,
+            ),
+            (
+                r#"{"choices":[{"delta":{"reasoning_content":"","reasoning":"d"}}]}"#,
+                vec![reasoning("d")],
+                false,
+            ),
+            (
+                r#"{"choices":[{"delta":{"reasoning_content":"e","reasoning":"f"}}]}"#,
+                vec![reasoning("e")],
+                false,
+            ),
         ];
-        for (data, text, finished) in cases {
-            let (read_text, read_finished) = read_chunk(data).unwrap();
-            assert_eq!(read_text.as_deref(), text, "{data}");
+        for (data, events, finished) in cases {
+            let (read_events, read_finished) = read_chunk(data).unwrap();
+            assert_eq!(read_events, events, "{data}");
             assert_eq!(read_finished, finished, "{data}");
         }
+    }
+
+    #[test]
+    fn a_chunk_with_every_part_gives_reasoning_then_text_then_tool_calls() {
+        let data = r#"{"choices":[{"delta":{
+            "tool_calls":[
+                {"id":"x","function":{"name":"first","arguments":"{"}},
+                {"index":7,"function":{"arguments":"}"}}
+            ],
+            "content":"t",
+            "reasoning":"r"
+        },"finish_reason":"tool_calls"}]}"#;
+        let (events, finished) = read_chunk(data).unwrap();
+        assert_eq!(
+            events,
+            vec![
+                reasoning("r"),
+                text("t"),
+                ProviderEvent::ToolCallFragment {
+                    index: 0,
+                    id: Some("x".to_owned()),
+                    name: Some("first".to_owned()),
+                    arguments: Some("{".to_owned()),
+                },
+                ProviderEvent::ToolCallFragment {
+                    index: 7,
+                    id: None,
+                    name: None,
+                    arguments: Some("}".to_owned()),
+                },
+            ]
+        );
+        assert!(finished);
     }
 
     #[test]
