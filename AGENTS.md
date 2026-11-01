@@ -27,11 +27,11 @@ Decided in ADR 0001. Nothing is built yet.
 
 | Crate | Holds | Depends on | Public surface | Label |
 |---|---|---|---|---|
-| `kiri-core` | Engine and session host | no other Kiri crate | ACP types and `kiri/*` extension methods; the rest is `pub(crate)` | `area:core` |
+| `kiri-core` | Engine and session host | no other Kiri crate | ACP types, `kiri/*` extension methods, `daemon::run`, `protocol::connect`; the rest is `pub(crate)` | `area:core` |
 | `kiri-tui` | Inline interface (full-screen later) | `kiri-core`'s protocol | — | `area:tui` |
 | `kiri` | The binary: `daemon`, CLI, `-p`, `acp` | `kiri-core`, `kiri-tui` | — | `area:cli` |
 
-- `kiri-core` is split by capability: `agent`, `provider`, `tools`, `permissions`, `sandbox`, `session`,
+- `kiri-core` is split by capability: `protocol`, `agent`, `provider`, `tools`, `permissions`, `sandbox`, `session`,
   `extensions`. Modules call each other directly; events exist only at the ACP boundary. Its two
   traits are `Provider`, one file per provider in `provider/`, and `Sandbox`, one file per OS in
   `sandbox/`, chosen at compile time.

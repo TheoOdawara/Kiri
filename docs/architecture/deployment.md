@@ -32,5 +32,5 @@ Nothing is installable yet; distribution is `Later`. As planned in
 ## Delivery
 
 - **Gates:** the repository's `gates` project skill. Today only the docs build exists.
-- **CI:** none. No workflow exists in the repository.
+- **CI:** none yet. The first task of [#2](https://github.com/TheoOdawara/Kiri/issues/2) adds a workflow on Windows, Linux, and macOS, and with it the cross-user check of `xtask`.
 - **Branches:** work branches merge into `staging` by pull request; a release is a merge of `staging` into `main`.

@@ -10,3 +10,8 @@ Provider output flows through one local pipeline, the same for every provider:
 Each stage does one transformation. Batching keeps redraws off the per-token path, which is what
 [NFR-PERF-01](../../requirements/non-functional/performance.md#nfr-perf-01) needs. With the Claude
 subscription the CLI's stream enters at stage 2.
+
+Stage 1 starts from a request the catalog and the user shape
+([FR-PRV-10](../../requirements/functional/providers.md#fr-prv-10)). A model in the catalog takes its reasoning
+settings in its own format, and `KIRI_REQUEST_PARAMS` adds any key to the body on any model. The conversation
+keeps each reply's reasoning, and the models the catalog marks receive it back in later requests.

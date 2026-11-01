@@ -2,6 +2,7 @@
 - Status: accepted
 - Date: 2026-09-30
 - Amended: 2026-10-27, the `sync` module is removed with FR-CNT-06 and 07 (SRS 3.0.0)
+- Amended: 2026-11-01, `kiri-core` gains the `protocol` module and two public entry points beside the protocol types
 
 Supersedes the `Architecture` section of `CLAUDE.md` and every earlier ADR in this folder; all of them
 describe the implementation discarded in the reset (see `docs/requirements/CHANGELOG.md`).
@@ -51,7 +52,7 @@ extension model.
 
 | Crate | Holds | Public surface |
 |---|---|---|
-| `kiri-core` | The engine and the daemon's session host | The protocol only |
+| `kiri-core` | The engine and the daemon's session host | The protocol, `daemon::run`, and `protocol::connect` |
 | `kiri-tui` | Inline interface (full-screen later) | — |
 | `kiri` | The binary: `daemon`, CLI, `-p`, `acp` bridge | — |
 
@@ -60,8 +61,8 @@ consumer of its own.
 
 ### 4. Engine internals — modules by capability
 
-- `kiri-core` is split into capability modules: `agent`, `provider`, `tools`, `permissions`, `sandbox`,
-  `session`, `extensions`. Each file groups one responsibility. No domain/application/
+- `kiri-core` is split into capability modules: `protocol`, `agent`, `provider`, `tools`, `permissions`,
+  `sandbox`, `session`, `extensions`. Each file groups one responsibility. No domain/application/
   infrastructure layering.
 - A trait exists only with two or more real implementations: `Provider` (OpenAI-compatible, Anthropic,
   OpenAI Responses, ChatGPT subscription, Claude CLI backend) and `Sandbox` (one per OS, chosen at

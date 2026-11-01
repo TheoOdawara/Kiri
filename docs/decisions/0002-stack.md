@@ -1,6 +1,7 @@
 # 0002. Stack: every dependency, and what stays in the standard library
 - Status: accepted
 - Date: 2026-10-27
+- Amended: 2026-11-01, adds `futures-util` for the spec of [#2](https://github.com/TheoOdawara/Kiri/issues/2)
 
 ## Context
 
@@ -34,7 +35,7 @@ and the docs of Claude Code, Antigravity, Gemini CLI, OpenCode, and Kimi Code.
 
 | Area | Crate | Version | Settings |
 | --- | --- | --- | --- |
-| Async runtime | `tokio` | 1.54.1 | |
+| Async runtime | `tokio`; `futures-util` | 1.54.1; 0.3.34 | `futures-util` consumes the streams of `reqwest` and `eventsource-stream` |
 | Errors | `thiserror` in `kiri-core`; `anyhow` in `kiri` and `kiri-tui` | 2.0.21; 1.0.104 | |
 | Logs | `tracing`, `tracing-subscriber` | 0.1.44, 0.3.23 | JSONL output; rotation is our code |
 | CLI | `clap` | 4.6.7 | `derive` |

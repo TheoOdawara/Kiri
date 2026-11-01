@@ -11,7 +11,7 @@
 
 - Each doc keeps its diagrams in its own `diagrams/` folder, as `.drawio.svg` files the draw.io extension
   edits in VS Code.
-- `specs/` does not exist yet: no feature has been specced.
+- `specs/`: one folder per epic, holding its closed specs.
 
 ## Reading it as a site
 
