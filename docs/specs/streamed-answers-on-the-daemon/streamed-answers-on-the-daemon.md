@@ -1,9 +1,9 @@
 # #2 — Stream answers through the daemon
 
-> **Status:** closed
+> **Status:** published
 > **Profile:** API
 > **Module:** `crates/kiri-core` (`protocol`, `session`, `agent`, `provider`), `crates/kiri-tui`, `crates/kiri`, `xtask`
-> **Epic:** [#2](https://github.com/TheoOdawara/Kiri/issues/2)
+> **Epic:** #2
 > **Requirements:** FR-CNT-02, NFR-SEC-02, FR-AGT-02, FR-PRV-01, FR-PRV-10. Constraints: NFR-FLEX-01, NFR-REL-01, NFR-REL-02.1, NFR-REL-02.3, NFR-REL-03
 > **Sprint:** 1
 
@@ -715,11 +715,11 @@ And exits with code 0
 
 ## Task Breakdown
 
-| # | Title | Scope | Acceptance criterion | Depends on |
-| --- | --- | --- | --- | --- |
-| 1 | Start the daemon on demand over a local socket | Cargo workspace with `kiri-core`, `kiri-tui`, `kiri`, `xtask`; CI on three systems; `gates` skill and `AGENTS.md` conventions; `protocol` (JSON-RPC, socket, pipe), lock, log, `initialize`, spawn, exit rules | Scenarios 3, 4, 6, 7, 38, 39 | — |
-| 2 | Restrict the daemon to its OS user | File modes, peer check, DACL, pipe owner check; `xtask` cross-user check in CI on three systems | Scenarios 8, 9, 10 | 1 |
-| 3 | Stream a text answer from an OpenAI-compatible endpoint | `env.rs`, `session`, `agent`, `provider/openai_compatible.rs`, line client in `kiri-tui`, `session/new`, `session/prompt`, `session/cancel`, conversation in memory | Scenarios 1, 2, 5, 11, 26, 27, 28, 29, 30 | 1 |
-| 4 | Show reasoning and tool calls in arrival order | Delta parsing, tool call events, 10 ms batching, client's reasoning and tool call output | Scenarios 12, 13, 14, 15 | 3 |
-| 5 | Add the native catalog and request parameters | `provider/catalog.rs`, the remaining variables of `env.rs`, request body, reasoning replay | Scenarios 16, 17, 18, 19, 20, 21, 22, 23, 24 | 4 |
-| 6 | Report every failure with its cause | Error mapping, timeouts, stop reasons, key redaction, client's failure paths | Scenarios 25, 31, 32, 33, 34, 35, 36, 37 | 5 |
+| # | Issue | Title | Scope | Acceptance criterion | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| 1 | #14 | Start the daemon on demand over a local socket | Cargo workspace with `kiri-core`, `kiri-tui`, `kiri`, `xtask`; CI on three systems; `gates` skill and `AGENTS.md` conventions; `protocol` (JSON-RPC, socket, pipe), lock, log, `initialize`, spawn, exit rules | Scenarios 3, 4, 6, 7, 38, 39 | — |
+| 2 | #15 | Restrict the daemon to its OS user | File modes, peer check, DACL, pipe owner check; `xtask` cross-user check in CI on three systems | Scenarios 8, 9, 10 | 1 |
+| 3 | #16 | Stream a text answer from an OpenAI-compatible endpoint | `env.rs`, `session`, `agent`, `provider/openai_compatible.rs`, line client in `kiri-tui`, `session/new`, `session/prompt`, `session/cancel`, conversation in memory | Scenarios 1, 2, 5, 11, 26, 27, 28, 29, 30 | 1 |
+| 4 | #17 | Show reasoning and tool calls in arrival order | Delta parsing, tool call events, 10 ms batching, client's reasoning and tool call output | Scenarios 12, 13, 14, 15 | 3 |
+| 5 | #18 | Add the native catalog and request parameters | `provider/catalog.rs`, the remaining variables of `env.rs`, request body, reasoning replay | Scenarios 16, 17, 18, 19, 20, 21, 22, 23, 24 | 4 |
+| 6 | #19 | Report every failure with its cause | Error mapping, timeouts, stop reasons, key redaction, client's failure paths | Scenarios 25, 31, 32, 33, 34, 35, 36, 37 | 5 |
