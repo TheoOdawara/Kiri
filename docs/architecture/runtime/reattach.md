@@ -11,4 +11,4 @@ Requirements: [FR-CNT-01, 02](../../requirements/functional/continuity.md#fr-cnt
 5. The client receives the session's events from then on.
 6. With no running session and no connected client, the daemon exits after its idle period.
 
-What the client is shown of the events it missed is not decided; the daemon's spec decides it.
+What the client is shown of the events it missed is not decided; the spec of [#3](https://github.com/TheoOdawara/Kiri/issues/3) decides it.

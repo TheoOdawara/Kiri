@@ -9,9 +9,9 @@ OpenAI-compatible endpoint, and the user closes the terminal and reattaches to t
 
 None of the three epics has a spec. Each gets `/tightship:spec`, then `/tightship:epic`, before any code:
 
-1. #2, Daemon and reattach
-2. #3, Branded inline interface
-3. #4, Streamed answers
+1. #2, Streamed answers on the daemon
+2. #3, Reattach
+3. #4, Branded inline interface
 
 The first code task creates the Cargo workspace and CI on Windows, Linux, and macOS.
 
@@ -19,9 +19,9 @@ The first code task creates the Cargo workspace and CI on Windows, Linux, and ma
 
 | Epic | In this sprint | Left for a later sprint |
 | --- | --- | --- |
-| #2 | FR-CNT-01.1, FR-CNT-01.2, FR-CNT-02, NFR-SEC-02 | FR-CNT-01.3, which needs approvals; FR-CNT-09; NFR-PERF-02 |
-| #3 | FR-UI-01, FR-UI-06, NFR-PERF-01 | FR-UI-07, NFR-INTR-01, NFR-INTR-02 |
-| #4 | FR-AGT-02, FR-PRV-01 | — |
+| #2 | FR-CNT-02, NFR-SEC-02, FR-AGT-02, FR-PRV-01 | — |
+| #3 | FR-CNT-01.1, FR-CNT-01.2, FR-CNT-09, NFR-PERF-02 | — |
+| #4 | FR-UI-01, FR-UI-06, NFR-PERF-01 | FR-UI-07, NFR-INTR-01, NFR-INTR-02 |
 
 The endpoint's URL and API key come from environment variables, read through the validation file. Setup
 inside Kiri belongs to #5 (FR-PRV-09).
