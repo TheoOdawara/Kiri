@@ -87,7 +87,12 @@ impl TemporaryHome {
 
     fn kiri(&self, kiri: &Path) -> Command {
         let mut command = Command::new(kiri);
-        command.env("HOME", &self.0).env("USERPROFILE", &self.0);
+        command
+            .env("HOME", &self.0)
+            .env("USERPROFILE", &self.0)
+            .env("KIRI_BASE_URL", "http://127.0.0.1:1")
+            .env("KIRI_API_KEY", "unused")
+            .env("KIRI_MODEL", "unused");
         command
     }
 }

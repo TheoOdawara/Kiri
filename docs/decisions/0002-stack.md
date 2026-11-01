@@ -2,7 +2,8 @@
 
 - Status: accepted
 - Date: 2026-10-27
-- Amended: 2026-11-01, adds `futures-util` for the spec of [#2](https://github.com/TheoOdawara/Kiri/issues/2)
+- Amended: 2026-11-01, adds `futures-util` for the spec of [#2](https://github.com/TheoOdawara/Kiri/issues/2), and
+  records that Windows compiles only in CI and that streaming fakes are hand-written
 
 ## Context
 
@@ -115,7 +116,11 @@ Harder, and accepted:
 
 - The Windows sandbox is the largest piece of Milestone 1 and needs a one-time elevated setup.
 - Two JSON-RPC stacks: ours for ACP and `rmcp`'s for MCP.
-- Oniguruma and jemalloc compile C in the build, as `aws-lc-rs` already does.
+- Oniguruma and jemalloc compile C in the build, as `aws-lc-rs` already does. That C needs the Windows headers, so
+  a Mac cannot compile the Windows target without `cargo-xwin` and LLVM. Windows compiles only in CI, and a Windows
+  error shows up after a push.
+- `wiremock` sends a whole body at once, so it cannot hold a stream or see a client close one. The tests that need
+  either use a small HTTP/1.1 server of our own in `crates/kiri/tests/daemon/fake_endpoint.rs`.
 - `crossterm` releases slowly; Codex carries four fixes in a fork. The TUI spec checks those cases.
 - Without a code signature, a macOS update can ask once for Keychain access, and Smart App Control can
   block `kiri.exe` on Windows. Both wait on the Distribution spikes.

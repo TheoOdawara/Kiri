@@ -2,15 +2,20 @@ use std::fs::{self, File, TryLockError};
 use std::io;
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use crate::env::{self, ConfigError};
 use crate::protocol::transport::{self, Listener};
-use crate::protocol::{Endpoint, framing, jsonrpc};
+use crate::protocol::{Endpoint, framing};
+use crate::provider::openai_compatible::OpenAiCompatible;
+use crate::session::{Host, Sessions};
 
+const OUTGOING_LINES: usize = 64;
 const NO_CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 const LOG_ROTATION_BYTES: u64 = 10 * 1024 * 1024;
 const ACCEPT_RETRY: Duration = Duration::from_millis(50);
@@ -51,7 +56,12 @@ pub async fn run() -> ExitCode {
     }
     start_logging(&log_path);
 
-    match serve(&endpoint).await {
+    let provider = env::read().and_then(OpenAiCompatible::new);
+    if let Err(cause) = &provider {
+        tracing::warn!(%cause, "the configuration is invalid");
+    }
+
+    match serve(&endpoint, provider).await {
         Ok(()) => {
             tracing::info!("daemon exited");
             ExitCode::SUCCESS
@@ -104,10 +114,15 @@ fn start_logging(log_path: &Path) {
     }
 }
 
-async fn serve(endpoint: &Endpoint) -> io::Result<()> {
-    let mut listener = Listener::bind(endpoint)?;
+async fn serve(
+    endpoint: &Endpoint,
+    provider: Result<OpenAiCompatible, ConfigError>,
+) -> io::Result<()> {
+    let mut listener = Some(Listener::bind(endpoint)?);
     tracing::info!("daemon started");
 
+    let (stop_listening, mut stop_requests) = mpsc::channel(1);
+    let host = Arc::new(Host::new(provider, stop_listening));
     let mut connections = JoinSet::new();
     let no_client_timeout = tokio::time::sleep(NO_CLIENT_TIMEOUT);
     tokio::pin!(no_client_timeout);
@@ -116,16 +131,25 @@ async fn serve(endpoint: &Endpoint) -> io::Result<()> {
     // shortcut: the daemon exits when its last client leaves, #3 replaces this with reattach and an idle period.
     loop {
         tokio::select! {
-            accepted = listener.accept() => match accepted {
+            accepted = async {
+                match listener.as_mut() {
+                    Some(listener) => listener.accept().await,
+                    None => std::future::pending().await,
+                }
+            } => match accepted {
                 Ok(stream) => {
                     had_a_client = true;
-                    connections.spawn(serve_connection(stream));
+                    connections.spawn(serve_connection(stream, Arc::clone(&host)));
                 }
                 Err(cause) => {
                     tracing::warn!(%cause, "could not accept a connection");
                     tokio::time::sleep(ACCEPT_RETRY).await;
                 }
             },
+            Some(stopped) = stop_requests.recv() => {
+                listener = None;
+                let _ = stopped.send(());
+            }
             Some(_) = connections.join_next() => {
                 if connections.is_empty() {
                     return Ok(());
@@ -136,9 +160,15 @@ async fn serve(endpoint: &Endpoint) -> io::Result<()> {
     }
 }
 
-async fn serve_connection<S: AsyncRead + AsyncWrite>(stream: S) {
-    let (reader, mut writer) = tokio::io::split(stream);
+async fn serve_connection<S>(stream: S, host: Arc<Host>)
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (reader, writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
+    let (outgoing, lines) = mpsc::channel(OUTGOING_LINES);
+    tokio::spawn(write_lines(writer, lines));
+    let mut sessions = Sessions::new(host, outgoing);
     loop {
         let line = match framing::read_line(&mut reader).await {
             Ok(Some(line)) => line,
@@ -148,9 +178,16 @@ async fn serve_connection<S: AsyncRead + AsyncWrite>(stream: S) {
                 return;
             }
         };
-        if let Some(answer) = jsonrpc::answer(&line)
-            && let Err(cause) = writer.write_all(&answer).await
-        {
+        if sessions.handle(&line).await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn write_lines<W: AsyncWrite>(writer: W, mut lines: mpsc::Receiver<Vec<u8>>) {
+    let mut writer = std::pin::pin!(writer);
+    while let Some(line) = lines.recv().await {
+        if let Err(cause) = writer.write_all(&line).await {
             tracing::warn!(%cause, "closing a connection");
             return;
         }

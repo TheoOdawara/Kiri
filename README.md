@@ -18,8 +18,9 @@
 
 ## Status
 
-Kiri is being rebuilt from its requirements. So far `kiri` only starts its daemon and connects to it, so there is
-nothing useful to install or run yet.
+Kiri is being rebuilt from its requirements. So far `kiri` is a line client that streams text answers from an
+OpenAI-compatible endpoint, set through `KIRI_BASE_URL`, `KIRI_API_KEY`, and `KIRI_MODEL`. It has no tools yet, and
+there is nothing to install.
 The previous implementation was discarded; only the brand was kept.
 
 ## The idea

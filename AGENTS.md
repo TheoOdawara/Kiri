@@ -17,8 +17,8 @@ one-week sprints.
 
 ## Architecture
 
-Decided in ADR 0001. Built so far: the daemon on demand and `initialize` (#14), restricted to its OS user (#15); the rest of this section is the
-target.
+Decided in ADR 0001. Built so far: the daemon on demand and `initialize` (#14), restricted to its OS user (#15), and a text answer streamed from an
+OpenAI-compatible endpoint (#16); the rest of this section is the target.
 
 - Process model: `kiri daemon` owns every session, for every provider. There is one per user, started by
   the first client and exiting after an idle period with no running session and no client. The TUI,
@@ -85,6 +85,10 @@ text is English until OQ-02 decides on localization.
   Administrators, and the client refuses its own daemon.
 - `cargo xtask cross-user` keeps its home under `/tmp` and not `$TMPDIR`: on macOS `$TMPDIR` is private to its user,
   so `nobody` could not cross it even with the modes widened.
+- A daemon with an invalid environment drops its listener and waits for `serve`'s confirmation before it sends the
+  error. Sent first, the error lets a fixed client reach the old daemon before it stops listening.
+- A turn updates the conversation and clears `running_turn` before its answer goes out. Otherwise a client's
+  immediate next prompt gets "A turn is already running in this session."
 - A refusal happens inside `Listener::accept`, so `serve` never sees it. Counted as a client, it would keep a daemon
   with no real client alive forever.
 

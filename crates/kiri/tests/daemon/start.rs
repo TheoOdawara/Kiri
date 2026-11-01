@@ -1,82 +1,10 @@
-use std::fs::{self, File};
+use std::fs;
 use std::io::{BufReader, Read};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::process::{Child, ChildStdout};
 use std::time::{Duration, Instant};
 
-static ONE_DAEMON_AT_A_TIME: Mutex<()> = Mutex::new(());
-static NEXT_HOME: AtomicU32 = AtomicU32::new(0);
-
-struct TestHome {
-    path: PathBuf,
-    _turn: MutexGuard<'static, ()>,
-}
-
-impl TestHome {
-    fn new() -> Self {
-        let turn = ONE_DAEMON_AT_A_TIME
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let unique = NEXT_HOME.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("k-{}-{unique}", std::process::id()));
-        fs::create_dir_all(&path).unwrap();
-        Self { path, _turn: turn }
-    }
-
-    fn kiri(&self, arguments: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_kiri"));
-        command
-            .args(arguments)
-            .env("HOME", &self.path)
-            .env("USERPROFILE", &self.path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        command
-    }
-
-    fn kiri_dir(&self) -> PathBuf {
-        self.path.join(".kiri")
-    }
-
-    fn log_path(&self) -> PathBuf {
-        self.kiri_dir().join("logs").join("daemon.jsonl")
-    }
-
-    fn log(&self) -> String {
-        fs::read_to_string(self.log_path()).unwrap_or_default()
-    }
-
-    fn started_daemons(&self) -> usize {
-        self.log().matches("daemon started").count()
-    }
-
-    fn wait_until(&self, condition: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !condition() {
-            assert!(Instant::now() < deadline, "condition not met in 10 seconds");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    fn wait_for_daemon_exit(&self) {
-        let lock_path = self.kiri_dir().join("daemon.lock");
-        self.wait_until(|| {
-            File::options()
-                .write(true)
-                .open(&lock_path)
-                .is_ok_and(|lock| lock.try_lock().is_ok())
-        });
-    }
-}
-
-impl Drop for TestHome {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
+use crate::support::TestHome;
 
 fn wait_for_input_prompt(client: &mut Child) {
     let stdout: ChildStdout = client.stdout.take().unwrap();
