@@ -9,14 +9,17 @@ Run every gate from the repository root: Zensical reads `zensical.toml` only fro
 
 | Gate | Invocation | Exit |
 |---|---|---|
-| Static analysis | n/a: there is no `Cargo.toml` yet | — |
-| Type checking | n/a: there is no `Cargo.toml` yet | — |
-| Formatting | n/a: there is no `Cargo.toml` yet | — |
-| Build | n/a: there is no `Cargo.toml` yet | — |
-| Tests | n/a: there is no `Cargo.toml` yet | — |
+| Formatting | `cargo fmt --all --check` | 0 |
+| Static analysis | `cargo clippy --workspace --all-targets --locked -- -D warnings` | 0 |
+| Type checking | `cargo check --workspace --all-targets --locked` | 0 |
+| Windows compile | `cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings` | 0 |
+| Build | `cargo build --workspace --locked` | 0 |
+| Tests | `cargo test --workspace --locked` | 0 |
 | Docs site build | `uvx zensical==0.0.73 build` | 0 |
 
-When the workspace lands, each code gate gets its exact invocation and a validated exit code here.
+The Windows compile gate needs `rustup target add x86_64-pc-windows-msvc` once, and proves only that the
+code compiles there. CI (`.github/workflows/ci.yml`) runs the code gates on Linux, macOS, and Windows on
+every push, and it is the only place the Windows tests run.
 
 ## Serving the docs site
 
