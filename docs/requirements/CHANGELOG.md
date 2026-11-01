@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.1.0 — 2026-11-01
+
+- **Added:** model request parameters (FR-PRV-10), Milestone 1. The author decided that thinking, effort, and other model parameters exist from the first epic: native for the well-known models, pass-through for all others. Glossary: catalog.
+
 ## 3.0.0 — 2026-10-27
 
 - **Retired:** sync across machines (FR-CNT-06) and its setup offer (FR-CNT-07). The author dropped sync

@@ -1,6 +1,6 @@
 # Kiri — Software Requirements Specification
 
-**Version:** 3.0.0 · **Date:** 2026-10-27 · [Changelog](CHANGELOG.md)
+**Version:** 3.1.0 · **Date:** 2026-11-01 · [Changelog](CHANGELOG.md)
 
 ## Purpose
 
@@ -55,6 +55,7 @@ interface on the daemon with vim editing and images in the prompt, and the brand
 | [FR-PRV-07](functional/providers.md#fr-prv-07) | Claude subscription opt-in warning | Won't (this release) | approved | Later |
 | [FR-PRV-08](functional/providers.md#fr-prv-08) | Live switching | Must | approved | M1 |
 | [FR-PRV-09](functional/providers.md#fr-prv-09) | In-app provider setup | Must | approved | M1 |
+| [FR-PRV-10](functional/providers.md#fr-prv-10) | Model request parameters | Must | approved | M1 |
 | [FR-TOL-01](functional/tools.md#fr-tol-01) | Read files | Must | approved | M1 |
 | [FR-TOL-02](functional/tools.md#fr-tol-02) | Search files | Must | approved | M1 |
 | [FR-TOL-03](functional/tools.md#fr-tol-03) | Edit files | Must | approved | M1 |

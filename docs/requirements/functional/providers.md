@@ -185,3 +185,26 @@ The system shall let the user add a provider from within Kiri, with no manual fi
 
 **Acceptance criteria**
 - **FR-PRV-09.1** — Given no provider configured, when the user adds one from within Kiri, then the next prompt runs on it and no file was edited by hand.
+
+
+<a id="fr-prv-10"></a>
+## FR-PRV-10 — Model request parameters
+
+> As an engineer, I want to set thinking, effort, and any other request parameter of my model, so that it runs the way I need from the first prompt.
+
+The system shall send the user's reasoning settings in each well-known model's own format, and pass any request parameter through unchanged to any model.
+
+| Attribute | Value |
+| --- | --- |
+| Rationale | Endpoints share no format for reasoning, and Kiri cannot know what an arbitrary endpoint accepts. A catalog serves the well-known models, and pass-through keeps every other model usable. |
+| Source | Author decision, 2026-11-01 |
+| Priority | Must |
+| Status | approved |
+| Milestone | M1 |
+| Since | v3.1.0 |
+
+**Acceptance criteria**
+- **FR-PRV-10.1** — Given a model in the catalog and a reasoning setting it accepts, when the user sends a prompt, then the request carries the setting in that model's format.
+- **FR-PRV-10.2** — Given a model in the catalog and a reasoning setting it does not accept, when the user opens Kiri, then the user sees why and no request is sent.
+- **FR-PRV-10.3** — Given request parameters set by the user, when the user sends a prompt to any model, then the request carries them unchanged, and they override the catalog.
+- **FR-PRV-10.4** — Given a parameter the endpoint refuses, when the user sends a prompt, then the user sees the endpoint's message.
