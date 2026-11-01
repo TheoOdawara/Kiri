@@ -17,7 +17,7 @@ one-week sprints.
 
 ## Architecture
 
-Decided in ADR 0001. Built so far: the daemon on demand and `initialize` (#14); the rest of this section is the
+Decided in ADR 0001. Built so far: the daemon on demand and `initialize` (#14), restricted to its OS user (#15); the rest of this section is the
 target.
 
 - Process model: `kiri daemon` owns every session, for every provider. There is one per user, started by
@@ -80,6 +80,13 @@ text is English until OQ-02 decides on localization.
 - `kiri` ends its runtime with `shutdown_background`, because tokio's stdin holds a blocking thread that a normal
   drop would wait for. It spawns the daemon through `tokio::process`, whose reaper keeps a daemon that lost the
   lock from staying a zombie.
+
+- The pipe's security descriptor names its owner. Left to the default, an elevated process creates the pipe owned by
+  Administrators, and the client refuses its own daemon.
+- `cargo xtask cross-user` keeps its home under `/tmp` and not `$TMPDIR`: on macOS `$TMPDIR` is private to its user,
+  so `nobody` could not cross it even with the modes widened.
+- A refusal happens inside `Listener::accept`, so `serve` never sees it. Counted as a client, it would keep a daemon
+  with no real client alive forever.
 
 ## Project skills
 

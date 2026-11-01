@@ -6,8 +6,8 @@ Requirements: [FR-CNT-02](../../requirements/functional/continuity.md#fr-cnt-02)
 
 1. **kiri** tries to connect to the socket or named pipe, and fails.
 2. **kiri** spawns its own executable as `kiri daemon`, detached from the terminal. The daemon inherits the client's environment.
-3. The **daemon** takes the exclusive lock on `~/.kiri/daemon.lock`. A daemon that loses the lock exits, so two clients starting together end with one daemon.
+3. The **daemon** creates `~/.kiri` at mode `0700`, or resets a wider mode, and stops if it cannot. It then takes the exclusive lock on `~/.kiri/daemon.lock`. A daemon that loses the lock exits, so two clients starting together end with one daemon.
 4. The **daemon** removes any leftover socket, binds the endpoint with owner-only access, and reads the environment once.
 5. **kiri** retries every 50 ms for up to 5 seconds, connects, and sends `initialize`.
-6. On Linux and macOS the **daemon** checks the peer's uid. On Windows **kiri** checks the pipe's owner.
+6. On Linux and macOS the **daemon** checks the peer's uid, and closes the connection unanswered when it differs. On Windows **kiri** checks the pipe's owner, and stops without sending anything when it is another SID or the OS denies access.
 7. Until [#3](https://github.com/TheoOdawara/Kiri/issues/3), the **daemon** exits when its last client leaves, or 5 seconds after starting when no client connected.

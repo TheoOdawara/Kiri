@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use kiri_core::protocol::{self, Connection, Endpoint};
+use kiri_core::protocol::{self, ConnectError, Connection, Endpoint};
 use tokio::process::Command;
 use tokio::time::Instant;
 
@@ -15,10 +15,10 @@ pub async fn reach(endpoint: &Endpoint, executable: &Path) -> Result<Connection>
     let deadline = Instant::now() + CONNECT_DEADLINE;
     let mut last_spawn: Option<Instant> = None;
     loop {
-        if let Ok(Ok(connection)) =
-            tokio::time::timeout_at(deadline, protocol::connect(endpoint)).await
-        {
-            return Ok(connection);
+        match tokio::time::timeout_at(deadline, protocol::connect(endpoint)).await {
+            Ok(Ok(connection)) => return Ok(connection),
+            Ok(Err(refused @ ConnectError::ForeignPipe)) => return Err(refused.into()),
+            _ => {}
         }
         if Instant::now() >= deadline {
             return Err(anyhow!(

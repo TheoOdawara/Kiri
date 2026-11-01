@@ -21,6 +21,12 @@ The Windows compile gate needs `rustup target add x86_64-pc-windows-msvc` once, 
 code compiles there. CI (`.github/workflows/ci.yml`) runs the code gates on Linux, macOS, and Windows on
 every push, and it is the only place the Windows tests run.
 
+## Cross-user check
+
+`cargo xtask cross-user` proves with a second real OS user that the daemon refuses it (NFR-SEC-02). It is a job in
+CI and not a local gate, because it needs privileges: `sudo -n` to become `nobody` on Linux and macOS (run `sudo -v`
+first), and an elevated shell on Windows, where it creates and removes a temporary account. Windows only runs it in CI.
+
 ## Serving the docs site
 
 `uvx zensical==0.0.73 serve --open` serves it on `http://localhost:8000`. The VS Code task `docs: serve`

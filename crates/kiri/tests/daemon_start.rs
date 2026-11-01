@@ -175,6 +175,43 @@ fn a_home_too_long_for_a_unix_socket_stops_the_client() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_daemon_start_leaves_its_files_to_the_owner_alone() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = TestHome::new();
+    let mode_of = |path: PathBuf| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    fs::create_dir_all(home.log_path().parent().unwrap()).unwrap();
+    fs::write(home.log_path(), "").unwrap();
+    fs::set_permissions(home.log_path(), fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(home.kiri_dir(), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut client = home.kiri(&[]).spawn().unwrap();
+    wait_for_input_prompt(&mut client);
+
+    assert_eq!(mode_of(home.kiri_dir()), 0o700);
+    assert_eq!(mode_of(home.kiri_dir().join("daemon.sock")), 0o600);
+    assert_eq!(mode_of(home.kiri_dir().join("daemon.lock")), 0o600);
+    assert_eq!(mode_of(home.log_path()), 0o600);
+
+    end_client(client);
+    home.wait_for_daemon_exit();
+}
+
+#[test]
+fn a_kiri_path_the_daemon_cannot_secure_stops_it() {
+    let home = TestHome::new();
+    fs::write(home.kiri_dir(), "").unwrap();
+
+    let output = home.kiri(&["daemon"]).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected = format!("Could not secure {}: ", home.kiri_dir().display());
+    assert!(stderr.contains(&expected), "{stderr}");
+}
+
 #[test]
 fn a_second_daemon_by_hand_reports_the_running_one() {
     let home = TestHome::new();

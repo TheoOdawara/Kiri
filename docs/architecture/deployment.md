@@ -32,5 +32,5 @@ Nothing is installable yet; distribution is `Later`. As planned in
 ## Delivery
 
 - **Gates:** the repository's `gates` project skill.
-- **CI:** `.github/workflows/ci.yml` runs the code gates on Windows, Linux, and macOS on every push. The cross-user check of `xtask` joins it with [#15](https://github.com/TheoOdawara/Kiri/issues/15).
+- **CI:** `.github/workflows/ci.yml` runs the code gates on Windows, Linux, and macOS on every push. A second job runs `cargo xtask cross-user` on the same three systems, proving with a second real OS user that the daemon refuses it.
 - **Branches:** work branches merge into `staging` by pull request; a release is a merge of `staging` into `main`.

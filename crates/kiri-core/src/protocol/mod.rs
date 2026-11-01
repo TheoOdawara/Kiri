@@ -11,16 +11,25 @@ use agent_client_protocol_schema::v1::{
     AGENT_METHOD_NAMES, Implementation, InitializeRequest, InitializeResponse, Request, RequestId,
     Response,
 };
+use thiserror::Error;
 use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 
 pub use endpoint::{Endpoint, EndpointError};
+
+#[derive(Debug, Error)]
+pub enum ConnectError {
+    #[error("The Kiri daemon pipe belongs to another user. Refusing to connect.")]
+    ForeignPipe,
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
 
 pub struct Connection {
     reader: BufReader<ReadHalf<transport::ClientStream>>,
     writer: WriteHalf<transport::ClientStream>,
 }
 
-pub async fn connect(endpoint: &Endpoint) -> io::Result<Connection> {
+pub async fn connect(endpoint: &Endpoint) -> Result<Connection, ConnectError> {
     let stream = transport::connect(endpoint).await?;
     let (reader, writer) = tokio::io::split(stream);
     let mut connection = Connection {

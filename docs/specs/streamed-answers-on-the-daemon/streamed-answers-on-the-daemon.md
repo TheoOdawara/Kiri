@@ -179,7 +179,7 @@ Text prints as it arrives. A change between reasoning and text starts a new line
 
 ### 1. Authorization
 
-Only the daemon's OS user reaches it. Another user's connection fails at the file permissions, or at the peer check when those were widened, and gets no answer. On Windows the DACL refuses it. A client that finds a pipe owned by another SID stops with "The Kiri daemon pipe belongs to another user. Refusing to connect."
+Only the daemon's OS user reaches it. Another user's connection fails at the file permissions, or at the peer check when those were widened, and gets no answer. On Windows the DACL refuses it. A client that finds a pipe owned by another SID, or that the OS denies access to a pipe under its own SID's name, stops at once with "The Kiri daemon pipe belongs to another user. Refusing to connect." A refused connection does not count as a client, so it neither keeps the daemon alive nor ends it. A daemon that cannot create `~/.kiri` or reset its mode, or set the socket's, does not start.
 
 ### 2. Daemon on demand
 
@@ -263,13 +263,14 @@ Failures with no JSON-RPC code, printed by the client:
 | The socket path is over the system's limit, 104 bytes on macOS and 108 on Linux | "The path <path> is too long for a Unix socket. The limit on this system is <limit> bytes." |
 | The home directory cannot be found | "Kiri cannot find your home directory." |
 | The spawn of the daemon fails | "Could not start the Kiri daemon: <cause>" |
+| `kiri daemon` cannot create `~/.kiri` or reset its mode. Printed by the daemon and logged; a client that spawned it reports the 5-second timeout | "Could not secure <path>: <cause>" |
 | No answer within 5 seconds at start | "Could not connect to the Kiri daemon within 5 seconds. See <log path>." |
-| The pipe belongs to another SID | "The Kiri daemon pipe belongs to another user. Refusing to connect." |
+| The pipe belongs to another SID, or the OS denies access to it | "The Kiri daemon pipe belongs to another user. Refusing to connect." |
 | The connection closes, or stays silent for 70 seconds, during a turn | "The connection to the Kiri daemon was lost." |
 
 ## Side Effects
 
-- **Persistence:** creates `~/.kiri` at mode `0700`, `~/.kiri/logs/daemon.jsonl`, `~/.kiri/daemon.lock`, and on Linux and macOS `~/.kiri/daemon.sock`. Nothing about a session is written.
+- **Persistence:** creates `~/.kiri` at mode `0700`, `~/.kiri/logs/daemon.jsonl` and `~/.kiri/daemon.lock` at mode `0600`, and on Linux and macOS `~/.kiri/daemon.sock` at mode `0600`. Nothing about a session is written.
 - **Concurrency:** turns of different sessions run at the same time. Two daemons starting together resolve by the lock. A client connecting while a daemon exits sees a closed connection and follows rule 2.
 - **Transaction:** a turn enters the conversation whole, at its end, or not at all.
 

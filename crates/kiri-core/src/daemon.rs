@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::task::JoinSet;
 
-use crate::protocol::transport::Listener;
+use crate::protocol::transport::{self, Listener};
 use crate::protocol::{Endpoint, framing, jsonrpc};
 
 const NO_CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -24,6 +24,15 @@ pub async fn run() -> ExitCode {
         }
     };
     let log_path = endpoint.log_path();
+    if let Err(cause) = transport::secure_directory(endpoint.kiri_dir()) {
+        start_logging(&log_path);
+        tracing::error!(%cause, "could not secure the Kiri directory");
+        eprintln!(
+            "Could not secure {}: {cause}",
+            endpoint.kiri_dir().display()
+        );
+        return ExitCode::FAILURE;
+    }
     let _lock = match take_lock(&endpoint) {
         Ok(Some(lock)) => lock,
         Ok(None) => {
@@ -56,13 +65,13 @@ pub async fn run() -> ExitCode {
 }
 
 fn take_lock(endpoint: &Endpoint) -> io::Result<Option<File>> {
-    fs::create_dir_all(endpoint.kiri_dir())?;
     let lock = File::options()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(endpoint.lock_path())?;
+    transport::restrict_file(&lock)?;
     match lock.try_lock() {
         Ok(()) => Ok(Some(lock)),
         Err(TryLockError::WouldBlock) => Ok(None),
@@ -84,7 +93,8 @@ fn start_logging(log_path: &Path) {
     let opened = log_path
         .parent()
         .map_or(Ok(()), fs::create_dir_all)
-        .and_then(|()| File::options().create(true).append(true).open(log_path));
+        .and_then(|()| File::options().create(true).append(true).open(log_path))
+        .and_then(|log| transport::restrict_file(&log).map(|()| log));
     match opened {
         Ok(log) => tracing_subscriber::fmt()
             .json()

@@ -536,6 +536,7 @@ name = "kiri-core"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol-schema",
+ "libc",
  "serde_json",
  "thiserror",
  "tokio",
@@ -1221,6 +1222,9 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "windows-sys",
+]
 
 [[package]]
 name = "zmij"

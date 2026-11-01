@@ -1,14 +1,33 @@
+use std::fs::{self, DirBuilder, File, Permissions};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::protocol::{Endpoint, EndpointError};
+use crate::protocol::{ConnectError, Endpoint, EndpointError};
 
 pub(crate) type ClientStream = UnixStream;
 
 const SOCKET_PATH_LIMIT: usize = if cfg!(target_os = "macos") { 104 } else { 108 };
+const OWNER_ONLY_DIRECTORY: u32 = 0o700;
+const OWNER_ONLY_FILE: u32 = 0o600;
+
+pub(crate) fn secure_directory(path: &Path) -> io::Result<()> {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(OWNER_ONLY_DIRECTORY)
+        .create(path)?;
+    if fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
+        fs::set_permissions(path, Permissions::from_mode(OWNER_ONLY_DIRECTORY))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn restrict_file(file: &File) -> io::Result<()> {
+    file.set_permissions(Permissions::from_mode(OWNER_ONLY_FILE))
+}
 
 pub(crate) fn address(kiri_dir: &Path) -> Result<PathBuf, EndpointError> {
     let path = kiri_dir.join("daemon.sock");
@@ -21,8 +40,8 @@ pub(crate) fn address(kiri_dir: &Path) -> Result<PathBuf, EndpointError> {
     Ok(path)
 }
 
-pub(crate) async fn connect(endpoint: &Endpoint) -> io::Result<ClientStream> {
-    UnixStream::connect(endpoint.address()).await
+pub(crate) async fn connect(endpoint: &Endpoint) -> Result<ClientStream, ConnectError> {
+    Ok(UnixStream::connect(endpoint.address()).await?)
 }
 
 pub(crate) struct Listener {
@@ -38,12 +57,26 @@ impl Listener {
             _ => {}
         }
         let listener = UnixListener::bind(&path)?;
-        Ok(Self { listener, path })
+        let bound = Self { listener, path };
+        fs::set_permissions(&bound.path, Permissions::from_mode(OWNER_ONLY_FILE))?;
+        Ok(bound)
     }
 
     pub(crate) async fn accept(&mut self) -> io::Result<UnixStream> {
-        let (stream, _) = self.listener.accept().await?;
-        Ok(stream)
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let owner = unsafe { libc::geteuid() };
+        loop {
+            let (stream, _) = self.listener.accept().await?;
+            match stream.peer_cred() {
+                Ok(peer) if peer.uid() == owner => return Ok(stream),
+                Ok(peer) => {
+                    tracing::warn!(uid = peer.uid(), "refused a connection from another user");
+                }
+                Err(cause) => {
+                    tracing::warn!(%cause, "refused a connection whose user cannot be read");
+                }
+            }
+        }
     }
 }
 
