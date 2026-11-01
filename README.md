@@ -17,7 +17,8 @@
 
 ## Status
 
-Kiri is being rebuilt from its requirements. No crate exists yet, so there is nothing to install or run.
+Kiri is being rebuilt from its requirements. So far `kiri` only starts its daemon and connects to it, so there is
+nothing useful to install or run yet.
 The previous implementation was discarded; only the brand was kept.
 
 ## The idea

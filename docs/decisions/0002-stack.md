@@ -37,10 +37,10 @@ and the docs of Claude Code, Antigravity, Gemini CLI, OpenCode, and Kimi Code.
 | --- | --- | --- | --- |
 | Async runtime | `tokio`; `futures-util` | 1.54.1; 0.3.34 | `futures-util` consumes the streams of `reqwest` and `eventsource-stream` |
 | Errors | `thiserror` in `kiri-core`; `anyhow` in `kiri` and `kiri-tui` | 2.0.21; 1.0.104 | |
-| Logs | `tracing`, `tracing-subscriber` | 0.1.44, 0.3.23 | JSONL output; rotation is our code |
+| Logs | `tracing`, `tracing-subscriber` | 0.1.44, 0.3.23 | `json`, for the JSONL output; rotation is our code |
 | CLI | `clap` | 4.6.7 | `derive` |
 | Serialization | `serde`, `serde_json` | 1.0.229, 1.0.154 | |
-| ACP types | `agent-client-protocol-schema` | 1.13.0 | Types only; the JSON-RPC layer is our code |
+| ACP types | `agent-client-protocol-schema` | 1.13.0 | No default features, which drops `schemars`; types and JSON-RPC envelopes only; reading, writing, and dispatch are our code |
 | OS APIs | `libc`; `windows-sys` | 0.2.191; 0.61.2 | No `windows` crate unless a spec finds an API `windows-sys` lacks |
 | Configuration | `toml_edit` | 0.25.17 | `serde`; edits keep the user's comments and layout |
 | HTTP | `reqwest` | 0.13.5 | `rustls` with `aws-lc-rs` and `rustls-platform-verifier`, `http2`, `system-proxy`, `stream` |

@@ -30,7 +30,8 @@ The arrows of the diagram follow from the requirements, not from code; each spec
 persistent memory ([FR-CNT-05](../../requirements/functional/continuity.md#fr-cnt-05)). ADR 0001 names seven
 modules and neither is among them; the spec of each decides where it lives.
 
-`env.rs` is the only file that reads the environment. The daemon calls it once, at start.
+`env.rs` is the only file that reads the environment. The daemon reads its configuration through it once, at
+start, and the client and the daemon both find the home directory through it.
 
 ## Changing it safely
 
