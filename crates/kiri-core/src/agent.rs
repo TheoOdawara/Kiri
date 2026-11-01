@@ -6,16 +6,19 @@ use agent_client_protocol_schema::v1::{
     SessionNotification, SessionUpdate, StopReason, ToolCall, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc};
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::protocol::jsonrpc;
-use crate::provider::openai_compatible::{OpenAiCompatible, ProviderError, ProviderEvent};
+use crate::provider::openai_compatible::{
+    OpenAiCompatible, ProviderError, ProviderEvent, ReplyEnd,
+};
 use crate::session::{Message, Role, Session};
 
 const INTERNAL_ERROR: i32 = -32603;
 const BATCH_INTERVAL: Duration = Duration::from_millis(10);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) struct Turn {
     pub(crate) session: Arc<Mutex<Session>>,
@@ -27,9 +30,29 @@ pub(crate) struct Turn {
 }
 
 enum Ending {
-    Finished,
+    Finished(ReplyEnd),
     Cancelled,
     Failed(ProviderError),
+}
+
+#[derive(Debug)]
+struct ClientGone;
+
+enum StreamFailure {
+    Provider(ProviderError),
+    ClientGone,
+}
+
+impl From<ProviderError> for StreamFailure {
+    fn from(cause: ProviderError) -> Self {
+        Self::Provider(cause)
+    }
+}
+
+impl From<ClientGone> for StreamFailure {
+    fn from(_: ClientGone) -> Self {
+        Self::ClientGone
+    }
 }
 
 pub(crate) async fn run_turn(turn: Turn) {
@@ -51,9 +74,11 @@ pub(crate) async fn run_turn(turn: Turn) {
         biased;
         () = turn.cancelled.notified() => Ending::Cancelled,
         reply = stream_reply(&provider, &messages, &mut output) => match reply {
-            Ok(()) => Ending::Finished,
-            Err(cause) => Ending::Failed(cause),
+            Ok(end) => Ending::Finished(end),
+            Err(StreamFailure::Provider(cause)) => Ending::Failed(cause),
+            Err(StreamFailure::ClientGone) => Ending::Cancelled,
         },
+        () = send_heartbeats(&turn.outgoing, HEARTBEAT_INTERVAL) => Ending::Cancelled,
     };
     output.finish().await;
 
@@ -64,8 +89,8 @@ pub(crate) async fn run_turn(turn: Turn) {
             .expect("no turn panics holding a session");
         session.running_turn = None;
         match ending {
-            Ending::Finished => {
-                if !output.text.trim().is_empty() {
+            Ending::Finished(end) => {
+                if end != ReplyEnd::Refused && !output.text.trim().is_empty() {
                     messages.push(Message {
                         role: Role::Assistant,
                         text: output.text,
@@ -73,10 +98,18 @@ pub(crate) async fn run_turn(turn: Turn) {
                     });
                     session.messages = messages;
                 }
-                stop_reason(StopReason::EndTurn)
+                stop_reason(match end {
+                    ReplyEnd::Complete => StopReason::EndTurn,
+                    ReplyEnd::OutputLimit => StopReason::MaxTokens,
+                    ReplyEnd::Refused => StopReason::Refusal,
+                })
             }
             Ending::Cancelled => stop_reason(StopReason::Cancelled),
-            Ending::Failed(cause) => Err(Error::new(INTERNAL_ERROR, cause.to_string())),
+            Ending::Failed(cause) => {
+                let (failure, status) = cause.log_fields();
+                tracing::warn!(failure, status, "a turn failed");
+                Err(Error::new(INTERNAL_ERROR, cause.to_string()))
+            }
         }
     };
     let _ = turn
@@ -89,11 +122,21 @@ fn stop_reason(stop_reason: StopReason) -> Result<Value, Error> {
     serde_json::to_value(PromptResponse::new(stop_reason)).map_err(|_| Error::internal_error())
 }
 
+async fn send_heartbeats(outgoing: &mpsc::Sender<Vec<u8>>, interval: Duration) {
+    loop {
+        sleep(interval).await;
+        let line = jsonrpc::notification_line(jsonrpc::ALIVE_METHOD, json!({}));
+        if outgoing.send(line).await.is_err() {
+            return;
+        }
+    }
+}
+
 async fn stream_reply(
     provider: &OpenAiCompatible,
     messages: &[Message],
     output: &mut TurnOutput,
-) -> Result<(), ProviderError> {
+) -> Result<ReplyEnd, StreamFailure> {
     let mut reply = provider.send(messages).await?;
     loop {
         let deadline = output.run.as_ref().map(|run| run.deadline);
@@ -105,7 +148,7 @@ async fn stream_reply(
             event = reply.next_event() => event?,
         };
         let Some(event) = event else {
-            return Ok(());
+            return Ok(reply.end());
         };
         output.accept(event).await?;
     }
@@ -150,7 +193,7 @@ impl TurnOutput {
         }
     }
 
-    async fn accept(&mut self, event: ProviderEvent) -> Result<(), ProviderError> {
+    async fn accept(&mut self, event: ProviderEvent) -> Result<(), ClientGone> {
         match event {
             ProviderEvent::Reasoning(delta) => {
                 self.extend_run(RunKind::Reasoning, &delta).await?;
@@ -181,7 +224,7 @@ impl TurnOutput {
         }
     }
 
-    async fn extend_run(&mut self, kind: RunKind, delta: &str) -> Result<(), ProviderError> {
+    async fn extend_run(&mut self, kind: RunKind, delta: &str) -> Result<(), ClientGone> {
         if self.run.as_ref().is_some_and(|run| run.kind != kind) {
             self.send_run().await?;
         }
@@ -199,7 +242,7 @@ impl TurnOutput {
         index: u64,
         id: Option<String>,
         name: Option<String>,
-    ) -> Result<(), ProviderError> {
+    ) -> Result<(), ClientGone> {
         self.send_run().await?;
         let id = id.unwrap_or_else(|| format!("call-{index}"));
         let tool_call = ToolCall::new(id.clone(), name.unwrap_or_default())
@@ -214,7 +257,7 @@ impl TurnOutput {
         Ok(())
     }
 
-    async fn send_run(&mut self) -> Result<(), ProviderError> {
+    async fn send_run(&mut self) -> Result<(), ClientGone> {
         if let Some(run) = &self.run {
             let chunk = ContentChunk::new(ContentBlock::from(run.text.clone()));
             let update = match run.kind {
@@ -240,7 +283,7 @@ impl TurnOutput {
         }
     }
 
-    async fn send_update(&self, update: SessionUpdate) -> Result<(), ProviderError> {
+    async fn send_update(&self, update: SessionUpdate) -> Result<(), ClientGone> {
         let notification = SessionNotification::new(self.session_id.clone(), update);
         self.outgoing
             .send(jsonrpc::notification_line(
@@ -248,7 +291,7 @@ impl TurnOutput {
                 notification,
             ))
             .await
-            .map_err(|_| ProviderError)
+            .map_err(|_| ClientGone)
     }
 }
 
@@ -264,6 +307,22 @@ mod tests {
     fn next_update(received: &mut mpsc::Receiver<Vec<u8>>) -> Value {
         let line = received.try_recv().unwrap();
         serde_json::from_slice::<Value>(&line).unwrap()["params"]["update"].clone()
+    }
+
+    #[tokio::test]
+    async fn heartbeats_repeat_and_stop_when_the_client_is_gone() {
+        let (outgoing, mut received) = mpsc::channel(4);
+        let beats = tokio::spawn(async move {
+            send_heartbeats(&outgoing, Duration::from_millis(1)).await;
+        });
+        for _ in 0..2 {
+            let line = received.recv().await.unwrap();
+            let message: Value = serde_json::from_slice(&line).unwrap();
+            assert_eq!(message["method"], "_kiri/alive");
+            assert!(message.get("id").is_none());
+        }
+        drop(received);
+        beats.await.unwrap();
     }
 
     #[tokio::test]

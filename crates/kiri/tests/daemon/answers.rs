@@ -752,7 +752,13 @@ fn a_broken_stream_sends_the_open_text_and_fails_the_open_tool_call_before_the_e
     client.request(2, "session/prompt", text_prompt(&session, "hello"));
     let (updates, answer) = updates_until_answer(&mut client, 2);
 
-    assert_eq!(error_of(&answer).0, -32603);
+    assert_eq!(
+        error_of(&answer),
+        (
+            -32603,
+            "The endpoint closed the stream before the turn finished."
+        )
+    );
     assert_eq!(chunk_texts(&updates, "agent_message_chunk"), ["partial"]);
     let last = updates.last().unwrap();
     assert_eq!(last["sessionUpdate"], "tool_call_update");
@@ -799,4 +805,316 @@ fn a_cancel_closes_the_request_and_leaves_the_conversation_unchanged() {
 
     drop(client);
     assert_eq!(daemon.wait().unwrap().code(), Some(0));
+}
+
+fn stderr_of_one_prompt(base_url: &str) -> String {
+    let home = TestHome::new();
+    let mut client = Client::start(home.kiri_on(base_url, &[]));
+    client.read_until("> ");
+    client.send_line("hello");
+    client.read_until("> ");
+    let (code, stderr) = client.finish();
+    assert_eq!(code, Some(0));
+    home.wait_for_daemon_exit();
+    stderr
+}
+
+#[test]
+fn an_endpoint_refusal_prints_its_message_and_returns_to_the_prompt() {
+    let cases = [
+        (
+            401,
+            "ignored",
+            "The endpoint rejected the API key (HTTP 401).",
+        ),
+        (
+            403,
+            "ignored",
+            "The endpoint rejected the API key (HTTP 403).",
+        ),
+        (
+            429,
+            "slow down",
+            "The endpoint is limiting requests (HTTP 429): slow down",
+        ),
+        (302, "", "The endpoint rejected the request (HTTP 302): "),
+        (
+            503,
+            "overloaded",
+            "The endpoint failed (HTTP 503): overloaded",
+        ),
+        (
+            400,
+            r#"{"error":{"message":"unknown parameter"}}"#,
+            "The endpoint rejected the request (HTTP 400): unknown parameter",
+        ),
+    ];
+    for (status, body, message) in cases {
+        let endpoint = FakeEndpoint::refusing(status, body);
+        assert_eq!(
+            stderr_of_one_prompt(&endpoint.base_url),
+            format!("error: {message}\n")
+        );
+    }
+}
+
+#[test]
+fn a_refused_prompt_stays_out_of_the_next_request() {
+    let home = TestHome::new();
+    let endpoint = FakeEndpoint::refusing(400, "unknown parameter");
+    let mut client = Client::start(home.kiri_on(&endpoint.base_url, &[]));
+    client.read_until("> ");
+
+    client.send_line("first prompt");
+    client.read_until("> ");
+    client.send_line("second prompt");
+    client.read_until("> ");
+
+    assert_eq!(
+        endpoint.body(1)["messages"],
+        json!([{"role": "user", "content": "second prompt"}])
+    );
+    client.end();
+    home.wait_for_daemon_exit();
+}
+
+#[test]
+fn a_closed_port_prints_the_cause_and_the_daemon_stays_up() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    drop(listener);
+    let home = TestHome::new();
+    let mut client = Client::start(home.kiri_on(&base_url, &[]));
+    client.read_until("> ");
+
+    client.send_line("first");
+    client.read_until("> ");
+    client.send_line("second");
+    client.read_until("> ");
+
+    assert_eq!(home.started_daemons(), 1);
+    let (code, stderr) = client.finish();
+    assert_eq!(code, Some(0));
+    let start = format!("error: Could not reach {base_url}: ");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines.len(), 2, "{stderr}");
+    for line in lines {
+        let cause = line
+            .strip_prefix(&start)
+            .unwrap_or_else(|| panic!("{line}"));
+        assert!(!cause.is_empty());
+        assert!(!cause.contains("error sending request"), "{cause}");
+    }
+    home.wait_for_daemon_exit();
+}
+
+#[test]
+fn a_broken_stream_prints_what_broke_it() {
+    let cases: [(Part, &str); 3] = [
+        (
+            Part::BreakStream,
+            "error: The endpoint closed the stream before the turn finished.\n",
+        ),
+        (
+            Part::Event(r#"{"error":{"message":"overloaded"}}"#),
+            "error: The endpoint failed during the stream: overloaded\n",
+        ),
+        (
+            Part::Event("{oops"),
+            "error: The endpoint sent a chunk Kiri cannot read: ",
+        ),
+    ];
+    for (part, message) in cases {
+        let endpoint = FakeEndpoint::answering(vec![part]);
+        let stderr = stderr_of_one_prompt(&endpoint.base_url);
+        assert!(stderr.starts_with(message), "{stderr}");
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    }
+}
+
+#[test]
+fn the_output_limit_keeps_the_partial_reply_and_a_refusal_keeps_nothing() {
+    let home = TestHome::new();
+    let endpoint = FakeEndpoint::answering(vec![
+        Part::Text("partial"),
+        Part::Event(r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#),
+        Part::BreakStream,
+    ]);
+    let mut client = Client::start(home.kiri_on(&endpoint.base_url, &[]));
+    client.read_until("> ");
+    client.send_line("first");
+    client.read_until("partial\nThe model reached its output limit.\n> ");
+    client.send_line("second");
+    client.read_until("> ");
+    assert_eq!(
+        endpoint.body(1)["messages"],
+        json!([
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "partial"},
+            {"role": "user", "content": "second"},
+        ])
+    );
+    client.end();
+    home.wait_for_daemon_exit();
+    drop(home);
+
+    let home = TestHome::new();
+    let endpoint = FakeEndpoint::answering(vec![
+        Part::Text("partial"),
+        Part::Event(r#"{"choices":[{"delta":{},"finish_reason":"content_filter"}]}"#),
+        Part::BreakStream,
+    ]);
+    let mut client = Client::start(home.kiri_on(&endpoint.base_url, &[]));
+    client.read_until("> ");
+    client.send_line("first");
+    client.read_until("partial\nThe model refused to answer.\n> ");
+    client.send_line("second");
+    client.read_until("> ");
+    assert_eq!(
+        endpoint.body(1)["messages"],
+        json!([{"role": "user", "content": "second"}])
+    );
+    client.end();
+    home.wait_for_daemon_exit();
+}
+
+#[test]
+fn a_killed_daemon_ends_the_client_with_code_one() {
+    let home = TestHome::new();
+    let endpoint = FakeEndpoint::answering(vec![Part::Text("first "), Part::Hold]);
+    let mut daemon = home.start_daemon_on(&endpoint.base_url);
+    let mut client = Client::start(home.kiri_on(&endpoint.base_url, &[]));
+    client.read_until("> ");
+    client.send_line("hello");
+    client.read_until("first ");
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+
+    assert_eq!(
+        client.finish(),
+        (
+            Some(1),
+            "error: The connection to the Kiri daemon was lost.\n".to_owned()
+        )
+    );
+}
+
+#[test]
+fn the_key_is_masked_and_the_log_holds_no_content() {
+    let home = TestHome::new();
+    let endpoint = FakeEndpoint::answering(vec![
+        Part::Delta(json!({"reasoning_content": "reasoning-marker"})),
+        Part::Text("reply-marker"),
+        Part::Event(r#"{"error":{"message":"bad key test-key"}}"#),
+    ]);
+    let mut command = home.kiri_on(&endpoint.base_url, &[]);
+    command.env("KIRI_REQUEST_PARAMS", r#"{"note":"params-marker"}"#);
+    let mut client = Client::start(command);
+    client.read_until("> ");
+    client.send_line("prompt-marker");
+    client.read_until("> ");
+    let (_, stderr) = client.finish();
+    home.wait_for_daemon_exit();
+    assert_eq!(
+        stderr,
+        "error: The endpoint failed during the stream: bad key ***\n"
+    );
+    let log = home.log();
+    assert!(log.contains("a turn failed"), "{log}");
+    for secret in [
+        "test-key",
+        "prompt-marker",
+        "reply-marker",
+        "reasoning-marker",
+        "params-marker",
+    ] {
+        assert!(!log.contains(secret), "{secret} in {log}");
+    }
+    drop(home);
+
+    let home = TestHome::new();
+    let endpoint = FakeEndpoint::refusing(500, "bad key test-key");
+    let mut client = Client::start(home.kiri_on(&endpoint.base_url, &[]));
+    client.read_until("> ");
+    client.send_line("hello");
+    client.read_until("> ");
+    let (_, stderr) = client.finish();
+    home.wait_for_daemon_exit();
+    assert_eq!(
+        stderr,
+        "error: The endpoint failed (HTTP 500): bad key ***\n"
+    );
+    assert!(home.log().contains("\"status\":500"), "{}", home.log());
+    assert!(!home.log().contains("test-key"));
+}
+
+#[test]
+#[ignore = "waits 60 seconds on the real clock; run by hand"]
+fn real_clock_an_idle_endpoint_fails_after_sixty_seconds() {
+    let home = TestHome::new();
+    let endpoint = FakeEndpoint::answering(vec![Part::Hold]);
+    let mut client = Client::start(home.kiri_on(&endpoint.base_url, &[]));
+    client.read_until("> ");
+    client.send_line("hello");
+    client.read_until_within("> ", Duration::from_secs(70));
+    assert_eq!(
+        client.finish(),
+        (
+            Some(0),
+            "error: The endpoint sent nothing for 60 seconds.\n".to_owned()
+        )
+    );
+    home.wait_for_daemon_exit();
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "waits 70 seconds on the real clock; run by hand"]
+fn real_clock_a_silent_daemon_ends_the_client_after_seventy_seconds() {
+    let home = TestHome::new();
+    let endpoint = FakeEndpoint::answering(vec![Part::Text("first "), Part::Hold]);
+    let mut daemon = home.start_daemon_on(&endpoint.base_url);
+    let mut client = Client::start(home.kiri_on(&endpoint.base_url, &[]));
+    client.read_until("> ");
+    client.send_line("hello");
+    client.read_until("first ");
+
+    let stopped = std::process::Command::new("kill")
+        .args(["-STOP", &daemon.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(stopped.success());
+    let started = std::time::Instant::now();
+
+    let finished = client.finish();
+    let elapsed = started.elapsed();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    assert_eq!(
+        finished,
+        (
+            Some(1),
+            "error: The connection to the Kiri daemon was lost.\n".to_owned()
+        )
+    );
+    assert!(elapsed >= Duration::from_secs(65), "{elapsed:?}");
+}
+
+#[test]
+#[ignore = "waits about 100 seconds on the real clock; run by hand"]
+fn real_clock_keep_alive_comments_leave_the_client_alive_past_seventy_seconds() {
+    let home = TestHome::new();
+    let mut script = Vec::new();
+    for _ in 0..5 {
+        script.extend([Part::Comment, Part::Wait(Duration::from_secs(20))]);
+    }
+    script.push(Part::Text("reply"));
+    let endpoint = FakeEndpoint::answering(script);
+    let mut client = Client::start(home.kiri_on(&endpoint.base_url, &[]));
+    client.read_until("> ");
+    client.send_line("hello");
+    client.read_until_within("reply\n> ", Duration::from_secs(120));
+    client.end();
+    home.wait_for_daemon_exit();
 }

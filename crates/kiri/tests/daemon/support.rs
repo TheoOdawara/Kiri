@@ -230,9 +230,13 @@ impl Client {
     }
 
     pub fn read_until(&mut self, expected: &str) -> String {
+        self.read_until_within(expected, READ_TIMEOUT)
+    }
+
+    pub fn read_until_within(&mut self, expected: &str, limit: Duration) -> String {
         let mut seen = Vec::new();
         while !seen.ends_with(expected.as_bytes()) {
-            match self.stdout.recv_timeout(READ_TIMEOUT) {
+            match self.stdout.recv_timeout(limit) {
                 Ok(byte) => seen.push(byte),
                 Err(cause) => panic!(
                     "no {expected:?} on stdout ({cause}), got {:?}",
@@ -257,5 +261,14 @@ impl Client {
     pub fn end(mut self) {
         drop(self.stdin.take());
         assert_eq!(self.child.wait().unwrap().code(), Some(0));
+    }
+
+    pub fn finish(mut self) -> (Option<i32>, String) {
+        drop(self.stdin.take());
+        let output = self.child.wait_with_output().unwrap();
+        (
+            output.status.code(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
     }
 }

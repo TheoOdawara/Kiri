@@ -21,6 +21,17 @@ jobs:
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
 
+  real-clock:
+    name: Real-clock timeouts on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo test -p kiri --test daemon --locked -- --ignored
+
   markdown:
     name: Markdown lint
     runs-on: ubuntu-latest

@@ -17,7 +17,7 @@ one-week sprints.
 
 ## Architecture
 
-Decided in ADR 0001. Built so far: the daemon on demand and `initialize` (#14), restricted to its OS user (#15), a text answer streamed from an OpenAI-compatible endpoint (#16), reasoning and tool calls in arrival order, in batches of about 10 ms (#17), and the native catalog with request parameters (#18); the rest of this section is the target.
+Decided in ADR 0001. Built so far: the daemon on demand and `initialize` (#14), restricted to its OS user (#15), a text answer streamed from an OpenAI-compatible endpoint (#16), reasoning and tool calls in arrival order, in batches of about 10 ms (#17), the native catalog with request parameters (#18), and every failure reported with its cause (#19); the rest of this section is the target.
 
 - Process model: `kiri daemon` owns every session, for every provider. There is one per user, started by
   the first client and exiting after an idle period with no running session and no client. The TUI,
@@ -27,7 +27,7 @@ Decided in ADR 0001. Built so far: the daemon on demand and `initialize` (#14), 
 
 | Crate | Holds | Depends on | Public surface | Label |
 | --- | --- | --- | --- | --- |
-| `kiri-core` | Engine and session host | no other Kiri crate | ACP types, `kiri/*` extension methods, `daemon::run`, `protocol::connect`; the rest is `pub(crate)` | `area:core` |
+| `kiri-core` | Engine and session host | no other Kiri crate | ACP types, `_kiri/*` extension methods, `daemon::run`, `protocol::connect`; the rest is `pub(crate)` | `area:core` |
 | `kiri-tui` | Inline interface (full-screen later) | `kiri-core`'s protocol | — | `area:tui` |
 | `kiri` | The binary: `daemon`, CLI, `-p`, `acp` | `kiri-core`, `kiri-tui` | — | `area:cli` |
 
@@ -92,6 +92,9 @@ text is English until OQ-02 decides on localization.
   `select!` can drop the stream mid-send, and `finish` then sends what is still held, without repeating anything.
 - A refusal happens inside `Listener::accept`, so `serve` never sees it. Counted as a client, it would keep a daemon
   with no real client alive forever.
+- `reqwest`'s read timeout restarts when the headers arrive, and SSE comments reset it without reaching `eventsource-stream`'s
+  events. The daemon can stay silent past 70 seconds on a healthy turn, so `_kiri/alive` is what keeps the client from
+  calling the connection lost.
 
 ## Project skills
 

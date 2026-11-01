@@ -30,6 +30,7 @@ JSON-RPC 2.0 messages in the types of `agent-client-protocol-schema` 1.13.0, pro
 | `session/prompt` | client to daemon | request | Owner of the daemon | No |
 | `session/cancel` | client to daemon | notification | Owner of the daemon | Yes |
 | `session/update` | daemon to client | notification | Owner of the daemon | No |
+| `_kiri/alive` | daemon to client | notification | Owner of the daemon | Yes |
 
 Any other method answers `-32601`. ACP's baseline requires `session/cancel`; the line client does not send it, and the key that does arrives with #6.
 
@@ -95,6 +96,8 @@ Framing: one UTF-8 JSON message per line, ended by `\n`. A line over 16 MiB clos
 | `session/cancel` received | `cancelled` |
 
 A stream that fails answers a JSON-RPC error from the [Errors](#errors) table.
+
+During a turn the daemon also sends `_kiri/alive` every 30 seconds, with empty params. The endpoint's timers do not bound the daemon's silence: the 60-second timer restarts when the headers arrive, and SSE comments and empty deltas reset it without producing an event. The client uses the notification only to restart its 70 seconds of silence. ACP requires an extension method to start with `_`.
 
 ### Environment
 
@@ -223,7 +226,7 @@ Every failure reaches the user with the message of the [Errors](#errors) table. 
 
 - **Tables/columns changed:** none. Sessions and messages live in memory.
 - **Audit:** none. The log records daemon start, daemon exit, connections refused, and failures with their HTTP status. It never records a prompt, a reply, reasoning, the API key, or `KIRI_REQUEST_PARAMS`. At daemon start, a log of 10 MiB or more moves to `daemon.jsonl.1`, replacing the previous one.
-- **Events/integrations fired:** the `session/update` notifications of the contract, and the HTTP request to the endpoint.
+- **Events/integrations fired:** the `session/update` and `_kiri/alive` notifications of the contract, and the HTTP request to the endpoint.
 
 ---
 
@@ -687,9 +690,9 @@ And exits with code 0
 - **`kiri`:** `kiri` and `kiri daemon` exist. `kiri` spawns the daemon. Until #3, `kiri daemon` exits when its last client leaves.
 - **`kiri-tui`:** holds the line client until #4 replaces it. It depends on the protocol types and on `protocol::connect`'s connection.
 - **`xtask`:** a new workspace member with the cross-user check, run by CI. It ships in no release.
-- **Deployment:** the first CI workflow, on Windows, Linux, and macOS. `~/.kiri` gains `daemon.sock`, `daemon.lock`, and `logs/`.
+- **Deployment:** the first CI workflow, on Windows, Linux, and macOS, with a job for the real-clock timeouts. `~/.kiri` gains `daemon.sock`, `daemon.lock`, and `logs/`.
 - **Runtime:** a new scenario, "Starting the daemon". "A prompt turn" stays as written for M1, and this epic builds steps 1 to 5 and the turn-end event of step 9, with no persistence.
-- **Concepts:** Streaming gains the reasoning replay and the catalog. Security's owner-only transport row gains the mechanisms of the [Transport](#transport) table.
+- **Concepts:** Streaming gains the reasoning replay, the catalog, the failures, and the heartbeat. Security's owner-only transport row gains the mechanisms of the [Transport](#transport) table.
 - **ADR 0002:** adds `futures-util` 0.3.34, the `Stream` consumer that `reqwest`'s `stream` and `eventsource-stream` need.
 
 ## Data model impact

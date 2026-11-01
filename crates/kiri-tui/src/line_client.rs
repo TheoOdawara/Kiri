@@ -2,12 +2,15 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use kiri_core::protocol::{
-    Connection, ContentBlock, ContentChunk, SessionId, SessionUpdate, ToolCallId, TurnEvent,
+    Connection, ContentBlock, ContentChunk, SessionId, SessionUpdate, StopReason, ToolCallId,
+    TurnEvent,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
 
-const CONNECTION_LOST: &str = "The connection to the Kiri daemon was lost.";
+const CONNECTION_LOST: &str = "error: The connection to the Kiri daemon was lost.";
 const NO_TOOLS_YET: &str = "Kiri has no tools yet, so this call did not run.\n";
+const OUTPUT_LIMIT: &str = "The model reached its output limit.\n";
+const REFUSED: &str = "The model refused to answer.\n";
 
 // shortcut: a plain line client with no input during a turn, #4 replaces it with the inline interface.
 pub async fn run(mut connection: Connection) -> Result<()> {
@@ -48,9 +51,13 @@ async fn run_turn(
         tool_names: HashMap::new(),
     };
     loop {
-        match connection.next_turn_event().await.map_err(lost)? {
+        let Ok(event) = connection.next_turn_event().await else {
+            printer.end_line().await?;
+            bail!(CONNECTION_LOST);
+        };
+        match event {
             TurnEvent::Update(update) => printer.print_update(*update).await?,
-            TurnEvent::Ended(_) => return printer.print_ending().await,
+            TurnEvent::Ended(stop_reason) => return printer.print_ending(stop_reason).await,
             TurnEvent::Failed(message) => {
                 printer.end_line().await?;
                 eprintln!("error: {message}");
@@ -133,11 +140,17 @@ impl TurnPrinter<'_> {
         Ok(())
     }
 
-    async fn print_ending(&mut self) -> Result<()> {
+    async fn print_ending(&mut self, stop_reason: StopReason) -> Result<()> {
         self.end_line().await?;
         if !self.tool_names.is_empty() {
             self.stdout.write_all(NO_TOOLS_YET.as_bytes()).await?;
         }
+        let notice = match stop_reason {
+            StopReason::MaxTokens => OUTPUT_LIMIT,
+            StopReason::Refusal => REFUSED,
+            _ => "",
+        };
+        self.stdout.write_all(notice.as_bytes()).await?;
         Ok(())
     }
 

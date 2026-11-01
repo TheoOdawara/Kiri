@@ -6,6 +6,8 @@ use agent_client_protocol_schema::v1::{
 use serde::Serialize;
 use serde_json::Value;
 
+pub(crate) const ALIVE_METHOD: &str = "_kiri/alive";
+
 pub(crate) enum Incoming {
     Request(Request<Value>),
     Notification {

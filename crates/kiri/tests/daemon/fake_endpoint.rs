@@ -11,6 +11,9 @@ use crate::support::wait_until;
 pub enum Part {
     Text(&'static str),
     Delta(Value),
+    Event(&'static str),
+    Comment,
+    Refuse(u16, &'static str),
     Wait(Duration),
     Hold,
     BreakStream,
@@ -50,6 +53,10 @@ impl FakeEndpoint {
             }
         });
         Self { base_url, state }
+    }
+
+    pub fn refusing(status: u16, body: &'static str) -> Self {
+        Self::answering(vec![Part::Refuse(status, body)])
     }
 
     pub fn body(&self, request: usize) -> Value {
@@ -115,6 +122,15 @@ fn answer(stream: TcpStream, script: &[Part], state: &Mutex<State>) {
         locked.bodies.push(serde_json::from_slice(&body).unwrap());
     }
 
+    if let [Part::Refuse(status, body)] = script {
+        let response = format!(
+            "HTTP/1.1 {status} Refused\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = writer.write_all(response.as_bytes());
+        return;
+    }
+
     writer
         .write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
@@ -132,6 +148,17 @@ fn answer(stream: TcpStream, script: &[Part], state: &Mutex<State>) {
                     break;
                 }
             }
+            Part::Event(data) => {
+                if write_event(&mut writer, data).is_err() {
+                    break;
+                }
+            }
+            Part::Comment => {
+                if writer.write_all(b": keep-alive\n\n").is_err() {
+                    break;
+                }
+            }
+            Part::Refuse(..) => unreachable!("a refusal is the whole script"),
             Part::Wait(duration) => std::thread::sleep(*duration),
             Part::BreakStream => return,
             Part::Hold => {

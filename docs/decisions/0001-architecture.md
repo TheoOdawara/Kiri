@@ -45,7 +45,7 @@ extension model.
   approve, cancel, rewind); the engine emits events (text, tool call proposed, diff, approval needed,
   turn end). The engine never knows which front-end is attached.
 - Kiri-specific operations (rewind, provider switch, session-to-session messaging) are ACP extension
-  methods under `kiri/*`.
+  methods under `_kiri/*`.
 - IDE integration is `kiri acp`: a stdio bridge between the IDE and the daemon socket.
 - Events stop at this boundary. Inside the engine, modules call each other directly.
 
@@ -120,7 +120,7 @@ Harder, and accepted:
 
 - Daemon lifecycle (start, reattach, idle exit, stale socket) is Milestone 1 work, before any feature.
 - Every client-engine interaction is serialized, even on one machine.
-- ACP's shape constrains the protocol; anything outside it becomes a `kiri/*` extension method.
+- ACP's shape constrains the protocol; anything outside it becomes a `_kiri/*` extension method.
 - With the Claude backend, Kiri does not own the loop: the built-in gate must work through the CLI's
   hooks, and behavior depends on the CLI's release cadence.
 - No in-process code plugins: a plugin that needs code must ship an MCP server.

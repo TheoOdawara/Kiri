@@ -1,7 +1,7 @@
 # kiri-core
 
-The engine and the session host. Its public surface is the protocol (ACP types and the `kiri/*` extension
-methods), `daemon::run` for `kiri daemon`, and `protocol::connect` for clients. Milestone: M1.
+The engine and the session host. Its public surface is the protocol (ACP types and the `_kiri/*` extension
+methods; ACP requires the leading underscore), `daemon::run` for `kiri daemon`, and `protocol::connect` for clients. Milestone: M1.
 
 ## What it never does
 
