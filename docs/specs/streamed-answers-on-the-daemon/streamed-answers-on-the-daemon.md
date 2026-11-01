@@ -156,8 +156,8 @@ Only `choices[0]` is read, and a chunk with no choices is skipped.
 
 | Element | Text |
 | --- | --- |
-| Input prompt | `> ` |
-| Start of a reasoning run | `[reasoning] ` |
+| Input prompt | `>` and a space |
+| Start of a reasoning run | `[reasoning]` and a space |
 | Tool call appears | `[tool call] <name>` |
 | Tool call's arguments arrive | `[tool call] <name> <arguments>` |
 | Turn ended with a tool call | "Kiri has no tools yet, so this call did not run." |
@@ -183,7 +183,7 @@ Only the daemon's OS user reaches it. Another user's connection fails at the fil
 
 ### 2. Daemon on demand
 
-The client tries to connect. When that fails it spawns its own executable as `kiri daemon`, detached from the terminal, with stdin, stdout, and stderr closed, and retries every 50 ms for up to 5 seconds. When nothing has answered 500 ms after a spawn, it spawns again. The same 5 seconds cover a connection that closes before `initialize` answers. On timeout it stops with "Could not connect to the Kiri daemon within 5 seconds. See <log path>." A failed spawn stops it with "Could not start the Kiri daemon: <cause>"
+The client tries to connect. When that fails it spawns its own executable as `kiri daemon`, detached from the terminal, with stdin, stdout, and stderr closed, and retries every 50 ms for up to 5 seconds. When nothing has answered 500 ms after a spawn, it spawns again. The same 5 seconds cover a connection that closes before `initialize` answers. On timeout it stops with "Could not connect to the Kiri daemon within 5 seconds. See `<log path>`." A failed spawn stops it with "Could not start the Kiri daemon: `<cause>`"
 
 ### 3. One daemon per user
 
@@ -201,7 +201,7 @@ The daemon validates the environment at start and keeps the result. An invalid r
 
 ### 6. Sessions and conversation
 
-Each connection can open many sessions, and each session runs one turn at a time. A prompt during a running turn answers `-32602` with "A turn is already running in this session." A prompt for a session this connection did not create answers `-32002` with "Unknown session: <id>." The conversation is held in memory. A turn that ends in `end_turn` or `max_tokens` adds its prompt, its reply, and its reasoning to the conversation. Any other ending adds nothing, so a failed turn leaves the next request valid.
+Each connection can open many sessions, and each session runs one turn at a time. A prompt during a running turn answers `-32602` with "A turn is already running in this session." A prompt for a session this connection did not create answers `-32002` with "Unknown session: `<id>`." The conversation is held in memory. A turn that ends in `end_turn` or `max_tokens` adds its prompt, its reply, and its reasoning to the conversation. Any other ending adds nothing, so a failed turn leaves the next request valid.
 
 ### 7. Streaming order and batching
 
@@ -231,40 +231,40 @@ Every failure reaches the user with the message of the [Errors](#errors) table. 
 
 | Code | When | Message |
 | --- | --- | --- |
-| `-32603` | At `session/new`, a required variable is missing | "Set KIRI_BASE_URL, KIRI_API_KEY, and KIRI_MODEL before opening Kiri. Missing: <names>." |
-| `-32603` | At `session/new`, a variable is over its limit | "<name> is longer than <limit> bytes." |
+| `-32603` | At `session/new`, a required variable is missing | "Set KIRI_BASE_URL, KIRI_API_KEY, and KIRI_MODEL before opening Kiri. Missing: `<names>`." |
+| `-32603` | At `session/new`, a variable is over its limit | "`<name>` is longer than `<limit>` bytes." |
 | `-32603` | At `session/new`, the base URL is invalid | "KIRI_BASE_URL must be an http or https URL." |
 | `-32603` | At `session/new`, `KIRI_REQUEST_PARAMS` is not a JSON object | "KIRI_REQUEST_PARAMS must be a JSON object." |
-| `-32603` | At `session/new`, `KIRI_REQUEST_PARAMS` sets a reserved key | "KIRI_REQUEST_PARAMS cannot set <key>, because Kiri sets it." |
+| `-32603` | At `session/new`, `KIRI_REQUEST_PARAMS` sets a reserved key | "KIRI_REQUEST_PARAMS cannot set `<key>`, because Kiri sets it." |
 | `-32603` | At `session/new`, `KIRI_THINKING` is neither `on` nor `off` | "KIRI_THINKING must be on or off." |
-| `-32603` | At `session/new`, a catalog setting on a model outside the catalog | "<model> is not in Kiri's catalog, so KIRI_REASONING_EFFORT and KIRI_THINKING do not apply. Use KIRI_REQUEST_PARAMS." |
-| `-32603` | At `session/new`, an effort value the model does not accept | "<model> accepts these KIRI_REASONING_EFFORT values: <values>. Got: <value>." |
-| `-32603` | At `session/new`, an effort on a catalog model with none | "<model> has no reasoning effort setting in Kiri. Unset KIRI_REASONING_EFFORT, or use KIRI_REQUEST_PARAMS." |
-| `-32603` | At `session/new`, a thinking switch on a catalog model with none | "<model> has no thinking switch in Kiri. Unset KIRI_THINKING, or use KIRI_REQUEST_PARAMS." |
+| `-32603` | At `session/new`, a catalog setting on a model outside the catalog | "`<model>` is not in Kiri's catalog, so KIRI_REASONING_EFFORT and KIRI_THINKING do not apply. Use KIRI_REQUEST_PARAMS." |
+| `-32603` | At `session/new`, an effort value the model does not accept | "`<model>` accepts these KIRI_REASONING_EFFORT values: `<values>`. Got: `<value>`." |
+| `-32603` | At `session/new`, an effort on a catalog model with none | "`<model>` has no reasoning effort setting in Kiri. Unset KIRI_REASONING_EFFORT, or use KIRI_REQUEST_PARAMS." |
+| `-32603` | At `session/new`, a thinking switch on a catalog model with none | "`<model>` has no thinking switch in Kiri. Unset KIRI_THINKING, or use KIRI_REQUEST_PARAMS." |
 | `-32602` | `cwd` is not absolute | "cwd must be an absolute path." |
 | `-32602` | The prompt has no non-blank text | "The prompt is empty." |
 | `-32602` | The prompt has another block type | "Kiri accepts only text and resource links in a prompt." |
 | `-32602` | A turn is running in the session | "A turn is already running in this session." |
-| `-32002` | The session is not on this connection | "Unknown session: <id>." |
-| `-32603` | HTTP 401 or 403 | "The endpoint rejected the API key (HTTP <status>)." |
-| `-32603` | HTTP 429 | "The endpoint is limiting requests (HTTP 429): <endpoint text>" |
-| `-32603` | Another 3xx or 4xx | "The endpoint rejected the request (HTTP <status>): <endpoint text>" |
-| `-32603` | HTTP 5xx | "The endpoint failed (HTTP <status>): <endpoint text>" |
-| `-32603` | Connection or TLS failure | "Could not reach <base URL>: <cause>" |
-| `-32603` | No bytes for 60 seconds, or no connection in 10 | "The endpoint sent nothing for <seconds> seconds." |
+| `-32002` | The session is not on this connection | "Unknown session: `<id>`." |
+| `-32603` | HTTP 401 or 403 | "The endpoint rejected the API key (HTTP `<status>`)." |
+| `-32603` | HTTP 429 | "The endpoint is limiting requests (HTTP 429): `<endpoint text>`" |
+| `-32603` | Another 3xx or 4xx | "The endpoint rejected the request (HTTP `<status>`): `<endpoint text>`" |
+| `-32603` | HTTP 5xx | "The endpoint failed (HTTP `<status>`): `<endpoint text>`" |
+| `-32603` | Connection or TLS failure | "Could not reach `<base URL>`: `<cause>`" |
+| `-32603` | No bytes for 60 seconds, or no connection in 10 | "The endpoint sent nothing for `<seconds>` seconds." |
 | `-32603` | The stream ends with no `finish_reason` and no `[DONE]` | "The endpoint closed the stream before the turn finished." |
-| `-32603` | A chunk carries an `error` object | "The endpoint failed during the stream: <endpoint text>" |
-| `-32603` | A chunk is not valid JSON | "The endpoint sent a chunk Kiri cannot read: <cause>" |
+| `-32603` | A chunk carries an `error` object | "The endpoint failed during the stream: `<endpoint text>`" |
+| `-32603` | A chunk is not valid JSON | "The endpoint sent a chunk Kiri cannot read: `<cause>`" |
 
 Failures with no JSON-RPC code, printed by the client:
 
 | When | Message |
 | --- | --- |
-| The socket path is over the system's limit, 104 bytes on macOS and 108 on Linux | "The path <path> is too long for a Unix socket. The limit on this system is <limit> bytes." |
+| The socket path is over the system's limit, 104 bytes on macOS and 108 on Linux | "The path `<path>` is too long for a Unix socket. The limit on this system is `<limit>` bytes." |
 | The home directory cannot be found | "Kiri cannot find your home directory." |
-| The spawn of the daemon fails | "Could not start the Kiri daemon: <cause>" |
-| `kiri daemon` cannot create `~/.kiri` or reset its mode. Printed by the daemon and logged; a client that spawned it reports the 5-second timeout | "Could not secure <path>: <cause>" |
-| No answer within 5 seconds at start | "Could not connect to the Kiri daemon within 5 seconds. See <log path>." |
+| The spawn of the daemon fails | "Could not start the Kiri daemon: `<cause>`" |
+| `kiri daemon` cannot create `~/.kiri` or reset its mode. Printed by the daemon and logged; a client that spawned it reports the 5-second timeout | "Could not secure `<path>`: `<cause>`" |
+| No answer within 5 seconds at start | "Could not connect to the Kiri daemon within 5 seconds. See `<log path>`." |
 | The pipe belongs to another SID, or the OS denies access to it | "The Kiri daemon pipe belongs to another user. Refusing to connect." |
 | The connection closes, or stays silent for 70 seconds, during a turn | "The connection to the Kiri daemon was lost." |
 

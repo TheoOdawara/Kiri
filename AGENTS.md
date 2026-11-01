@@ -1,7 +1,7 @@
 # Kiri — Repository Contract
 
 Layers on the global contract. Product truth: `docs/requirements/`. Architecture decision:
-`docs/decisions/0001-architecture.md`. Backlog: https://github.com/users/TheoOdawara/projects/7, in
+`docs/decisions/0001-architecture.md`. Backlog: <https://github.com/users/TheoOdawara/projects/7>, in
 one-week sprints.
 
 ## Stack
@@ -27,7 +27,7 @@ target.
 - Crates, with one issue label each:
 
 | Crate | Holds | Depends on | Public surface | Label |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `kiri-core` | Engine and session host | no other Kiri crate | ACP types, `kiri/*` extension methods, `daemon::run`, `protocol::connect`; the rest is `pub(crate)` | `area:core` |
 | `kiri-tui` | Inline interface (full-screen later) | `kiri-core`'s protocol | — | `area:tui` |
 | `kiri` | The binary: `daemon`, CLI, `-p`, `acp` | `kiri-core`, `kiri-tui` | — | `area:cli` |

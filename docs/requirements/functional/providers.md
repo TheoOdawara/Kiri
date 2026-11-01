@@ -4,8 +4,7 @@ The model providers and subscriptions a session can run on.
 
 ![Use cases: Providers](../diagrams/use-cases-providers.drawio.svg)
 
-<a id="fr-prv-01"></a>
-## FR-PRV-01 — OpenAI-compatible endpoint
+## FR-PRV-01 — OpenAI-compatible endpoint {#fr-prv-01}
 
 > As an engineer, I want to use any OpenAI-compatible endpoint, so that I am not locked to one vendor.
 
@@ -20,12 +19,11 @@ The system shall run turns on any OpenAI-compatible endpoint identified by a bas
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-PRV-01.1** — Given the base URL and API key of an OpenAI-compatible endpoint, when the user sends a prompt, then the turn completes through that endpoint.
 
-
-<a id="fr-prv-02"></a>
-## FR-PRV-02 — Anthropic and Anthropic-compatible endpoint
+## FR-PRV-02 — Anthropic and Anthropic-compatible endpoint {#fr-prv-02}
 
 > As an engineer, I want to use Anthropic's API and endpoints compatible with it, so that providers such as MiniMax, GLM, and Kimi work without a dedicated integration.
 
@@ -40,13 +38,12 @@ The system shall run turns on Anthropic's API and on any Anthropic-compatible en
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-PRV-02.1** — Given an Anthropic API key, when the user sends a prompt, then the turn completes through Anthropic's API.
 - **FR-PRV-02.2** — Given the base URL and API key of an Anthropic-compatible endpoint, when the user sends a prompt, then the turn completes through that endpoint.
 
-
-<a id="fr-prv-03"></a>
-## FR-PRV-03 — OpenAI
+## FR-PRV-03 — OpenAI {#fr-prv-03}
 
 > As an engineer, I want to use OpenAI's API with my key, so that OpenAI models work with their native interface.
 
@@ -61,12 +58,11 @@ The system shall run turns on OpenAI's Responses API with an API key.
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-PRV-03.1** — Given an OpenAI API key, when the user sends a prompt, then the turn completes through OpenAI's Responses API.
 
-
-<a id="fr-prv-04"></a>
-## FR-PRV-04 — Local model server
+## FR-PRV-04 — Local model server {#fr-prv-04}
 
 > As an engineer, I want to use a model served on my machine, so that I work with no key and no account.
 
@@ -81,12 +77,11 @@ The system shall run turns on a local model server (Ollama, LM Studio) with no A
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-PRV-04.1** — Given only a running Ollama or LM Studio server, when the user selects it and sends a prompt, then the turn completes with no API key configured.
 
-
-<a id="fr-prv-05"></a>
-## FR-PRV-05 — ChatGPT subscription
+## FR-PRV-05 — ChatGPT subscription {#fr-prv-05}
 
 > As an engineer, I want to sign in with my ChatGPT Plus/Pro account, so that turns draw on the plan I already pay for.
 
@@ -101,12 +96,11 @@ The system shall run turns on a ChatGPT Plus/Pro subscription through the "Sign 
 | Milestone | Later |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-PRV-05.1** — Given a ChatGPT Plus/Pro account, when the user signs in with ChatGPT and sends a prompt, then the turn draws on that plan.
 
-
-<a id="fr-prv-06"></a>
-## FR-PRV-06 — Claude subscription
+## FR-PRV-06 — Claude subscription {#fr-prv-06}
 
 > As an engineer, I want to use my Claude Pro/Max subscription, so that turns draw on the plan I already pay for.
 
@@ -121,13 +115,12 @@ The system shall run turns on a Claude Pro/Max subscription by driving the user'
 | Milestone | Later |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-PRV-06.1** — Given a logged-in official `claude` CLI and the opt-in of FR-PRV-07 confirmed, when the user sends a prompt, then the turn runs through the CLI and every tool call is executed by Kiri's tools.
 - **FR-PRV-06.2** — Given a `claude` CLI older than the minimum supported version, when the user enables the subscription, then Kiri refuses and names the required version.
 
-
-<a id="fr-prv-07"></a>
-## FR-PRV-07 — Claude subscription opt-in warning
+## FR-PRV-07 — Claude subscription opt-in warning {#fr-prv-07}
 
 > As an engineer, I want to be warned before enabling my Claude subscription, so that I decide knowing the risk to my account.
 
@@ -142,12 +135,11 @@ The system shall require the user to confirm a warning, stating that Anthropic r
 | Milestone | Later |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-PRV-07.1** — Given the Claude subscription not yet enabled, when the user enables it, then the warning is shown and the subscription stays disabled until the user confirms.
 
-
-<a id="fr-prv-08"></a>
-## FR-PRV-08 — Live switching
+## FR-PRV-08 — Live switching {#fr-prv-08}
 
 > As an engineer, I want to switch provider, model, and reasoning effort inside a session, so that I change the model without restarting my work.
 
@@ -162,13 +154,12 @@ The system shall let the user switch the provider, the model, and the reasoning 
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-PRV-08.1** — Given a session on provider A, when the user switches to provider B, then the next turn uses B with the history preserved.
 - **FR-PRV-08.2** — Given a running session, when the user switches the model or the reasoning effort, then the next turn uses the new value.
 
-
-<a id="fr-prv-09"></a>
-## FR-PRV-09 — In-app provider setup
+## FR-PRV-09 — In-app provider setup {#fr-prv-09}
 
 > As an engineer, I want to add a provider from within Kiri, so that I never edit a configuration file by hand.
 
@@ -183,12 +174,11 @@ The system shall let the user add a provider from within Kiri, with no manual fi
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-PRV-09.1** — Given no provider configured, when the user adds one from within Kiri, then the next prompt runs on it and no file was edited by hand.
 
-
-<a id="fr-prv-10"></a>
-## FR-PRV-10 — Model request parameters
+## FR-PRV-10 — Model request parameters {#fr-prv-10}
 
 > As an engineer, I want to set thinking, effort, and any other request parameter of my model, so that it runs the way I need from the first prompt.
 
@@ -203,7 +193,8 @@ The system shall send the user's reasoning settings in each well-known model's o
 | Milestone | M1 |
 | Since | v3.1.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-PRV-10.1** — Given a model in the catalog and a reasoning setting it accepts, when the user sends a prompt, then the request carries the setting in that model's format.
 - **FR-PRV-10.2** — Given a model in the catalog and a reasoning setting it does not accept, when the user opens Kiri, then the user sees why and no request is sent.
 - **FR-PRV-10.3** — Given request parameters set by the user, when the user sends a prompt to any model, then the request carries them unchanged, and they override the catalog.

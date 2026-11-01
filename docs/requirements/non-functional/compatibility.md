@@ -2,8 +2,7 @@
 
 ISO/IEC 25010 characteristic: compatibility.
 
-<a id="nfr-comp-01"></a>
-## NFR-COMP-01 — Claude Code extension formats
+## NFR-COMP-01 — Claude Code extension formats {#nfr-comp-01}
 
 The system shall load skills, commands, agents, hooks, and MCP configuration written in Claude Code's formats.
 
@@ -16,5 +15,6 @@ The system shall load skills, commands, agents, hooks, and MCP configuration wri
 | Milestone | Later |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **NFR-COMP-01.1** — A skill, command, agent, hook, or MCP configuration valid for Claude Code loads in Kiri with 0 modifications.

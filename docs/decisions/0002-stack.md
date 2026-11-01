@@ -1,4 +1,5 @@
 # 0002. Stack: every dependency, and what stays in the standard library
+
 - Status: accepted
 - Date: 2026-10-27
 - Amended: 2026-11-01, adds `futures-util` for the spec of [#2](https://github.com/TheoOdawara/Kiri/issues/2)
@@ -103,6 +104,7 @@ and the docs of Claude Code, Antigravity, Gemini CLI, OpenCode, and Kimi Code.
 ## Consequences
 
 Easier:
+
 - About forty crates, each with a known reason, against roughly 110 in Grok Build's workspace. Grok
   Build's stack matches this one almost item by item, so the choices are proven in production.
 - Six areas that usually take a dependency (IDs, dates, home directory, the JSON-RPC layer, temporary
@@ -110,6 +112,7 @@ Easier:
 - Musl and the install script remove glibc versions and package-manager variants from support.
 
 Harder, and accepted:
+
 - The Windows sandbox is the largest piece of Milestone 1 and needs a one-time elevated setup.
 - Two JSON-RPC stacks: ours for ACP and `rmcp`'s for MCP.
 - Oniguruma and jemalloc compile C in the build, as `aws-lc-rs` already does.

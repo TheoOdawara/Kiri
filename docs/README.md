@@ -17,7 +17,7 @@
 
 From the repository root, run the `docs: serve` task in VS Code, or:
 
-```
+```bash
 uvx zensical==0.0.73 serve --open
 ```
 

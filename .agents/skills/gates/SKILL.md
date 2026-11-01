@@ -8,8 +8,9 @@ description: The Kiri repository's gates, cheapest first, with their exact invoc
 Run every gate from the repository root: Zensical reads `zensical.toml` only from the current folder.
 
 | Gate | Invocation | Exit |
-|---|---|---|
+| --- | --- | --- |
 | Formatting | `cargo fmt --all --check` | 0 |
+| Markdown lint | `npx --yes markdownlint-cli2@0.24.0 "**/*.md"` | 0 |
 | Static analysis | `cargo clippy --workspace --all-targets --locked -- -D warnings` | 0 |
 | Type checking | `cargo check --workspace --all-targets --locked` | 0 |
 | Windows compile | `cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings` | 0 |
@@ -19,7 +20,8 @@ Run every gate from the repository root: Zensical reads `zensical.toml` only fro
 
 The Windows compile gate needs `rustup target add x86_64-pc-windows-msvc` once, and proves only that the
 code compiles there. CI (`.github/workflows/ci.yml`) runs the code gates on Linux, macOS, and Windows on
-every push, and it is the only place the Windows tests run.
+every push, and it is the only place the Windows tests run. It also runs the Markdown lint, on Linux only, because the
+result does not depend on the system.
 
 ## Cross-user check
 

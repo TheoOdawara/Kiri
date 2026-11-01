@@ -1,4 +1,5 @@
 # 0001. Architecture: daemon, ACP boundary, capability modules, data extensions
+
 - Status: accepted
 - Date: 2026-09-30
 - Amended: 2026-10-27, the `sync` module is removed with FR-CNT-06 and 07 (SRS 3.0.0)
@@ -51,7 +52,7 @@ extension model.
 ### 3. Physical structure — a three-crate workspace
 
 | Crate | Holds | Public surface |
-|---|---|---|
+| --- | --- | --- |
 | `kiri-core` | The engine and the daemon's session host | The protocol, `daemon::run`, and `protocol::connect` |
 | `kiri-tui` | Inline interface (full-screen later) | — |
 | `kiri` | The binary: `daemon`, CLI, `-p`, `acp` bridge | — |
@@ -106,6 +107,7 @@ these files with any editor, and a session's JSONL only appends.
 ## Consequences
 
 Easier:
+
 - A new front-end is a protocol client; headless and IDE reuse everything.
 - Sessions survive closed terminals; session-to-session and subagent conversations need no new
   infrastructure.
@@ -115,6 +117,7 @@ Easier:
 - The Claude subscription path has a genuine client fingerprint instead of an impersonation to maintain.
 
 Harder, and accepted:
+
 - Daemon lifecycle (start, reattach, idle exit, stale socket) is Milestone 1 work, before any feature.
 - Every client-engine interaction is serialized, even on one machine.
 - ACP's shape constrains the protocol; anything outside it becomes a `kiri/*` extension method.

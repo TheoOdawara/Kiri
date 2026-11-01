@@ -1,3 +1,4 @@
+<!-- markdownlint-disable-file MD033 MD041 -->
 <p align="center">
   <img src="docs/design/brand/logo.png" alt="Kiri" width="200">
 </p>
