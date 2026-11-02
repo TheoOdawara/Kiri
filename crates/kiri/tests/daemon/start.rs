@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::{BufReader, Read};
-use std::path::PathBuf;
 use std::process::{Child, ChildStdout};
 use std::time::{Duration, Instant};
 
@@ -109,7 +108,8 @@ fn a_daemon_start_leaves_its_files_to_the_owner_alone() {
     use std::os::unix::fs::PermissionsExt;
 
     let home = TestHome::new();
-    let mode_of = |path: PathBuf| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let mode_of =
+        |path: std::path::PathBuf| fs::metadata(path).unwrap().permissions().mode() & 0o777;
     fs::create_dir_all(home.log_path().parent().unwrap()).unwrap();
     fs::write(home.log_path(), "").unwrap();
     fs::set_permissions(home.log_path(), fs::Permissions::from_mode(0o644)).unwrap();
