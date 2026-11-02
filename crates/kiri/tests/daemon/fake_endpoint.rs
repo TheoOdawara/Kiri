@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -15,6 +15,7 @@ pub enum Part {
     Comment,
     Refuse(u16, &'static str),
     Wait(Duration),
+    UntilElapsed(Duration),
     Hold,
     BreakStream,
 }
@@ -136,6 +137,7 @@ fn answer(stream: TcpStream, script: &[Part], state: &Mutex<State>) {
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
         )
         .unwrap();
+    let started = Instant::now();
     for part in script {
         match part {
             Part::Text(text) => {
@@ -160,6 +162,9 @@ fn answer(stream: TcpStream, script: &[Part], state: &Mutex<State>) {
             }
             Part::Refuse(..) => unreachable!("a refusal is the whole script"),
             Part::Wait(duration) => std::thread::sleep(*duration),
+            Part::UntilElapsed(elapsed) => {
+                std::thread::sleep(elapsed.saturating_sub(started.elapsed()));
+            }
             Part::BreakStream => return,
             Part::Hold => {
                 if !hold(&reader, state) {

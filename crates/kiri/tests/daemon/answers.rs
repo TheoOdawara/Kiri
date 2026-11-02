@@ -687,7 +687,7 @@ fn batching_reduces_the_events_and_keeps_the_text() {
         let text = number.to_string();
         expected.push_str(&text);
         script.push(Part::Delta(json!({"content": text})));
-        script.push(Part::Wait(Duration::from_millis(1)));
+        script.push(Part::UntilElapsed(Duration::from_millis(number)));
     }
     let endpoint = FakeEndpoint::answering(script);
     let mut daemon = home.start_daemon_on(&endpoint.base_url);
