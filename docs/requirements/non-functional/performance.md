@@ -2,8 +2,7 @@
 
 ISO/IEC 25010 characteristic: performance efficiency.
 
-<a id="nfr-perf-01"></a>
-## NFR-PERF-01 — Live input
+## NFR-PERF-01 — Live input {#nfr-perf-01}
 
 The system shall keep input live while the model streams or a tool runs.
 
@@ -16,12 +15,11 @@ The system shall keep input live while the model streams or a tool runs.
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **NFR-PERF-01.1** — While the model streams or a tool runs, a keystroke is drawn within 50 ms at the 95th percentile.
 
-
-<a id="nfr-perf-02"></a>
-## NFR-PERF-02 — Daemon idle exit
+## NFR-PERF-02 — Daemon idle exit {#nfr-perf-02}
 
 The system shall stop the daemon after an idle period with no running session and no connected client.
 
@@ -34,5 +32,6 @@ The system shall stop the daemon after an idle period with no running session an
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **NFR-PERF-02.1** — Given no running session and no connected client, when 10 minutes pass, then the daemon has exited.

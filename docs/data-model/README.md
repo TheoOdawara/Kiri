@@ -1,7 +1,7 @@
 # Data model
 
-Only the conceptual model exists. It is inferred from the [requirements](../requirements/README.md) and
-[ADR 0001](../decisions/0001-architecture.md); no attribute and no file layout has been decided.
+The conceptual model is inferred from the [requirements](../requirements/README.md) and
+[ADR 0001](../decisions/0001-architecture.md). Specs add attributes as they close; no file layout has been decided.
 
 ![Conceptual model](diagrams/conceptual.drawio.svg)
 
@@ -17,6 +17,16 @@ Only the conceptual model exists. It is inferred from the [requirements](../requ
 | Checkpoint | A point of a session its file edits can return to | [FR-CNT-04](../requirements/functional/continuity.md#fr-cnt-04) | Later |
 | Extension | One skill, command, hook, MCP server, subagent definition, or plugin | [FR-EXT](../requirements/functional/extensions.md) | Later |
 | Memory note | One fact or preference kept across sessions | [FR-CNT-05](../requirements/functional/continuity.md#fr-cnt-05) | Later |
+
+## Attributes decided so far
+
+All are in memory; none reaches a file. From the spec of [#2](../specs/streamed-answers-on-the-daemon/streamed-answers-on-the-daemon.md), Milestone M1.
+
+| Entity | Attributes |
+| --- | --- |
+| Session | `id` (UUIDv7), `cwd`, `messages` |
+| Message | `role` (`user` or `assistant`), `text`, optional `reasoning` |
+| Provider | `base_url`, `api_key`, `model`, `request_params`; one instance per daemon, from the environment |
 
 ## Relations
 

@@ -1,6 +1,9 @@
 # 0002. Stack: every dependency, and what stays in the standard library
+
 - Status: accepted
 - Date: 2026-10-27
+- Amended: 2026-11-01, adds `futures-util` for the spec of [#2](https://github.com/TheoOdawara/Kiri/issues/2), and
+  records that Windows compiles only in CI and that streaming fakes are hand-written
 
 ## Context
 
@@ -34,12 +37,12 @@ and the docs of Claude Code, Antigravity, Gemini CLI, OpenCode, and Kimi Code.
 
 | Area | Crate | Version | Settings |
 | --- | --- | --- | --- |
-| Async runtime | `tokio` | 1.54.1 | |
+| Async runtime | `tokio`; `futures-util` | 1.54.1; 0.3.34 | `futures-util` consumes the streams of `reqwest` and `eventsource-stream` |
 | Errors | `thiserror` in `kiri-core`; `anyhow` in `kiri` and `kiri-tui` | 2.0.21; 1.0.104 | |
-| Logs | `tracing`, `tracing-subscriber` | 0.1.44, 0.3.23 | JSONL output; rotation is our code |
+| Logs | `tracing`, `tracing-subscriber` | 0.1.44, 0.3.23 | `json`, for the JSONL output; rotation is our code |
 | CLI | `clap` | 4.6.7 | `derive` |
 | Serialization | `serde`, `serde_json` | 1.0.229, 1.0.154 | |
-| ACP types | `agent-client-protocol-schema` | 1.13.0 | Types only; the JSON-RPC layer is our code |
+| ACP types | `agent-client-protocol-schema` | 1.13.0 | No default features, which drops `schemars`; types and JSON-RPC envelopes only; reading, writing, and dispatch are our code |
 | OS APIs | `libc`; `windows-sys` | 0.2.191; 0.61.2 | No `windows` crate unless a spec finds an API `windows-sys` lacks |
 | Configuration | `toml_edit` | 0.25.17 | `serde`; edits keep the user's comments and layout |
 | HTTP | `reqwest` | 0.13.5 | `rustls` with `aws-lc-rs` and `rustls-platform-verifier`, `http2`, `system-proxy`, `stream` |
@@ -102,6 +105,7 @@ and the docs of Claude Code, Antigravity, Gemini CLI, OpenCode, and Kimi Code.
 ## Consequences
 
 Easier:
+
 - About forty crates, each with a known reason, against roughly 110 in Grok Build's workspace. Grok
   Build's stack matches this one almost item by item, so the choices are proven in production.
 - Six areas that usually take a dependency (IDs, dates, home directory, the JSON-RPC layer, temporary
@@ -109,9 +113,14 @@ Easier:
 - Musl and the install script remove glibc versions and package-manager variants from support.
 
 Harder, and accepted:
+
 - The Windows sandbox is the largest piece of Milestone 1 and needs a one-time elevated setup.
 - Two JSON-RPC stacks: ours for ACP and `rmcp`'s for MCP.
-- Oniguruma and jemalloc compile C in the build, as `aws-lc-rs` already does.
+- Oniguruma and jemalloc compile C in the build, as `aws-lc-rs` already does. That C needs the Windows headers, so
+  a Mac cannot compile the Windows target without `cargo-xwin` and LLVM. Windows compiles only in CI, and a Windows
+  error shows up after a push.
+- `wiremock` sends a whole body at once, so it cannot hold a stream or see a client close one. The tests that need
+  either use a small HTTP/1.1 server of our own in `crates/kiri/tests/daemon/fake_endpoint.rs`.
 - `crossterm` releases slowly; Codex carries four fixes in a fork. The TUI spec checks those cases.
 - Without a code signature, a macOS update can ask once for Keychain access, and Smart App Control can
   block `kiri.exe` on Windows. Both wait on the Distribution spikes.

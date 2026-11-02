@@ -5,8 +5,10 @@ Everything Kiri stores is text: JSONL, TOML, or Markdown. There is no database. 
 
 | Location | Holds |
 | --- | --- |
-| `~/.kiri` | The user's sessions, configuration, memory, and extensions |
+| `~/.kiri` | The user's sessions, configuration, memory, and extensions; the daemon's `daemon.lock`, `daemon.sock` on Linux and macOS, and `logs/daemon.jsonl` |
 | `<project>/.kiri` | The project's configuration and extensions |
+
+Sessions stay in memory until [FR-CNT-03](../../requirements/functional/continuity.md#fr-cnt-03) ships.
 
 Text is the choice because the user reads and edits these files with any editor, and a session's JSONL only
 appends. Secrets stay out of configuration, logs, and transcripts

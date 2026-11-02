@@ -12,6 +12,7 @@ depends on `kiri-core` for the protocol types only. Milestone: M1.
 
 | Concern | Requirements | Milestone |
 | --- | --- | --- |
+| Line client, replaced by the inline interface in #4 | [FR-AGT-02](../../requirements/functional/agent.md#fr-agt-02) | M1 |
 | Inline interface on the native scrollback | [FR-UI-01](../../requirements/functional/interfaces.md#fr-ui-01) | M1 |
 | Seal, tagline, and palette | [FR-UI-06, 07](../../requirements/functional/interfaces.md#fr-ui-06) | M1 |
 | Live input while streaming | [NFR-PERF-01](../../requirements/non-functional/performance.md#nfr-perf-01) | M1 |

@@ -12,7 +12,7 @@ Epics are in dependency order.
 
 | Epic | Issue | Covers |
 | --- | --- | --- |
-| Streamed answers on the daemon | [#2](https://github.com/TheoOdawara/Kiri/issues/2) | FR-CNT-02, NFR-SEC-02, FR-AGT-02, FR-PRV-01 |
+| Streamed answers on the daemon | [#2](https://github.com/TheoOdawara/Kiri/issues/2) | FR-CNT-02, NFR-SEC-02, FR-AGT-02, FR-PRV-01, FR-PRV-10 |
 | Reattach | [#3](https://github.com/TheoOdawara/Kiri/issues/3) | FR-CNT-01.1, FR-CNT-01.2, FR-CNT-09, NFR-PERF-02 |
 | Branded inline interface | [#4](https://github.com/TheoOdawara/Kiri/issues/4) | FR-UI-01, FR-UI-06, FR-UI-07, NFR-PERF-01, NFR-INTR-01, NFR-INTR-02 |
 | Provider choice | [#5](https://github.com/TheoOdawara/Kiri/issues/5) | FR-PRV-02, FR-PRV-03, FR-PRV-04, FR-PRV-08, FR-PRV-09 |
@@ -35,6 +35,10 @@ Decided while splitting the milestone:
 - #6 holds only the read-only tools. Edits, writes, and shell commands arrive in #8, after #7, so none of
   them exists without approvals and confinement.
 - #8 and #9 enter the same sprint, because project rules must not load without trust (BR-02).
+- FR-PRV-10's catalog grows with the APIs that exist. #2 holds the nine approved models reachable through
+  Chat Completions: DeepSeek, Kimi, GLM, Qwen, and Gemini. #5 adds the ten that need its APIs:
+  `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-1`, `claude-haiku-5-5`, `gpt-6-astra`, `gpt-6.1-sol`,
+  `gpt-6.1-terra`, `grok-4.7`, `muse-spark-1.3`, and `MiniMax-M3`.
 
 ## Requirement coverage
 
@@ -55,6 +59,7 @@ Every approved requirement of a planned milestone maps to exactly one epic. Two 
 | FR-PRV-04 | #5 | M1 |
 | FR-PRV-08 | #5 | M1 |
 | FR-PRV-09 | #5 | M1 |
+| FR-PRV-10 | #2 | M1 |
 | FR-TOL-01 | #6 | M1 |
 | FR-TOL-02 | #6 | M1 |
 | FR-TOL-03 | #8 | M1 |

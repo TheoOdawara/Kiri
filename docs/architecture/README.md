@@ -36,7 +36,7 @@ Each line is a decision of [ADR 0001](../decisions/0001-architecture.md).
 
 - **One daemon per user owns every session.** Front-ends are thin clients; there is no embedded mode.
 - **The boundary is ACP.** Clients send commands, the engine emits events, and Kiri-specific operations are
-  `kiri/*` extension methods.
+  `_kiri/*` extension methods.
 - **Three crates.** `kiri-core`, `kiri-tui`, and `kiri`; the compiler enforces the boundaries.
 - **Modules by capability inside the engine.** They call each other directly; events exist only at the boundary.
 - **Extensions are data and child processes.** Third-party code never runs inside the daemon.

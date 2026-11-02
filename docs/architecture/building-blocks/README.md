@@ -10,4 +10,6 @@ The diagram shows the running processes; each is built from the crates below.
 | [kiri-tui](kiri-tui.md) | Rust library crate | The interactive interface | The daemon (ACP over the local socket) | M1 |
 | [kiri](kiri.md) | Rust binary crate | The `kiri` executable: `daemon`, the CLI, `-p`, `acp` | `kiri-core` and `kiri-tui` (function calls) | M1 |
 
+The workspace also holds `xtask`, repository tooling such as the cross-user check. It ships in no release.
+
 A crate exists only when it has a consumer of its own.

@@ -6,6 +6,7 @@
 | Agent backend | A provider whose own loop drives the turn while Kiri executes the tools; today only the Claude subscription. |
 | Approval mode | Plan, default, or auto: how much the agent does without asking. |
 | Bundled skill | A skill shipped inside Kiri. |
+| Catalog | The table in the Kiri binary of well-known models and their reasoning settings. |
 | Checkpoint | A point of the conversation the agent's file edits can be rolled back to. |
 | Classifier | An optional model that judges each action in auto mode. |
 | Client | A front-end connected to the daemon: an interactive interface, `kiri -p`, or `kiri acp`. |
