@@ -7,7 +7,7 @@
 | Trust approval | Nothing from a project or plugin activates before the user approves | [FR-SAF-08](../../requirements/functional/safety.md#fr-saf-08), [BR-02](../../requirements/business-rules.md#br-02) | M1 |
 | Tool output is data | Output never changes mode, permissions, or configuration | [BR-01](../../requirements/business-rules.md#br-01) | M1 |
 | Secrets | Keys and tokens stay out of configuration, logs, and transcripts | [NFR-SEC-01](../../requirements/non-functional/security.md#nfr-sec-01) | M1 |
-| Owner-only transport | Another OS user cannot reach the daemon | [NFR-SEC-02](../../requirements/non-functional/security.md#nfr-sec-02) | M1 |
+| Owner-only transport | Another OS user cannot reach the daemon: `~/.kiri` at `0700`, the socket at `0600`, and a peer uid check on Unix; a DACL for the owner SID and a client check of the pipe's owner on Windows | [NFR-SEC-02](../../requirements/non-functional/security.md#nfr-sec-02) | M1 |
 | Process isolation | Third-party code runs only as a child process | [ADR 0001](../../decisions/0001-architecture.md) | Later |
 | OS confinement | A command cannot write outside the allowed area | [FR-SAF-07](../../requirements/functional/safety.md#fr-saf-07) | M1 |
 | Classifier | An optional model judges each action in auto mode | [FR-SAF-05](../../requirements/functional/safety.md#fr-saf-05) | Later |

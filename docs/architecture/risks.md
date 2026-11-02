@@ -7,7 +7,7 @@ accepted. None is tracked by an issue yet: the first sprint plan opens them.
 | --- | --- |
 | Daemon lifecycle: start, reattach, idle exit, stale socket | It is Milestone 1 work that comes before any feature |
 | Every client–engine interaction is serialized | Overhead even on one machine |
-| ACP's shape constrains the protocol | Anything outside it becomes a `kiri/*` extension method |
+| ACP's shape constrains the protocol | Anything outside it becomes a `_kiri/*` extension method |
 | The Claude subscription's loop is not Kiri's | The gate must work through the CLI's hooks, and behavior follows the CLI's release cadence |
 | No in-process code plugins | A plugin that needs code must ship an MCP server |
 | The gate and persistent memory have no module | Their specs must place them before code |

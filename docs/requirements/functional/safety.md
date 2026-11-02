@@ -4,8 +4,7 @@ Approval modes, permissions, the classifier, OS confinement, and trust.
 
 ![Use cases: Safety and control](../diagrams/use-cases-safety.drawio.svg)
 
-<a id="fr-saf-01"></a>
-## FR-SAF-01 — Plan mode
+## FR-SAF-01 — Plan mode {#fr-saf-01}
 
 > As an engineer, I want a read-only mode, so that the agent investigates and plans without changing anything.
 
@@ -20,14 +19,13 @@ The system shall keep plan mode from changing the user's files: it refuses every
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-SAF-01.1** — Given plan mode, when the model attempts a file edit or write, then it is refused and the file is unchanged.
 - **FR-SAF-01.2** — Given plan mode, when the model runs a command that writes a file, then the operating system stops the write and the file is unchanged.
 - **FR-SAF-01.3** — Given plan mode, when the model runs a command, then it runs, asks, or is blocked exactly as it would in auto mode, network access included, with the user's files read-only.
 
-
-<a id="fr-saf-02"></a>
-## FR-SAF-02 — Default mode
+## FR-SAF-02 — Default mode {#fr-saf-02}
 
 > As an engineer, I want to be asked before any side effect, so that nothing changes without my approval.
 
@@ -42,13 +40,12 @@ The system shall ask the user, in default mode, before any side effect that no p
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-SAF-02.1** — Given default mode, when the model proposes a side effect that no permission rule allows, then nothing runs until the user approves.
 - **FR-SAF-02.2** — Given default mode and a permission rule that allows an action, when the model proposes it, then it runs without asking.
 
-
-<a id="fr-saf-03"></a>
-## FR-SAF-03 — Auto mode
+## FR-SAF-03 — Auto mode {#fr-saf-03}
 
 > As an engineer, I want a mode that acts without asking, so that routine work proceeds unattended inside limits I set.
 
@@ -63,13 +60,12 @@ The system shall act, in auto mode, without asking, within the permissions, the 
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-SAF-03.1** — Given auto mode with no classifier configured, when the model proposes an action, then the sandbox and the configured permissions alone decide whether it runs, asks, or is blocked.
 - **FR-SAF-03.2** — Given auto mode and an action the permissions block, when the model proposes it, then it does not run.
 
-
-<a id="fr-saf-04"></a>
-## FR-SAF-04 — Configurable permissions
+## FR-SAF-04 — Configurable permissions {#fr-saf-04}
 
 > As an engineer, I want to configure which actions run, ask, or are blocked, so that my policy applies without repeating approvals.
 
@@ -84,13 +80,12 @@ The system shall let the user configure, globally and per project, which actions
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-SAF-04.1** — Given a global rule that blocks an action, when the model proposes it in any project, then it is blocked.
 - **FR-SAF-04.2** — Given a project rule, when the model proposes the action in another project, then the rule does not apply.
 
-
-<a id="fr-saf-05"></a>
-## FR-SAF-05 — Auto-mode classifier
+## FR-SAF-05 — Auto-mode classifier {#fr-saf-05}
 
 > As an engineer, I want an optional classifier judging each action in auto mode, so that unsafe actions stop even when I am not watching.
 
@@ -105,12 +100,11 @@ The system shall let an optional classifier decide, in auto mode, per action: ru
 | Milestone | Later |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-SAF-05.1** — Given auto mode with a classifier, when the classifier judges an action unsafe, then the action is blocked or escalated to the user.
 
-
-<a id="fr-saf-06"></a>
-## FR-SAF-06 — Classifier model choice
+## FR-SAF-06 — Classifier model choice {#fr-saf-06}
 
 > As an engineer, I want to pick the classifier's model, so that I use a model I already have.
 
@@ -125,12 +119,11 @@ The system shall let the user pick the classifier's model among every configured
 | Milestone | Later |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-SAF-06.1** — Given two configured models, when the user picks one as the classifier, then classifier decisions come from that model.
 
-
-<a id="fr-saf-07"></a>
-## FR-SAF-07 — OS confinement
+## FR-SAF-07 — OS confinement {#fr-saf-07}
 
 > As an engineer, I want commands confined by the operating system, so that a command cannot reach outside the allowed area.
 
@@ -145,12 +138,11 @@ The system shall run commands inside OS-level confinement on Windows (native mec
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-SAF-07.1** — Given the sandbox, when a command tries to write outside the allowed area, then the operating system stops it — on Windows, on Linux, and on macOS.
 
-
-<a id="fr-saf-08"></a>
-## FR-SAF-08 — Trust approval
+## FR-SAF-08 — Trust approval {#fr-saf-08}
 
 > As an engineer, I want to approve a project or plugin before it takes effect, so that an untrusted repository cannot act on my machine.
 
@@ -165,6 +157,7 @@ The system shall apply configuration and extensions supplied by a project or a p
 | Milestone | M1 |
 | Since | v1.0.0 |
 
-**Acceptance criteria**
+**Acceptance criteria:**
+
 - **FR-SAF-08.1** — Given a project the user has not trusted, when Kiri starts in it, then none of its configuration or extensions is active until the user approves.
 - **FR-SAF-08.2** — Given an untrusted repository whose configuration tries to loosen safety or redirect a credential, when Kiri loads it, then the attempt is ignored and reported to the user.
