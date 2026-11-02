@@ -21,7 +21,7 @@ methods; ACP requires the leading underscore), `daemon::run` for `kiri daemon`, 
 | `tools` | The built-in tools: read, search, edit, write, shell | [FR-TOL](../../requirements/functional/tools.md) | M1 |
 | `permissions` | Approval modes and the run / ask / block rules; the classifier | [FR-SAF-01 to 06](../../requirements/functional/safety.md) | M1; classifier Later |
 | `sandbox` | The `Sandbox` trait and one implementation per OS, selected at compile time | [FR-SAF-07](../../requirements/functional/safety.md#fr-saf-07) | M1 |
-| `session` | Session lifecycle, attach and reattach, persistence, subagents as child sessions | [FR-CNT-01 to 04, 08](../../requirements/functional/continuity.md) | M1; resume, rewind, messaging Later |
+| `session` | Session lifecycle, attach, detach and reattach with the transcript's replay, persistence, subagents as child sessions | [FR-CNT-01 to 04, 08](../../requirements/functional/continuity.md) | M1; resume, rewind, messaging Later |
 | `extensions` | Skills, commands, hooks, MCP servers, plugins, and trust | [FR-EXT](../../requirements/functional/extensions.md), [FR-SAF-08](../../requirements/functional/safety.md#fr-saf-08) | Later; trust M1 |
 
 The arrows of the diagram follow from the requirements, not from code; each spec confirms its own.

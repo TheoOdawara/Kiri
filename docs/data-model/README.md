@@ -20,11 +20,12 @@ The conceptual model is inferred from the [requirements](../requirements/README.
 
 ## Attributes decided so far
 
-All are in memory; none reaches a file. From the spec of [#2](../specs/streamed-answers-on-the-daemon/streamed-answers-on-the-daemon.md), Milestone M1.
+All are in memory; none reaches a file. From the specs of [#2](../specs/streamed-answers-on-the-daemon/streamed-answers-on-the-daemon.md)
+and [#3](../specs/reattach/reattach.md), Milestone M1.
 
 | Entity | Attributes |
 | --- | --- |
-| Session | `id` (UUIDv7), `cwd`, `messages` |
+| Session | `id` (UUIDv7), `cwd`, `messages`; from #3, `title`, `transcript` (the prompts, updates, and turn endings it sent, in order), `attached` (its connection, or none when detached), `last_activity` |
 | Message | `role` (`user` or `assistant`), `text`, optional `reasoning` |
 | Provider | `base_url`, `api_key`, `model`, `request_params`; one instance per daemon, from the environment |
 

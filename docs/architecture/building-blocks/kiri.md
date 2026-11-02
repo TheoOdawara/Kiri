@@ -5,8 +5,8 @@ Milestone: M1.
 
 | Invocation | Role | Milestone |
 | --- | --- | --- |
-| `kiri` | Opens the interactive interface as a client; starts the daemon when none runs | M1 |
-| `kiri daemon` | Hosts every session of the user; exits after an idle period, and until #3 when its last client leaves | M1 |
+| `kiri` | Opens the interactive interface as a client; starts the daemon when none runs, replaces one of another version, and reattaches to a detached session of its directory | M1 |
+| `kiri daemon` | Hosts every session of the user; exits after 10 idle minutes, a period tests shorten with the hidden `--idle-exit-seconds` | M1 |
 | `kiri -p` | Headless client: one prompt, text or JSON output | Later |
 | `kiri acp` | stdio bridge between an IDE and the daemon's socket | Later |
 

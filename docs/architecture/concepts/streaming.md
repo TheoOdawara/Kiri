@@ -20,6 +20,13 @@ Stage 1 starts from a request the catalog and the user shape
 settings in its own format, and `KIRI_REQUEST_PARAMS` adds any key to the body on any model. The conversation
 keeps each reply's reasoning, and the models the catalog marks receive it back in later requests.
 
+## Transcript and replay
+
+Every update a session sends also enters its transcript, with each prompt and each turn's end, whether or not a
+client is attached. A client that reattaches receives the transcript first and the live updates after it, with
+nothing lost or repeated between them, so a turn that ran while the terminal was closed reads as if it had been
+watched. Milestone: M1, from [#3](../../specs/reattach/reattach.md).
+
 ## When a turn fails
 
 Every failure reaches the user with the message from the spec's error table. Text taken from an endpoint or a

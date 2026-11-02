@@ -11,4 +11,10 @@ Requirements: [FR-CNT-02](../../requirements/functional/continuity.md#fr-cnt-02)
 5. **kiri** retries every 50 ms for up to 5 seconds, connects, and sends `initialize`.
 6. On Linux and macOS the **daemon** checks the peer's uid, and closes the connection unanswered when it differs. On Windows **kiri** checks the pipe's owner, and stops without sending anything when it is another SID or the OS denies access.
 7. When the environment is invalid, the **daemon** answers the first `session/new` with the error, and first closes the socket or pipe. It keeps its connections until they end, then exits. A client run right after finds no endpoint and starts a daemon that reads the new environment.
-8. Until [#3](https://github.com/TheoOdawara/Kiri/issues/3), the **daemon** exits when its last client leaves, or 5 seconds after starting when no client connected.
+8. **kiri** compares the daemon's `agentInfo.version` with its own identity, the package version plus the
+   executable's modification time. When they differ it sends `_kiri/exit`: a daemon with no running turn exits and
+   **kiri** returns to step 1; a daemon with one refuses, and **kiri** prints both versions and stops
+   ([FR-CNT-09](../../requirements/functional/continuity.md#fr-cnt-09)). From [#3](../../specs/reattach/reattach.md).
+9. The **daemon** exits after 10 minutes with no connected client and no running turn
+   ([NFR-PERF-02](../../requirements/non-functional/performance.md#nfr-perf-02)). From
+   [#3](../../specs/reattach/reattach.md).
