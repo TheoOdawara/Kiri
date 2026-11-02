@@ -1,6 +1,6 @@
 # #3 — Reattach to a session the terminal left
 
-> **Status:** closed
+> **Status:** published
 > **Profile:** API
 > **Module:** `crates/kiri-core` (`daemon`, `session`, `agent`, `protocol`), `crates/kiri-tui`, `crates/kiri`, `xtask`
 > **Epic:** #3
@@ -549,8 +549,8 @@ And lists the sessions again, with only the second one
 
 ## Task Breakdown
 
-| # | Title | Scope | Acceptance criterion | Depends on |
-| --- | --- | --- | --- | --- |
-| 1 | Keep sessions alive across connections and exit when idle | `session` owns sessions daemon-wide; detach, `session/close`, Ctrl-D in the line client; idle clock and `--idle-exit-seconds`; `_kiri/exit` in the daemon; test teardown moves from "last client leaves" to `_kiri/exit` in `crates/kiri/tests/daemon/support.rs` and its 27 `wait_for_daemon_exit` calls, and in `xtask`'s `OwnerClient` and refusal check; #2's tests for rule 4 rewritten | Scenarios 7, 10, 11, 12, 13, 18, 21 | — |
-| 2 | Reattach to a detached session with its replay | Transcript and title in `session`, `agent` sending to the attached connection, `session/list`, `session/load`, `_kiri/turn_ended`, `initialize` capabilities; line client listing, choice, replay printing | Scenarios 1, 2, 3, 4, 5, 6, 8, 9, 17, 19, 20, 22 | 1 |
-| 3 | Replace a daemon of another version | Version identity, `agentInfo.version`, `protocol::connect` returning it, client comparison and `_kiri/exit` call, the "another version" message | Scenarios 14, 15, 16 | 1 |
+| # | Issue | Title | Scope | Acceptance criterion | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| 1 | #21 | Keep sessions alive across connections and exit when idle | `session` owns sessions daemon-wide; detach, `session/close`, Ctrl-D in the line client; idle clock and `--idle-exit-seconds`; `_kiri/exit` in the daemon; test teardown moves from "last client leaves" to `_kiri/exit` in `crates/kiri/tests/daemon/support.rs` and its 27 `wait_for_daemon_exit` calls, and in `xtask`'s `OwnerClient` and refusal check; #2's tests for rule 4 rewritten | Scenarios 7, 10, 11, 12, 13, 18, 21 | — |
+| 2 | #22 | Reattach to a detached session with its replay | Transcript and title in `session`, `agent` sending to the attached connection, `session/list`, `session/load`, `_kiri/turn_ended`, `initialize` capabilities; line client listing, choice, replay printing | Scenarios 1, 2, 3, 4, 5, 6, 8, 9, 17, 19, 20, 22 | 1 |
+| 3 | #23 | Replace a daemon of another version | Version identity, `agentInfo.version`, `protocol::connect` returning it, client comparison and `_kiri/exit` call, the "another version" message | Scenarios 14, 15, 16 | 1 |
