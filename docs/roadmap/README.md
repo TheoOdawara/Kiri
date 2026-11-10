@@ -98,3 +98,4 @@ Every approved requirement of a planned milestone maps to exactly one epic. Two 
 ## Sprints
 
 - [Sprint 1](sprints/sprint-01.md) — from opening `kiri` to a streamed answer that survives closing the terminal
+- [Sprint 2](sprints/sprint-02.md) — reattach after closing the terminal, in the branded inline interface
