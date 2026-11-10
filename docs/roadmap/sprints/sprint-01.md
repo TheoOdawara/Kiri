@@ -25,3 +25,15 @@ The first code task creates the Cargo workspace and CI on Windows, Linux, and ma
 
 The endpoint's URL, API key, and model come from environment variables, read through the validation file. Setup
 inside Kiri belongs to #5 (FR-PRV-09).
+
+## Result — 2026-11-10
+
+| Item | Result |
+| --- | --- |
+| #2 | Done: merged into `staging` by #20, with tasks #14 to #19. |
+| #3 | Not done: spec closed and published as the epic, with tasks #21, #22, and #23. No code. Carried over. |
+| #4 | Not done: no spec. Carried over. |
+
+#2 took the whole sprint: it also created the Cargo workspace and CI on three systems. The daemon starts by itself
+and streams the answer, so the goal stops short of reattaching, which moves to Sprint 2. No requirement or
+architecture change came out of the sprint.
